@@ -1,14 +1,14 @@
 //! # B-Tree Module
 //!
-//! Este módulo implementa las estructuras y operaciones relacionadas con los árboles B-Tree
-//! utilizados en SQLite para almacenar tablas e índices.
+//! This module implements a B-Tree data structure, which is used for indexing and storing
+//! data in a way that allows for efficient searching, insertion, and deletion operations.
 
 pub mod btree;
 pub mod cell;
 pub mod node;
 pub mod record;
 
-// Re-exportar para facilitar el acceso
+// Re-export the necessary components for external use
 pub use btree::{BTree, TreeType};
 pub use cell::BTreeCellFactory;
 pub use node::BTreeNode;
