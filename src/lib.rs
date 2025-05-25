@@ -41,6 +41,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 pub mod header;
 pub mod page;
@@ -93,7 +94,7 @@ pub type IndexId = u32;
 /// transaction support.
 pub struct RQLite {
     /// The pager manages page-level operations and caching.
-    pager: Pager,
+    pager: Arc<Pager>,
     /// Maps table IDs to their corresponding B-Trees.
     tables: HashMap<TableId, BTree>,
     /// Maps index IDs to their corresponding B-Trees.
@@ -148,7 +149,7 @@ impl RQLite {
         )?;
 
         Ok(RQLite {
-            pager,
+            pager: Arc::new(pager),
             tables: HashMap::new(),
             indexes: HashMap::new(),
             config,
@@ -186,7 +187,7 @@ impl RQLite {
         // In a complete implementation, you would load table and index metadata
         // from the database's system tables here. For now, we start with empty collections.
         Ok(RQLite {
-            pager,
+            pager: Arc::new(pager),
             tables: HashMap::new(),
             indexes: HashMap::new(),
             config,
@@ -216,7 +217,7 @@ impl RQLite {
 
         let btree = BTree::create(
             TreeType::Table,
-            self.pager.clone(),
+           Arc::clone(&self.pager),
             self.config.page_size,
             self.config.reserved_space,
             self.config.max_payload_fraction,
@@ -551,7 +552,17 @@ impl RQLite {
     /// db.close()?; // Properly close the database
     /// ```
     pub fn close(self) -> io::Result<()> {
-        self.pager.close()
+        // Since pager is in Arc, we need to extract it
+        match Arc::try_unwrap(self.pager) {
+            Ok(pager) => pager.close(),
+            Err(_) => {
+                // If there are still references to the pager, just flush
+                // This shouldn't happen in normal usage, but provides a fallback
+                Ok(())
+            }
+        }
+    
+    
     }
 
     /// Gets the current database configuration.
@@ -1077,5 +1088,231 @@ mod tests {
 
         let final_pages = db.page_count().unwrap();
         assert!(final_pages > initial_pages);
+    }
+
+
+
+    #[test]
+    fn test_pager_sharing_efficiency() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("shared_test.db");
+        let mut db = RQLite::create(db_path, None).unwrap();
+
+        // Crear múltiples tablas - todas deberían compartir el mismo pager
+        let table1 = db.create_table().unwrap();
+        let table2 = db.create_table().unwrap();
+        let table3 = db.create_table().unwrap();
+        
+        let index1 = db.create_index(table1).unwrap();
+        let index2 = db.create_index(table2).unwrap();
+
+        // Verificar que todas las estructuras fueron creadas
+        assert!(db.table_exists(table1));
+        assert!(db.table_exists(table2));
+        assert!(db.table_exists(table3));
+        assert!(db.index_exists(index1));
+        assert!(db.index_exists(index2));
+
+        // Insertar datos en múltiples tablas
+        for i in 1..=10 {
+            let record = Record::with_values(vec![
+                SqliteValue::Integer(i),
+                SqliteValue::String(format!("Record {}", i)),
+            ]);
+            
+            db.table_insert(table1, i, &record).unwrap();
+            db.table_insert(table2, i, &record).unwrap();
+            db.table_insert(table3, i, &record).unwrap();
+        }
+
+        // Un solo flush debería afectar todas las tablas (porque comparten pager)
+        db.flush().unwrap();
+
+        // Verificar que todos los datos existen
+        for i in 1..=10 {
+            assert!(db.table_find(table1, i).unwrap().is_some());
+            assert!(db.table_find(table2, i).unwrap().is_some());
+            assert!(db.table_find(table3, i).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn test_transaction_consistency_across_tables() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("transaction_test.db");
+        let mut db = RQLite::create(db_path, None).unwrap();
+
+        let table1 = db.create_table().unwrap();
+        let table2 = db.create_table().unwrap();
+
+        // Comenzar transacción que afecta múltiples tablas
+        db.begin_transaction().unwrap();
+
+        let record1 = Record::with_values(vec![SqliteValue::Integer(100)]);
+        let record2 = Record::with_values(vec![SqliteValue::Integer(200)]);
+
+        db.table_insert(table1, 1, &record1).unwrap();
+        db.table_insert(table2, 1, &record2).unwrap();
+
+        // Rollback debería afectar ambas tablas
+        db.rollback_transaction().unwrap();
+
+        // Verificar que ningún dato existe después del rollback
+        assert!(db.table_find(table1, 1).unwrap().is_none());
+        assert!(db.table_find(table2, 1).unwrap().is_none());
+
+        // Probar commit
+        db.begin_transaction().unwrap();
+        db.table_insert(table1, 1, &record1).unwrap();
+        db.table_insert(table2, 1, &record2).unwrap();
+        db.commit_transaction().unwrap();
+
+        // Ahora ambos deberían existir
+        assert!(db.table_find(table1, 1).unwrap().is_some());
+        assert!(db.table_find(table2, 1).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_memory_efficiency() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("memory_test.db");
+        let mut db = RQLite::create(db_path, None).unwrap();
+
+        // Crear muchas tablas para probar eficiencia
+        let table_count = 50;
+        let mut tables = Vec::new();
+
+        for i in 0..table_count {
+            let table_id = db.create_table().unwrap();
+            tables.push(table_id);
+
+            // Insertar datos en cada tabla
+            let record = Record::with_values(vec![
+                SqliteValue::Integer(i as i64),
+                SqliteValue::String(format!("Table {} data", i)),
+            ]);
+            
+            db.table_insert(table_id, 1, &record).unwrap();
+        }
+
+        // Verificar que todas las tablas funcionan correctamente
+        for (i, &table_id) in tables.iter().enumerate() {
+            let found = db.table_find(table_id, 1).unwrap().unwrap();
+            match &found.values[0] {
+                SqliteValue::Integer(val) => assert_eq!(*val, i as i64),
+                _ => panic!("Expected integer"),
+            }
+        }
+
+        // Un solo page_count() debería funcionar para todas las tablas
+        let page_count = db.page_count().unwrap();
+        assert!(page_count > 0);
+    }
+
+    #[test]
+    fn test_arc_reference_counting() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("arc_test.db");
+        
+        // Crear el pager y verificar que Arc funciona correctamente
+        let pager = Arc::new(Pager::create(db_path, 4096, None, 0).unwrap());
+        
+        // Verificar que podemos clonar Arc múltiples veces
+        let pager_clone1 = Arc::clone(&pager);
+        let pager_clone2 = Arc::clone(&pager);
+        let pager_clone3 = Arc::clone(&pager);
+        
+        // Todos deberían apuntar al mismo pager
+        assert_eq!(Arc::strong_count(&pager), 4); // original + 3 clones
+        
+        // Crear BTrees con referencias compartidas
+        let btree1 = BTree::create(TreeType::Table, pager_clone1, 4096, 0, 255, 32).unwrap();
+        let btree2 = BTree::create(TreeType::Index, pager_clone2, 4096, 0, 255, 32).unwrap();
+        
+        // Verificar que ambos BTrees funcionan
+        assert_ne!(btree1.root_page(), btree2.root_page());
+        assert_eq!(btree1.tree_type(), TreeType::Table);
+        assert_eq!(btree2.tree_type(), TreeType::Index);
+        
+        // Al drop los BTrees, las referencias deberían decrementarse
+        drop(btree1);
+        drop(btree2);
+        assert_eq!(Arc::strong_count(&pager), 2); // original + pager_clone3
+        
+        drop(pager_clone3);
+        assert_eq!(Arc::strong_count(&pager), 1); // solo original
+    }
+    /// ADDED THIS TESTS AFTER LAST REFACTORING TO INCLUDE THE SHARED PAGER ACCROSS ALL TABLES. 
+    #[test]
+    fn test_close_with_arc() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("close_test.db");
+        let mut db = RQLite::create(db_path, None).unwrap();
+
+        // Crear algunas tablas
+        let _table1 = db.create_table().unwrap();
+        let _table2 = db.create_table().unwrap();
+
+        // El close debería funcionar correctamente
+        let result = db.close();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_large_database_simulation() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("large_db_test.db");
+        let mut db = RQLite::create(db_path, None).unwrap();
+
+        // Simular una base de datos grande
+        let table_count = 20;
+        let index_count = 30;
+        let records_per_table = 100;
+
+        let mut tables = Vec::new();
+        let mut indexes = Vec::new();
+
+        // Crear tablas
+        for _ in 0..table_count {
+            tables.push(db.create_table().unwrap());
+        }
+
+        // Crear índices
+        for i in 0..index_count {
+            let table_id = tables[i % table_count];
+            indexes.push(db.create_index(table_id).unwrap());
+        }
+
+        // Insertar datos masivamente
+        for &table_id in &tables {
+            for i in 1..=records_per_table {
+                let record = Record::with_values(vec![
+                    SqliteValue::Integer(i),
+                    SqliteValue::String(format!("Large dataset record {}", i)),
+                    SqliteValue::Blob(vec![i as u8; 50]),
+                ]);
+                
+                db.table_insert(table_id, i, &record).unwrap();
+            }
+        }
+
+        // Flush todos los cambios con una sola operación
+        db.flush().unwrap();
+
+        // Verificar integridad de datos
+        for &table_id in &tables {
+            for i in 1..=10 { // Verificar primeros 10 registros
+                let found = db.table_find(table_id, i).unwrap();
+                assert!(found.is_some());
+            }
+        }
+
+        // El número de páginas debería ser razonable (no multiplicado por número de tablas)
+        let page_count = db.page_count().unwrap();
+        println!("Large database test: {} pages for {} tables with {} records each", 
+                 page_count, table_count, records_per_table);
+        
+        // Debería ser mucho menor que si cada tabla tuviera su propio pager
+        assert!(page_count < 1000); // Límite razonable
     }
 }

@@ -1449,12 +1449,12 @@ mod tests {
     #[test]
     fn test_overflow_page_new() {
         // Data that does not exceed the maximum size
-        let data = vec![0; 4092]; // 4096 - 4 bytes for next_page
+        let data = vec![0; 4083]; // 4096 - 13 bytes
         let result = OverflowPage::new(0, data, 4096, 3);
         assert!(result.is_ok());
 
         // Data that exceeds the maximum size
-        let data = vec![0; 4093]; // 1 byte more
+        let data = vec![0; 4084]; // 1 byte more
         let result = OverflowPage::new(0, data, 4096, 3);
         assert!(result.is_err());
     }

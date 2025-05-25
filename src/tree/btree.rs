@@ -11,6 +11,7 @@
 //! Apart from that I am quite happy with the current solution.
 
 use std::io;
+use std::sync::Arc;
 
 use crate::page::{BTreeCell, PageType};
 use crate::storage::pager::Pager;
@@ -34,7 +35,7 @@ pub struct BTree {
     /// Type of B-Tree (table or index)
     tree_type: TreeType,
     /// Reference to the pager for I/O operations
-    pager: Pager,
+    pager: Arc<Pager>, // Decided to use Arc for Pager to avoid cloning it everywhere
     /// Size of each page in bytes
     page_size: u32,
     /// Reserved space at the end of each page
@@ -71,7 +72,7 @@ impl BTree {
     pub fn new(
         root_page: u32,
         tree_type: TreeType,
-        pager: Pager,
+        pager: Arc<Pager>,
         page_size: u32,
         reserved_space: u8,
         max_payload_fraction: u8,
@@ -105,7 +106,7 @@ impl BTree {
     /// A new B-Tree instance.
     pub fn create(
         tree_type: TreeType,
-        pager: Pager,
+        pager: Arc<Pager>,
         page_size: u32,
         reserved_space: u8,
         max_payload_fraction: u8,
@@ -151,7 +152,7 @@ impl BTree {
     pub fn open(
         root_page: u32,
         tree_type: TreeType,
-        pager: Pager,
+        pager: Arc<Pager>,
         page_size: u32,
         reserved_space: u8,
         max_payload_fraction: u8,
@@ -434,7 +435,7 @@ impl BTree {
         // Try to insert the cell
         let (split, median_key, new_node) = leaf_node.insert_cell_ordered(cell, &self.pager)?;
         // println!("Insert cell: split={}, median_key={:?}", split, median_key);
-      
+        
         if split {
             // Propagate the split up the tree
             self.propagate_split_table(leaf_node, new_node.unwrap(), median_key.unwrap(), path)?;
@@ -1715,7 +1716,7 @@ mod tests {
         // Create a table B-Tree
         let result = BTree::create(
             TreeType::Table,
-            pager,
+            Arc::new(pager),
             4096,
             0,
             255, // max_payload_fraction (100%)
@@ -1739,7 +1740,7 @@ mod tests {
         // Create an index B-Tree
         let result = BTree::create(
             TreeType::Index,
-            pager,
+            Arc::new(pager),
             4096,
             0,
             255, // max_payload_fraction (100%)
@@ -1763,7 +1764,7 @@ mod tests {
         // Create a B-Tree
         let btree = BTree::create(
             TreeType::Table,
-            pager,
+            Arc::new(pager),
             4096,
             0,
             255, // max_payload_fraction (100%)
@@ -1787,7 +1788,7 @@ mod tests {
         let pager = create_test_pager();
 
         // Create a table B-Tree
-        let btree = BTree::create(TreeType::Table, pager, 4096, 0, 255, 32).unwrap();
+        let btree = BTree::create(TreeType::Table, Arc::new(pager), 4096, 0, 255, 32).unwrap();
 
         let root_page = btree.root_page;
         let pager = btree.pager; // Move pager out
@@ -1805,7 +1806,7 @@ mod tests {
         // Create a table B-Tree
         let mut btree = BTree::create(
             TreeType::Table,
-            pager,
+            Arc::new(pager),
             4096,
             0,
             255, // max_payload_fraction (100%)
@@ -1874,7 +1875,7 @@ mod tests {
         // Create a table B-Tree
         let mut btree = BTree::create(
             TreeType::Table,
-            pager,
+            Arc::new(pager),
             4096,
             0,
             255, // max_payload_fraction (100%)
@@ -1928,7 +1929,7 @@ mod tests {
         // Create a table B-Tree
         let mut btree = BTree::create(
             TreeType::Table,
-            pager,
+            Arc::new(pager),
             4096,
             0,
             255, // max_payload_fraction (100%)
@@ -1968,7 +1969,7 @@ mod tests {
         // Create an index B-Tree
         let mut btree = BTree::create(
             TreeType::Index,
-            pager,
+            Arc::new(pager),
             4096,
             0,
             255, // max_payload_fraction (100%)
@@ -2014,7 +2015,7 @@ mod tests {
         // Create an index B-Tree
         let mut btree = BTree::create(
             TreeType::Index,
-            pager,
+            Arc::new(pager),
             4096,
             0,
             255, // max_payload_fraction (100%)
@@ -2061,7 +2062,7 @@ mod tests {
         // Create a table B-Tree
         let mut btree = BTree::create(
             TreeType::Table,
-            pager,
+            Arc::new(pager),
             4096,
             0,
             255, // max_payload_fraction (100%)
@@ -2100,7 +2101,7 @@ mod tests {
     fn test_btree_getters() {
         let pager = create_test_pager();
 
-        let btree = BTree::create(TreeType::Table, pager, 4096, 0, 255, 32).unwrap();
+        let btree = BTree::create(TreeType::Table, Arc::new(pager), 4096, 0, 255, 32).unwrap();
 
         assert_eq!(btree.tree_type(), TreeType::Table);
         assert!(btree.root_page() > 0);
@@ -2111,7 +2112,7 @@ mod tests {
         let pager = create_test_pager();
 
         // Create an index B-Tree
-        let btree = BTree::create(TreeType::Index, pager, 4096, 0, 255, 32).unwrap();
+        let btree = BTree::create(TreeType::Index, Arc::new(pager), 4096, 0, 255, 32).unwrap();
 
         // Try to find a record (should fail on index tree)
         let result = btree.find(42);
@@ -2123,7 +2124,7 @@ mod tests {
         let pager = create_test_pager();
 
         // Create an index B-Tree
-        let mut btree = BTree::create(TreeType::Index, pager, 4096, 0, 255, 32).unwrap();
+        let mut btree = BTree::create(TreeType::Index, Arc::new(pager), 4096, 0, 255, 32).unwrap();
 
         let record = create_test_record(vec![SqliteValue::Integer(42)]);
 
@@ -2137,7 +2138,7 @@ mod tests {
         let pager = create_test_pager();
 
         // Create a table B-Tree
-        let btree = BTree::create(TreeType::Table, pager, 4096, 0, 255, 32).unwrap();
+        let btree = BTree::create(TreeType::Table, Arc::new(pager), 4096, 0, 255, 32).unwrap();
 
         // Try to find an index key (should fail on table tree)
         let result = btree.find_index_key(&KeyValue::Integer(42));
@@ -2149,7 +2150,7 @@ mod tests {
         let pager = create_test_pager();
 
         // Create a table B-Tree
-        let mut btree = BTree::create(TreeType::Table, pager, 4096, 0, 255, 32).unwrap();
+        let mut btree = BTree::create(TreeType::Table, Arc::new(pager), 4096, 0, 255, 32).unwrap();
 
         let mut key_payload = Vec::new();
         crate::utils::serialization::serialize_values(
@@ -2168,7 +2169,7 @@ mod tests {
         let pager = create_test_pager();
 
         // Create an index B-Tree
-        let mut btree = BTree::create(TreeType::Index, pager, 4096, 0, 255, 32).unwrap();
+        let mut btree = BTree::create(TreeType::Index, Arc::new(pager), 4096, 0, 255, 32).unwrap();
 
         // Try to delete a record (should fail on index tree)
         let result = btree.delete(42);
@@ -2180,7 +2181,7 @@ mod tests {
         let pager = create_test_pager();
 
         // Create a table B-Tree
-        let mut btree = BTree::create(TreeType::Table, pager, 4096, 0, 255, 32).unwrap();
+        let mut btree = BTree::create(TreeType::Table, Arc::new(pager), 4096, 0, 255, 32).unwrap();
 
         // Try to delete an index key (should fail on table tree)
         let result = btree.delete_index(&KeyValue::Integer(42));
@@ -2193,7 +2194,7 @@ mod tests {
 
         let btree = BTree::create(
             TreeType::Table,
-            pager,
+            Arc::new(pager),
             4096,
             0,
             128, // 50% max payload fraction
@@ -2217,7 +2218,7 @@ mod tests {
 
         let btree = BTree::create(
             TreeType::Table,
-            pager,
+            Arc::new(pager),
             4096,
             100, // 100 bytes reserved space
             255,
@@ -2233,7 +2234,7 @@ mod tests {
     fn test_create_index_payload_from_median_key() {
         let pager = create_test_pager();
 
-        let btree = BTree::create(TreeType::Index, pager, 4096, 0, 255, 32).unwrap();
+        let btree = BTree::create(TreeType::Index, Arc::new(pager), 4096, 0, 255, 32).unwrap();
 
         // Test creating payload from median key
         let median_key = 42i64;
@@ -2262,7 +2263,7 @@ mod tests {
     fn test_key_value_payload_roundtrip() {
         let pager = create_test_pager();
 
-        let btree = BTree::create(TreeType::Index, pager, 4096, 0, 255, 32).unwrap();
+        let btree = BTree::create(TreeType::Index, Arc::new(pager), 4096, 0, 255, 32).unwrap();
 
         // Test different types of KeyValues
         let test_cases = vec![
@@ -2294,7 +2295,7 @@ mod tests {
         let pager = create_test_pager();
 
         // Create an index B-Tree
-        let mut btree = BTree::create(TreeType::Index, pager, 4096, 0, 255, 32).unwrap();
+        let mut btree = BTree::create(TreeType::Index, Arc::new(pager), 4096, 0, 255, 32).unwrap();
 
         // Insert enough entries to force a split
         for i in 1..=20 {
@@ -2330,7 +2331,7 @@ mod tests {
     fn test_complex_index_operations() {
         let pager = create_test_pager();
 
-        let mut btree = BTree::create(TreeType::Index, pager, 4096, 0, 255, 32).unwrap();
+        let mut btree = BTree::create(TreeType::Index, Arc::new(pager), 4096, 0, 255, 32).unwrap();
 
         // Insert entries with different key types (but all as integers for simplicity)
         let test_keys = [

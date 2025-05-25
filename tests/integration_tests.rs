@@ -8,9 +8,13 @@
 //! 
 //! * Overflow pages are not being created correctly when a single record exceeds the page size.
 //! 
-//! * Cloning the pager for each table is very inefficient and should be optimized. 
+//! * Cloning the pager for each table is very inefficient and should be optimized. --> Currently i fixed it with an Arc to create a shared reference instead but i think it can be done better.
 //! 
-//! *  Although it has been designed to be thread-safe, the current implementation is not completely transaction-serializable.
+//! *  Although it has been designed to be thread-safe, the current implementation is not completely transaction-serializable. A more robust transaction management system is needed to ensure that concurrent transactions do not interfere with each other.
+//! 
+//! * WAL logging and journal recovery are not yet implemented, which means that the database is not durable against crashes or power failures.
+//! 
+//! * The catalog is also not durable yet, which means that the database schema (tables, indexes, etc.) is not persisted across restarts.
 //! 
 //! I am not still a database or Rust expert so I know this can be done much better. 
 //! Anyway, I am happy with the current state of the engine and I will continue to improve it in the future.
