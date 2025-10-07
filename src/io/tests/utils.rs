@@ -54,10 +54,6 @@ impl crate::HeaderOps for TestPage {
         self.id
     }
 
-    fn max_cell_size(&self) -> usize {
-        0
-    }
-
     fn is_overflow(&self) -> bool {
         false
     }

@@ -14,7 +14,9 @@ fn has_overflow<R: Read>(reader: &mut R) -> io::Result<bool> {
 
 /// Trait for all cells to implement
 pub trait Cell: Clone + Send + Sync {
+    type Key: Ord;
     fn size(&self) -> usize;
+    fn key(&self) -> Self::Key;
 }
 
 /// Each cell on a B-Tree page can be of different types.
@@ -37,6 +39,10 @@ impl TableLeafCell {
 }
 
 impl Cell for TableLeafCell {
+    type Key = RowId;
+    fn key(&self) -> Self::Key {
+        self.row_id
+    }
     fn size(&self) -> usize {
         // The overflow page pointer if only serialized if set. If not set, we avoid serializing it.
         // Therefore the size of a cell is variable, depending on it having an overflow page to point to.
@@ -111,6 +117,10 @@ pub struct TableInteriorCell {
 }
 
 impl Cell for TableInteriorCell {
+    type Key = RowId;
+    fn key(&self) -> Self::Key {
+        self.key
+    }
     fn size(&self) -> usize {
         self.left_child_page.size_of() + self.key.size_of()
     }
@@ -159,6 +169,11 @@ pub struct IndexLeafCell {
 }
 
 impl Cell for IndexLeafCell {
+    type Key = VarlenaType;
+    fn key(&self) -> Self::Key {
+        self.payload.clone()
+    }
+
     fn size(&self) -> usize {
         let overflow_size = if let Some(page) = self.overflow_page {
             page.size_of()
@@ -240,6 +255,11 @@ pub struct IndexInteriorCell {
 }
 
 impl Cell for IndexInteriorCell {
+    type Key = VarlenaType;
+    fn key(&self) -> Self::Key {
+        self.payload.clone()
+    }
+
     fn size(&self) -> usize {
         let overflow_size = if let Some(overflow_page) = self.overflow_page {
             overflow_page.size_of()

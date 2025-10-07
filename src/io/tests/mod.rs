@@ -1,9 +1,12 @@
+use crate::io::{Frame, IOFrame, IndexFrame, OverflowFrame, TableFrame};
+use crate::test_frame_conversion;
+use crate::{
+    types::{Key, PageId},
+    PageType,
+};
 use std::fs::File;
 use std::io::{Read, Result, Write};
 use tempfile::TempDir;
-use crate::test_frame_conversion;
-use crate::{PageType, types::{PageId, Key }};
-use crate::io::{IOFrame, TableFrame, IndexFrame, OverflowFrame, Frame};
 mod utils;
 
 #[cfg(target_os = "linux")]
@@ -73,50 +76,48 @@ fn test_sync_all_with_fiu_injection() -> Result<()> {
     Ok(())
 }
 
+test_frame_conversion!(
+    test_io_to_table_frame_conversion,
+    IOFrame => TableFrame,
+    [
+        (PageId::new_key(), PageType::TableLeaf, 4096, None),
+        (PageId::new_key(), PageType::TableInterior, 4096, Some(PageId::new_key()))
+    ],
+    |frame: &TableFrame, idx: usize| {
+        assert!(frame.is_table(), "Test case {}: Frame should be a table frame", idx);
+        assert!(!frame.is_index(), "Test case {}: Frame should not be an index frame", idx);
 
-
- test_frame_conversion!(
-        test_io_to_table_frame_conversion,
-        IOFrame => TableFrame,
-        [
-            (PageId::new_key(), PageType::TableLeaf, 4096, None),
-            (PageId::new_key(), PageType::TableInterior, 4096, Some(PageId::new_key()))
-        ],
-        |frame: &TableFrame, idx: usize| {
-            assert!(frame.is_table(), "Test case {}: Frame should be a table frame", idx);
-            assert!(!frame.is_index(), "Test case {}: Frame should not be an index frame", idx);
-
-            // Validar que el page_type es correcto
-            match idx {
-                0 => assert_eq!(frame.page_type(), PageType::TableLeaf),
-                1 => assert_eq!(frame.page_type(), PageType::TableInterior),
-                _ => panic!("Unexpected test case index"),
-            }
+        // Validar que el page_type es correcto
+        match idx {
+            0 => assert_eq!(frame.page_type(), PageType::TableLeaf),
+            1 => assert_eq!(frame.page_type(), PageType::TableInterior),
+            _ => panic!("Unexpected test case index"),
         }
-    );
+    }
+);
 
-    test_frame_conversion!(
-        test_io_to_index_frame_conversion,
-        IOFrame => IndexFrame,
-        [
-            (PageId::new_key(), PageType::IndexLeaf, 4096, None),
-            (PageId::new_key(), PageType::IndexInterior, 4096, Some(PageId::new_key()))
-        ],
-        |frame: &IndexFrame, idx: usize| {
-            assert!(frame.is_index(), "Test case {}: Frame should be an index frame", idx);
-            assert!(!frame.is_table(), "Test case {}: Frame should not be a table frame", idx);
-            assert!(!frame.is_dirty(), "Test case {}: Newly converted frame should not be dirty", idx);
-        }
-    );
+test_frame_conversion!(
+    test_io_to_index_frame_conversion,
+    IOFrame => IndexFrame,
+    [
+        (PageId::new_key(), PageType::IndexLeaf, 4096, None),
+        (PageId::new_key(), PageType::IndexInterior, 4096, Some(PageId::new_key()))
+    ],
+    |frame: &IndexFrame, idx: usize| {
+        assert!(frame.is_index(), "Test case {}: Frame should be an index frame", idx);
+        assert!(!frame.is_table(), "Test case {}: Frame should not be a table frame", idx);
+        assert!(!frame.is_dirty(), "Test case {}: Newly converted frame should not be dirty", idx);
+    }
+);
 
-    test_frame_conversion!(
-        test_io_to_overflow_frame_conversion,
-        IOFrame => OverflowFrame,
-        [
-            (PageId::new_key(), PageType::Overflow, 4096, None)
-        ],
-        |frame: &OverflowFrame, _idx: usize| {
-            assert!(frame.is_overflow(), "Frame should be an overflow frame");
-            assert_eq!(frame.page_type(), PageType::Overflow);
-        }
-    );
+test_frame_conversion!(
+    test_io_to_overflow_frame_conversion,
+    IOFrame => OverflowFrame,
+    [
+        (PageId::new_key(), PageType::Overflow, 4096, None)
+    ],
+    |frame: &OverflowFrame, _idx: usize| {
+        assert!(frame.is_overflow(), "Frame should be an overflow frame");
+        assert_eq!(frame.page_type(), PageType::Overflow);
+    }
+);

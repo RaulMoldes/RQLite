@@ -10,13 +10,6 @@ macro_rules! impl_header_ops {
                 }
             }
 
-            fn max_cell_size(&self) -> usize {
-                match self {
-                    $(
-                        $enum::$variant(page) => page.max_cell_size(),
-                    )*
-                }
-            }
 
             fn content_start(&self) -> usize {
                 match self {

@@ -22,8 +22,6 @@ macro_rules! test_serializable {
     };
 }
 
-
-
 #[macro_export]
 macro_rules! test_frame_conversion {
     (

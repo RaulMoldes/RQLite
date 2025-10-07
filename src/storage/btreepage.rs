@@ -16,6 +16,9 @@ pub(crate) trait BTreePageOps<BTreeCellType: Cell> {
 
     /// Append a cell to this btreepage.
     fn add_cell(&mut self, cell: BTreeCellType) -> io::Result<u16>;
+
+    /// Take the cells inside this page.
+    fn take_cells(&mut self) -> Vec<BTreeCellType>;
 }
 
 #[derive(Debug, Clone)]
@@ -38,10 +41,6 @@ pub(crate) struct BTreePage<BTreeCellType: Cell> {
 impl<BTreeCellType: Cell + Serializable> HeaderOps for BTreePage<BTreeCellType> {
     fn cell_count(&self) -> usize {
         self.header.cell_count()
-    }
-
-    fn max_cell_size(&self) -> usize {
-        self.header.max_cell_size()
     }
 
     fn content_start(&self) -> usize {
@@ -109,6 +108,13 @@ impl<BTreeCellType: Cell + Serializable> BTreePageOps<BTreeCellType> for BTreePa
         None
     }
 
+    // BTreeMap does not include a drain method, so we need to use std::mem::take here.
+    fn take_cells(&mut self) -> Vec<BTreeCellType> {
+        let old_cells = std::mem::take(&mut self.cells);
+        self.cell_indices.clear();
+        old_cells.into_values().collect()
+    }
+
     /// Add a cell, returning the offset at which was inserted.
     fn add_cell(&mut self, cell: BTreeCellType) -> io::Result<u16> {
         // The cell append size is the total cell size + SLOT_SIZE.
@@ -174,7 +180,7 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
 
             let mut cell_cursor = Cursor::new(&remaining_data[cell_offset..]);
             let cell = C::read_from(&mut cell_cursor)?;
-            cells.insert(cell_index.offset , cell);
+            cells.insert(cell_index.offset, cell);
         }
 
         Ok(BTreePage {

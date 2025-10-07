@@ -22,6 +22,7 @@ use crate::{impl_header_ops, impl_interior_page_ops, impl_leaf_page_ops};
 #[cfg(test)]
 mod tests;
 
+#[derive(Debug)]
 pub(crate) enum RQLiteTablePage {
     Leaf(TableLeafPage),
     Interior(TableInteriorPage),
@@ -71,31 +72,42 @@ pub(crate) enum RQLiteIndexPage {
 }
 
 impl RQLiteIndexPage {
-    fn try_insert_with_overflow_interior(
+    pub(crate) fn try_insert_with_overflow_interior(
         &mut self,
         content: IndexInteriorCell,
-    ) -> std::io::Result<()> {
+        max_payload_factor: u16,
+    ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         match self {
             RQLiteIndexPage::Leaf(_) => panic!("Invalid content. Content type must be IndexLeafCell when inserting on IndexLeafPages"),
-            RQLiteIndexPage::Interior(page) => page.try_insert_with_overflow(content)
+            RQLiteIndexPage::Interior(page) => page.try_insert_with_overflow(content, max_payload_factor)
         }
     }
 
-    fn try_insert_with_overflow_leaf(&mut self, content: IndexLeafCell) -> std::io::Result<()> {
+    pub(crate) fn try_insert_with_overflow_leaf(
+        &mut self,
+        content: IndexLeafCell,
+        max_payload_factor: u16,
+    ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         match self {
             RQLiteIndexPage::Interior(_) => panic!("Invalid content. Content type must be IndexInteriorCell when inserting on IndexInteriorPages"),
-            RQLiteIndexPage::Leaf(page) => page.try_insert_with_overflow(content)
+            RQLiteIndexPage::Leaf(page) => page.try_insert_with_overflow(content, max_payload_factor)
         }
     }
 }
 
 impl RQLiteTablePage {
-    fn try_insert_with_overflow_leaf(&mut self, content: TableLeafCell) -> std::io::Result<()> {
+    pub(crate) fn try_insert_with_overflow_leaf(
+        &mut self,
+        content: TableLeafCell,
+        max_payload_factor: u16,
+    ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         match self {
             RQLiteTablePage::Interior(_) => {
                 panic!("Invalid content. Table interior pages are not overflowable.")
             }
-            RQLiteTablePage::Leaf(page) => page.try_insert_with_overflow(content),
+            RQLiteTablePage::Leaf(page) => {
+                page.try_insert_with_overflow(content, max_payload_factor)
+            }
         }
     }
 }
@@ -310,10 +322,44 @@ impl_interior_page_ops!(RQLiteIndexPage<IndexInteriorCell> {
 
 impl Overflowable for RQLitePage {
     type Content = VarlenaType;
-    fn try_insert_with_overflow(&mut self, content: Self::Content) -> std::io::Result<()> {
+    fn try_insert_with_overflow(
+        &mut self,
+        content: Self::Content,
+        max_payload_factor: u16,
+    ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         match self {
-            Self::Overflow(page) => page.try_insert_with_overflow(content),
+            Self::Overflow(page) => page.try_insert_with_overflow(content, max_payload_factor),
             _ => panic!("Cannot insert with overflow on non-overflow pages. Use try_insert_with_overflow_interior or try_insert_with_overflow_leaf instead.")
+        }
+    }
+}
+
+impl RQLiteTablePage {
+    pub(crate) fn get_cell_at_leaf(&self, id: u16) -> Option<TableLeafCell> {
+        match self {
+            RQLiteTablePage::Leaf(page) => page.get_cell_at(id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn get_cell_at_interior(&self, id: u16) -> Option<TableInteriorCell> {
+        match self {
+            RQLiteTablePage::Interior(page) => page.get_cell_at(id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn take_cells_leaf(&mut self) -> Vec<TableLeafCell> {
+        match self {
+            RQLiteTablePage::Leaf(page) => page.take_cells(),
+            _ => panic!("Invalid page type. For non leaf cellsuse take_cells_interior"),
+        }
+    }
+
+    pub(crate) fn take_cells_interior(&mut self) -> Vec<TableInteriorCell> {
+        match self {
+            RQLiteTablePage::Interior(page) => page.take_cells(),
+            _ => panic!("Invalid page type. For non leaf cellsuse take_cells_leaf"),
         }
     }
 }

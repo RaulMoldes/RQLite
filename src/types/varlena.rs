@@ -6,7 +6,6 @@ use crate::TextEncoding;
 use std::cmp::Ordering;
 use std::cmp::{Ord, PartialOrd};
 
-
 #[derive(Debug, Clone)]
 pub struct VarlenaType {
     length: Varint,

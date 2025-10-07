@@ -1,9 +1,9 @@
-use crate::types::{Key, PageId, RowId,  VarlenaType};
+use crate::types::{Key, PageId, RowId, VarlenaType};
 use crate::TextEncoding;
 use crate::{
-    BTreePage,  IndexInteriorCell, IndexInteriorPage, IndexLeafCell, IndexLeafPage,
-    InteriorPageOps, LeafPageOps, OverflowPage, PageHeader, PageType, TableInteriorCell,
-    TableInteriorPage, TableLeafCell, TableLeafPage,
+    BTreePage, IndexInteriorCell, IndexInteriorPage, IndexLeafCell, IndexLeafPage, InteriorPageOps,
+    LeafPageOps, OverflowPage, PageHeader, PageType, TableInteriorCell, TableInteriorPage,
+    TableLeafCell, TableLeafPage,
 };
 
 pub fn validate_index_leaf_cell(

@@ -90,6 +90,27 @@ impl<P> PageFrame<P> {
             is_dirty: AtomicBool::new(false),
         }
     }
+
+    pub(crate) fn from_page(page: P) -> Self
+    where
+        P: HeaderOps,
+    {
+        Self {
+            id: page.id(),
+            page_type: page.type_of(),
+            page: Arc::new(RwLock::new(page)),
+            is_dirty: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn from_buffer(page_id: PageId, page_type: PageType, page: P) -> Self {
+        Self {
+            id: page_id,
+            page_type,
+            page: Arc::new(RwLock::new(page)),
+            is_dirty: AtomicBool::new(false),
+        }
+    }
 }
 
 impl<P> Frame<P> for PageFrame<P>
@@ -291,6 +312,81 @@ impl TryFrom<IOFrame> for OverflowFrame {
     }
 }
 
+impl TryFrom<TableFrame> for IOFrame {
+    type Error = std::io::Error;
+
+    fn try_from(table_frame: TableFrame) -> Result<Self, Self::Error> {
+        use crate::serialization::Serializable;
+
+        let page_id = table_frame.id;
+        let page_type = table_frame.page_type;
+        let is_dirty = table_frame.is_dirty.load(Ordering::SeqCst);
+
+        let mut buffer = Vec::new();
+
+        {
+            let guard = table_frame.page.read().unwrap();
+            guard.write_to(&mut buffer)?;
+        }
+
+        Ok(PageFrame {
+            id: page_id,
+            page_type,
+            page: Arc::new(RwLock::new(buffer)),
+            is_dirty: AtomicBool::new(is_dirty),
+        })
+    }
+}
+
+impl TryFrom<IndexFrame> for IOFrame {
+    type Error = std::io::Error;
+
+    fn try_from(index_frame: IndexFrame) -> Result<Self, Self::Error> {
+        use crate::serialization::Serializable;
+
+        let page_id = index_frame.id;
+        let page_type = index_frame.page_type;
+        let is_dirty = index_frame.is_dirty.load(Ordering::SeqCst);
+
+        let mut buffer = Vec::new();
+        {
+            let guard = index_frame.page.read().unwrap();
+            guard.write_to(&mut buffer)?;
+        }
+
+        Ok(PageFrame {
+            id: page_id,
+            page_type,
+            page: Arc::new(RwLock::new(buffer)),
+            is_dirty: AtomicBool::new(is_dirty),
+        })
+    }
+}
+
+impl TryFrom<OverflowFrame> for IOFrame {
+    type Error = std::io::Error;
+
+    fn try_from(overflow_frame: OverflowFrame) -> Result<Self, Self::Error> {
+        use crate::serialization::Serializable;
+
+        let page_id = overflow_frame.id;
+        let page_type = overflow_frame.page_type;
+        let is_dirty = overflow_frame.is_dirty.load(Ordering::SeqCst);
+        let mut buffer = Vec::new();
+
+        {
+            let guard = overflow_frame.page.read().unwrap();
+            guard.write_to(&mut buffer)?;
+        }
+
+        Ok(PageFrame {
+            id: page_id,
+            page_type,
+            page: Arc::new(RwLock::new(buffer)),
+            is_dirty: AtomicBool::new(is_dirty),
+        })
+    }
+}
 pub(crate) fn create_frame(
     page_id: PageId,
     page_type: PageType,

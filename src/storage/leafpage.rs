@@ -3,9 +3,9 @@ use crate::storage::cell::IndexLeafCell;
 use crate::storage::cell::TableLeafCell;
 use crate::storage::overflowpage::{OverflowPage, Overflowable};
 use crate::storage::slot::Slot;
+use crate::types::Splittable;
 use crate::types::VarlenaType;
 use crate::types::{Key, PageId, RowId};
-use crate::types::Splittable;
 use crate::PageType;
 use crate::{BTreePage, BTreePageOps, HeaderOps};
 
@@ -255,10 +255,15 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
 impl Overflowable for IndexLeafPage {
     type Content = IndexLeafCell;
 
-    fn try_insert_with_overflow(&mut self, mut content: Self::Content) -> std::io::Result<()> {
+    fn try_insert_with_overflow(
+        &mut self,
+        mut content: Self::Content,
+        max_payload_factor: u16,
+    ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         // Extra four bytes for pointers to pages
-        if self.max_cell_size() >= content.size() {
-            return self.insert(content.payload.clone(), content);
+        if self.max_cell_size(max_payload_factor) >= content.size() {
+            self.insert(content.payload.clone(), content)?;
+            return Ok(None);
         };
 
         let pos = self
@@ -273,7 +278,7 @@ impl Overflowable for IndexLeafPage {
             })
             .unwrap_or(self.cell_indices.len());
 
-        let fitting_size = self.max_cell_size() - 4;
+        let fitting_size = self.available_space(max_payload_factor);
         let remaining = content.payload.split_at(fitting_size);
         let new_id = PageId::new_key();
         content.set_overflow(new_id);
@@ -281,18 +286,23 @@ impl Overflowable for IndexLeafPage {
         let new_offset = self.add_cell(content)?;
         self.cell_indices.insert(pos, Slot::new(new_offset));
 
-        let mut overflowpage =
+        let overflowpage =
             OverflowPage::create(new_id, self.page_size() as u32, PageType::Overflow, None);
-        overflowpage.try_insert_with_overflow(remaining)
+        Ok(Some((overflowpage, remaining)))
     }
 }
 
 impl Overflowable for TableLeafPage {
     type Content = TableLeafCell;
 
-    fn try_insert_with_overflow(&mut self, mut content: Self::Content) -> std::io::Result<()> {
-        if self.max_cell_size() >= content.size() {
-            return self.insert(content.row_id, content);
+    fn try_insert_with_overflow(
+        &mut self,
+        mut content: Self::Content,
+        max_payload_factor: u16,
+    ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
+        if self.max_cell_size(max_payload_factor) >= content.size() {
+            self.insert(content.row_id, content)?;
+            return Ok(None);
         };
 
         let pos = self
@@ -307,7 +317,7 @@ impl Overflowable for TableLeafPage {
             })
             .unwrap_or(self.cell_indices.len());
 
-        let fitting_size = self.max_cell_size() - 8;
+        let fitting_size = self.available_space(max_payload_factor);
         let remaining = content.payload.split_at(fitting_size);
         let new_id = PageId::new_key();
         content.set_overflow(new_id);
@@ -315,8 +325,8 @@ impl Overflowable for TableLeafPage {
         let new_offset = self.add_cell(content)?;
         self.cell_indices.insert(pos, Slot::new(new_offset));
 
-        let mut overflowpage =
+        let overflowpage =
             OverflowPage::create(new_id, self.page_size() as u32, PageType::Overflow, None);
-        overflowpage.try_insert_with_overflow(remaining)
+        Ok(Some((overflowpage, remaining)))
     }
 }

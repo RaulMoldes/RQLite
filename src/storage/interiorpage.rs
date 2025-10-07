@@ -1,9 +1,9 @@
 use crate::storage::cell::Cell;
 use crate::storage::cell::IndexInteriorCell;
 use crate::storage::cell::TableInteriorCell;
-use crate::storage::overflowpage:: Overflowable;
+use crate::storage::overflowpage::Overflowable;
 use crate::storage::Slot;
-use crate::types::{Key, PageId,  Splittable, VarlenaType};
+use crate::types::{Key, PageId, Splittable, VarlenaType};
 use crate::PageType;
 use crate::{BTreePage, BTreePageOps, HeaderOps, OverflowPage};
 use std::io;
@@ -307,9 +307,14 @@ impl InteriorPageOps<IndexInteriorCell> for IndexInteriorPage {
 impl Overflowable for IndexInteriorPage {
     type Content = IndexInteriorCell;
 
-    fn try_insert_with_overflow(&mut self, mut content: Self::Content) -> std::io::Result<()> {
-        if self.max_cell_size() >= content.size() {
-            return self.insert_child(content.payload, content.left_child_page);
+    fn try_insert_with_overflow(
+        &mut self,
+        mut content: Self::Content,
+        max_payload_factor: u16,
+    ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
+        if self.max_cell_size(max_payload_factor) >= content.size() {
+            self.insert_child(content.payload, content.left_child_page)?;
+            return Ok(None);
         };
 
         let pos = self
@@ -324,15 +329,15 @@ impl Overflowable for IndexInteriorPage {
             })
             .unwrap_or(self.cell_indices.len());
 
-        let fitting_size = self.max_cell_size() - 8;
+        let fitting_size = self.available_space(max_payload_factor);
         let remaining = content.payload.split_at(fitting_size);
         let new_id = PageId::new_key();
         content.set_overflow(new_id);
         self.set_next_overflow(new_id);
         let new_offset = self.add_cell(content)?;
         self.cell_indices.insert(pos, Slot::new(new_offset));
-        let mut overflowpage =
+        let overflowpage =
             OverflowPage::create(new_id, self.page_size() as u32, PageType::Overflow, None);
-        overflowpage.try_insert_with_overflow(remaining)
+        Ok(Some((overflowpage, remaining)))
     }
 }

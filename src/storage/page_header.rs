@@ -36,19 +36,41 @@ pub(crate) trait HeaderOps {
     fn id(&self) -> PageId;
 
     /// Return the availble space (bytes) in the page.
-    fn free_space(&self) -> usize;
+    fn free_space(&self) -> usize {
+        self.free_space_start().saturating_sub(self.content_start())
+    }
+
+    fn available_space(&self, max_payload_factor: u16) -> usize {
+        (self.page_size() * max_payload_factor as usize).saturating_sub(self.free_space())
+    }
 
     /// Shortcut to get the next overflow page in the overflow chain.
     fn get_next_overflow(&self) -> Option<PageId>;
 
     /// Max cell size
-    fn max_cell_size(&self) -> usize;
+    fn max_cell_size(&self, max_payload_factor: u16) -> usize {
+        self.page_size().saturating_sub(PAGE_HEADER_SIZE) * max_payload_factor as usize
+    }
 
     /// Setter for the page type.
     fn set_type(&mut self, page_type: super::PageType);
 
     /// Set the pointer to the next overflow page.
     fn set_next_overflow(&mut self, overflowpage: PageId);
+
+    fn is_on_underflow_state(&self, min_payload_factor: u16) -> bool {
+        self.free_space()
+            >= (self
+                .page_size()
+                .saturating_sub(self.page_size() * min_payload_factor as usize))
+    }
+
+    fn is_on_overflow_state(&self, max_payload_factor: u16) -> bool {
+        self.free_space()
+            <= (self
+                .page_size()
+                .saturating_sub(self.page_size() * max_payload_factor as usize))
+    }
 }
 
 /// 1-byte Page enum.
@@ -237,16 +259,12 @@ impl HeaderOps for PageHeader {
         self.page_number
     }
 
-    fn free_space(&self) -> usize {
-        self.free_space_start().saturating_sub(self.content_start())
-    }
-
     /// Max cell size, to determine when to create an overflow page.
     /// The logic is the following:
     /// If the cell does not fit on a page, but does not excede the maximum size, we create a new page.
     /// If the cell excedes the max_cell_size, we insert what is available and then create an overflow chain to insert the rest of the data.
-    fn max_cell_size(&self) -> usize {
-        self.page_size().saturating_sub(PAGE_HEADER_SIZE)
+    fn max_cell_size(&self, max_payload_factor: u16) -> usize {
+        self.page_size().saturating_sub(PAGE_HEADER_SIZE) * max_payload_factor as usize
     }
 
     fn get_next_overflow(&self) -> Option<PageId> {

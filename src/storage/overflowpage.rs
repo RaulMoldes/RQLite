@@ -15,7 +15,12 @@ pub(crate) trait Overflowable {
 
     /// Attempt to insert a chunk of [Content] into the Overflowable item. Ifnot possible,
     /// will split it and handle the creation of the overflow chain.
-    fn try_insert_with_overflow(&mut self, content: Self::Content) -> std::io::Result<()>;
+    /// If the content does not fit in a single overflow page, will return the remaining to ensure the caller can create multiple overflow pages on demand.
+    fn try_insert_with_overflow(
+        &mut self,
+        content: Self::Content,
+        max_payload_factor: u16,
+    ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>>;
 }
 
 #[derive(Debug, Clone)]
@@ -41,10 +46,6 @@ impl HeaderOps for OverflowPage {
 
     fn set_next_overflow(&mut self, overflowpage: PageId) {
         self.header.set_next_overflow(overflowpage);
-    }
-
-    fn max_cell_size(&self) -> usize {
-        self.header.max_cell_size()
     }
 
     fn content_start(&self) -> usize {
@@ -133,19 +134,24 @@ impl Overflowable for OverflowPage {
 
     /// Attempt to insert a VarlenaType in this Overflow Page.
     /// If not possible, will create additional pages, connecting them properly in an overflow chain.
-    fn try_insert_with_overflow(&mut self, mut content: Self::Content) -> std::io::Result<()> {
-        if content.size_of() < self.free_space() {
+    fn try_insert_with_overflow(
+        &mut self,
+        mut content: Self::Content,
+        max_payload_factor: u16,
+    ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
+        if content.size_of() < self.max_cell_size(max_payload_factor) {
             self.data = content;
             self.header.free_space_ptr -= self.data.size_of() as u16;
-            return Ok(());
+            return Ok(None);
         }
-        let available = self.free_space().div_ceil(8);
+        let available = self.available_space(max_payload_factor);
         let remaining = content.split_at(available);
         self.data = content;
         let new = PageId::new_key();
         self.set_next_overflow(new);
-        let mut new_page = OverflowPage::create(new, self.page_size() as u32, self.type_of(), None);
-        new_page.try_insert_with_overflow(remaining)
+        let new_page = OverflowPage::create(new, self.page_size() as u32, self.type_of(), None);
+
+        Ok(Some((new_page, remaining)))
     }
 }
 
