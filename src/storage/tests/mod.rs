@@ -74,15 +74,23 @@ test_serializable!(
     test_index_leaf_cell,
     IndexLeafCell,
     [
-        IndexLeafCell::new(VarlenaType::from_raw_bytes(b"index_key_1", None)),
-        IndexLeafCell::new(VarlenaType::from_raw_bytes(b"index_key_2", None)),
-        IndexLeafCell::new(VarlenaType::from_raw_bytes(b"a", None)),
-        IndexLeafCell::new(VarlenaType::from_raw_bytes(b"", None)),
+        IndexLeafCell::new(
+            VarlenaType::from_raw_bytes(b"index_key_1", None),
+            RowId::from(0)
+        ),
+        IndexLeafCell::new(
+            VarlenaType::from_raw_bytes(b"index_key_2", None),
+            RowId::from(1)
+        ),
+        IndexLeafCell::new(VarlenaType::from_raw_bytes(b"a", None), RowId::from(2)),
+        IndexLeafCell::new(VarlenaType::from_raw_bytes(b"", None), RowId::from(3)),
         IndexLeafCell {
+            row_id: RowId::from(5),
             payload: VarlenaType::from_raw_bytes(b"key_with_overflow", None),
             overflow_page: Some(PageId::from(777)),
         },
         IndexLeafCell {
+            row_id: RowId::from(7),
             payload: VarlenaType::from_raw_bytes(&vec![0x42; 2000], None),
             overflow_page: Some(PageId::from(888)),
         }
@@ -151,6 +159,7 @@ test_leaf_page_ops!(
     PageType::IndexLeaf,
     (|id: u32| VarlenaType::from_raw_bytes(&id.to_be_bytes(), None)),
     (|key: VarlenaType| IndexLeafCell {
+        row_id: RowId::from(6),
         payload: key,
         overflow_page: None,
     })

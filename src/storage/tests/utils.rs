@@ -234,6 +234,13 @@ pub fn validate_index_leaf_page(
             idx,
             i
         );
+
+        assert_eq!(
+            orig_cell.row_id, deser_cell.row_id,
+            "Test case {}: cell[{}] row_id mismatch",
+            idx, i
+        );
+
         assert_eq!(
             orig_cell.overflow_page, deser_cell.overflow_page,
             "Test case {}: cell[{}] overflow_page mismatch",
@@ -350,16 +357,19 @@ pub fn create_table_interior_page() -> BTreePage<TableInteriorCell> {
 pub fn create_index_leaf_page() -> BTreePage<IndexLeafCell> {
     let mut page = IndexLeafPage::default();
 
-    let cell1 = IndexLeafCell::new(VarlenaType::from_raw_bytes(b"index_key_1", None));
-    let cell2 = IndexLeafCell::new(VarlenaType::from_raw_bytes(b"index_key_2", None));
-    let cell3 = IndexLeafCell::new(VarlenaType::from_raw_bytes(b"index_key_3", None));
+    let cell1 = IndexLeafCell::new(
+        VarlenaType::from_raw_bytes(b"index_key_1", None),
+        RowId::from(0),
+    );
+    let cell2 = IndexLeafCell::new(
+        VarlenaType::from_raw_bytes(b"index_key_2", None),
+        RowId::from(3),
+    );
 
     page.insert(cell1.payload.clone(), cell1)
         .expect("Failed to add cell1");
     page.insert(cell2.payload.clone(), cell2)
         .expect("Failed to add cell2");
-    page.insert(cell3.payload.clone(), cell3)
-        .expect("Failed to add cell3");
 
     page
 }

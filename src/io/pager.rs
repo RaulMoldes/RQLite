@@ -500,10 +500,7 @@ impl<'a> Iterator for JournalIterator<'a> {
     type Item = IOFrame;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match IOFrame::read_from(&mut self.journal) {
-            Ok(frame) => Some(frame),
-            Err(err) => None,
-        }
+        IOFrame::read_from(&mut self.journal).ok()
     }
 }
 

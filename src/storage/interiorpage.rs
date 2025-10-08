@@ -6,6 +6,7 @@ use crate::storage::Slot;
 use crate::types::{Key, PageId, Splittable, VarlenaType};
 use crate::PageType;
 use crate::{BTreePage, BTreePageOps, HeaderOps, OverflowPage};
+
 use std::io;
 
 pub(crate) type TableInteriorPage = BTreePage<TableInteriorCell>;
@@ -63,9 +64,6 @@ impl InteriorPageOps<TableInteriorCell> for TableInteriorPage {
     /// If we find a key that is bigger than target, navigate to the left. If not, navigate to the right. This creates. a left-biased distribution which is preferred on B+Trees.
     fn find_child(&self, key: &Self::KeyType) -> PageId {
         for slot in &self.cell_indices {
-            if slot.is_deleted() {
-                continue;
-            }
             if let Some(cell) = self.cells.get(&slot.offset) {
                 if key < &cell.key {
                     return cell.left_child_page;
@@ -85,9 +83,7 @@ impl InteriorPageOps<TableInteriorCell> for TableInteriorPage {
             .cell_indices
             .iter()
             .position(|slot| {
-                if slot.is_deleted() {
-                    false
-                } else if let Some(cell) = self.cells.get(&slot.offset) {
+                if let Some(cell) = self.cells.get(&slot.offset) {
                     cell.key > key
                 } else {
                     false
@@ -103,17 +99,14 @@ impl InteriorPageOps<TableInteriorCell> for TableInteriorPage {
     /// Remove a child given by its key. Returns the page id to the caller.
     fn remove_child(&mut self, key: &Self::KeyType) -> Option<PageId> {
         if let Some(pos) = self.cell_indices.iter().position(|slot| {
-            if slot.is_deleted() {
-                false
-            } else if let Some(cell) = self.cells.get(&slot.offset) {
+            if let Some(cell) = self.cells.get(&slot.offset) {
                 &cell.key == key
             } else {
                 false
             }
         }) {
-            let slot = self.cell_indices.get_mut(pos).unwrap();
-            slot.delete();
-            let removed_cell = self.cells.get(&slot.offset).unwrap();
+            let slot = self.cell_indices.remove(pos);
+            let removed_cell = self.cells.remove(&slot.offset).unwrap();
             Some(removed_cell.left_child_page)
         } else {
             None
@@ -145,10 +138,6 @@ impl InteriorPageOps<IndexInteriorCell> for IndexInteriorPage {
 
     fn find_child(&self, key: &Self::KeyType) -> PageId {
         for slot in &self.cell_indices {
-            if slot.is_deleted() {
-                continue;
-            }
-
             if let Some(cell) = self.cells.get(&slot.offset) {
                 if key < &cell.payload {
                     return cell.left_child_page;
@@ -166,9 +155,7 @@ impl InteriorPageOps<IndexInteriorCell> for IndexInteriorPage {
             .cell_indices
             .iter()
             .position(|slot| {
-                if slot.is_deleted() {
-                    false
-                } else if let Some(cell) = self.cells.get(&slot.offset) {
+                if let Some(cell) = self.cells.get(&slot.offset) {
                     cell.payload > key
                 } else {
                     false
@@ -183,17 +170,14 @@ impl InteriorPageOps<IndexInteriorCell> for IndexInteriorPage {
 
     fn remove_child(&mut self, key: &Self::KeyType) -> Option<PageId> {
         if let Some(pos) = self.cell_indices.iter().position(|slot| {
-            if slot.is_deleted() {
-                false
-            } else if let Some(cell) = self.cells.get(&slot.offset) {
+            if let Some(cell) = self.cells.get(&slot.offset) {
                 &cell.payload == key
             } else {
                 false
             }
         }) {
-            let slot = self.cell_indices.get_mut(pos).unwrap();
-            slot.delete();
-            let removed_cell = self.cells.get(&slot.offset).unwrap();
+            let slot = self.cell_indices.remove(pos);
+            let removed_cell = self.cells.remove(&slot.offset).unwrap();
             Some(removed_cell.left_child_page)
         } else {
             None

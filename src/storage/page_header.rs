@@ -9,7 +9,7 @@ use std::io::{self, Read, Write};
 pub(crate) const PAGE_HEADER_SIZE: usize = 24;
 
 /// As said on [crate::storage::slot.rs] slot size is also fixed.
-pub(crate) const SLOT_SIZE: usize = 3;
+pub(crate) const SLOT_SIZE: usize = 2;
 
 /// Trait that all pages (header + buffer with data)
 /// Will implement, although values will be computed at the header leve, which is where metadata lives.

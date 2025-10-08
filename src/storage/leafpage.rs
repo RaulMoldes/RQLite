@@ -5,7 +5,7 @@ use crate::storage::overflowpage::{OverflowPage, Overflowable};
 use crate::storage::slot::Slot;
 use crate::types::Splittable;
 use crate::types::VarlenaType;
-use crate::types::{Key, PageId, RQLiteType, RowId};
+use crate::types::{Key, PageId, RowId};
 use crate::PageType;
 use crate::{BTreePage, BTreePageOps, HeaderOps};
 
@@ -43,11 +43,9 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
     /// If not found, return none. The caller is responsible to navigate to the next page at that point.
     fn find(&self, key: &Self::KeyType) -> Option<&TableLeafCell> {
         for slot in &self.cell_indices {
-            if !slot.is_deleted() {
-                if let Some(cell) = self.cells.get(&slot.offset) {
-                    if &cell.row_id == key {
-                        return Some(cell);
-                    }
+            if let Some(cell) = self.cells.get(&slot.offset) {
+                if &cell.row_id == key {
+                    return Some(cell);
                 }
             }
         }
@@ -57,18 +55,14 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
     /// Remove a cell given by is key. Has the same find logic as [`find`]
     fn remove(&mut self, key: &Self::KeyType) -> Option<TableLeafCell> {
         if let Some(pos) = self.cell_indices.iter().position(|slot| {
-            if slot.is_deleted() {
-                false
-            } else if let Some(cell) = self.cells.get(&slot.offset) {
+            if let Some(cell) = self.cells.get(&slot.offset) {
                 &cell.row_id == key
             } else {
                 false
             }
         }) {
-            let slot = self.cell_indices.get_mut(pos).unwrap();
-            slot.delete();
-
-            Some(self.cells.get(&slot.offset).unwrap().clone())
+            let slot = self.cell_indices.remove(pos);
+            Some(self.cells.remove(&slot.offset).unwrap())
         } else {
             None
         }
@@ -90,9 +84,7 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
             .cell_indices
             .iter()
             .position(|slot| {
-                if slot.is_deleted() {
-                    false
-                } else if let Some(existing_cell) = self.cells.get(&slot.offset) {
+                if let Some(existing_cell) = self.cells.get(&slot.offset) {
                     existing_cell.row_id > key
                 } else {
                     false
@@ -113,11 +105,9 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
 
     fn find(&self, key: &Self::KeyType) -> Option<&IndexLeafCell> {
         for slot in &self.cell_indices {
-            if !slot.is_deleted() {
-                if let Some(cell) = self.cells.get(&slot.offset) {
-                    if &cell.payload == key {
-                        return Some(cell);
-                    }
+            if let Some(cell) = self.cells.get(&slot.offset) {
+                if &cell.payload == key {
+                    return Some(cell);
                 }
             }
         }
@@ -133,18 +123,15 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
 
     fn remove(&mut self, key: &Self::KeyType) -> Option<IndexLeafCell> {
         if let Some(pos) = self.cell_indices.iter().position(|slot| {
-            if slot.is_deleted() {
-                false
-            } else if let Some(cell) = self.cells.get(&slot.offset) {
+            if let Some(cell) = self.cells.get(&slot.offset) {
                 &cell.payload == key
             } else {
                 false
             }
         }) {
-            let slot = self.cell_indices.get_mut(pos).unwrap();
-            slot.delete();
+            let slot = self.cell_indices.remove(pos);
 
-            Some(self.cells.get(&slot.offset).unwrap().clone())
+            Some(self.cells.remove(&slot.offset).unwrap())
         } else {
             None
         }
@@ -157,9 +144,7 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
             .cell_indices
             .iter()
             .position(|slot| {
-                if slot.is_deleted() {
-                    false
-                } else if let Some(existing_cell) = self.cells.get(&slot.offset) {
+                if let Some(existing_cell) = self.cells.get(&slot.offset) {
                     existing_cell.payload > key
                 } else {
                     false

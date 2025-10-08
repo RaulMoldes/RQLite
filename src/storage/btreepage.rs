@@ -102,14 +102,13 @@ impl<BTreeCellType: Cell + Serializable> BTreePageOps<BTreeCellType> for BTreePa
     /// If the slot has been marked as deleted, we simply ignore it.
     fn get_cell_at(&self, id: u16) -> Option<BTreeCellType> {
         if let Some(slot) = self.cell_indices.get(id as usize) {
-            if !slot.is_deleted() {
-                return self.cells.get(&slot.offset).cloned();
-            };
+            return self.cells.get(&slot.offset).cloned();
         };
         None
     }
 
     // BTreeMap does not include a drain method, so we need to use std::mem::take here.
+    // TODO: currently this does not check if cells are deleted or not. We need to implement that part manually.
     fn take_cells(&mut self) -> Vec<BTreeCellType> {
         let old_cells = std::mem::take(&mut self.cells);
         self.cell_indices.clear();
@@ -167,14 +166,22 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
         // Calculate how many bytes to read
         let content_start = header.content_start();
         let remaining_bytes = header.page_size() - content_start;
-
+        dbg!(remaining_bytes);
         // Read exactly the remaining bytes for the page into a temp buffer.
         let mut remaining_data = vec![0u8; remaining_bytes];
         reader.read_exact(&mut remaining_data)?;
+        dbg!(header.cell_count());
+    dbg!(header.content_start());
+    dbg!(header.page_size());
+    dbg!(remaining_bytes);
+
 
         let mut cells = BTreeMap::new();
         for &cell_index in cell_indices.iter() {
+              dbg!(cell_index.offset);
             let cell_offset = cell_index.offset as usize - header.content_start();
+            dbg!(cell_offset);
+    dbg!(remaining_data.len());
             if cell_offset >= remaining_data.len() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -201,6 +208,7 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
             idx.write_to(writer)?;
         }
         let buffer_size = self.page_size() - self.content_start();
+        dbg!(buffer_size);
         let mut content_buffer = vec![0u8; buffer_size];
 
         for (offset, cell) in self.cells.iter() {

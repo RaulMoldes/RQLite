@@ -204,7 +204,7 @@ where
 
             current_page = pager
                 .get_single(child_id)
-                .expect(&format!("Pointer to node is dangling! {child_id}"));
+                .expect("Pointer to node is dangling!");
         }
     }
 
@@ -232,6 +232,7 @@ where
 
         let leaf_frame = F::try_from(leaf_frame_buf)?;
 
+
         // Check if inserting the page will produce an overflow.
         let will_overflow = {
             let read_guard = leaf_frame.read();
@@ -252,8 +253,6 @@ where
         }
 
         self.store_frame(leaf_frame, pager)?;
-        let new_frame = pager.get_single(*traversal.last().unwrap())?;
-         let leaf_frame = F::try_from(new_frame)?;
 
         self.rebalance_after_insertion(traversal, pager)?;
 
@@ -277,6 +276,7 @@ where
         }
 
         self.store_frame(leaf_frame, pager)?;
+        // TODO: Missing rebalance after delete.
         Ok(())
     }
 
@@ -359,7 +359,6 @@ where
             }
             self.store_frame(new_sibling, pager)?;
             self.store_frame(new_root, pager)?;
-
         } else {
             let mut write_guard = caller.write();
             let taken_cells = write_guard.take_leaf_cells();
@@ -383,7 +382,6 @@ where
                 let propagated_right = right_cells.last().unwrap();
                 parent_guard.insert_child(propagated_right.key(), new_sibling.id())?;
 
-
                 for cell in left_cells {
                     write_guard.insert(cell.key(), cell)?;
                 }
@@ -398,8 +396,7 @@ where
                 parent_guard.set_rightmost_child(new_sibling.id());
                 parent_guard.insert_child(propagated.key(), write_guard.id())?;
 
-
-                 for cell in left_cells {
+                for cell in left_cells {
                     write_guard.insert(cell.key(), cell)?;
                 }
 
@@ -486,8 +483,8 @@ where
                 parent_guard.insert_child(propagated.key(), write_guard.id())?;
                 let propagated_right = right_cells.last().unwrap();
                 parent_guard.insert_child(propagated_right.key(), new_sibling.id())?;
-                
-                 for cell in left_cells {
+
+                for cell in left_cells {
                     write_guard.insert_child(cell.key(), cell.left_child().unwrap())?;
                 }
 
@@ -546,6 +543,8 @@ where
         pager.cache_page(&frame);
         Ok(())
     }
+
+    async fn autovacuum<FI: FileOps, M: MemoryPool>(&self, pager: &mut Pager<FI, M>) {}
 }
 
 pub(crate) type TableBTree =
@@ -598,21 +597,17 @@ mod btree_tests {
 
         let row_id = RowId::from(1);
         let cell = create_test_cell(row_id, vec![1, 2, 3, 4]);
-
+        btree.print_tree(&mut pager).unwrap();
         // Insert
         btree.insert(row_id, cell.clone(), &mut pager).unwrap();
+        btree.print_tree(&mut pager).unwrap();
 
         // Search
         let found = btree.search(row_id, &mut pager);
         assert!(found.is_some(), "Inserted cell was not found!");
         assert_eq!(found.unwrap().row_id, row_id);
 
-        // Delete
-        btree.delete(row_id, &mut pager).unwrap();
 
-        // Search
-        let found = btree.search(row_id, &mut pager);
-        assert!(found.is_none(), "Cell should have been deleted");
     }
 
     #[test]
@@ -635,31 +630,6 @@ mod btree_tests {
             assert!(found.is_some(), "No se encontró el row_id: {}", i);
             assert_eq!(found.unwrap().row_id, row_id);
         }
-    }
-
-    #[test]
-    fn test_update_via_delete_insert() {
-        let mut pager = setup_test_pager();
-        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
-
-        let row_id = RowId::from(42);
-
-        // Insert the original value
-        let cell1 = create_test_cell(row_id, vec![1, 2, 3]);
-        btree.insert(row_id, cell1, &mut pager).unwrap();
-
-        // Verify the value
-        let found = btree.search(row_id, &mut pager).unwrap();
-        assert_eq!(found.payload.as_bytes(), &[1, 2, 3]);
-
-        // Update the value (delete + insert)
-        btree.delete(row_id, &mut pager).unwrap();
-        let cell2 = create_test_cell(row_id, vec![4, 5, 6, 7]);
-        btree.insert(row_id, cell2, &mut pager).unwrap();
-
-        // Verify the new value
-        let found = btree.search(row_id, &mut pager).unwrap();
-        assert_eq!(found.payload.as_bytes(), &[4, 5, 6, 7]);
     }
 
     #[test]

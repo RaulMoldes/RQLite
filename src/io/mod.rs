@@ -18,7 +18,6 @@ use crate::PageType;
 use crate::{RQLiteIndexPage, RQLitePage, RQLiteTablePage};
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc, RwLock};
 
-
 pub(crate) struct PageFrame<P> {
     id: PageId,
     // Store the page type to be able to check for conversions between frames at runtime.
@@ -110,8 +109,7 @@ impl<P> PageFrame<P> {
     }
 }
 
-
-impl<P: Send + Sync + std::fmt::Debug> std::fmt::Debug for PageFrame<P>{
+impl<P: Send + Sync + std::fmt::Debug> std::fmt::Debug for PageFrame<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.page.read().fmt(f)
     }

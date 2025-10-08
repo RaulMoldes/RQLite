@@ -199,6 +199,8 @@ impl TableInteriorCell {
 pub struct IndexLeafCell {
     /// Payload content in bytes (Index Key)
     pub payload: VarlenaType,
+    /// RowId that references the actual row in the table
+    pub row_id: RowId,
     /// References to the page of overflow
     pub overflow_page: Option<PageId>,
 }
@@ -221,7 +223,7 @@ impl Cell for IndexLeafCell {
             0
         };
 
-        TRUE.size_of() + self.payload.size_of() + overflow_size
+        TRUE.size_of() + self.payload.size_of() + overflow_size + self.row_id.size_of()
     }
 }
 
@@ -234,7 +236,7 @@ impl Serializable for IndexLeafCell {
             FALSE
         };
         flags.write_to(writer)?;
-
+        self.row_id.write_to(writer)?;
         // Write payload
         self.payload.write_to(writer)?;
 
@@ -252,7 +254,8 @@ impl Serializable for IndexLeafCell {
     {
         // Read flags
         let has_overflow = has_overflow(reader)?;
-
+        // Read Rowid:
+        let row_id = RowId::read_from(reader)?;
         // Read payload
         let payload = VarlenaType::read_from(reader)?;
 
@@ -265,15 +268,18 @@ impl Serializable for IndexLeafCell {
 
         Ok(IndexLeafCell {
             payload,
+            row_id,
             overflow_page,
         })
     }
 }
 
 impl IndexLeafCell {
-    pub fn new(payload: VarlenaType) -> Self {
+    pub fn new(payload: VarlenaType, row_id: RowId) -> Self {
         Self {
             payload,
+            row_id,
+
             overflow_page: None,
         }
     }

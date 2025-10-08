@@ -47,9 +47,9 @@ impl std::fmt::Debug for RQLiteIndexPage {
 
 impl std::fmt::Debug for OverflowPage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Page id {}", self.id());
-        write!(f, "Effective data len {}", self.data.effective_size());
-        write!(f, "Data len {}", self.data.size_of());
+        write!(f, "Page id {}", self.id())?;
+        write!(f, "Effective data len {}", self.data.effective_size())?;
+        write!(f, "Data len {}", self.data.size_of())?;
         Ok(())
     }
 }

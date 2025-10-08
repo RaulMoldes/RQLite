@@ -6,7 +6,7 @@
       "request": "launch",
       "name": "Debug Rust test (rqlite)",
       "program": "${workspaceFolder}/target/debug/deps/rqlite-15f45e8b69133adf",
-      "args": ["--nocapture", "test_root_split"],
+      "args": ["--nocapture", "test_single_record"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {
