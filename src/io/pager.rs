@@ -473,7 +473,7 @@ impl Write for Journal {
     fn flush(&mut self) -> io::Result<()> {
         self.file.truncate()?;
         self.file.seek(SeekFrom::Start(0))?;
-        dbg!(self.buffer.as_slice().len());
+
         self.file.write_all(self.buffer.as_slice())?;
         self.buffer.truncate()?;
         Ok(())
@@ -500,13 +500,9 @@ impl<'a> Iterator for JournalIterator<'a> {
     type Item = IOFrame;
 
     fn next(&mut self) -> Option<Self::Item> {
-        dbg!("Reading");
         match IOFrame::read_from(&mut self.journal) {
             Ok(frame) => Some(frame),
-            Err(err) => {
-                dbg!("ERROR: {}", err);
-                None
-            }
+            Err(err) => None,
         }
     }
 }
@@ -638,7 +634,6 @@ impl WriteAheadLog {
             return Ok(());
         }
 
-        dbg!(self.entries_since_flush);
         self.flush()?;
         self.sync_all()?;
         self.entries_since_flush = 0;

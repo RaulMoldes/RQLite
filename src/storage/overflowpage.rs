@@ -12,6 +12,8 @@ use std::io::{self, Read, Write};
 pub(crate) trait Overflowable {
     /// Type of content that can be inserted in this overflowable type.
     type Content: Serializable;
+    type LeafContent: Serializable;
+    type InteriorContent: Serializable;
 
     /// Attempt to insert a chunk of [Content] into the Overflowable item. Ifnot possible,
     /// will split it and handle the creation of the overflow chain.
@@ -19,11 +21,29 @@ pub(crate) trait Overflowable {
     fn try_insert_with_overflow(
         &mut self,
         content: Self::Content,
-        max_payload_factor: u16,
-    ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>>;
+        max_payload_factor: f32,
+    ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
+        Ok(None)
+    }
+
+    fn try_insert_with_overflow_leaf(
+        &mut self,
+        content: Self::LeafContent,
+        max_payload_factor: f32,
+    ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
+        Ok(None)
+    }
+
+    fn try_insert_with_overflow_interior(
+        &mut self,
+        content: Self::InteriorContent,
+        max_payload_factor: f32,
+    ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
+        Ok(None)
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct OverflowPage {
     pub(crate) header: PageHeader,
     pub(crate) data: VarlenaType,
@@ -131,19 +151,22 @@ impl OverflowPage {
 
 impl Overflowable for OverflowPage {
     type Content = VarlenaType;
+    type LeafContent = VarlenaType;
+    type InteriorContent = VarlenaType;
 
     /// Attempt to insert a VarlenaType in this Overflow Page.
     /// If not possible, will create additional pages, connecting them properly in an overflow chain.
     fn try_insert_with_overflow(
         &mut self,
         mut content: Self::Content,
-        max_payload_factor: u16,
+        max_payload_factor: f32,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         if content.size_of() < self.max_cell_size(max_payload_factor) {
             self.data = content;
             self.header.free_space_ptr -= self.data.size_of() as u16;
             return Ok(None);
         }
+
         let available = self.available_space(max_payload_factor);
         let remaining = content.split_at(available);
         self.data = content;

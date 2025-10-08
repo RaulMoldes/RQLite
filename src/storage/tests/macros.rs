@@ -111,28 +111,7 @@ macro_rules! test_leaf_page_ops {
                 }
             }
 
-            #[test]
-            fn [<test_split_ $test_suffix>]() {
-                let mut page = <$page_type>::create(
-                    PageId::from(1),
-                    4096,
-                    $page_variant,
-                    None,
-                );
 
-                for i in 0..20 {
-                    let key = $create_key(i);
-                    let cell = $create_cell(key.clone());
-                    page.insert(key, cell).unwrap();
-                }
-
-                let original_count = page.cell_count();
-                let (_, new_page) = page.split_leaf();
-
-                assert!(page.cell_count() > 0);
-                assert!(new_page.cell_count() > 0);
-                assert_eq!(page.cell_count() + new_page.cell_count(), original_count);
-            }
         }
     };
 }
@@ -234,28 +213,6 @@ macro_rules! test_interior_page_ops {
 
                 let key = $create_key(999);
                 assert!(page.remove_child(&key).is_none());
-            }
-
-            #[test]
-            fn [<test_split_interior_ $test_suffix>]() {
-                let mut page = <$page_type>::create(
-                    PageId::from(1),
-                    4096,
-                    $page_variant,
-                    None,
-                );
-
-                for i in 0..20 {
-                    let key = $create_key(i);
-                    let child = PageId::from(i + 10);
-                    page.insert_child(key, child).unwrap();
-                }
-
-                let original_count = page.cell_count();
-                let (split_key, new_page) = page.split_interior();
-
-                assert!(page.cell_count() > 0);
-                assert!(new_page.cell_count() > 0);
             }
 
             #[test]

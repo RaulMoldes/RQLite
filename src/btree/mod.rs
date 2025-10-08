@@ -1,16 +1,19 @@
+mod debug;
+
 use crate::io::cache::MemoryPool;
 use crate::io::disk::FileOps;
 use crate::io::pager::Pager;
 use crate::io::IOFrame;
-use crate::io::{Frame, TableFrame};
+use crate::io::{Frame, IndexFrame, OverflowFrame, TableFrame};
 use crate::storage::Cell;
-use crate::storage::{BTreePageOps, InteriorPageOps, LeafPageOps, Overflowable};
-use crate::types::{PageId, RowId, VarlenaType};
-use crate::TableLeafCell;
+use crate::storage::{InteriorPageOps, LeafPageOps, Overflowable};
+use crate::types::{PageId, RowId, Splittable, VarlenaType};
+use crate::{HeaderOps, OverflowPage};
 use crate::{
-    overflowpage, HeaderOps, OverflowPage, RQLiteTablePage, TableInteriorCell, TableInteriorPage,
-    TableLeafPage,
+    IndexInteriorCell, IndexLeafCell, RQLiteIndexPage, RQLiteTablePage, TableInteriorCell,
+    TableLeafCell,
 };
+
 fn split_cells_by_size<BTreeCellType: Cell>(
     mut taken_cells: Vec<BTreeCellType>,
 ) -> (Vec<BTreeCellType>, Vec<BTreeCellType>) {
@@ -41,60 +44,55 @@ pub(crate) enum BTreeType {
     Index,
 }
 
-pub(crate) struct BTree<K, V> {
-    pub(crate) root: PageId,
-    pub(crate) min_payload_fraction: u16,
-    pub(crate) max_payload_fraction: u16,
-    pub(crate) tree_type: BTreeType,
-    pub(crate) key_marker: std::marker::PhantomData<K>,
-    pub(crate) val_marker: std::marker::PhantomData<V>,
-}
-
-/// Information about a split that needs to be propagated upward
 #[derive(Debug)]
-struct SplitInfo {
-    /// The key that was promoted during the split
-    promoted_key: RowId,
-    /// The page id of the left child after split
-    left_child: PageId,
-    /// The page id of the newly created right child
-    right_child: PageId,
+pub(crate) struct BTree<K, Vl, Vi, P, F> {
+    pub(crate) root: PageId,
+    pub(crate) min_payload_fraction: f32,
+    pub(crate) max_payload_fraction: f32,
+    pub(crate) tree_type: BTreeType,
+    __key_marker: std::marker::PhantomData<K>,
+    __val_leaf_marker: std::marker::PhantomData<Vl>,
+    __val_int_marker: std::marker::PhantomData<Vi>,
+    __page_marker: std::marker::PhantomData<P>,
+    __frame_marker: std::marker::PhantomData<F>,
 }
 
-impl<K, V> BTree<K, V>
+impl<K, Vl, Vi, P, F> BTree<K, Vl, Vi, P, F>
 where
-    K: Ord,
-    V: Cell,
+    K: Ord + Clone + Copy + Eq + PartialEq,
+    Vl: Cell<Key = K>,
+    Vi: Cell<Key = K>,
+    P: Send
+        + Sync
+        + HeaderOps
+        + InteriorPageOps<Vi, KeyType = K>
+        + LeafPageOps<Vl, KeyType = K>
+        + Overflowable<LeafContent = Vl>
+        + std::fmt::Debug,
+    F: Frame<P> + TryFrom<IOFrame, Error = std::io::Error>,
+    IOFrame: TryFrom<F, Error = std::io::Error>,
 {
-    pub(crate) fn create_table<F: FileOps, M: MemoryPool>(
-        pager: &mut Pager<F, M>,
-        max_payload_fraction: u16,
-        min_payload_fraction: u16,
+    pub(crate) fn create<FI: FileOps, M: MemoryPool>(
+        pager: &mut Pager<FI, M>,
+        tree_type: BTreeType,
+        max_payload_fraction: f32,
+        min_payload_fraction: f32,
     ) -> std::io::Result<Self> {
-        let id = pager.alloc_page(crate::PageType::TableLeaf)?.id();
+        let page_type = match tree_type {
+            BTreeType::Table => crate::PageType::TableLeaf,
+            BTreeType::Index => crate::PageType::IndexLeaf,
+        };
+        let id = pager.alloc_page(page_type)?.id();
         Ok(Self {
             root: id,
-            tree_type: BTreeType::Table,
+            tree_type,
             max_payload_fraction,
             min_payload_fraction,
-            key_marker: std::marker::PhantomData,
-            val_marker: std::marker::PhantomData,
-        })
-    }
-
-    pub(crate) fn create_index<F: FileOps, M: MemoryPool>(
-        pager: &mut Pager<F, M>,
-        max_payload_fraction: u16,
-        min_payload_fraction: u16,
-    ) -> std::io::Result<Self> {
-        let id = pager.alloc_page(crate::PageType::IndexLeaf)?.id();
-        Ok(Self {
-            root: id,
-            tree_type: BTreeType::Index,
-            max_payload_fraction,
-            min_payload_fraction,
-            key_marker: std::marker::PhantomData,
-            val_marker: std::marker::PhantomData,
+            __key_marker: std::marker::PhantomData,
+            __val_leaf_marker: std::marker::PhantomData,
+            __val_int_marker: std::marker::PhantomData,
+            __page_marker: std::marker::PhantomData,
+            __frame_marker: std::marker::PhantomData,
         })
     }
 
@@ -115,44 +113,89 @@ where
         );
     }
 
-    /// Search for a cell by its RowId
-    pub(crate) fn search<F: FileOps, M: MemoryPool>(
+    pub(crate) fn interior_page_type(&self) -> crate::PageType {
+        match self.tree_type {
+            BTreeType::Table => crate::PageType::TableInterior,
+            BTreeType::Index => crate::PageType::IndexInterior,
+        }
+    }
+
+    pub(crate) fn leaf_page_type(&self) -> crate::PageType {
+        match self.tree_type {
+            BTreeType::Table => crate::PageType::TableLeaf,
+            BTreeType::Index => crate::PageType::IndexLeaf,
+        }
+    }
+
+    /// Search for a cell by its Key
+    pub(crate) fn search<FI: FileOps, M: MemoryPool>(
         &self,
-        key: RowId,
-        pager: &mut Pager<F, M>,
-    ) -> Option<TableLeafCell> {
+        key: K,
+        pager: &mut Pager<FI, M>,
+    ) -> Option<Vl> {
         let root_page = pager.get_single(self.root).unwrap();
         self.debug_assert_page_type(&root_page);
         let traversal = self.traverse(key, pager);
+
         let leaf_frame_buf = pager.get_single(*traversal.last().unwrap()).unwrap();
-        let leaf_frame = TableFrame::try_from(leaf_frame_buf).unwrap();
+        assert!(
+            leaf_frame_buf.is_leaf(),
+            "Error, traversing did not reach a leaf page ID: {}, TYPE: {:?}",
+            leaf_frame_buf.id(),
+            leaf_frame_buf.page_type()
+        );
+
+        let leaf_frame = F::try_from(leaf_frame_buf).unwrap();
 
         let guard = leaf_frame.read();
-        guard.find(&key).cloned()
+
+        if let Some(mut cell) = guard.find(&key).cloned() {
+            if let Some(overflowpage) = cell.overflow_page() {
+                // If there is an overflow page, traverse the linked list of overflow pages to reconstruct the data.
+                let mut current_overflow_id = Some(overflowpage);
+
+                while let Some(overflow_id) = current_overflow_id {
+                    // Leer la overflow page
+                    let io_frame = pager.get_single(overflow_id).unwrap();
+                    let overflow_frame = OverflowFrame::try_from(io_frame).unwrap();
+
+                    current_overflow_id = if let Some(payload) = cell.data_mut() {
+                        let ovf_guard = overflow_frame.read();
+                        let overflow_data = ovf_guard.data.clone();
+                        payload.merge_with(overflow_data);
+                        ovf_guard.get_next_overflow()
+                    } else {
+                        None
+                    }
+                }
+            }
+            return Some(cell);
+        }
+        None
     }
 
     /// Navigate down to the leaf that should contain the key
-    fn traverse<F: FileOps, M: MemoryPool>(
+    fn traverse<FI: FileOps, M: MemoryPool>(
         &self,
-        key: RowId,
-        pager: &mut Pager<F, M>,
+        key: K,
+        pager: &mut Pager<FI, M>,
     ) -> Vec<PageId> {
         let mut traversal = Vec::new();
-        traversal.push(self.root);
-        let mut current_page = pager.get_single(self.root).expect(&format!(
-            "Pointer to root node is dangling: {} !",
-            self.root
-        ));
+        let mut current_page = pager
+            .get_single(self.root)
+            .expect("Pointer to root node is dangling!");
 
         self.debug_assert_page_type(&current_page);
         loop {
             if current_page.is_leaf() {
+                traversal.push(current_page.id());
                 return traversal;
             }
             let id = current_page.id();
+
             traversal.push(id);
-            let table_frame = TableFrame::try_from(current_page)
-                .expect(&format!("Failed to convert page to table frame: {} !", id));
+            let table_frame =
+                F::try_from(current_page).expect("Failed to convert page to table frame!");
 
             let child_id = {
                 let guard = table_frame.read();
@@ -161,7 +204,7 @@ where
 
             current_page = pager
                 .get_single(child_id)
-                .expect(&format!("Pointer to node is dangling: {} !", id));
+                .expect(&format!("Pointer to node is dangling! {child_id}"));
         }
     }
 
@@ -174,17 +217,20 @@ where
     }
 
     /// Insert, allowing to overflow.
-    fn insert<F: FileOps, M: MemoryPool>(
+    fn insert<FI: FileOps, M: MemoryPool>(
         &mut self,
-        key: RowId,
-        value: TableLeafCell,
-        pager: &mut Pager<F, M>,
+        key: K,
+        value: Vl,
+        pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
         let root_page = pager.get_single(self.root)?;
+
         self.debug_assert_page_type(&root_page);
         let traversal = self.traverse(key, pager);
+
         let leaf_frame_buf = pager.get_single(*traversal.last().unwrap())?;
-        let leaf_frame = TableFrame::try_from(leaf_frame_buf)?;
+
+        let leaf_frame = F::try_from(leaf_frame_buf)?;
 
         // Check if inserting the page will produce an overflow.
         let will_overflow = {
@@ -194,6 +240,7 @@ where
 
         if will_overflow {
             let mut write_guard = leaf_frame.write();
+
             if let Some((overflow_page, content)) =
                 write_guard.try_insert_with_overflow_leaf(value, self.max_payload_fraction)?
             {
@@ -205,43 +252,58 @@ where
         }
 
         self.store_frame(leaf_frame, pager)?;
+        let new_frame = pager.get_single(*traversal.last().unwrap())?;
+         let leaf_frame = F::try_from(new_frame)?;
+
         self.rebalance_after_insertion(traversal, pager)?;
 
         Ok(())
     }
 
-    fn store_frame<F: FileOps, M: MemoryPool, T>(
+    /// Delete, allowing to underflow
+    fn delete<FI: FileOps, M: MemoryPool>(
+        &mut self,
+        key: K,
+        pager: &mut Pager<FI, M>,
+    ) -> std::io::Result<()> {
+        let root_page = pager.get_single(self.root)?;
+        self.debug_assert_page_type(&root_page);
+        let traversal = self.traverse(key, pager);
+        let leaf_frame_buf = pager.get_single(*traversal.last().unwrap())?;
+        let leaf_frame = F::try_from(leaf_frame_buf)?;
+        {
+            let mut leaf_guard = leaf_frame.write();
+            leaf_guard.remove(&key);
+        }
+
+        self.store_frame(leaf_frame, pager)?;
+        Ok(())
+    }
+
+    fn store_frame<FI: FileOps, M: MemoryPool>(
         &self,
-        frame: T,
-        pager: &mut Pager<F, M>,
-    ) -> std::io::Result<()>
-    where
-        IOFrame: TryFrom<T, Error = std::io::Error>,
-    {
+        frame: F,
+        pager: &mut Pager<FI, M>,
+    ) -> std::io::Result<()> {
         let io_frame = IOFrame::try_from(frame)?;
+
         pager.cache_page(&io_frame);
         Ok(())
     }
 
-    pub(crate) fn rebalance_after_insertion<F: FileOps, M: MemoryPool>(
+    pub(crate) fn rebalance_after_insertion<FI: FileOps, M: MemoryPool>(
         &mut self,
         mut traversal: Vec<PageId>,
-        pager: &mut Pager<F, M>,
+        pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
         traversal.reverse();
 
-        if traversal.len() == 1 {
-            let node = traversal[0];
-            let parent = traversal[0];
-            self.rebalance_leaf(node, parent, pager)?;
-            return Ok(());
-        }
+        for current_index in 0..traversal.len() {
+            let next_index = (current_index + 1).clamp(0, traversal.len() - 1);
+            let node = traversal[current_index];
+            let parent = traversal[next_index];
 
-        for i in 0..traversal.len() {
-            let node = traversal[i];
-            let parent = traversal[i + 1];
-
-            if i == 0 {
+            if current_index == 0 {
                 self.rebalance_leaf(node, parent, pager)?;
             } else {
                 self.rebalance_interior(node, parent, pager)?;
@@ -250,18 +312,18 @@ where
         Ok(())
     }
 
-    fn rebalance_leaf<F: FileOps, M: MemoryPool>(
+    fn rebalance_leaf<FI: FileOps, M: MemoryPool>(
         &mut self,
         caller_id: PageId,
         parent_id: PageId,
-        pager: &mut Pager<F, M>,
+        pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
         let frame = pager.get_single(caller_id)?;
-        let caller = TableFrame::try_from(frame)?;
         assert!(
-            caller.is_leaf(),
+            frame.is_leaf(),
             "Cannot call rebalance-leaf on an interior node. Use rebalance-interior instead"
         );
+        let caller = F::try_from(frame)?;
         let is_overflow_state = {
             let read_guard = caller.read();
             read_guard.is_on_overflow_state(self.max_payload_fraction)
@@ -274,35 +336,39 @@ where
         // Root has overflown
         if self.is_root(caller.id()) {
             let mut write_guard = caller.write();
-            let taken_cells = write_guard.take_cells_leaf();
+            let taken_cells = write_guard.take_leaf_cells();
             let (left_cells, right_cells) = split_cells_by_size(taken_cells);
             let propagated = right_cells.first().unwrap();
 
-            let new_root = TableFrame::try_from(pager.alloc_page(crate::PageType::TableInterior)?)?;
-            let new_sibling = TableFrame::try_from(pager.alloc_page(crate::PageType::TableLeaf)?)?;
+            let new_root = F::try_from(pager.alloc_page(self.interior_page_type())?)?;
+            let new_sibling = F::try_from(pager.alloc_page(self.leaf_page_type())?)?;
+            {
+                let mut root_guard = new_root.write();
+                root_guard.insert_child(propagated.key(), write_guard.id())?;
+                root_guard.set_rightmost_child(new_sibling.id());
+                self.set_root(new_root.id());
 
-            let mut root_guard = new_root.write();
-            root_guard.insert_child(propagated.row_id, write_guard.id())?;
-            root_guard.set_rightmost_child(new_sibling.id());
-            self.set_root(new_root.id());
+                for cell in left_cells {
+                    write_guard.insert(cell.key(), cell)?;
+                }
 
-            for cell in left_cells {
-                write_guard.insert(cell.row_id, cell)?;
+                let mut new_sibling_guard = new_sibling.write();
+                for cell in right_cells {
+                    new_sibling_guard.insert(cell.key(), cell)?;
+                }
             }
+            self.store_frame(new_sibling, pager)?;
+            self.store_frame(new_root, pager)?;
 
-            let mut new_sibling_guard = new_sibling.write();
-            for cell in right_cells {
-                new_sibling_guard.insert(cell.row_id, cell)?;
-            }
         } else {
             let mut write_guard = caller.write();
-            let taken_cells = write_guard.take_cells_leaf();
+            let taken_cells = write_guard.take_leaf_cells();
             let (left_cells, right_cells) = split_cells_by_size(taken_cells);
             let propagated = right_cells.first().unwrap();
-            let new_sibling = TableFrame::try_from(pager.alloc_page(crate::PageType::TableLeaf)?)?;
+            let new_sibling = F::try_from(pager.alloc_page(self.leaf_page_type())?)?;
 
             let parent_buf = pager.get_single(parent_id)?;
-            let parent_frame = TableFrame::try_from(parent_buf)?;
+            let parent_frame = F::try_from(parent_buf)?;
 
             let right_most_some = parent_frame
                 .read()
@@ -313,13 +379,34 @@ where
                 // No need to fix the right most child pointer. We can proceed.
                 // As there was an already set right most child pointer, different from the splitted node, we can be sure that the keys on that right most child node will be >> than any key on the new sibling node, as those keys came from a node that was previously a child of this parent we are fixing, and was left to the right most child of this specific parent.
                 let mut parent_guard = parent_frame.write();
-                parent_guard.insert_child(propagated.row_id, write_guard.id())?;
+                parent_guard.insert_child(propagated.key(), write_guard.id())?;
+
+
+                for cell in left_cells {
+                    write_guard.insert(cell.key(), cell)?;
+                }
+
+                let mut new_sibling_guard = new_sibling.write();
+                for cell in right_cells {
+                    new_sibling_guard.insert(cell.key(), cell)?;
+                }
             } else {
                 let mut parent_guard = parent_frame.write();
                 parent_guard.set_rightmost_child(new_sibling.id());
-                parent_guard.insert_child(propagated.row_id, write_guard.id())?;
+                parent_guard.insert_child(propagated.key(), write_guard.id())?;
+
+
+                 for cell in left_cells {
+                    write_guard.insert(cell.key(), cell)?;
+                }
+
+                let mut new_sibling_guard = new_sibling.write();
+                for cell in right_cells {
+                    new_sibling_guard.insert(cell.key(), cell)?;
+                }
             }
 
+            self.store_frame(new_sibling, pager)?;
             self.store_frame(parent_frame, pager)?;
         }
 
@@ -328,18 +415,19 @@ where
         Ok(())
     }
 
-    fn rebalance_interior<F: FileOps, M: MemoryPool>(
+    fn rebalance_interior<FI: FileOps, M: MemoryPool>(
         &mut self,
         caller_id: PageId,
         parent_id: PageId,
-        pager: &mut Pager<F, M>,
+        pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
         let frame = pager.get_single(caller_id)?;
-        let caller = TableFrame::try_from(frame)?;
         assert!(
-            caller.is_interior(),
-            "Cannot call rebalance-leaf on a leaf node. Use rebalance-interior instead"
+            frame.is_interior(),
+            "Cannot call rebalance-leaf on a non leaf node. Use rebalance-interior instead"
         );
+        let caller = F::try_from(frame)?;
+
         let is_overflow_state = {
             let read_guard = caller.read();
             read_guard.is_on_overflow_state(self.max_payload_fraction)
@@ -352,37 +440,38 @@ where
         // Root has overflown
         if self.is_root(caller.id()) {
             let mut write_guard = caller.write();
-            let taken_cells = write_guard.take_cells_interior();
+            let taken_cells = write_guard.take_interior_cells();
             let (left_cells, right_cells) = split_cells_by_size(taken_cells);
             let propagated = right_cells.first().unwrap();
 
-            let new_root = TableFrame::try_from(pager.alloc_page(crate::PageType::TableInterior)?)?;
-            let new_sibling =
-                TableFrame::try_from(pager.alloc_page(crate::PageType::TableInterior)?)?;
+            let new_root = F::try_from(pager.alloc_page(self.interior_page_type())?)?;
+            let new_sibling = F::try_from(pager.alloc_page(self.interior_page_type())?)?;
+            {
+                let mut root_guard = new_root.write();
+                root_guard.insert_child(propagated.key(), write_guard.id())?;
+                root_guard.set_rightmost_child(new_sibling.id());
+                self.set_root(new_root.id());
 
-            let mut root_guard = new_root.write();
-            root_guard.insert_child(propagated.key, write_guard.id())?;
-            root_guard.set_rightmost_child(new_sibling.id());
-            self.set_root(new_root.id());
+                for cell in left_cells {
+                    write_guard.insert_child(cell.key(), cell.left_child().unwrap())?;
+                }
 
-            for cell in left_cells {
-                write_guard.insert_child(cell.key, cell.left_child_page)?;
+                let mut new_sibling_guard = new_sibling.write();
+                for cell in right_cells {
+                    new_sibling_guard.insert_child(cell.key(), cell.left_child().unwrap())?;
+                }
             }
-
-            let mut new_sibling_guard = new_sibling.write();
-            for cell in right_cells {
-                new_sibling_guard.insert_child(cell.key, cell.left_child_page)?;
-            }
+            self.store_frame(new_sibling, pager)?;
+            self.store_frame(new_root, pager)?;
         } else {
             let mut write_guard = caller.write();
-            let taken_cells = write_guard.take_cells_leaf();
+            let taken_cells = write_guard.take_interior_cells();
             let (left_cells, right_cells) = split_cells_by_size(taken_cells);
             let propagated = right_cells.first().unwrap();
-            let new_sibling =
-                TableFrame::try_from(pager.alloc_page(crate::PageType::TableInterior)?)?;
+            let new_sibling = F::try_from(pager.alloc_page(self.interior_page_type())?)?;
 
             let parent_buf = pager.get_single(parent_id)?;
-            let parent_frame = TableFrame::try_from(parent_buf)?;
+            let parent_frame = F::try_from(parent_buf)?;
 
             let right_most_some = parent_frame
                 .read()
@@ -391,13 +480,22 @@ where
 
             if let Some(right_most) = right_most_some {
                 let mut parent_guard = parent_frame.write();
-                parent_guard.insert_child(propagated.row_id, write_guard.id())?;
+                parent_guard.insert_child(propagated.key(), write_guard.id())?;
+
+                 for cell in left_cells {
+                    write_guard.insert_child(cell.key(), cell.left_child().unwrap())?;
+                }
+
+                let mut new_sibling_guard = new_sibling.write();
+                for cell in right_cells {
+                    new_sibling_guard.insert_child(cell.key(), cell.left_child().unwrap())?;
+                }
             } else {
                 let mut parent_guard = parent_frame.write();
                 parent_guard.set_rightmost_child(new_sibling.id());
-                parent_guard.insert_child(propagated.row_id, write_guard.id())?;
+                parent_guard.insert_child(propagated.key(), write_guard.id())?;
             }
-
+            self.store_frame(new_sibling, pager)?;
             self.store_frame(parent_frame, pager)?;
         }
 
@@ -406,11 +504,11 @@ where
         Ok(())
     }
 
-    fn create_overflow_chain<F: FileOps, M: MemoryPool>(
+    fn create_overflow_chain<FI: FileOps, M: MemoryPool>(
         &self,
         mut overflow_page: OverflowPage,
         mut content: VarlenaType,
-        pager: &mut Pager<F, M>,
+        pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
         while let Some((new_page, remaining_content)) =
             overflow_page.try_insert_with_overflow(content, self.max_payload_fraction)?
@@ -419,14 +517,17 @@ where
             overflow_page = new_page;
             content = remaining_content;
         }
+
+        self.store_page(crate::RQLitePage::Overflow(overflow_page), pager)?;
+
         Ok(())
     }
 
     /// Save a table page to the pager
-    fn store_page<F: FileOps, M: MemoryPool>(
+    fn store_page<FI: FileOps, M: MemoryPool>(
         &self,
         page: crate::RQLitePage,
-        pager: &mut Pager<F, M>,
+        pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
         use crate::serialization::Serializable;
 
@@ -437,11 +538,16 @@ where
 
         // Create a frame and cache it.
         let frame = crate::io::PageFrame::from_buffer(page_id, page_type, buffer);
-
         pager.cache_page(&frame);
         Ok(())
     }
 }
+
+pub(crate) type TableBTree =
+    BTree<RowId, TableLeafCell, TableInteriorCell, RQLiteTablePage, TableFrame>;
+
+pub(crate) type IndexBTree =
+    BTree<VarlenaType, IndexLeafCell, IndexInteriorCell, RQLiteIndexPage, IndexFrame>;
 
 #[cfg(test)]
 mod btree_tests {
@@ -451,21 +557,20 @@ mod btree_tests {
     use crate::io::disk::Buffer;
     use crate::io::pager::Pager;
     use crate::serialization::Serializable;
-    use crate::types::{PageId, RowId};
-    use crate::TableLeafCell;
-    use std::io::{Read, Seek, Write};
+    use crate::types::RowId;
+    use std::io::Seek;
 
-    // Helper para crear un pager de prueba con Buffer (in-memory)
+    // Helper to create a test pager in memory
     fn setup_test_pager() -> Pager<Buffer, StaticPool> {
         let mut pager = Pager::<Buffer, StaticPool>::create("test.db").unwrap();
 
-        // Inicializar el header
+        // Initialize the header
         let header = Header::default();
-        // Escribir header al pager
+        // Write the header to the pager
         pager.seek(std::io::SeekFrom::Start(0)).unwrap();
         header.write_to(&mut pager).unwrap();
 
-        // Iniciar el pager con capacidad de cache
+        // Init the pager with cache capacity
         pager.start(100).unwrap();
 
         pager
@@ -482,22 +587,9 @@ mod btree_tests {
     }
 
     #[test]
-    fn test_btree_creation() {
+    fn test_single_record() {
         let mut pager = setup_test_pager();
-        let btree = BTree::<RowId, TableLeafCell>::create_table(
-            &mut pager, 255, // max_payload_fraction
-            32,  // min_payload_fraction
-        )
-        .unwrap();
-
-        assert_eq!(btree.tree_type, BTreeType::Table);
-        assert!(u32::from(btree.root) > 0);
-    }
-
-    #[test]
-    fn test_single_insert_and_search() {
-        let mut pager = setup_test_pager();
-        let mut btree = BTree::<RowId, TableLeafCell>::create_table(&mut pager, 255, 32).unwrap();
+        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
 
         let row_id = RowId::from(1);
         let cell = create_test_cell(row_id, vec![1, 2, 3, 4]);
@@ -507,7 +599,123 @@ mod btree_tests {
 
         // Search
         let found = btree.search(row_id, &mut pager);
-        assert!(found.is_some(), "No se encontró la célula insertada");
+        assert!(found.is_some(), "Inserted cell was not found!");
         assert_eq!(found.unwrap().row_id, row_id);
+
+        // Delete
+        btree.delete(row_id, &mut pager).unwrap();
+
+        // Search
+        let found = btree.search(row_id, &mut pager);
+        assert!(found.is_none(), "Cell should have been deleted");
+    }
+
+    #[test]
+    fn test_multiple_sequential_inserts() {
+        let mut pager = setup_test_pager();
+        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
+
+        // Insert 100 registers
+        for i in 1..=100 {
+            let row_id = RowId::from(i);
+            let data = vec![i as u8; 10];
+            let cell = create_test_cell(row_id, data);
+            btree.insert(row_id, cell, &mut pager).unwrap();
+        }
+
+        // Verify all can be found
+        for i in 1..=100 {
+            let row_id = RowId::from(i);
+            let found = btree.search(row_id, &mut pager);
+            assert!(found.is_some(), "No se encontró el row_id: {}", i);
+            assert_eq!(found.unwrap().row_id, row_id);
+        }
+    }
+
+    #[test]
+    fn test_update_via_delete_insert() {
+        let mut pager = setup_test_pager();
+        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
+
+        let row_id = RowId::from(42);
+
+        // Insert the original value
+        let cell1 = create_test_cell(row_id, vec![1, 2, 3]);
+        btree.insert(row_id, cell1, &mut pager).unwrap();
+
+        // Verify the value
+        let found = btree.search(row_id, &mut pager).unwrap();
+        assert_eq!(found.payload.as_bytes(), &[1, 2, 3]);
+
+        // Update the value (delete + insert)
+        btree.delete(row_id, &mut pager).unwrap();
+        let cell2 = create_test_cell(row_id, vec![4, 5, 6, 7]);
+        btree.insert(row_id, cell2, &mut pager).unwrap();
+
+        // Verify the new value
+        let found = btree.search(row_id, &mut pager).unwrap();
+        assert_eq!(found.payload.as_bytes(), &[4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_overflow() {
+        let mut pager = setup_test_pager();
+        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.3, 0.1).unwrap();
+
+        let row_id = RowId::from(1);
+
+        // Create a big payload
+        let large_data: Vec<u8> = (0..2048).map(|i| (i % 256) as u8).collect();
+        let cell = create_test_cell(row_id, large_data.clone());
+
+        btree.insert(row_id, cell, &mut pager).unwrap();
+
+        let found = btree.search(row_id, &mut pager);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().payload.as_bytes(), large_data.as_slice());
+    }
+
+    #[test]
+    fn test_root_split() {
+        let mut pager = setup_test_pager();
+        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.3, 0.1).unwrap();
+
+        let original_root = btree.root;
+
+        // Insert enough cells to force overflow state at some point.
+        let cell_size = 500;
+
+        for i in 1..=10 {
+            let row_id = RowId::from(i);
+            let data = vec![i as u8; cell_size];
+            let cell = create_test_cell(row_id, data);
+            btree.insert(row_id, cell, &mut pager).unwrap();
+        }
+
+        // Verify that the root changed.
+        assert_ne!(
+            btree.root, original_root,
+            "Root should have changed after split"
+        );
+
+        // Verify the new root is an interior page.
+        let new_root_frame = pager.get_single(btree.root).unwrap();
+        assert!(
+            new_root_frame.is_interior(),
+            "Root should be an interior page."
+        );
+
+        btree.print_tree(&mut pager).unwrap();
+
+        // Verify all cells can still be found.
+        for i in 1..=10 {
+            let row_id = RowId::from(i);
+            let found = btree.search(row_id, &mut pager);
+            assert!(
+                found.is_some(),
+                "Cell with row_id {} should exist after split",
+                i
+            );
+        }
     }
 }

@@ -5,7 +5,7 @@ use crate::storage::overflowpage::{OverflowPage, Overflowable};
 use crate::storage::slot::Slot;
 use crate::types::Splittable;
 use crate::types::VarlenaType;
-use crate::types::{Key, PageId, RowId};
+use crate::types::{Key, PageId, RQLiteType, RowId};
 use crate::PageType;
 use crate::{BTreePage, BTreePageOps, HeaderOps};
 
@@ -29,11 +29,9 @@ pub(crate) trait LeafPageOps<BTreeCellType: Cell> {
     /// [REMOVE]: remove a cell in this page, given by its key.
     fn remove(&mut self, key: &Self::KeyType) -> Option<BTreeCellType>;
 
-    /// [SPLIT]: Split this page, moving half of the cells to the next page.
-    fn split_leaf(&mut self) -> (Self::KeyType, Self);
-
-    /// [MERGE]: Merge with the next page.
-    fn merge_with_next_leaf(&mut self, right_most: Self);
+    /// Take interior cells.
+    fn take_leaf_cells(&mut self) -> Vec<BTreeCellType>;
+    fn get_cell_at_leaf(&self, id: u16) -> Option<BTreeCellType>;
 }
 
 impl LeafPageOps<TableLeafCell> for TableLeafPage {
@@ -76,6 +74,13 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
         }
     }
 
+    fn take_leaf_cells(&mut self) -> Vec<TableLeafCell> {
+        self.take_cells()
+    }
+    fn get_cell_at_leaf(&self, id: u16) -> Option<TableLeafCell> {
+        self.get_cell_at(id)
+    }
+
     /// Insert a cell with a given key on this page.
     /// Needs to find the target position when inserting the slot to ensure that cells are ordered.
     fn insert(&mut self, key: Self::KeyType, cell: TableLeafCell) -> std::io::Result<()> {
@@ -96,53 +101,8 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
             .unwrap_or(self.cell_indices.len());
 
         self.cell_indices.insert(pos, Slot::new(new_offset));
+
         Ok(())
-    }
-
-    /// Split the page at the mid position, moving half the cells to the next page.
-    fn split_leaf(&mut self) -> (Self::KeyType, Self) {
-        let mid = self.cell_count().div_ceil(2);
-
-        let split_offset = self.cell_indices.split_off(mid).first().unwrap().offset;
-        let new_cells = self.cells.split_off(&split_offset);
-        let split_key = new_cells.get(&split_offset).unwrap().row_id;
-
-        let new_id = PageId::new_key();
-        let page_type = PageType::TableLeaf;
-        let right_most_page = if self.header.right_most_page.is_valid() {
-            Some(self.header.right_most_page)
-        } else {
-            None
-        };
-
-        // Update the header of the current page.
-        self.header.cell_count = self.cells.len() as u16;
-        self.header.right_most_page = new_id;
-
-        let mut page =
-            TableLeafPage::create(new_id, self.page_size() as u32, page_type, right_most_page);
-
-        for (_, cell) in new_cells {
-            if let Err(e) = page.insert(cell.row_id, cell) {
-                panic!("Unable to insert cell {}", e);
-            }
-        }
-
-        (split_key, page)
-    }
-
-    /// Merge with the right sibling, combining cells.
-    /// The caller must ensure both pages can be combined (have [underflowed]).
-    fn merge_with_next_leaf(&mut self, right_most: Self) {
-        // The left most page absorbs the right most.
-        for (_, cell) in right_most.cells {
-            if let Err(e) = self.insert(cell.row_id, cell) {
-                panic!("Unable to insert child while merging {}", e);
-            }
-        }
-
-        self.header.cell_count = self.cells.len() as u16;
-        self.header.right_most_page = right_most.header.right_most_page;
     }
 }
 
@@ -162,6 +122,13 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
             }
         }
         None
+    }
+
+    fn take_leaf_cells(&mut self) -> Vec<IndexLeafCell> {
+        self.take_cells()
+    }
+    fn get_cell_at_leaf(&self, id: u16) -> Option<IndexLeafCell> {
+        self.get_cell_at(id)
     }
 
     fn remove(&mut self, key: &Self::KeyType) -> Option<IndexLeafCell> {
@@ -203,49 +170,6 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
         self.cell_indices.insert(pos, Slot::new(new_offset));
         Ok(())
     }
-
-    fn split_leaf(&mut self) -> (Self::KeyType, Self) {
-        let mid = self.cell_count().div_ceil(2);
-
-        let split_offset = self.cell_indices.split_off(mid).first().unwrap().offset;
-        let new_cells = self.cells.split_off(&split_offset);
-        let split_key = new_cells.get(&split_offset).unwrap().payload.clone();
-
-        let new_id = PageId::new_key();
-        let page_type = PageType::IndexLeaf;
-        let right_most_page = if self.header.right_most_page.is_valid() {
-            Some(self.header.right_most_page)
-        } else {
-            None
-        };
-
-        // Update the header of the current page.
-        self.header.cell_count = self.cells.len() as u16;
-        self.header.right_most_page = new_id;
-
-        let mut page =
-            IndexLeafPage::create(new_id, self.page_size() as u32, page_type, right_most_page);
-
-        for (_, cell) in new_cells {
-            if let Err(e) = page.insert(cell.payload.clone(), cell) {
-                panic!("Unable to insert cell {}", e);
-            }
-        }
-
-        (split_key, page)
-    }
-
-    fn merge_with_next_leaf(&mut self, right_most: Self) {
-        // The left most page absorbs the right most.
-        for (_, cell) in right_most.cells {
-            if let Err(e) = self.insert(cell.payload.clone(), cell) {
-                panic!("Unable to insert child while merging {}", e);
-            }
-        }
-
-        self.header.cell_count = self.cells.len() as u16;
-        self.header.right_most_page = right_most.header.right_most_page;
-    }
 }
 
 /// Both [IndexLeafPage] and [TableLeafPage] are [Overflowable].
@@ -254,11 +178,13 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
 /// TODO: need to review is recursively creating the overflow chain is the best idea here.
 impl Overflowable for IndexLeafPage {
     type Content = IndexLeafCell;
+    type InteriorContent = IndexLeafCell;
+    type LeafContent = IndexLeafCell;
 
     fn try_insert_with_overflow(
         &mut self,
         mut content: Self::Content,
-        max_payload_factor: u16,
+        max_payload_factor: f32,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         // Extra four bytes for pointers to pages
         if self.max_cell_size(max_payload_factor) >= content.size() {
@@ -282,6 +208,7 @@ impl Overflowable for IndexLeafPage {
         let remaining = content.payload.split_at(fitting_size);
         let new_id = PageId::new_key();
         content.set_overflow(new_id);
+
         self.set_next_overflow(new_id);
         let new_offset = self.add_cell(content)?;
         self.cell_indices.insert(pos, Slot::new(new_offset));
@@ -294,17 +221,24 @@ impl Overflowable for IndexLeafPage {
 
 impl Overflowable for TableLeafPage {
     type Content = TableLeafCell;
+    type InteriorContent = TableLeafCell;
+    type LeafContent = TableLeafCell;
 
     fn try_insert_with_overflow(
         &mut self,
         mut content: Self::Content,
-        max_payload_factor: u16,
+        max_payload_factor: f32,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         if self.max_cell_size(max_payload_factor) >= content.size() {
             self.insert(content.row_id, content)?;
             return Ok(None);
         };
-
+        println!("Insert cell with size: {}.", content.size());
+        println!("My page size is: {}", self.page_size());
+        println!(
+            "Creating overflow because max cell size is: {}",
+            self.max_cell_size(max_payload_factor)
+        );
         let pos = self
             .cell_indices
             .iter()
@@ -319,8 +253,10 @@ impl Overflowable for TableLeafPage {
 
         let fitting_size = self.available_space(max_payload_factor);
         let remaining = content.payload.split_at(fitting_size);
+
         let new_id = PageId::new_key();
         content.set_overflow(new_id);
+
         self.set_next_overflow(new_id);
         let new_offset = self.add_cell(content)?;
         self.cell_indices.insert(pos, Slot::new(new_offset));

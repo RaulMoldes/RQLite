@@ -5,6 +5,7 @@ use crate::serialization::Serializable;
 use crate::storage::{cell_append_size, Slot};
 use crate::types::PageId;
 use crate::HeaderOps;
+use crate::PAGE_HEADER_SIZE;
 use crate::SLOT_SIZE;
 use std::collections::BTreeMap;
 use std::io::{self, Cursor, Read, Write};
@@ -21,7 +22,7 @@ pub(crate) trait BTreePageOps<BTreeCellType: Cell> {
     fn take_cells(&mut self) -> Vec<BTreeCellType>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct BTreePage<BTreeCellType: Cell> {
     /// Header of the page containing page metadata.
     pub(crate) header: PageHeader,
@@ -112,6 +113,9 @@ impl<BTreeCellType: Cell + Serializable> BTreePageOps<BTreeCellType> for BTreePa
     fn take_cells(&mut self) -> Vec<BTreeCellType> {
         let old_cells = std::mem::take(&mut self.cells);
         self.cell_indices.clear();
+        self.header.content_start_ptr = PAGE_HEADER_SIZE as u16;
+        self.header.free_space_ptr = self.page_size() as u16;
+        self.header.cell_count = 0;
         old_cells.into_values().collect()
     }
 
@@ -196,15 +200,12 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
         for &idx in &self.cell_indices {
             idx.write_to(writer)?;
         }
-
         let buffer_size = self.page_size() - self.content_start();
-
         let mut content_buffer = vec![0u8; buffer_size];
 
         for (offset, cell) in self.cells.iter() {
             let buffer_offset = *offset as usize - self.content_start();
-            dbg!(offset);
-            dbg!(buffer_offset);
+
             let mut cell_cursor = Cursor::new(&mut content_buffer[buffer_offset..]);
             cell.write_to(&mut cell_cursor)?;
         }
@@ -214,6 +215,29 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
     }
 }
 
+impl<C: Cell> std::fmt::Debug for BTreePage<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut dbg = f.debug_struct("Page");
+        dbg.field("header", &self.header)
+            .field("cell_indices_len", &self.cell_indices.len())
+            .field("cells_len", &self.cells.len())
+            .finish()?;
+
+        writeln!(f, "Free space pointer: {:?}", self.header.free_space_ptr)?;
+        writeln!(
+            f,
+            "Content start pointer: {:?}",
+            self.header.content_start_ptr
+        )?;
+
+        for (offset, cell) in &self.cells {
+            writeln!(f, "  Cell at offset {} (size: {:?})", offset, cell.size())?;
+            writeln!(f, "Cell {}", cell.key())?;
+        }
+
+        Ok(())
+    }
+}
 /// Utilities to easily create [`BTreePages`]
 impl<C: Cell> BTreePage<C> {
     pub fn create(

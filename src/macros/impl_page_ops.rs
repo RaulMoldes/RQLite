@@ -50,38 +50,29 @@ macro_rules! impl_interior_page_ops {
                 }
             }
 
+            fn get_cell_at_interior(&self, id: u16) -> Option<$cell> {
+                match self {
+                    $enum::$interior_variant(page) => page.get_cell_at_interior(id),
+                    $enum::$leaf_variant(_) => {
+                        panic!("Cannot get cell from  leaf page using interior operations!")
+                    }
+                }
+            }
+
+            fn take_interior_cells(&mut self) -> Vec<$cell> {
+                match self {
+                    $enum::$interior_variant(page) => page.take_interior_cells(),
+                    $enum::$leaf_variant(_) => {
+                        panic!("Cannot take cells from leaf page using interior operations!")
+                    }
+                }
+            }
+
             fn remove_child(&mut self, key: &Self::KeyType) -> Option<PageId> {
                 match self {
                     $enum::$interior_variant(page) => page.remove_child(key),
                     $enum::$leaf_variant(_) => {
                         panic!("Cannot remove child from leaf page!")
-                    }
-                }
-            }
-
-            fn split_interior(&mut self) -> (Self::KeyType, Self) {
-                match self {
-                    $enum::$interior_variant(page) => {
-                        let (key, new_page) = page.split_interior();
-                        (key, $enum::$interior_variant(new_page))
-                    }
-                    $enum::$leaf_variant(_) => {
-                        panic!("Cannot split leaf page as interior!")
-                    }
-                }
-            }
-
-            fn merge_with_next_interior(
-                &mut self,
-                separator_key: Self::KeyType,
-                right_sibling: Self,
-            ) {
-                match (self, right_sibling) {
-                    ($enum::$interior_variant(left), $enum::$interior_variant(right)) => {
-                        left.merge_with_next_interior(separator_key, right);
-                    }
-                    _ => {
-                        panic!("Cannot merge non-interior pages with interior merge operation!")
                     }
                 }
             }
@@ -110,6 +101,24 @@ macro_rules! impl_leaf_page_ops {
                 }
             }
 
+            fn get_cell_at_leaf(&self, id: u16) -> Option<$cell> {
+                match self {
+                    $enum::$leaf_variant(page) => page.get_cell_at_leaf(id),
+                    $enum::$interior_variant(_) => {
+                        panic!("Cannot get cell from  interior page using leaf operations!")
+                    }
+                }
+            }
+
+            fn take_leaf_cells(&mut self) -> Vec<$cell> {
+                match self {
+                    $enum::$leaf_variant(page) => page.take_leaf_cells(),
+                    $enum::$interior_variant(_) => {
+                        panic!("Cannot take cells from interior page using leaf operations!")
+                    }
+                }
+            }
+
             fn insert(&mut self, key: Self::KeyType, cell: $cell) -> std::io::Result<()> {
                 match self {
                     $enum::$leaf_variant(page) => page.insert(key, cell),
@@ -124,29 +133,6 @@ macro_rules! impl_leaf_page_ops {
                     $enum::$leaf_variant(page) => page.remove(key),
                     $enum::$interior_variant(_) => {
                         panic!("Cannot remove from interior page using leaf operations!")
-                    }
-                }
-            }
-
-            fn split_leaf(&mut self) -> (Self::KeyType, Self) {
-                match self {
-                    $enum::$leaf_variant(page) => {
-                        let (key, new_page) = page.split_leaf();
-                        (key, $enum::$leaf_variant(new_page))
-                    }
-                    $enum::$interior_variant(_) => {
-                        panic!("Cannot split interior page as leaf!")
-                    }
-                }
-            }
-
-            fn merge_with_next_leaf(&mut self, right_most: Self) {
-                match (self, right_most) {
-                    ($enum::$leaf_variant(left), $enum::$leaf_variant(right)) => {
-                        left.merge_with_next_leaf(right);
-                    }
-                    _ => {
-                        panic!("Cannot merge non-leaf pages with leaf merge operation!")
                     }
                 }
             }

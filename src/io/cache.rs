@@ -95,6 +95,9 @@ impl MemoryPool for StaticPool {
         let evicted = self.evict(None);
         self.free_list.push_back(id);
         self.frames.insert(id, frame);
+
+        let frames: Vec<PageId> = self.frames.keys().cloned().collect();
+
         evicted
     }
 

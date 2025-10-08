@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug Rust test (rqlite)",
+      "program": "${workspaceFolder}/target/debug/deps/rqlite-15f45e8b69133adf",
+      "args": ["--nocapture", "test_root_split"],
+      "cwd": "${workspaceFolder}",
+      "sourceLanguages": ["rust"],
+      "env": {
+        "RUST_BACKTRACE": "1"
+      }
+    }
+  ]
+}

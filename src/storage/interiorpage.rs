@@ -29,10 +29,10 @@ pub(crate) trait InteriorPageOps<BTreeCellType: Cell> {
     fn find_child(&self, key: &Self::KeyType) -> PageId;
     /// Remove a child given by its key.
     fn remove_child(&mut self, key: &Self::KeyType) -> Option<PageId>;
-    /// Merge with right sibling
-    fn merge_with_next_interior(&mut self, separator_key: Self::KeyType, right_sibling: Self);
-    /// Split in half when the page has overflown.
-    fn split_interior(&mut self) -> (Self::KeyType, Self);
+    /// Take interior cells.
+    fn take_interior_cells(&mut self) -> Vec<BTreeCellType>;
+    /// Get a cell from interior page.
+    fn get_cell_at_interior(&self, id: u16) -> Option<BTreeCellType>;
 }
 
 impl InteriorPageOps<TableInteriorCell> for TableInteriorPage {
@@ -49,6 +49,13 @@ impl InteriorPageOps<TableInteriorCell> for TableInteriorPage {
     /// Setter for the right most child
     fn set_rightmost_child(&mut self, page_id: PageId) {
         self.header.right_most_page = page_id
+    }
+
+    fn take_interior_cells(&mut self) -> Vec<TableInteriorCell> {
+        self.take_cells()
+    }
+    fn get_cell_at_interior(&self, id: u16) -> Option<TableInteriorCell> {
+        self.get_cell_at(id)
     }
 
     /// Find a child.
@@ -112,64 +119,6 @@ impl InteriorPageOps<TableInteriorCell> for TableInteriorPage {
             None
         }
     }
-
-    /// Merge with right sibling at a separator key, combining cells.
-    fn merge_with_next_interior(&mut self, separator_key: Self::KeyType, right_sibling: Self) {
-        let separator_cell = TableInteriorCell::new(self.header.right_most_page, separator_key);
-
-        if let Ok(separator_offset) = self.add_cell(separator_cell) {
-            self.cell_indices.push(Slot::new(separator_offset));
-        }
-
-        for (_, cell) in right_sibling.cells {
-            if let Err(e) = self.insert_child(cell.key, cell.left_child_page) {
-                panic!("Unable to insert child while merging {}", e);
-            }
-        }
-        self.header.right_most_page = right_sibling.header.right_most_page;
-        self.header.cell_count = self.cell_indices.len() as u16;
-    }
-
-    /// Split in half, promoting the split key to the parent and creating a new page at the right.
-    fn split_interior(&mut self) -> (Self::KeyType, Self) {
-        let mid = self.cell_count().div_ceil(2);
-
-        let mid_slot = &self.cell_indices[mid].clone();
-        let promoted_cell = self.cells.remove(&mid_slot.offset).unwrap();
-        let split_offset = self
-            .cell_indices
-            .split_off(mid + 1)
-            .first()
-            .map(|s| s.offset)
-            .unwrap_or(u16::MAX);
-        let new_cells = self.cells.split_off(&split_offset);
-
-        let new_id = PageId::new_key();
-        let page_type = PageType::TableInterior;
-
-        let right_most_page = if self.header.right_most_page.is_valid() {
-            Some(self.header.right_most_page)
-        } else {
-            None
-        };
-
-        self.header.right_most_page = promoted_cell.left_child_page;
-
-        self.cells.remove(&mid_slot.offset);
-        self.cell_indices.pop();
-        self.header.cell_count = self.cell_indices.len() as u16;
-
-        let mut new_page =
-            TableInteriorPage::create(new_id, self.page_size() as u32, page_type, right_most_page);
-
-        for cell in new_cells.values() {
-            if let Err(e) = new_page.insert_child(cell.key, cell.left_child_page) {
-                panic!("Unable to insert cell {}", e);
-            }
-        }
-
-        (promoted_cell.key, new_page)
-    }
 }
 
 /// All explanations at the top are valid for [IndexPages], with the difference that they use IndexCells and Varlena as the Key type.
@@ -181,6 +130,13 @@ impl InteriorPageOps<IndexInteriorCell> for IndexInteriorPage {
             return Some(self.header.right_most_page);
         }
         None
+    }
+
+    fn take_interior_cells(&mut self) -> Vec<IndexInteriorCell> {
+        self.take_cells()
+    }
+    fn get_cell_at_interior(&self, id: u16) -> Option<IndexInteriorCell> {
+        self.get_cell_at(id)
     }
 
     fn set_rightmost_child(&mut self, page_id: PageId) {
@@ -243,74 +199,19 @@ impl InteriorPageOps<IndexInteriorCell> for IndexInteriorPage {
             None
         }
     }
-
-    /// TODO: Create a method for bulk inserting new cells which should be more efficient.
-    fn merge_with_next_interior(&mut self, separator_key: Self::KeyType, right_sibling: Self) {
-        let separator_cell = IndexInteriorCell::new(self.header.right_most_page, separator_key);
-
-        if let Ok(separator_offset) = self.add_cell(separator_cell) {
-            self.cell_indices.push(Slot::new(separator_offset));
-        }
-
-        for (_, cell) in right_sibling.cells {
-            if let Err(e) = self.insert_child(cell.payload, cell.left_child_page) {
-                panic!("Unable to insert child while merging {}", e);
-            }
-        }
-        self.header.right_most_page = right_sibling.header.right_most_page;
-        self.header.cell_count = self.cell_indices.len() as u16;
-    }
-
-    fn split_interior(&mut self) -> (Self::KeyType, Self) {
-        let mid = self.cell_count().div_ceil(2);
-
-        let mid_slot = &self.cell_indices[mid].clone();
-        let promoted_cell = self.cells.remove(&mid_slot.offset).unwrap();
-        let split_offset = self
-            .cell_indices
-            .split_off(mid + 1)
-            .first()
-            .map(|s| s.offset)
-            .unwrap_or(u16::MAX);
-        let new_cells = self.cells.split_off(&split_offset);
-
-        let new_id = PageId::new_key();
-        let page_type = PageType::IndexInterior;
-
-        let right_most_page = if self.header.right_most_page.is_valid() {
-            Some(self.header.right_most_page)
-        } else {
-            None
-        };
-
-        self.header.right_most_page = promoted_cell.left_child_page;
-
-        self.cells.remove(&mid_slot.offset);
-        self.cell_indices.pop();
-        self.header.cell_count = self.cell_indices.len() as u16;
-
-        let mut new_page =
-            IndexInteriorPage::create(new_id, self.page_size() as u32, page_type, right_most_page);
-
-        for cell in new_cells.values() {
-            if let Err(e) = new_page.insert_child(cell.payload.clone(), cell.left_child_page) {
-                panic!("Unable to insert cell {}", e);
-            }
-        }
-
-        (promoted_cell.payload, new_page)
-    }
 }
 
 /// For interior pages, only index pages are overflowable.
 /// Table interior pages are not as they do not include data content.
 impl Overflowable for IndexInteriorPage {
     type Content = IndexInteriorCell;
+    type LeafContent = IndexInteriorCell;
+    type InteriorContent = IndexInteriorCell;
 
     fn try_insert_with_overflow(
         &mut self,
         mut content: Self::Content,
-        max_payload_factor: u16,
+        max_payload_factor: f32,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         if self.max_cell_size(max_payload_factor) >= content.size() {
             self.insert_child(content.payload, content.left_child_page)?;

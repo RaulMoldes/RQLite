@@ -115,6 +115,10 @@ impl VarlenaType {
         1 + self.length.size_of() + self.data.len()
     }
 
+    pub fn effective_size(&self) -> usize {
+        self.data.len()
+    }
+
     /// Returns the data as bytes
     pub fn as_bytes(&self) -> &[u8] {
         &self.data

@@ -18,7 +18,7 @@ use crate::PageType;
 use crate::{RQLiteIndexPage, RQLitePage, RQLiteTablePage};
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc, RwLock};
 
-#[derive(Debug)]
+
 pub(crate) struct PageFrame<P> {
     id: PageId,
     // Store the page type to be able to check for conversions between frames at runtime.
@@ -41,10 +41,6 @@ impl<P> Clone for PageFrame<P> {
 }
 
 impl<P> PageFrame<P> {
-    pub(crate) fn id(&self) -> PageId {
-        self.id
-    }
-
     pub(crate) fn page_type(&self) -> PageType {
         self.page_type
     }
@@ -74,7 +70,8 @@ impl<P> PageFrame<P> {
     }
 }
 
-pub(crate) trait Frame<P: Send + Sync> {
+pub(crate) trait Frame<P: Send + Sync>: std::fmt::Debug {
+    fn id(&self) -> PageId;
     fn is_free(&self) -> bool;
     fn is_dirty(&self) -> bool;
     fn read(&self) -> std::sync::RwLockReadGuard<'_, P>;
@@ -113,10 +110,20 @@ impl<P> PageFrame<P> {
     }
 }
 
+
+impl<P: Send + Sync + std::fmt::Debug> std::fmt::Debug for PageFrame<P>{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.page.read().fmt(f)
+    }
+}
 impl<P> Frame<P> for PageFrame<P>
 where
-    P: Send + Sync,
+    P: Send + Sync + std::fmt::Debug,
 {
+    fn id(&self) -> PageId {
+        self.id
+    }
+
     fn is_free(&self) -> bool {
         Arc::strong_count(&self.page) <= 1
     }
@@ -387,6 +394,7 @@ impl TryFrom<OverflowFrame> for IOFrame {
         })
     }
 }
+
 pub(crate) fn create_frame(
     page_id: PageId,
     page_type: PageType,

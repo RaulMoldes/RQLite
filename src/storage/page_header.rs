@@ -40,16 +40,20 @@ pub(crate) trait HeaderOps {
         self.free_space_start().saturating_sub(self.content_start())
     }
 
-    fn available_space(&self, max_payload_factor: u16) -> usize {
-        (self.page_size() * max_payload_factor as usize).saturating_sub(self.free_space())
+    fn available_space(&self, max_payload_factor: f32) -> usize {
+        let used_space = self.page_size().saturating_sub(self.free_space());
+        ((self.page_size() as f32 * max_payload_factor) as usize).saturating_sub(used_space)
     }
 
     /// Shortcut to get the next overflow page in the overflow chain.
     fn get_next_overflow(&self) -> Option<PageId>;
 
-    /// Max cell size
-    fn max_cell_size(&self, max_payload_factor: u16) -> usize {
-        self.page_size().saturating_sub(PAGE_HEADER_SIZE) * max_payload_factor as usize
+    /// Max cell size, to determine when to create an overflow page.
+    /// The logic is the following:
+    /// If the cell does not fit on a page, but does not excede the maximum size, we create a new page.
+    /// If the cell excedes the max_cell_size, we insert what is available and then create an overflow chain to insert the rest of the data.
+    fn max_cell_size(&self, max_payload_factor: f32) -> usize {
+        (self.page_size().saturating_sub(PAGE_HEADER_SIZE) as f32 * max_payload_factor) as usize
     }
 
     /// Setter for the page type.
@@ -58,18 +62,18 @@ pub(crate) trait HeaderOps {
     /// Set the pointer to the next overflow page.
     fn set_next_overflow(&mut self, overflowpage: PageId);
 
-    fn is_on_underflow_state(&self, min_payload_factor: u16) -> bool {
-        self.free_space()
-            >= (self
-                .page_size()
-                .saturating_sub(self.page_size() * min_payload_factor as usize))
+    fn is_on_underflow_state(&self, min_payload_factor: f32) -> bool {
+        self.cell_count() == 0
+            || self.free_space()
+                >= (self.page_size() as f32 - (self.page_size() as f32 * min_payload_factor))
+                    as usize
     }
 
-    fn is_on_overflow_state(&self, max_payload_factor: u16) -> bool {
-        self.free_space()
-            <= (self
-                .page_size()
-                .saturating_sub(self.page_size() * max_payload_factor as usize))
+    fn is_on_overflow_state(&self, max_payload_factor: f32) -> bool {
+        self.cell_count() > 1
+            && self.free_space()
+                <= (self.page_size() as f32 - (self.page_size() as f32 * max_payload_factor))
+                    as usize
     }
 }
 
@@ -257,14 +261,6 @@ impl HeaderOps for PageHeader {
 
     fn id(&self) -> PageId {
         self.page_number
-    }
-
-    /// Max cell size, to determine when to create an overflow page.
-    /// The logic is the following:
-    /// If the cell does not fit on a page, but does not excede the maximum size, we create a new page.
-    /// If the cell excedes the max_cell_size, we insert what is available and then create an overflow chain to insert the rest of the data.
-    fn max_cell_size(&self, max_payload_factor: u16) -> usize {
-        self.page_size().saturating_sub(PAGE_HEADER_SIZE) * max_payload_factor as usize
     }
 
     fn get_next_overflow(&self) -> Option<PageId> {
