@@ -380,6 +380,8 @@ where
                 // As there was an already set right most child pointer, different from the splitted node, we can be sure that the keys on that right most child node will be >> than any key on the new sibling node, as those keys came from a node that was previously a child of this parent we are fixing, and was left to the right most child of this specific parent.
                 let mut parent_guard = parent_frame.write();
                 parent_guard.insert_child(propagated.key(), write_guard.id())?;
+                let propagated_right = right_cells.last().unwrap();
+                parent_guard.insert_child(propagated_right.key(), new_sibling.id())?;
 
 
                 for cell in left_cells {
@@ -387,6 +389,7 @@ where
                 }
 
                 let mut new_sibling_guard = new_sibling.write();
+
                 for cell in right_cells {
                     new_sibling_guard.insert(cell.key(), cell)?;
                 }
@@ -481,7 +484,9 @@ where
             if let Some(right_most) = right_most_some {
                 let mut parent_guard = parent_frame.write();
                 parent_guard.insert_child(propagated.key(), write_guard.id())?;
-
+                let propagated_right = right_cells.last().unwrap();
+                parent_guard.insert_child(propagated_right.key(), new_sibling.id())?;
+                
                  for cell in left_cells {
                     write_guard.insert_child(cell.key(), cell.left_child().unwrap())?;
                 }
