@@ -8,6 +8,7 @@ use crate::types::VarlenaType;
 use crate::types::{Key, PageId, RowId};
 use crate::PageType;
 use crate::{BTreePage, BTreePageOps, HeaderOps};
+use crate::SLOT_SIZE;
 
 /// LEAF PAGE:
 pub(crate) type TableLeafPage = BTreePage<TableLeafCell>;
@@ -62,7 +63,12 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
             }
         }) {
             let slot = self.cell_indices.remove(pos);
-            Some(self.cells.remove(&slot.offset).unwrap())
+            let cell = self.cells.remove(&slot.offset).unwrap();
+            self.header.cell_count -= 1;
+            self.header.content_start_ptr -= SLOT_SIZE as u16;
+            self.header.free_space_ptr -= cell.size() as u16;
+
+            Some(cell)
         } else {
             None
         }
@@ -130,8 +136,12 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
             }
         }) {
             let slot = self.cell_indices.remove(pos);
+            let cell = self.cells.remove(&slot.offset).unwrap();
+            self.header.cell_count -= 1;
+            self.header.content_start_ptr -= SLOT_SIZE as u16;
+            self.header.free_space_ptr -= cell.size() as u16;
 
-            Some(self.cells.remove(&slot.offset).unwrap())
+            Some(cell)
         } else {
             None
         }

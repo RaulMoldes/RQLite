@@ -166,22 +166,16 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
         // Calculate how many bytes to read
         let content_start = header.content_start();
         let remaining_bytes = header.page_size() - content_start;
-        dbg!(remaining_bytes);
+
         // Read exactly the remaining bytes for the page into a temp buffer.
         let mut remaining_data = vec![0u8; remaining_bytes];
         reader.read_exact(&mut remaining_data)?;
-        dbg!(header.cell_count());
-    dbg!(header.content_start());
-    dbg!(header.page_size());
-    dbg!(remaining_bytes);
+
 
 
         let mut cells = BTreeMap::new();
         for &cell_index in cell_indices.iter() {
-              dbg!(cell_index.offset);
             let cell_offset = cell_index.offset as usize - header.content_start();
-            dbg!(cell_offset);
-    dbg!(remaining_data.len());
             if cell_offset >= remaining_data.len() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

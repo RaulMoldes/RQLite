@@ -6,7 +6,7 @@ use crate::storage::Slot;
 use crate::types::{Key, PageId, Splittable, VarlenaType};
 use crate::PageType;
 use crate::{BTreePage, BTreePageOps, HeaderOps, OverflowPage};
-
+use crate::SLOT_SIZE;
 use std::io;
 
 pub(crate) type TableInteriorPage = BTreePage<TableInteriorCell>;
@@ -106,8 +106,13 @@ impl InteriorPageOps<TableInteriorCell> for TableInteriorPage {
             }
         }) {
             let slot = self.cell_indices.remove(pos);
-            let removed_cell = self.cells.remove(&slot.offset).unwrap();
-            Some(removed_cell.left_child_page)
+            let cell = self.cells.remove(&slot.offset).unwrap();
+            self.header.cell_count -= 1;
+            self.header.content_start_ptr -= SLOT_SIZE as u16;
+            self.header.free_space_ptr -= cell.size() as u16;
+
+
+            Some(cell.left_child_page)
         } else {
             None
         }
@@ -177,8 +182,11 @@ impl InteriorPageOps<IndexInteriorCell> for IndexInteriorPage {
             }
         }) {
             let slot = self.cell_indices.remove(pos);
-            let removed_cell = self.cells.remove(&slot.offset).unwrap();
-            Some(removed_cell.left_child_page)
+            let cell = self.cells.remove(&slot.offset).unwrap();
+            self.header.cell_count -= 1;
+            self.header.content_start_ptr -= SLOT_SIZE as u16;
+            self.header.free_space_ptr -= cell.size() as u16;
+            Some(cell.left_child_page)
         } else {
             None
         }
