@@ -19,11 +19,42 @@ macro_rules! impl_interior_page_ops {
                 }
             }
 
+            fn try_pop_back_interior(&mut self, min_payload_factor: f32) -> Option<$cell> {
+                match self {
+                    $enum::$interior_variant(page) => {
+                        page.try_pop_back_interior(min_payload_factor)
+                    }
+                    $enum::$leaf_variant(_) => {
+                        panic!("Leaf pages don't have rightmost child!")
+                    }
+                }
+            }
+
+            fn try_pop_front_interior(&mut self, min_payload_factor: f32) -> Option<$cell> {
+                match self {
+                    $enum::$interior_variant(page) => {
+                        page.try_pop_front_interior(min_payload_factor)
+                    }
+                    $enum::$leaf_variant(_) => {
+                        panic!("Leaf pages don't have rightmost child!")
+                    }
+                }
+            }
+
             fn get_rightmost_child(&self) -> Option<PageId> {
                 match self {
                     $enum::$interior_variant(page) => page.get_rightmost_child(),
                     $enum::$leaf_variant(_) => {
                         panic!("Leaf pages don't have rightmost child!")
+                    }
+                }
+            }
+
+            fn get_siblings_for(&self, child_id: PageId) -> (Option<PageId>, Option<PageId>) {
+                match self {
+                    $enum::$interior_variant(page) => page.get_siblings_for(child_id),
+                    $enum::$leaf_variant(_) => {
+                        panic!("Leaf pages don't have children!")
                     }
                 }
             }
@@ -68,9 +99,9 @@ macro_rules! impl_interior_page_ops {
                 }
             }
 
-            fn remove_child(&mut self, key: &Self::KeyType) -> Option<PageId> {
+            fn remove_child(&mut self, page_id: PageId) {
                 match self {
-                    $enum::$interior_variant(page) => page.remove_child(key),
+                    $enum::$interior_variant(page) => page.remove_child(page_id),
                     $enum::$leaf_variant(_) => {
                         panic!("Cannot remove child from leaf page!")
                     }
@@ -106,6 +137,28 @@ macro_rules! impl_leaf_page_ops {
                     $enum::$leaf_variant(page) => page.get_cell_at_leaf(id),
                     $enum::$interior_variant(_) => {
                         panic!("Cannot get cell from  interior page using leaf operations!")
+                    }
+                }
+            }
+
+            fn try_pop_back_leaf(&mut self, min_payload_factor: f32) -> Option<$cell> {
+                match self {
+                    $enum::$leaf_variant(page) => page.try_pop_back_leaf(min_payload_factor),
+                    $enum::$interior_variant(_) => {
+                        panic!(
+                            "Invalid use of leaf page function! Use try_pop_back_interior instead"
+                        )
+                    }
+                }
+            }
+
+            fn try_pop_front_leaf(&mut self, min_payload_factor: f32) -> Option<$cell> {
+                match self {
+                    $enum::$leaf_variant(page) => page.try_pop_front_leaf(min_payload_factor),
+                    $enum::$interior_variant(_) => {
+                        panic!(
+                            "Invalid use of leaf page function! Use try_pop_front_interior instead"
+                        )
                     }
                 }
             }

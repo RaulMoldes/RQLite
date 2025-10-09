@@ -183,37 +183,7 @@ macro_rules! test_interior_page_ops {
                 assert_eq!(found_right, PageId::from(999));
             }
 
-            #[test]
-            fn [<test_remove_child_ $test_suffix>]() {
-                let mut page = <$page_type>::create(
-                    PageId::from(1),
-                    4096,
-                    $page_variant,
-                    None,
-                );
 
-                let key = $create_key(1);
-                let child = PageId::from(10);
-
-                page.insert_child(key.clone(), child).unwrap();
-
-                let removed = page.remove_child(&key);
-                assert!(removed.is_some());
-                assert_eq!(removed.unwrap(), child);
-            }
-
-            #[test]
-            fn [<test_remove_nonexistent_child_ $test_suffix>]() {
-                let mut page = <$page_type>::create(
-                    PageId::from(1),
-                    4096,
-                    $page_variant,
-                    None,
-                );
-
-                let key = $create_key(999);
-                assert!(page.remove_child(&key).is_none());
-            }
 
             #[test]
             fn [<test_rightmost_child_ $test_suffix>]() {

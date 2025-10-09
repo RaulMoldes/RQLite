@@ -13,17 +13,21 @@ fn has_overflow<R: Read>(reader: &mut R) -> io::Result<bool> {
 }
 
 /// Trait for all cells to implement
-pub trait Cell: Clone + Send + Sync + Debug {
+pub(crate) trait Cell: Clone + Send + Sync + Debug {
     type Key: Ord + std::fmt::Display;
+    type Data: Serializable;
 
     fn size(&self) -> usize;
+
+    fn create(key: Self::Key, data: Option<Self::Data>) -> Self;
+
     fn key(&self) -> Self::Key;
 
-    fn data(&self) -> Option<&VarlenaType> {
+    fn payload(&self) -> Option<&VarlenaType> {
         None
     }
 
-    fn data_mut(&mut self) -> Option<&mut VarlenaType> {
+    fn payload_mut(&mut self) -> Option<&mut VarlenaType> {
         None
     }
 
@@ -57,6 +61,8 @@ impl TableLeafCell {
 
 impl Cell for TableLeafCell {
     type Key = RowId;
+    type Data = VarlenaType;
+
     fn key(&self) -> Self::Key {
         self.row_id
     }
@@ -65,11 +71,19 @@ impl Cell for TableLeafCell {
         self.overflow_page
     }
 
-    fn data(&self) -> Option<&VarlenaType> {
+    fn create(key: Self::Key, data: Option<Self::Data>) -> Self {
+        Self {
+            row_id: key,
+            payload: data.unwrap(),
+            overflow_page: None,
+        }
+    }
+
+    fn payload(&self) -> Option<&VarlenaType> {
         Some(&self.payload)
     }
 
-    fn data_mut(&mut self) -> Option<&mut VarlenaType> {
+    fn payload_mut(&mut self) -> Option<&mut VarlenaType> {
         Some(&mut self.payload)
     }
 
@@ -148,6 +162,7 @@ pub struct TableInteriorCell {
 
 impl Cell for TableInteriorCell {
     type Key = RowId;
+    type Data = PageId;
 
     fn key(&self) -> Self::Key {
         self.key
@@ -158,6 +173,13 @@ impl Cell for TableInteriorCell {
 
     fn left_child(&self) -> Option<PageId> {
         Some(self.left_child_page)
+    }
+
+    fn create(key: Self::Key, data: Option<Self::Data>) -> Self {
+        Self {
+            key,
+            left_child_page: data.unwrap(),
+        }
     }
 }
 
@@ -207,6 +229,7 @@ pub struct IndexLeafCell {
 
 impl Cell for IndexLeafCell {
     type Key = VarlenaType;
+    type Data = RowId;
 
     fn key(&self) -> Self::Key {
         self.payload.clone()
@@ -214,6 +237,14 @@ impl Cell for IndexLeafCell {
 
     fn overflow_page(&self) -> Option<PageId> {
         self.overflow_page
+    }
+
+    fn create(key: Self::Key, data: Option<Self::Data>) -> Self {
+        Self {
+            row_id: data.unwrap(),
+            payload: key,
+            overflow_page: None,
+        }
     }
 
     fn size(&self) -> usize {
@@ -302,6 +333,7 @@ pub struct IndexInteriorCell {
 
 impl Cell for IndexInteriorCell {
     type Key = VarlenaType;
+    type Data = PageId;
     fn key(&self) -> Self::Key {
         self.payload.clone()
     }
@@ -312,6 +344,14 @@ impl Cell for IndexInteriorCell {
 
     fn overflow_page(&self) -> Option<PageId> {
         self.overflow_page
+    }
+
+    fn create(key: Self::Key, data: Option<Self::Data>) -> Self {
+        Self {
+            payload: key,
+            left_child_page: data.unwrap(),
+            overflow_page: None,
+        }
     }
 
     fn size(&self) -> usize {

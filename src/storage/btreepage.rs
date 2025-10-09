@@ -171,8 +171,6 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
         let mut remaining_data = vec![0u8; remaining_bytes];
         reader.read_exact(&mut remaining_data)?;
 
-
-
         let mut cells = BTreeMap::new();
         for &cell_index in cell_indices.iter() {
             let cell_offset = cell_index.offset as usize - header.content_start();
@@ -202,7 +200,7 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
             idx.write_to(writer)?;
         }
         let buffer_size = self.page_size() - self.content_start();
-        dbg!(buffer_size);
+        
         let mut content_buffer = vec![0u8; buffer_size];
 
         for (offset, cell) in self.cells.iter() {

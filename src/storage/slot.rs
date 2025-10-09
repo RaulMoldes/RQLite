@@ -17,16 +17,12 @@ pub(crate) struct Slot {
 
 impl Slot {
     pub(crate) fn new(offset: u16) -> Self {
-        Self {
-            offset
-        }
+        Self { offset }
     }
 
     pub(crate) fn set_offset(&mut self, offset: u16) {
         self.offset = offset
     }
-
-
 }
 
 impl PartialEq for Slot {
@@ -46,10 +42,7 @@ impl Serializable for Slot {
         reader.read_exact(&mut buffer)?;
         let offset = u16::from_be_bytes(buffer);
 
-        Ok(Self {
-            offset,
-
-        })
+        Ok(Self { offset })
     }
 
     fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {

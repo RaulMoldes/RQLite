@@ -7,8 +7,8 @@ use crate::types::Splittable;
 use crate::types::VarlenaType;
 use crate::types::{Key, PageId, RowId};
 use crate::PageType;
-use crate::{BTreePage, BTreePageOps, HeaderOps};
 use crate::SLOT_SIZE;
+use crate::{BTreePage, BTreePageOps, HeaderOps};
 
 /// LEAF PAGE:
 pub(crate) type TableLeafPage = BTreePage<TableLeafCell>;
@@ -30,6 +30,11 @@ pub(crate) trait LeafPageOps<BTreeCellType: Cell> {
     /// [REMOVE]: remove a cell in this page, given by its key.
     fn remove(&mut self, key: &Self::KeyType) -> Option<BTreeCellType>;
 
+    /// [TRY_POP_BACK]: Tries to remove the last cell. Before removing it it checks if it will underflow.
+    fn try_pop_back_leaf(&mut self, min_payload_factor: f32) -> Option<BTreeCellType>;
+
+    /// [TRY_POP_FRONT]: Tries to remove the first cell. Before removing it it checks if it will underflow.
+    fn try_pop_front_leaf(&mut self, min_payload_factor: f32) -> Option<BTreeCellType>;
     /// Take interior cells.
     fn take_leaf_cells(&mut self) -> Vec<BTreeCellType>;
     fn get_cell_at_leaf(&self, id: u16) -> Option<BTreeCellType>;
@@ -74,6 +79,56 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
         }
     }
 
+    fn try_pop_back_leaf(&mut self, min_payload_factor: f32) -> Option<TableLeafCell> {
+        let mut size = usize::MAX;
+
+        if let Some(last_slot) = self.cell_indices.last() {
+            if let Some(last_cell) = self.cells.get(&last_slot.offset) {
+                size = last_cell.size() + SLOT_SIZE
+            };
+        };
+
+        if self.cell_count() <= 1
+            || self.free_space() + size
+                >= (self.page_size() as f32 - (self.page_size() as f32 * min_payload_factor))
+                    as usize
+        {
+            return None;
+        };
+
+        let slot = self.cell_indices.pop().unwrap();
+        let cell = self.cells.remove(&slot.offset).unwrap();
+        self.header.cell_count -= 1;
+        self.header.content_start_ptr -= SLOT_SIZE as u16;
+        self.header.free_space_ptr -= cell.size() as u16;
+        Some(cell)
+    }
+
+    fn try_pop_front_leaf(&mut self, min_payload_factor: f32) -> Option<TableLeafCell> {
+        let mut size = usize::MAX;
+
+        if let Some(first_slot) = self.cell_indices.first() {
+            if let Some(first_cell) = self.cells.get(&first_slot.offset) {
+                size = first_cell.size() + SLOT_SIZE
+            };
+        };
+
+        if self.cell_count() <= 1
+            || self.free_space() + size
+                >= (self.page_size() as f32 - (self.page_size() as f32 * min_payload_factor))
+                    as usize
+        {
+            return None;
+        };
+
+        let slot = self.cell_indices.remove(0);
+        let cell = self.cells.remove(&slot.offset).unwrap();
+        self.header.cell_count -= 1;
+        self.header.content_start_ptr -= SLOT_SIZE as u16;
+        self.header.free_space_ptr -= cell.size() as u16;
+        Some(cell)
+    }
+
     fn take_leaf_cells(&mut self) -> Vec<TableLeafCell> {
         self.take_cells()
     }
@@ -84,6 +139,7 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
     /// Insert a cell with a given key on this page.
     /// Needs to find the target position when inserting the slot to ensure that cells are ordered.
     fn insert(&mut self, key: Self::KeyType, cell: TableLeafCell) -> std::io::Result<()> {
+       let _old_cell = self.remove(&key);
         let new_offset = self.add_cell(cell)?;
 
         let pos = self
@@ -91,14 +147,16 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
             .iter()
             .position(|slot| {
                 if let Some(existing_cell) = self.cells.get(&slot.offset) {
-                    existing_cell.row_id > key
+                    existing_cell.row_id >= key
                 } else {
                     false
                 }
             })
             .unwrap_or(self.cell_indices.len());
 
+
         self.cell_indices.insert(pos, Slot::new(new_offset));
+
 
         Ok(())
     }
@@ -118,6 +176,56 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
             }
         }
         None
+    }
+
+    fn try_pop_back_leaf(&mut self, min_payload_factor: f32) -> Option<IndexLeafCell> {
+        let mut size = usize::MAX;
+
+        if let Some(last_slot) = self.cell_indices.last() {
+            if let Some(last_cell) = self.cells.get(&last_slot.offset) {
+                size = last_cell.size()
+            };
+        };
+
+        if self.cell_count() <= 1
+            || self.free_space() + size
+                >= (self.page_size() as f32 - (self.page_size() as f32 * min_payload_factor))
+                    as usize
+        {
+            return None;
+        };
+
+        let slot = self.cell_indices.pop().unwrap();
+        let cell = self.cells.remove(&slot.offset).unwrap();
+        self.header.cell_count -= 1;
+        self.header.content_start_ptr -= SLOT_SIZE as u16;
+        self.header.free_space_ptr -= cell.size() as u16;
+        Some(cell)
+    }
+
+    fn try_pop_front_leaf(&mut self, min_payload_factor: f32) -> Option<IndexLeafCell> {
+        let mut size = usize::MAX;
+
+        if let Some(first_slot) = self.cell_indices.first() {
+            if let Some(last_cell) = self.cells.get(&first_slot.offset) {
+                size = last_cell.size()
+            };
+        };
+
+        if self.cell_count() <= 1
+            || self.free_space() + size
+                >= (self.page_size() as f32 - (self.page_size() as f32 * min_payload_factor))
+                    as usize
+        {
+            return None;
+        };
+
+        let slot = self.cell_indices.remove(0);
+        let cell = self.cells.remove(&slot.offset).unwrap();
+        self.header.cell_count -= 1;
+        self.header.content_start_ptr -= SLOT_SIZE as u16;
+        self.header.free_space_ptr -= cell.size() as u16;
+        Some(cell)
     }
 
     fn take_leaf_cells(&mut self) -> Vec<IndexLeafCell> {
@@ -148,6 +256,7 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
     }
 
     fn insert(&mut self, key: Self::KeyType, cell: IndexLeafCell) -> std::io::Result<()> {
+        let _old_cell = self.remove(&key);
         let new_offset = self.add_cell(cell)?;
 
         let pos = self
