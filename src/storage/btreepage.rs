@@ -200,7 +200,7 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
             idx.write_to(writer)?;
         }
         let buffer_size = self.page_size() - self.content_start();
-        
+
         let mut content_buffer = vec![0u8; buffer_size];
 
         for (offset, cell) in self.cells.iter() {

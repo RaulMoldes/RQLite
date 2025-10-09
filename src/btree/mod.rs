@@ -1,4 +1,6 @@
 mod debug;
+#[cfg(test)]
+mod tests;
 
 use crate::io::cache::MemoryPool;
 use crate::io::disk::FileOps;
@@ -240,13 +242,20 @@ where
         self.root = new_root
     }
 
-
-    fn try_get_frame<FI: FileOps, M: MemoryPool>(&self, id: PageId, pager: &mut Pager<FI, M>) -> std::io::Result<F>{
+    fn try_get_frame<FI: FileOps, M: MemoryPool>(
+        &self,
+        id: PageId,
+        pager: &mut Pager<FI, M>,
+    ) -> std::io::Result<F> {
         let buf = pager.get_single(id)?;
         F::try_from(buf)
     }
 
-    fn get_frame_unchecked<FI: FileOps, M: MemoryPool>(&self, id: PageId, pager: &mut Pager<FI, M>) -> F {
+    fn get_frame_unchecked<FI: FileOps, M: MemoryPool>(
+        &self,
+        id: PageId,
+        pager: &mut Pager<FI, M>,
+    ) -> F {
         let buf = pager.get_single(id).unwrap();
         F::try_from(buf).unwrap()
     }
@@ -258,11 +267,9 @@ where
         value: Vl,
         pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
-
         // Navigate from the root to the leaf page.
         let traversal = self.traverse(key, pager);
         let leaf_frame = self.try_get_frame(*traversal.last().unwrap(), pager)?;
-
 
         // Check if inserting the page will produce an overflow.
         // Get the read lock only on this scope to minimize the time we are acquiring it.
@@ -270,7 +277,6 @@ where
             let leaf_lock = leaf_frame.read();
             leaf_lock.max_cell_size(self.max_payload_fraction) <= value.size()
         };
-
 
         // Now acquire the exclusive lock for the whole time that the insertion lasts, as we want to ensure no one else acquires it at mid time..
         if will_overflow {
@@ -285,7 +291,6 @@ where
             let mut write_lock = leaf_frame.write();
             write_lock.insert(key, value)?;
         }
-
 
         // Overflow chain built, now store the current frame to the pager.
         // The possible overflow pages that have been created are stored within the
@@ -302,11 +307,10 @@ where
         key: K,
         pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
-
         // Start from the root and traverse to the leaf
         let traversal = self.traverse(key, pager);
         // Collect the leaf as the last node in the traversal.
-        let leaf_frame =self.try_get_frame(*traversal.last().unwrap(), pager)?;
+        let leaf_frame = self.try_get_frame(*traversal.last().unwrap(), pager)?;
         {
             let mut leaf_guard = leaf_frame.write();
             leaf_guard.remove(&key);
@@ -332,14 +336,12 @@ where
         pager: &mut Pager<FI, M>,
         method: RebalanceMethod,
     ) -> std::io::Result<()> {
-
         // First reverse the traversal.
         // We are going to traverse the tree in reverse topo order, fixing everything we fuck up on the way downwards as we go back towards the root.
         traversal.reverse();
 
         // Start traversing the tree upwards.
         for current_index in 0..traversal.len() {
-
             // Next index will be equal to the current index if there is only one node to traverse.
             let next_index = (current_index + 1).clamp(0, traversal.len() - 1);
             let node = traversal[current_index];
@@ -351,21 +353,24 @@ where
                     RebalanceMethod::PostInsert => {
                         self.rebalance_post_insert_leaf(node, parent, pager)?
                     }
-                    RebalanceMethod::PostDelete => self.rebalance_post_delete_leaf(node, parent, pager)?,
+                    RebalanceMethod::PostDelete => {
+                        self.rebalance_post_delete_leaf(node, parent, pager)?
+                    }
                 };
             } else {
                 // The rest will always be interior nodes.
                 match method {
                     RebalanceMethod::PostInsert => {
                         self.rebalance_post_insert_interior(node, parent, pager)?
-                    },
-                    RebalanceMethod::PostDelete => self.rebalance_post_delete_interior(node, parent, pager)?,
+                    }
+                    RebalanceMethod::PostDelete => {
+                        self.rebalance_post_delete_interior(node, parent, pager)?
+                    }
                 };
             }
         }
         Ok(())
     }
-
 
     /// Attempts to borrow the cells from the siblings at both sides of a node.
     /// It is preferred to borrow than to merge as merging is more costly and also fucks up more things on the tree.
@@ -376,7 +381,6 @@ where
         parent_id: PageId,
         pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
-
         // Obtain the parent and the siblings. We only need a shared lock for that.
         let parent = self.try_get_frame(parent_id, pager)?;
 
@@ -393,13 +397,12 @@ where
 
             // While we are on underflow state, we keep borrowing.
             while caller_lock.is_on_underflow_state(self.min_payload_fraction) {
-
                 // Pop the cell at the front.
-                if let Some(popped_cell) =
-                    right_page.write().try_pop_front_leaf(self.min_payload_fraction)
+                if let Some(popped_cell) = right_page
+                    .write()
+                    .try_pop_front_leaf(self.min_payload_fraction)
                 {
-                    caller_lock
-                        .insert(popped_cell.key(), popped_cell)?;
+                    caller_lock.insert(popped_cell.key(), popped_cell)?;
                 } else {
                     // At the point we cannot borrow more, we stop trying, to avoid fucking up our sibling.
                     break;
@@ -415,12 +418,11 @@ where
                 let left_page = self.try_get_frame(left, pager)?;
 
                 while caller_lock.is_on_underflow_state(self.min_payload_fraction) {
-
-                    if let Some(popped_cell) =
-                        left_page.write().try_pop_back_leaf(self.min_payload_fraction)
+                    if let Some(popped_cell) = left_page
+                        .write()
+                        .try_pop_back_leaf(self.min_payload_fraction)
                     {
-                        caller_lock
-                            .insert(popped_cell.key(), popped_cell)?;
+                        caller_lock.insert(popped_cell.key(), popped_cell)?;
                     } else {
                         break;
                     }
@@ -504,7 +506,6 @@ where
         Ok(())
     }
 
-
     // Converts the right most child of an interior page into an InteriorCell (Vi).
     // Allowing to insert it on interior nodes later.
     // The new cell will include a copy of the first key in the right most child and the child key itself, allowing to propagate that cell to the parent.
@@ -563,7 +564,6 @@ where
 
         // NO OTHER OPPORTUNITY THAN MERGING WITH OUR FRIENDS AND REMOVING OUR KEY FROM THE PARENT.
         if still_underflow {
-
             let parent = self.try_get_frame(parent_id, pager)?;
             let parent_cell_count = parent.read().cell_count();
 
@@ -573,11 +573,9 @@ where
                 let mut parent_lock = parent.write();
                 let (left_sibling, right_sibling) = parent_lock.get_siblings_for(caller.id());
 
-
                 // Detach the caller from the tree.
                 let mut all_cells = caller.write().take_leaf_cells();
                 parent_lock.remove_child(caller.id());
-
 
                 // Also, if there are left or right siblings, detach them from the tree too and collect their cells.
                 if let Some(left) = left_sibling {
@@ -586,7 +584,6 @@ where
                     all_cells.extend(left_page.write().take_leaf_cells());
                     parent_lock.remove_child(left);
                     self.store_frame(left_page, pager)?;
-
                 };
                 if let Some(right) = right_sibling {
                     let right_frame = pager.get_single(right)?;
@@ -594,10 +591,7 @@ where
                     all_cells.extend(right_page.write().take_leaf_cells());
                     parent_lock.remove_child(right);
                     self.store_frame(right_page, pager)?;
-
                 };
-
-
 
                 // If collected size fits in a single page we are done.
                 let total_size_valid = check_valid_size(
@@ -607,18 +601,13 @@ where
                     caller.read().page_size(),
                 );
 
-
-
                 if total_size_valid {
-
                     // All cells fit in a single page, therefore we put them on the caller and that's all folks.
                     all_cells.sort_by_key(|cell| cell.key());
                     let last_cell = all_cells.pop().unwrap();
                     parent_lock.insert_child(last_cell.key(), caller_id)?;
                     for cell in all_cells {
-                        caller
-                            .write()
-                            .insert(cell.key(), cell)?;
+                        caller.write().insert(cell.key(), cell)?;
                     }
 
                     return Ok(());
@@ -629,10 +618,25 @@ where
                 // Now we can proceed distributing the cells.
                 let (mut splitted_left, mut splitted_right) = split_cells_by_size(all_cells);
 
-
                 // This should mostly never happen but I am unsure if it can occur.
-                debug_assert!(check_valid_size(&splitted_left, self.max_payload_fraction, self.min_payload_fraction,   caller.read().page_size()), "Oh no , size for left cells is not valid");
-                debug_assert!(check_valid_size(&splitted_right, self.max_payload_fraction, self.min_payload_fraction,   caller.read().page_size()), "Oh no , size for right cells is not valid");
+                debug_assert!(
+                    check_valid_size(
+                        &splitted_left,
+                        self.max_payload_fraction,
+                        self.min_payload_fraction,
+                        caller.read().page_size()
+                    ),
+                    "Oh no , size for left cells is not valid"
+                );
+                debug_assert!(
+                    check_valid_size(
+                        &splitted_right,
+                        self.max_payload_fraction,
+                        self.min_payload_fraction,
+                        caller.read().page_size()
+                    ),
+                    "Oh no , size for right cells is not valid"
+                );
 
                 let last_cell = splitted_left.pop().unwrap();
                 parent_lock.insert_child(last_cell.key(), caller_id)?;
@@ -645,9 +649,7 @@ where
                 let last_cell = splitted_right.pop().unwrap();
                 parent_lock.insert_child(last_cell.key(), new_sibling.id())?;
                 for cell in splitted_right {
-                    new_sibling
-                        .write()
-                        .insert(cell.key(), cell)?;
+                    new_sibling.write().insert(cell.key(), cell)?;
                 }
                 self.store_frame(new_sibling, pager)?;
             }
@@ -742,7 +744,7 @@ where
                     };
 
                     let right_page_right = if let Some(right) = right_sibling {
-                        let right_page= self.try_get_frame(right, pager)?;
+                        let right_page = self.try_get_frame(right, pager)?;
                         all_cells.extend(right_page.write().take_interior_cells());
                         let right_right_most = right_page.read().get_rightmost_child();
                         parent_lock.remove_child(right);
@@ -779,7 +781,6 @@ where
                         self.min_payload_fraction,
                         caller.read().page_size(),
                     );
-
 
                     // If the total size is perfectly valid, we can determine we have finished.
                     if total_size_valid {
@@ -1078,254 +1079,3 @@ pub(crate) type TableBTree =
 
 pub(crate) type IndexBTree =
     BTree<VarlenaType, IndexLeafCell, IndexInteriorCell, RQLiteIndexPage, IndexFrame>;
-
-#[cfg(test)]
-mod btree_tests {
-    use super::*;
-    use crate::header::Header;
-    use crate::io::cache::StaticPool;
-    use crate::io::disk::Buffer;
-    use crate::io::pager::Pager;
-    use crate::serialization::Serializable;
-    use crate::types::RowId;
-    use std::io::Seek;
-
-    // Helper to create a test pager in memory
-    fn setup_test_pager() -> Pager<Buffer, StaticPool> {
-        let mut pager = Pager::<Buffer, StaticPool>::create("test.db").unwrap();
-
-        // Initialize the header
-        let header = Header::default();
-        // Write the header to the pager
-        pager.seek(std::io::SeekFrom::Start(0)).unwrap();
-        header.write_to(&mut pager).unwrap();
-
-        // Init the pager with cache capacity
-        pager.start(100).unwrap();
-
-        pager
-    }
-
-    // Helper para crear células de prueba simples
-    fn create_test_cell(row_id: RowId, data: Vec<u8>) -> TableLeafCell {
-        let payload = VarlenaType::from_raw_bytes(&data, None);
-        TableLeafCell {
-            row_id,
-            payload,
-            overflow_page: None,
-        }
-    }
-
-    #[test]
-    fn test_single_record() {
-        let mut pager = setup_test_pager();
-        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
-
-        let row_id = RowId::from(1);
-        let cell = create_test_cell(row_id, vec![1, 2, 3, 4]);
-        btree.print_tree(&mut pager).unwrap();
-        // Insert
-        btree.insert(row_id, cell.clone(), &mut pager).unwrap();
-        btree.print_tree(&mut pager).unwrap();
-
-        // Search
-        let found = btree.search(row_id, &mut pager);
-        assert!(found.is_some(), "Inserted cell was not found!");
-        assert_eq!(found.unwrap().row_id, row_id);
-    }
-
-    #[test]
-    fn test_multiple_sequential_inserts() {
-        let mut pager = setup_test_pager();
-        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
-
-        // Insert 100 registers
-        for i in 1..=100 {
-            let row_id = RowId::from(i);
-            let data = vec![i as u8; 10];
-            let cell = create_test_cell(row_id, data);
-            btree.insert(row_id, cell, &mut pager).unwrap();
-        }
-
-        // Verify all can be found
-        for i in 1..=100 {
-            let row_id = RowId::from(i);
-            let found = btree.search(row_id, &mut pager);
-            assert!(found.is_some(), "No se encontró el row_id: {}", i);
-            assert_eq!(found.unwrap().row_id, row_id);
-        }
-    }
-
-    #[test]
-    fn test_overflow() {
-        let mut pager = setup_test_pager();
-        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.3, 0.1).unwrap();
-
-        let row_id = RowId::from(1);
-
-        // Create a big payload
-        let large_data: Vec<u8> = (0..2048).map(|i| (i % 256) as u8).collect();
-        let cell = create_test_cell(row_id, large_data.clone());
-
-        btree.insert(row_id, cell, &mut pager).unwrap();
-
-        let found = btree.search(row_id, &mut pager);
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().payload.as_bytes(), large_data.as_slice());
-    }
-
-    #[test]
-    fn test_root_split() {
-        let mut pager = setup_test_pager();
-        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.3, 0.1).unwrap();
-
-        let original_root = btree.root;
-
-        // Insert enough cells to force overflow state at some point.
-        let cell_size = 500;
-
-        for i in 1..=10 {
-            let row_id = RowId::from(i);
-            let data = vec![i as u8; cell_size];
-            let cell = create_test_cell(row_id, data);
-            btree.insert(row_id, cell, &mut pager).unwrap();
-        }
-
-        // Verify that the root changed.
-        assert_ne!(
-            btree.root, original_root,
-            "Root should have changed after split"
-        );
-
-        // Verify the new root is an interior page.
-        let new_root_frame = pager.get_single(btree.root).unwrap();
-        assert!(
-            new_root_frame.is_interior(),
-            "Root should be an interior page."
-        );
-
-        btree.print_tree(&mut pager).unwrap();
-
-        // Verify all cells can still be found.
-        for i in 1..=10 {
-            let row_id = RowId::from(i);
-            let found = btree.search(row_id, &mut pager);
-            assert!(
-                found.is_some(),
-                "Cell with row_id {} should exist after split",
-                i
-            );
-        }
-    }
-
-
-     #[test]
-    fn test_insert_duplicate_keys() {
-        let mut pager = setup_test_pager();
-        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
-
-        let row_id = RowId::from(1);
-        let cell1 = create_test_cell(row_id, vec![1; 10]);
-        let cell2 = create_test_cell(row_id, vec![2; 10]);
-
-        btree.insert(row_id, cell1, &mut pager).unwrap();
-        btree.insert(row_id, cell2, &mut pager).unwrap();
-
-        let found = btree.search(row_id, &mut pager).unwrap();
-        // Should have the latest inserted value
-        assert_eq!(found.payload.as_bytes()[0], 2);
-    }
-
-
-     #[test]
-    fn test_insert_varying_sizes() {
-        let mut pager = setup_test_pager();
-        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
-
-        //
-        for i in 1..=50 {
-            let row_id = RowId::from(i);
-            let size = (i * 20) as usize; // Tamaños de 20 a 1000 bytes
-            let cell = create_test_cell(row_id, vec![i as u8; size]);
-            btree.insert(row_id, cell, &mut pager).unwrap();
-        }
-
-        for i in 1..=50 {
-            let row_id = RowId::from(i);
-            let found = btree.search(row_id, &mut pager);
-            assert!(found.is_some());
-            assert_eq!(found.unwrap().payload.as_bytes().len(), (i * 20) as usize);
-        }
-    }
-
-
-     #[test]
-    fn test_delete_single_element() {
-        let mut pager = setup_test_pager();
-        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
-
-        let row_id = RowId::from(1);
-        let cell = create_test_cell(row_id, vec![1; 10]);
-        btree.insert(row_id, cell, &mut pager).unwrap();
-
-        btree.delete(row_id, &mut pager).unwrap();
-
-        assert!(btree.search(row_id, &mut pager).is_none());
-    }
-
-
-     #[test]
-    fn test_delete_all_elements() {
-        let mut pager = setup_test_pager();
-        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
-
-        for i in 1..=50 {
-            let row_id = RowId::from(i);
-            let cell = create_test_cell(row_id, vec![i as u8; 10]);
-            btree.insert(row_id, cell, &mut pager).unwrap();
-        }
-
-        for i in 1..=50 {
-            let row_id = RowId::from(i);
-            btree.delete(row_id, &mut pager).unwrap();
-        }
-
-        for i in 1..=50 {
-            let row_id = RowId::from(i);
-            assert!(btree.search(row_id, &mut pager).is_none());
-        }
-    }
-
-    #[test]
-    fn test_delete_and_reinsert() {
-        let mut pager = setup_test_pager();
-        let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
-
-        for i in 1..=50 {
-            let row_id = RowId::from(i);
-            let cell = create_test_cell(row_id, vec![i as u8; 10]);
-            btree.insert(row_id, cell, &mut pager).unwrap();
-        }
-
-        // Eliminar la mitad
-        for i in 1..=25 {
-            let row_id = RowId::from(i);
-            btree.delete(row_id, &mut pager).unwrap();
-        }
-
-        // Reinsertar con datos diferentes
-        for i in 1..=25 {
-            let row_id = RowId::from(i);
-            let cell = create_test_cell(row_id, vec![i as u8 + 100; 10]);
-            btree.insert(row_id, cell, &mut pager).unwrap();
-        }
-
-        // Verificar los nuevos datos
-        for i in 1..=25 {
-            let row_id = RowId::from(i);
-            let found = btree.search(row_id, &mut pager).unwrap();
-            assert_eq!(found.payload.as_bytes()[0], i as u8 + 100);
-        }
-    }
-
-}
