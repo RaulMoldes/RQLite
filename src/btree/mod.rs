@@ -1071,7 +1071,6 @@ where
         Ok(())
     }
 
-    async fn autovacuum<FI: FileOps, M: MemoryPool>(&self, pager: &mut Pager<FI, M>) {}
 }
 
 pub(crate) type TableBTree =
