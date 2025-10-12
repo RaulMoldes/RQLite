@@ -344,12 +344,9 @@ pub fn create_table_interior_page() -> BTreePage<TableInteriorCell> {
     let cell2 = TableInteriorCell::new(PageId::from(20), RowId::from(200));
     let cell3 = TableInteriorCell::new(PageId::from(30), RowId::from(300));
 
-    page.insert_child(cell1.key, cell1.left_child_page)
-        .expect("Failed to add cell1");
-    page.insert_child(cell2.key, cell2.left_child_page)
-        .expect("Failed to add cell2");
-    page.insert_child(cell3.key, cell3.left_child_page)
-        .expect("Failed to add cell3");
+    page.insert_child(cell1).expect("Failed to add cell1");
+    page.insert_child(cell2).expect("Failed to add cell2");
+    page.insert_child(cell3).expect("Failed to add cell3");
 
     page
 }
@@ -386,10 +383,8 @@ pub fn create_index_interior_page() -> BTreePage<IndexInteriorCell> {
         VarlenaType::from_raw_bytes(b"interior_key_2", None),
     );
 
-    page.insert_child(cell1.payload, cell1.left_child_page)
-        .expect("Failed to add cell1");
-    page.insert_child(cell2.payload, cell2.left_child_page)
-        .expect("Failed to add cell2");
+    page.insert_child(cell1).expect("Failed to add cell1");
+    page.insert_child(cell2).expect("Failed to add cell2");
 
     page
 }

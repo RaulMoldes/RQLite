@@ -27,6 +27,8 @@ pub(crate) trait Cell: Clone + Send + Sync + Debug {
         None
     }
 
+    fn set_left_child(&mut self, child: PageId) {}
+
     fn payload_mut(&mut self) -> Option<&mut VarlenaType> {
         None
     }
@@ -115,13 +117,13 @@ impl Serializable for TableLeafCell {
         // Write cell content
         self.row_id.write_to(writer)?;
 
-        // Write payload as a chunk of bytes.
-        self.payload.write_to(writer)?;
-
         // Write the overflow page if present
         if let Some(overflow_page) = self.overflow_page {
             overflow_page.write_to(writer)?;
         }
+
+        // Write payload as a chunk of bytes.
+        self.payload.write_to(writer)?;
 
         Ok(())
     }
@@ -134,14 +136,14 @@ impl Serializable for TableLeafCell {
 
         let row_id = RowId::read_from(reader)?;
 
-        let payload = VarlenaType::read_from(reader)?;
-
         // Read overflow page if flag is set
         let overflow_page = if has_overflow {
             Some(PageId::read_from(reader)?)
         } else {
             None
         };
+
+        let payload = VarlenaType::read_from(reader)?;
 
         Ok(TableLeafCell {
             row_id,
@@ -173,6 +175,10 @@ impl Cell for TableInteriorCell {
 
     fn left_child(&self) -> Option<PageId> {
         Some(self.left_child_page)
+    }
+
+    fn set_left_child(&mut self, child: PageId) {
+        self.left_child_page = child
     }
 
     fn create(key: Self::Key, data: Option<Self::Data>) -> Self {
@@ -340,6 +346,10 @@ impl Cell for IndexInteriorCell {
 
     fn left_child(&self) -> Option<PageId> {
         Some(self.left_child_page)
+    }
+
+    fn set_left_child(&mut self, child: PageId) {
+        self.left_child_page = child
     }
 
     fn overflow_page(&self) -> Option<PageId> {

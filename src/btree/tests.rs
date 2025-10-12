@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::header::Header;
 use crate::io::cache::StaticPool;
@@ -33,9 +32,6 @@ fn create_test_cell(row_id: RowId, data: Vec<u8>) -> TableLeafCell {
         overflow_page: None,
     }
 }
-
-
-
 
 #[test]
 fn test_single_record() {
@@ -77,6 +73,8 @@ fn test_multiple_sequential_inserts() {
     }
 }
 
+
+
 #[test]
 fn test_overflow() {
     let mut pager = setup_test_pager();
@@ -95,6 +93,8 @@ fn test_overflow() {
     assert_eq!(found.unwrap().payload.as_bytes(), large_data.as_slice());
 }
 
+
+// DEADLOCK
 #[test]
 fn test_root_split() {
     let mut pager = setup_test_pager();
@@ -110,6 +110,10 @@ fn test_root_split() {
         let data = vec![i as u8; cell_size];
         let cell = create_test_cell(row_id, data);
         btree.insert(row_id, cell, &mut pager).unwrap();
+
+        if i.is_multiple_of(4) {
+            btree.print_tree(&mut pager).unwrap();
+        }
     }
 
     // Verify that the root changed.
@@ -161,13 +165,14 @@ fn test_insert_varying_sizes() {
     let mut pager = setup_test_pager();
     let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
 
-    //
     for i in 1..=50 {
         let row_id = RowId::from(i);
         let size = (i * 20) as usize; // Tamaños de 20 a 1000 bytes
         let cell = create_test_cell(row_id, vec![i as u8; size]);
         btree.insert(row_id, cell, &mut pager).unwrap();
+        btree.print_tree(&mut pager).unwrap();
     }
+    btree.print_tree(&mut pager).unwrap();
 
     for i in 1..=50 {
         let row_id = RowId::from(i);

@@ -177,7 +177,7 @@ test_interior_page_ops!(
 test_interior_page_ops!(
     table_interior,
     TableInteriorPage,
-    TablenteriorCell,
+    TableInteriorCell,
     RowId,
     PageType::TableInterior,
     (|id: u32| RowId::from(id))

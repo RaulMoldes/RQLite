@@ -1,5 +1,4 @@
-use crate::io::IOFrame;
-use crate::io::*;
+use crate::io::frames::{Frame, IOFrame};
 use crate::types::PageId;
 use crate::MAX_CACHE_SIZE;
 use std::collections::{HashMap, VecDeque};

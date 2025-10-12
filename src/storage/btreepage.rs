@@ -11,15 +11,19 @@ use std::collections::BTreeMap;
 use std::io::{self, Cursor, Read, Write};
 
 /// Trait for functions common to all BTreePages.
-pub(crate) trait BTreePageOps<BTreeCellType: Cell> {
-    /// Get a cell at a specific position in the slot array
-    fn get_cell_at(&self, id: u16) -> Option<BTreeCellType>;
-
-    /// Append a cell to this btreepage.
-    fn add_cell(&mut self, cell: BTreeCellType) -> io::Result<u16>;
-
-    /// Take the cells inside this page.
-    fn take_cells(&mut self) -> Vec<BTreeCellType>;
+pub(crate) trait BTreePageOps {
+    /// Utility methods to check the status of the page.
+    fn can_pop_at_back(&self, min_payload_factor: f32) -> bool
+    where
+        Self: HeaderOps;
+    /// Check if we can pop at the front of the page
+    fn can_pop_at_front(&self, min_payload_factor: f32) -> bool
+    where
+        Self: HeaderOps;
+    /// Check if a new cell fits inside the page.
+    fn fits_in(&self, additional_size: usize, max_payload_factor: f32) -> bool
+    where
+        Self: HeaderOps;
 }
 
 #[derive(Clone)]
@@ -95,55 +99,56 @@ impl<BTreeCellType: Cell + Serializable> Default for BTreePage<BTreeCellType> {
     }
 }
 
-impl<BTreeCellType: Cell + Serializable> BTreePageOps<BTreeCellType> for BTreePage<BTreeCellType> {
-    /// Logic to get a cell at a specific position.
-    /// As said, the position in the slot array is the canonical way to get a cell in a specific [BTreePage].
-    /// So, we go get the cell offset first, then lookup in the btreemap to get the cell.
-    /// If the slot has been marked as deleted, we simply ignore it.
-    fn get_cell_at(&self, id: u16) -> Option<BTreeCellType> {
-        if let Some(slot) = self.cell_indices.get(id as usize) {
-            return self.cells.get(&slot.offset).cloned();
-        };
-        None
-    }
+impl<BTreeCellType: Cell> BTreePageOps for BTreePage<BTreeCellType> {
+    fn can_pop_at_back(&self, min_payload_factor: f32) -> bool
+    where
+        Self: HeaderOps,
+    {
+        let minimum_used_space = (self.page_size() as f32 * min_payload_factor) as usize;
+        let used_space = self.page_size() - self.free_space();
 
-    // BTreeMap does not include a drain method, so we need to use std::mem::take here.
-    // TODO: currently this does not check if cells are deleted or not. We need to implement that part manually.
-    fn take_cells(&mut self) -> Vec<BTreeCellType> {
-        let old_cells = std::mem::take(&mut self.cells);
-        self.cell_indices.clear();
-        self.header.content_start_ptr = PAGE_HEADER_SIZE as u16;
-        self.header.free_space_ptr = self.page_size() as u16;
-        self.header.cell_count = 0;
-        old_cells.into_values().collect()
-    }
-
-    /// Add a cell, returning the offset at which was inserted.
-    fn add_cell(&mut self, cell: BTreeCellType) -> io::Result<u16> {
-        // The cell append size is the total cell size + SLOT_SIZE.
-        let cell_size = cell_append_size(&cell);
-        let free_space = self.free_space();
-
-        // Simple check to validate that there is enough space for this cell.
-        if free_space < cell_size {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Not enough bytes to store the cell: needed {} bytes, available {} bytes",
-                    cell_size, free_space
-                ),
-            ));
+        if let Some(last_item) = self.cell_indices.last() {
+            if let Some(cell) = self.cells.get(&last_item.offset) {
+                if used_space.saturating_sub(cell.size()) > minimum_used_space {
+                    return true;
+                }
+            }
         }
+        false
+    }
 
-        // Decrement the free space ptr and increment the start-of-content ptr.
-        self.header.free_space_ptr -= cell.size() as u16;
-        self.header.content_start_ptr += SLOT_SIZE as u16;
-        // Increment the cell count.
-        self.header.cell_count += 1;
-        // Finally insert the cell at the offset in the btreemap
-        self.cells.insert(self.free_space_start() as u16, cell);
-        // Return the location to where the cell is offseted.
-        Ok(self.free_space_start() as u16)
+    fn can_pop_at_front(&self, min_payload_factor: f32) -> bool
+    where
+        Self: HeaderOps,
+    {
+        let minimum_used_space = (self.page_size() as f32 * min_payload_factor) as usize;
+        let used_space = self.page_size() - self.free_space();
+
+        if let Some(last_item) = self.cell_indices.first() {
+            if let Some(cell) = self.cells.get(&last_item.offset) {
+                if used_space.saturating_sub(cell.size()) > minimum_used_space {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn fits_in(&self, additional_size: usize, max_payload_factor: f32) -> bool
+    where
+        Self: HeaderOps,
+    {
+        let maximum_used_space = (self.page_size() as f32 * max_payload_factor) as usize;
+        let used_space = self.page_size() - self.free_space();
+
+        if let Some(last_item) = self.cell_indices.first() {
+            if let Some(cell) = self.cells.get(&last_item.offset) {
+                if used_space.saturating_add(cell.size()) < maximum_used_space {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -239,7 +244,10 @@ impl<C: Cell> std::fmt::Debug for BTreePage<C> {
     }
 }
 /// Utilities to easily create [`BTreePages`]
-impl<C: Cell> BTreePage<C> {
+impl<C: Cell> BTreePage<C>
+where
+    Self: HeaderOps,
+{
     pub fn create(
         page_id: PageId,
         page_size: u32,
@@ -268,6 +276,88 @@ impl<C: Cell> BTreePage<C> {
             cell_indices: cell_slots,
             cells,
         }
+    }
+
+    // This function is used to compact the cells after deletion has happened.
+    // When you delete a cell at some point, the offsets and the free space pointer can get fucked up.
+    // For example.
+    pub(crate) fn unfuck_cell_offsets(&mut self, removed_offset: u16, removed_size: u16) {
+        // Identify those slots that need to be unfucked.
+        for slot in self.cell_indices.iter_mut() {
+            if slot.offset < removed_offset {
+                let old_offset = slot.offset;
+                let new_offset = old_offset + removed_size;
+
+                // Move the cell to the proper offset.
+                if let Some(cell) = self.cells.remove(&old_offset) {
+                    slot.offset = new_offset;
+                    self.cells.insert(new_offset, cell);
+                }
+            }
+        }
+
+        self.header.free_space_ptr += removed_size;
+    }
+
+    /// Logic to get a cell at a specific position.
+    /// As said, the position in the slot array is the canonical way to get a cell in a specific [BTreePage].
+    /// So, we go get the cell offset first, then lookup in the btreemap to get the cell.
+    /// If the slot has been marked as deleted, we simply ignore it.
+    pub(crate) fn get_cell_at(&self, id: u16) -> Option<C> {
+        if let Some(slot) = self.cell_indices.get(id as usize) {
+            return self.cells.get(&slot.offset).cloned();
+        };
+        None
+    }
+
+    // BTreeMap does not include a drain method, so we need to use std::mem::take here.
+    pub(crate) fn take_cells(&mut self) -> Vec<C> {
+        let old_cells = std::mem::take(&mut self.cells);
+        self.cell_indices.clear();
+        self.header.content_start_ptr = PAGE_HEADER_SIZE as u16;
+        self.header.free_space_ptr = self.page_size() as u16;
+        self.header.cell_count = 0;
+        old_cells.into_values().collect()
+    }
+
+    /// Add a cell, returning the offset at which was inserted.
+    pub(crate) fn add_cell(&mut self, cell: C) -> io::Result<u16> {
+        // The cell append size is the total cell size + SLOT_SIZE.
+        let cell_size = cell_append_size(&cell);
+        let free_space = self.free_space();
+
+        // Simple check to validate that there is enough space for this cell.
+        if free_space < cell_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Not enough bytes to store the cell: needed {} bytes, available {} bytes",
+                    cell_size, free_space
+                ),
+            ));
+        }
+
+        // Decrement the free space ptr and increment the start-of-content ptr.
+
+        self.header.free_space_ptr -= cell.size() as u16;
+        self.header.content_start_ptr += SLOT_SIZE as u16;
+
+        if let Some(cell) = self.cells.get(&(self.free_space_start() as u16)) {
+            panic!(
+                "Error, ya existia una celda en ese slot {}, offset: {}",
+                cell.key(),
+                self.free_space_start()
+            );
+        }
+
+        // Finally insert the cell at the offset in the btreemap
+        self.cells.insert(self.free_space_start() as u16, cell);
+
+        // Increment the cell count.
+        self.header.cell_count += 1;
+
+        // Return the location to where the cell is offseted.
+        Ok(self.free_space_start() as u16)
     }
 }
 

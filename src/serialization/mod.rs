@@ -14,3 +14,16 @@ pub(crate) trait Serializable {
     /// Writes a value to a byte stream.
     fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()>;
 }
+
+impl Serializable for Vec<u8> {
+    fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
+        let mut buffer = Vec::new();
+        reader.read_to_end(&mut buffer)?;
+        Ok(buffer)
+    }
+
+    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_all(self)?;
+        Ok(())
+    }
+}

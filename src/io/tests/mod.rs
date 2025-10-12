@@ -1,4 +1,4 @@
-use crate::io::{Frame, IOFrame, IndexFrame, OverflowFrame, TableFrame};
+use crate::io::frames::{Frame, IOFrame, IndexFrame, OverflowFrame, TableFrame};
 use crate::test_frame_conversion;
 use crate::{
     types::{Key, PageId},

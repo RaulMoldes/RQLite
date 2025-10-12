@@ -6,9 +6,8 @@ use crate::storage::slot::Slot;
 use crate::types::Splittable;
 use crate::types::VarlenaType;
 use crate::types::{Key, PageId, RowId};
-use crate::PageType;
 use crate::SLOT_SIZE;
-use crate::{BTreePage, BTreePageOps, HeaderOps};
+use crate::{BTreePage, HeaderOps};
 
 /// LEAF PAGE:
 pub(crate) type TableLeafPage = BTreePage<TableLeafCell>;
@@ -21,8 +20,22 @@ pub(crate) trait LeafPageOps<BTreeCellType: Cell> {
     /// Type of key for the leaf page. Is a VarlenaType for Index Leaf pages and a RowId for Table Leaf pages.
     type KeyType: Ord;
 
+    /// Set the next sibling in the linked list of leaf pages.
+    fn set_next(&mut self, page_id: PageId);
+
+    /// Get the next sibling in the linked list of leaf pages.
+    fn get_next(&self) -> Option<PageId>;
+
     /// [INSERT]: Find a slot to insert a cell in the page with a given key.
     fn insert(&mut self, key: Self::KeyType, cell: BTreeCellType) -> std::io::Result<()>;
+
+    /// [SAFE INSERT]: With embedded overflow check.
+    fn try_insert(
+        &mut self,
+        key: Self::KeyType,
+        cell: BTreeCellType,
+        max_payload_fraction: f32,
+    ) -> std::io::Result<()>;
 
     /// [FIND]: find a cell in this page. If not found, return None. The caller should know what to do in that case. Normally, the BTree engine should look in the next sibling on the linked list.
     fn find(&self, key: &Self::KeyType) -> Option<&BTreeCellType>;
@@ -37,11 +50,24 @@ pub(crate) trait LeafPageOps<BTreeCellType: Cell> {
     fn try_pop_front_leaf(&mut self, min_payload_factor: f32) -> Option<BTreeCellType>;
     /// Take interior cells.
     fn take_leaf_cells(&mut self) -> Vec<BTreeCellType>;
+    /// Get cells at a given leaf.
     fn get_cell_at_leaf(&self, id: u16) -> Option<BTreeCellType>;
 }
 
 impl LeafPageOps<TableLeafCell> for TableLeafPage {
     type KeyType = RowId;
+
+    fn get_next(&self) -> Option<PageId> {
+        if self.header.right_most_page.is_valid() {
+            Some(self.header.right_most_page)
+        } else {
+            None
+        }
+    }
+
+    fn set_next(&mut self, page_id: PageId) {
+        self.header.right_most_page = page_id
+    }
 
     /// Find a key in this page.
     /// Iterate over the cell indices, skipping deleted ones.
@@ -58,6 +84,29 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
         None
     }
 
+    // Try to insert, previously checking so as not to get on overflow state.
+    fn try_insert(
+        &mut self,
+        key: Self::KeyType,
+        cell: TableLeafCell,
+        max_payload_fraction: f32,
+    ) -> std::io::Result<()> {
+        let size = cell.size() + SLOT_SIZE;
+        let current_used_space = self.page_size() - self.free_space();
+        if current_used_space + size >= (max_payload_fraction * self.page_size() as f32) as usize {
+            return Err(
+                std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Attempted to insert with overflow: Required size: {}, page_size: {}, max payload fraction: {}", size, self.page_size(), max_payload_fraction
+                ),
+            )
+            );
+        };
+
+        self.insert(key, cell)
+    }
+
     /// Remove a cell given by is key. Has the same find logic as [`find`]
     fn remove(&mut self, key: &Self::KeyType) -> Option<TableLeafCell> {
         if let Some(pos) = self.cell_indices.iter().position(|slot| {
@@ -71,7 +120,12 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
             let cell = self.cells.remove(&slot.offset).unwrap();
             self.header.cell_count -= 1;
             self.header.content_start_ptr -= SLOT_SIZE as u16;
-            self.header.free_space_ptr -= cell.size() as u16;
+
+            if slot.offset != self.header.free_space_ptr {
+                self.unfuck_cell_offsets(slot.offset, cell.size() as u16);
+            } else {
+                self.header.free_space_ptr -= cell.size() as u16;
+            };
 
             Some(cell)
         } else {
@@ -98,9 +152,14 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
 
         let slot = self.cell_indices.pop().unwrap();
         let cell = self.cells.remove(&slot.offset).unwrap();
+
         self.header.cell_count -= 1;
         self.header.content_start_ptr -= SLOT_SIZE as u16;
-        self.header.free_space_ptr -= cell.size() as u16;
+        if slot.offset != self.header.free_space_ptr {
+            self.unfuck_cell_offsets(slot.offset, cell.size() as u16);
+        } else {
+            self.header.free_space_ptr += cell.size() as u16;
+        };
         Some(cell)
     }
 
@@ -123,9 +182,15 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
 
         let slot = self.cell_indices.remove(0);
         let cell = self.cells.remove(&slot.offset).unwrap();
+
         self.header.cell_count -= 1;
         self.header.content_start_ptr -= SLOT_SIZE as u16;
-        self.header.free_space_ptr -= cell.size() as u16;
+        if slot.offset != self.header.free_space_ptr {
+            self.unfuck_cell_offsets(slot.offset, cell.size() as u16);
+        } else {
+            self.header.free_space_ptr += cell.size() as u16;
+        };
+
         Some(cell)
     }
 
@@ -139,7 +204,6 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
     /// Insert a cell with a given key on this page.
     /// Needs to find the target position when inserting the slot to ensure that cells are ordered.
     fn insert(&mut self, key: Self::KeyType, cell: TableLeafCell) -> std::io::Result<()> {
-        let _old_cell = self.remove(&key);
         let new_offset = self.add_cell(cell)?;
 
         let pos = self
@@ -176,6 +240,41 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
         None
     }
 
+    fn get_next(&self) -> Option<PageId> {
+        if self.header.right_most_page.is_valid() {
+            Some(self.header.right_most_page)
+        } else {
+            None
+        }
+    }
+
+    fn set_next(&mut self, page_id: PageId) {
+        self.header.right_most_page = page_id
+    }
+
+    // Try to insert, previously checking so as not to get on overflow state.
+    fn try_insert(
+        &mut self,
+        key: Self::KeyType,
+        cell: IndexLeafCell,
+        max_payload_fraction: f32,
+    ) -> std::io::Result<()> {
+        let size = cell.size() + SLOT_SIZE;
+        let current_used_space = self.page_size() - self.free_space();
+        if current_used_space + size >= (max_payload_fraction * self.page_size() as f32) as usize {
+            return Err(
+                std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Attempted to insert with overflow: Required size: {}, page_size: {}, max payload fraction: {}", size, self.page_size(), max_payload_fraction
+                ),
+            )
+            );
+        };
+
+        self.insert(key, cell)
+    }
+
     fn try_pop_back_leaf(&mut self, min_payload_factor: f32) -> Option<IndexLeafCell> {
         let mut size = usize::MAX;
 
@@ -197,7 +296,12 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
         let cell = self.cells.remove(&slot.offset).unwrap();
         self.header.cell_count -= 1;
         self.header.content_start_ptr -= SLOT_SIZE as u16;
-        self.header.free_space_ptr -= cell.size() as u16;
+
+        if slot.offset != self.header.free_space_ptr {
+            self.unfuck_cell_offsets(slot.offset, cell.size() as u16);
+        } else {
+            self.header.free_space_ptr += cell.size() as u16;
+        };
         Some(cell)
     }
 
@@ -220,9 +324,14 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
 
         let slot = self.cell_indices.remove(0);
         let cell = self.cells.remove(&slot.offset).unwrap();
+
         self.header.cell_count -= 1;
         self.header.content_start_ptr -= SLOT_SIZE as u16;
-        self.header.free_space_ptr -= cell.size() as u16;
+        if slot.offset != self.header.free_space_ptr {
+            self.unfuck_cell_offsets(slot.offset, cell.size() as u16);
+        } else {
+            self.header.free_space_ptr += cell.size() as u16;
+        };
         Some(cell)
     }
 
@@ -245,7 +354,11 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
             let cell = self.cells.remove(&slot.offset).unwrap();
             self.header.cell_count -= 1;
             self.header.content_start_ptr -= SLOT_SIZE as u16;
-            self.header.free_space_ptr -= cell.size() as u16;
+            if slot.offset != self.header.free_space_ptr {
+                self.unfuck_cell_offsets(slot.offset, cell.size() as u16);
+            } else {
+                self.header.free_space_ptr += cell.size() as u16;
+            };
 
             Some(cell)
         } else {
@@ -254,7 +367,6 @@ impl LeafPageOps<IndexLeafCell> for IndexLeafPage {
     }
 
     fn insert(&mut self, key: Self::KeyType, cell: IndexLeafCell) -> std::io::Result<()> {
-        let _old_cell = self.remove(&key);
         let new_offset = self.add_cell(cell)?;
 
         let pos = self
@@ -315,8 +427,7 @@ impl Overflowable for IndexLeafPage {
         let new_offset = self.add_cell(content)?;
         self.cell_indices.insert(pos, Slot::new(new_offset));
 
-        let overflowpage =
-            OverflowPage::create(new_id, self.page_size() as u32, PageType::Overflow, None);
+        let overflowpage = OverflowPage::create(new_id, self.page_size() as u32, None);
         Ok(Some((overflowpage, remaining)))
     }
 }
@@ -335,12 +446,7 @@ impl Overflowable for TableLeafPage {
             self.insert(content.row_id, content)?;
             return Ok(None);
         };
-        println!("Insert cell with size: {}.", content.size());
-        println!("My page size is: {}", self.page_size());
-        println!(
-            "Creating overflow because max cell size is: {}",
-            self.max_cell_size(max_payload_factor)
-        );
+
         let pos = self
             .cell_indices
             .iter()
@@ -363,8 +469,7 @@ impl Overflowable for TableLeafPage {
         let new_offset = self.add_cell(content)?;
         self.cell_indices.insert(pos, Slot::new(new_offset));
 
-        let overflowpage =
-            OverflowPage::create(new_id, self.page_size() as u32, PageType::Overflow, None);
+        let overflowpage = OverflowPage::create(new_id, self.page_size() as u32, None);
         Ok(Some((overflowpage, remaining)))
     }
 }

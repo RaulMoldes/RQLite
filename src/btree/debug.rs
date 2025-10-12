@@ -1,7 +1,7 @@
 use super::*;
 use std::fmt;
 
-impl<K, Vl, Vi, P, F> fmt::Display for BTree<K, Vl, Vi, P, F>
+impl<K, Vl, Vi, P> fmt::Display for BTree<K, Vl, Vi, P>
 where
     K: Ord + Clone + Copy + Eq + PartialEq + fmt::Debug,
     Vl: Cell<Key = K> + fmt::Debug,
@@ -13,8 +13,8 @@ where
         + LeafPageOps<Vl, KeyType = K>
         + Overflowable<LeafContent = Vl>
         + fmt::Debug,
-    F: Frame<P> + TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<F, Error = std::io::Error>,
+    PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
+    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "BTree {{")?;
@@ -27,7 +27,7 @@ where
     }
 }
 
-impl<K, Vl, Vi, P, F> BTree<K, Vl, Vi, P, F>
+impl<K, Vl, Vi, P> BTree<K, Vl, Vi, P>
 where
     K: Ord + Clone + Copy + Eq + PartialEq + fmt::Debug,
     Vl: Cell<Key = K> + fmt::Debug,
@@ -39,8 +39,8 @@ where
         + LeafPageOps<Vl, KeyType = K>
         + Overflowable<LeafContent = Vl>
         + fmt::Debug,
-    F: Frame<P> + TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<F, Error = std::io::Error>,
+    PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
+    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
 {
     /// Print the tree structure with detailed information about each node
     pub(crate) fn print_tree<FI: FileOps, M: MemoryPool>(
@@ -98,7 +98,7 @@ where
         pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
         let indent = "  ".repeat(depth + 1);
-        let frame = F::try_from(io_frame)?;
+        let frame = PageFrame::try_from(io_frame)?;
         let guard = frame.read();
 
         let mut cells: Vec<Vl> = Vec::with_capacity(guard.cell_count());
@@ -144,7 +144,7 @@ where
         pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
         let indent = "  ".repeat(depth + 1);
-        let frame = F::try_from(io_frame)?;
+        let frame = PageFrame::try_from(io_frame)?;
         let guard = frame.read();
 
         let mut cells: Vec<Vi> = Vec::with_capacity(guard.cell_count());

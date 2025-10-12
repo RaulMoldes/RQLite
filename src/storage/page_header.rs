@@ -90,7 +90,20 @@ pub(crate) enum PageType {
     Overflow = 0x10,
     Free = 0x00,
 }
+impl std::fmt::Display for PageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PageType::IndexInterior => write!(f, " Page type: Index Interior"),
+            PageType::TableInterior => write!(f, " Page type: Table Interior"),
+            PageType::IndexLeaf => write!(f, " Page type: Index Leaf"),
+            PageType::TableLeaf => write!(f, " Page type: Table Leaf"),
+            PageType::Overflow => write!(f, " Page type: Overflow"),
+            PageType::Free => write!(f, " Page type: Free"),
+        }?;
 
+        Ok(())
+    }
+}
 /// Shortcut to convert a PageType value to a byte and back.
 impl TryFrom<u8> for PageType {
     type Error = &'static str;
@@ -154,7 +167,7 @@ pub(crate) struct PageHeader {
     /// Type of this page.
     pub(crate) page_type: PageType,
 
-    /// One byte of reserved space to align to 24 bytes.
+    /// Reserved space to align to 24 bytes
     pub(crate) reserved_space: u8,
 }
 
@@ -163,7 +176,7 @@ pub(crate) struct PageHeader {
 /// This enum should ideally read the byte marker and deserialize the corresponding page depending on that.
 impl Serializable for PageHeader {
     fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let mut buffer = [0u8; PAGE_HEADER_SIZE - 1];
+        let mut buffer = [0u8; PAGE_HEADER_SIZE];
         reader.read_exact(&mut buffer[0..16])?;
 
         let page_number = PageId::from(u32::from_be_bytes([
@@ -186,7 +199,9 @@ impl Serializable for PageHeader {
         reader.read_exact(&mut buffer[22..23])?;
         let reserved_space = buffer[22];
 
-        let page_type = PageType::Free; // Page type is set to free and later established by the dispatcher.
+        reader.read_exact(&mut buffer[23..24])?;
+        let page_type = PageType::try_from(buffer[23]).unwrap();
+
         Ok(PageHeader {
             page_number,
             page_size,
@@ -208,7 +223,7 @@ impl Serializable for PageHeader {
         writer.write_all(&self.free_space_ptr.to_be_bytes())?;
         writer.write_all(&self.cell_count.to_be_bytes())?;
         writer.write_all(&self.content_start_ptr.to_be_bytes())?;
-        writer.write_all(&[self.reserved_space])?;
+        writer.write_all(&[self.reserved_space, self.page_type as u8])?;
         Ok(())
     }
 }
@@ -282,9 +297,9 @@ impl Default for PageHeader {
             page_number: PageId::from(0),
             right_most_page: PageId::from(0),
             next_overflow_page: PageId::from(0),
-            free_space_ptr: PAGE_SIZE as u16,
+            free_space_ptr: (PAGE_SIZE) as u16,
             cell_count: 0,
-            content_start_ptr: PAGE_HEADER_SIZE as u16,
+            content_start_ptr: (PAGE_HEADER_SIZE) as u16,
             page_type: PageType::Free,
             reserved_space: 0,
         }
@@ -305,9 +320,9 @@ impl PageHeader {
             next_overflow_page: PageId::from(0),
             // NOTE that cells are inserted at the end of the page.
             // Therefore the free space pointer grows towards the beginning of the page.
-            free_space_ptr: PAGE_SIZE as u16,
+            free_space_ptr: (PAGE_SIZE) as u16,
             cell_count: 0,
-            content_start_ptr: PAGE_HEADER_SIZE as u16,
+            content_start_ptr: (PAGE_HEADER_SIZE) as u16,
             page_type,
             reserved_space: 0,
         }

@@ -138,8 +138,10 @@ macro_rules! test_interior_page_ops {
 
                 let key = $create_key(1);
                 let child = PageId::from(10);
-
-                assert!(page.insert_child(key.clone(), child).is_ok());
+                let cell = $cell_type::new(
+                    child, key
+                );
+                assert!(page.insert_child(cell).is_ok());
                 assert_eq!(page.cell_count(), 1);
             }
 
@@ -155,7 +157,10 @@ macro_rules! test_interior_page_ops {
                 for i in 0..10 {
                     let key = $create_key(i);
                     let child = PageId::from(i + 10);
-                    assert!(page.insert_child(key, child).is_ok());
+                    let cell = $cell_type::new(
+                    child, key
+                );
+                    assert!(page.insert_child(cell).is_ok());
                 }
 
                 assert_eq!(page.cell_count(), 10);
@@ -174,7 +179,10 @@ macro_rules! test_interior_page_ops {
 
                 let key = $create_key(5);
                 let child = PageId::from(10);
-                page.insert_child(key.clone(), child).unwrap();
+                let cell = $cell_type::new(
+                    child, key
+                );
+                page.insert_child(cell).unwrap();
 
                 let found = page.find_child(&$create_key(3));
                 assert_eq!(found, child);

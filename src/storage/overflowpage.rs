@@ -1,3 +1,4 @@
+use super::PageType;
 use crate::page_header::PAGE_HEADER_SIZE;
 use crate::serialization::Serializable;
 use crate::types::varlena::VarlenaType;
@@ -41,6 +42,10 @@ pub(crate) trait Overflowable {
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         Ok(None)
     }
+
+    fn data_owned(&self) -> Option<VarlenaType> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -52,6 +57,10 @@ pub(crate) struct OverflowPage {
 impl OverflowPage {
     pub(crate) fn new(header: PageHeader, data: VarlenaType) -> Self {
         OverflowPage { header, data }
+    }
+
+    pub(crate) fn data(&self) -> VarlenaType {
+        self.data.clone()
     }
 }
 
@@ -135,13 +144,8 @@ impl Serializable for OverflowPage {
 }
 
 impl OverflowPage {
-    pub fn create(
-        page_id: PageId,
-        page_size: u32,
-        page_type: crate::page_header::PageType,
-        right_most_page: Option<PageId>,
-    ) -> Self {
-        let header = PageHeader::new(page_id, page_size, page_type, right_most_page);
+    pub fn create(page_id: PageId, page_size: u32, right_most_page: Option<PageId>) -> Self {
+        let header = PageHeader::new(page_id, page_size, PageType::Overflow, right_most_page);
         Self {
             header,
             data: VarlenaType::from_raw_bytes(&[], None),
@@ -172,9 +176,13 @@ impl Overflowable for OverflowPage {
         self.data = content;
         let new = PageId::new_key();
         self.set_next_overflow(new);
-        let new_page = OverflowPage::create(new, self.page_size() as u32, self.type_of(), None);
+        let new_page = OverflowPage::create(new, self.page_size() as u32, None);
 
         Ok(Some((new_page, remaining)))
+    }
+
+    fn data_owned(&self) -> Option<VarlenaType> {
+        Some(self.data())
     }
 }
 

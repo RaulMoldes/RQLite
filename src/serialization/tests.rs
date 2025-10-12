@@ -33,7 +33,7 @@ macro_rules! test_frame_conversion {
         #[test]
         fn $test_name() {
             use $crate::serialization::Serializable;
-            use $crate::io::{create_frame};
+            use $crate::io::frames::{create_frame};
             use std::io::Cursor;
 
             let test_cases = vec![
