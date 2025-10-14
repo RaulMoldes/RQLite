@@ -5,10 +5,18 @@ use crate::io::pager::Pager;
 use crate::storage::btreepage::BTreePageOps;
 use crate::storage::{Cell, InteriorPageOps, LeafPageOps, Overflowable};
 use crate::types::PageId;
-use crate::{HeaderOps, PageType};
+use crate::HeaderOps;
 
-use super::{BTree, LockingOps};
+use super::locking::TraverseStack;
+use super::BTree;
 
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub(crate) enum TraverseMode {
+    Read,
+    Upgradable,
+    Write,
+}
 pub(crate) trait SearchOps<K, Vl, Vi, P>
 where
     K: Ord + Clone + Copy + Eq + PartialEq,
@@ -18,7 +26,6 @@ where
         + Sync
         + HeaderOps
         + BTreePageOps
-
         + InteriorPageOps<Vi, KeyType = K>
         + LeafPageOps<Vl, KeyType = K>
         + Overflowable<LeafContent = Vl>
@@ -40,7 +47,8 @@ where
         &mut self,
         key: K,
         pager: &mut Pager<FI, M>,
-    ) -> Vec<PageId>;
+        mode: TraverseMode,
+    ) -> TraverseStack<P>;
 }
 
 impl<K, Vl, Vi, P> SearchOps<K, Vl, Vi, P> for BTree<K, Vl, Vi, P>
@@ -52,7 +60,6 @@ where
         + Sync
         + HeaderOps
         + BTreePageOps
-
         + InteriorPageOps<Vi, KeyType = K>
         + LeafPageOps<Vl, KeyType = K>
         + Overflowable<LeafContent = Vl>
@@ -67,15 +74,14 @@ where
         key: K,
         pager: &mut Pager<FI, M>,
     ) -> Option<Vl> {
-        let traversal = self.traverse(key, pager);
-        let last_node = traversal.last().unwrap();
-
-        let (r_lock, _) = self.acquire_readonly(*last_node, pager);
-
-        if let Some(mut cell) = r_lock.find(&key).cloned() {
-            // Modifies the cell in place traversing the linked list of overflow pages in case there is one.
-            self.try_reconstruct_overflow_payload(&mut cell, pager).ok();
-            return Some(cell);
+        let traversal = self.traverse(key, pager, TraverseMode::Read);
+        if let Some(last_node) = traversal.last() {
+            let r_lock = traversal.read(last_node);
+            if let Some(mut cell) = r_lock.find(&key).cloned() {
+                // Modifies the cell in place traversing the linked list of overflow pages in case there is one.
+                self.try_reconstruct_overflow_payload(&mut cell, pager).ok();
+                return Some(cell);
+            }
         }
         None
     }
@@ -84,28 +90,29 @@ where
         &mut self,
         key: K,
         pager: &mut Pager<FI, M>,
-    ) -> Vec<PageId> {
-        let mut traversal = Vec::new();
+        mode: TraverseMode,
+    ) -> TraverseStack<P> {
+        let mut traversal = TraverseStack::default();
         let mut current_id = self.root;
 
         // The idea here is to traverse the tree downwards acquiring upgradable locks as needed.
         // Once we visit a node, we inmediately release the readonly lock to ensure other threads are able to visit that part of the tree and maximize parallelism.
         loop {
             // Collect the visited node in the traversal.
-            traversal.push(current_id);
-            // Acquire the readonly lock.
-            let (r_lock, _) = self.acquire_readonly(current_id, pager);
+            match mode {
+                TraverseMode::Read => traversal.track_rlatch(current_id, pager),
+                TraverseMode::Upgradable => traversal.track_slatch(current_id, pager),
+                TraverseMode::Write => traversal.track_wlatch(current_id, pager),
+            }
 
             // If we have reached a leaf, return.
             // The last lock will be released here.
-            if matches!(r_lock.type_of(), PageType::IndexLeaf)
-                || matches!(r_lock.type_of(), PageType::TableLeaf)
-            {
+            if traversal.is_node_leaf(&current_id) {
                 return traversal;
             }
             // If we are not a leaf, navigate to the corresponding child.
             // After getting out of scope the lock of the parent will be released, and the lock on the child will be acquired.
-            let child_id = r_lock.find_child(&key);
+            let child_id = traversal.navigate(&current_id, key).unwrap();
             current_id = child_id;
         }
     }

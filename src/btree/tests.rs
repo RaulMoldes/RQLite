@@ -73,8 +73,6 @@ fn test_multiple_sequential_inserts() {
     }
 }
 
-
-
 #[test]
 fn test_overflow() {
     let mut pager = setup_test_pager();
@@ -92,7 +90,6 @@ fn test_overflow() {
     assert!(found.is_some());
     assert_eq!(found.unwrap().payload.as_bytes(), large_data.as_slice());
 }
-
 
 // DEADLOCK
 #[test]
@@ -168,9 +165,14 @@ fn test_insert_varying_sizes() {
     for i in 1..=50 {
         let row_id = RowId::from(i);
         let size = (i * 20) as usize; // Tamaños de 20 a 1000 bytes
+
         let cell = create_test_cell(row_id, vec![i as u8; size]);
+
+        if i == 43 {
+            btree.print_tree(&mut pager);
+        };
         btree.insert(row_id, cell, &mut pager).unwrap();
-        btree.print_tree(&mut pager).unwrap();
+
     }
     btree.print_tree(&mut pager).unwrap();
 

@@ -88,18 +88,20 @@ impl Overflowable for RQLiteIndexPage {
     fn try_insert_with_overflow_interior(
         &mut self,
         content: IndexInteriorCell,
-        max_payload_factor: f32,
+        max_payload_factor: f32
+
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         match self {
             RQLiteIndexPage::Leaf(_) => panic!("Invalid content. Content type must be IndexLeafCell when inserting on IndexLeafPages"),
-            RQLiteIndexPage::Interior(page) => page.try_insert_with_overflow(content, max_payload_factor)
+            RQLiteIndexPage::Interior(page) => page.try_insert_with_overflow(content,max_payload_factor)
         }
     }
 
     fn try_insert_with_overflow_leaf(
         &mut self,
         content: IndexLeafCell,
-        max_payload_factor: f32,
+        max_payload_factor: f32
+
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         match self {
             RQLiteIndexPage::Interior(_) => panic!("Invalid content. Content type must be IndexInteriorCell when inserting on IndexInteriorPages"),
@@ -116,7 +118,8 @@ impl Overflowable for RQLiteTablePage {
     fn try_insert_with_overflow_leaf(
         &mut self,
         content: TableLeafCell,
-        max_payload_factor: f32,
+        max_payload_factor: f32
+
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         match self {
             RQLiteTablePage::Interior(_) => {

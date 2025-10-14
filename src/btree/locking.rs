@@ -1,135 +1,410 @@
-use super::BTree;
+use super::try_get_frame;
+use crate::btree::allocate_page;
 use crate::io::cache::MemoryPool;
 use crate::io::disk::FileOps;
 use crate::io::frames::{Frame, IOFrame, PageFrame};
 use crate::io::pager::Pager;
-use crate::storage::btreepage::BTreePageOps;
-use crate::storage::{Cell, InteriorPageOps, LeafPageOps, Overflowable};
+use crate::storage::guards::*;
+use crate::storage::{Cell, InteriorPageOps, HeaderOps};
 use crate::types::PageId;
-use crate::HeaderOps;
+use crate::PageType;
+use std::collections::HashMap;
 
-use parking_lot::{
-    ArcRwLockReadGuard, ArcRwLockUpgradableReadGuard, ArcRwLockWriteGuard, RawRwLock,
-};
-
-/// BTree locking operations go here.
-/// TODO: this should include a transaction manager that acquires exclusive locks incrementally and deletes them at commit time. However this is not possible still so our tree is not completely ACID.
-pub(crate) trait LockingOps<K, Vl, Vi, P>
-where
-    K: Ord + Clone + Copy + Eq + PartialEq,
-    Vl: Cell<Key = K>,
-    Vi: Cell<Key = K, Data = PageId>,
-    P: Send
-        + Sync
-        + HeaderOps
-        + BTreePageOps
-        + InteriorPageOps<Vi, KeyType = K>
-        + LeafPageOps<Vl, KeyType = K>
-        + Overflowable<LeafContent = Vl>
-        + std::fmt::Debug,
-    PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
-{
-    fn acquire_shared<FI: FileOps, M: MemoryPool>(
-        &self,
-        id: PageId,
-        pager: &mut Pager<FI, M>,
-    ) -> (ArcRwLockUpgradableReadGuard<RawRwLock, P>, PageFrame<P>);
-
-    fn acquire_exclusive<FI: FileOps, M: MemoryPool>(
-        &self,
-        id: PageId,
-        pager: &mut Pager<FI, M>,
-    ) -> (ArcRwLockWriteGuard<RawRwLock, P>, PageFrame<P>);
-
-    fn acquire_readonly<FI: FileOps, M: MemoryPool>(
-        &self,
-        id: PageId,
-        pager: &mut Pager<FI, M>,
-    ) -> (ArcRwLockReadGuard<RawRwLock, P>, PageFrame<P>);
-
-    fn upgrade_shared(
-        &self,
-        lock: ArcRwLockUpgradableReadGuard<RawRwLock, P>,
-    ) -> ArcRwLockWriteGuard<RawRwLock, P> {
-        ArcRwLockUpgradableReadGuard::upgrade(lock)
-    }
-
-    fn downgrade_exclusive(
-        &self,
-        lock: ArcRwLockWriteGuard<RawRwLock, P>,
-    ) -> ArcRwLockUpgradableReadGuard<RawRwLock, P> {
-        ArcRwLockWriteGuard::downgrade_to_upgradable(lock)
-    }
-
-    fn store_and_release<FI: FileOps, M: MemoryPool>(
-        &self,
-        p_frame: PageFrame<P>,
-        p_lock: ArcRwLockWriteGuard<RawRwLock, P>,
-        pager: &mut Pager<FI, M>,
-    ) -> std::io::Result<()>;
+/// Thread local traverse stack.
+pub(crate) struct TraverseStack<P> {
+    read_only_latches: HashMap<PageId, ReadOnlyLatch<P>>,
+    write_latches: HashMap<PageId, WriteLatch<P>>,
+    upgradable_latches: HashMap<PageId, UpgradableLatch<P>>,
+    tracked_frames: HashMap<PageId, PageFrame<P>>,
+    visited_pages: Vec<PageId>,
 }
 
-impl<K, Vl, Vi, P> LockingOps<K, Vl, Vi, P> for BTree<K, Vl, Vi, P>
+impl<P> Default for TraverseStack<P> {
+    fn default() -> Self {
+        Self {
+            read_only_latches: HashMap::new(),
+            write_latches: HashMap::new(),
+            upgradable_latches: HashMap::new(),
+            tracked_frames: HashMap::new(),
+            visited_pages: Vec::new(),
+        }
+    }
+}
+
+impl<P> TraverseStack<P>
 where
-    K: Ord + Clone + Copy + Eq + PartialEq,
-    Vl: Cell<Key = K>,
-    Vi: Cell<Key = K, Data = PageId>,
-    P: Send
-        + Sync
-        + HeaderOps
-        + BTreePageOps
-        + InteriorPageOps<Vi, KeyType = K>
-        + LeafPageOps<Vl, KeyType = K>
-        + Overflowable<LeafContent = Vl>
-        + std::fmt::Debug,
-    PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
+    P: Send + Sync + HeaderOps,
+    PageFrame<P>: Frame<P> + TryFrom<IOFrame, Error = std::io::Error>,
     IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
 {
-    fn acquire_shared<FI: FileOps, M: MemoryPool>(
-        &self,
+    pub(crate) fn track_rlatch<FI: FileOps, M: MemoryPool>(
+        &mut self,
         id: PageId,
         pager: &mut Pager<FI, M>,
-    ) -> (ArcRwLockUpgradableReadGuard<RawRwLock, P>, PageFrame<P>) {
-        let frame = self
-            .try_get_frame(id, pager)
-            .expect("Frame not found! Likely the page id of this frame is poisoned.");
-        (frame.read_for_upgrade(), frame)
+    ) {
+        if !self.write_latches.contains_key(&id)
+            && !self.read_only_latches.contains_key(&id)
+            && !self.upgradable_latches.contains_key(&id)
+        {
+            let frame = try_get_frame(id, pager).expect(
+                "Pointer to page id might be dangling. Unable to get frame from the pager.",
+            );
+            let latch = frame.read();
+            self.visited_pages.push(id);
+            self.tracked_frames.insert(id, frame);
+            self.read_only_latches.insert(id, latch);
+        } else if self.write_latches.contains_key(&id) {
+            self.full_downgrade_latch(id);
+        };
     }
 
-    fn acquire_exclusive<FI: FileOps, M: MemoryPool>(
-        &self,
+    pub(crate) fn track_wlatch<FI: FileOps, M: MemoryPool>(
+        &mut self,
         id: PageId,
         pager: &mut Pager<FI, M>,
-    ) -> (ArcRwLockWriteGuard<RawRwLock, P>, PageFrame<P>) {
-        let frame = self
-            .try_get_frame(id, pager)
-            .expect("Frame not found! Likely the page id of this frame is poisoned.");
-        (frame.write(), frame)
+    ) {
+        if !self.read_only_latches.contains_key(&id) && !self.write_latches.contains_key(&id) && !self.upgradable_latches.contains_key(&id) {
+            let frame = try_get_frame(id, pager).expect(
+                "Pointer to page id might be dangling. Unable to get frame from the pager.",
+            );
+            let latch = frame.write();
+            self.visited_pages.push(id);
+            self.tracked_frames.insert(id, frame);
+            self.write_latches.insert(id, latch);
+        } else if self.upgradable_latches.contains_key(&id) {
+            self.upgrade_latch(id);
+        }
     }
 
-    fn acquire_readonly<FI: FileOps, M: MemoryPool>(
-        &self,
+    pub(crate) fn track_slatch<FI: FileOps, M: MemoryPool>(
+        &mut self,
         id: PageId,
         pager: &mut Pager<FI, M>,
-    ) -> (ArcRwLockReadGuard<RawRwLock, P>, PageFrame<P>) {
-        let frame = self
-            .try_get_frame(id, pager)
-            .expect("Frame not found! Likely the page id of this frame is poisoned.");
-        (frame.read(), frame)
+    ) {
+        if !self.write_latches.contains_key(&id)
+            && !self.read_only_latches.contains_key(&id)
+            && !self.upgradable_latches.contains_key(&id)
+        {
+            let frame = try_get_frame(id, pager).expect(
+                "Pointer to page id might be dangling. Unable to get frame from the pager.",
+            );
+            let latch = frame.read_for_upgrade();
+            self.visited_pages.push(id);
+            self.tracked_frames.insert(id, frame);
+            self.upgradable_latches.insert(id, latch);
+        } else if !self.write_latches.contains_key(&id) {
+            self.downgrade_latch(id);
+        };
     }
 
-    // Store a frame on the page cache, marking it as dirty in consequence.
-    // The page cache will eventually flush the content to disk using the pager.
-    fn store_and_release<FI: FileOps, M: MemoryPool>(
-        &self,
-        p_frame: PageFrame<P>,
-        p_lock: ArcRwLockWriteGuard<RawRwLock, P>,
+    pub(crate) fn allocate_for_read<FI: FileOps, M: MemoryPool>(
+        &mut self,
+        page_type: PageType,
+        pager: &mut Pager<FI, M>,
+    ) -> std::io::Result<PageId> {
+        let frame = allocate_page(page_type, pager)?;
+        let latch = frame.read();
+        let id = frame.id();
+        self.visited_pages.push(id);
+        self.tracked_frames.insert(id, frame);
+        self.read_only_latches.insert(id, latch);
+        Ok(id)
+    }
+
+    pub(crate) fn allocate_for_write<FI: FileOps, M: MemoryPool>(
+        &mut self,
+        page_type: PageType,
+        pager: &mut Pager<FI, M>,
+    ) -> std::io::Result<PageId> {
+        let frame = allocate_page(page_type, pager)?;
+        let latch = frame.write();
+        let id = frame.id();
+        self.visited_pages.push(id);
+        self.tracked_frames.insert(id, frame);
+        self.write_latches.insert(id, latch);
+        Ok(id)
+    }
+
+    pub(crate) fn allocate_for_upgrade<FI: FileOps, M: MemoryPool>(
+        &mut self,
+        page_type: PageType,
+        pager: &mut Pager<FI, M>,
+    ) -> std::io::Result<PageId> {
+        let frame = allocate_page(page_type, pager)?;
+        let latch = frame.read_for_upgrade();
+        let id = frame.id();
+        self.visited_pages.push(id);
+        self.tracked_frames.insert(id, frame);
+        self.upgradable_latches.insert(id, latch);
+        Ok(id)
+    }
+
+    pub(crate) fn reverse(&mut self) {
+        self.visited_pages.reverse();
+    }
+
+    pub(crate) fn is_node_leaf(&self, page_id: &PageId) -> bool {
+        self.tracked_frames
+            .get(page_id)
+            .map(|p| p.is_leaf())
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn is_node_interior(&self, page_id: &PageId) -> bool {
+        self.tracked_frames
+            .get(page_id)
+            .map(|p| p.is_interior())
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn upgrade_latch(&mut self, id: PageId) {
+        if let Some(s_latch) = self.upgradable_latches.remove(&id) {
+            let w_latch = s_latch.upgrade();
+
+            self.write_latches.insert(id, w_latch);
+        };
+    }
+
+    pub(crate) fn downgrade_latch(&mut self, id: PageId) {
+        if let Some(s_latch) = self.write_latches.remove(&id) {
+            let w_latch = s_latch.downgrade_to_upgradable();
+            self.upgradable_latches.insert(id, w_latch);
+        };
+    }
+
+    pub(crate) fn full_downgrade_latch(&mut self, id: PageId) {
+        if let Some(s_latch) = self.write_latches.remove(&id) {
+            let w_latch = s_latch.downgrade();
+            self.read_only_latches.insert(id, w_latch);
+        };
+    }
+
+    pub(crate) fn release_latch<FI: FileOps, M: MemoryPool>(
+        &mut self,
+        id: &PageId,
         pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
-        drop(p_lock);
-        let io_frame = IOFrame::try_from(p_frame)?;
-        pager.cache_page(&io_frame);
+        if let Some(frame) = self.tracked_frames.remove(id) {
+            if let Some(latch) = self.write_latches.remove(id) {
+                drop(latch);
+                if frame.is_dirty() {
+                    let io_frame = IOFrame::try_from(frame)?;
+                    pager.cache_page(&io_frame);
+                };
+            } else if let Some(latch) = self.upgradable_latches.remove(id) {
+                drop(latch);
+                if frame.is_dirty() {
+                    let io_frame = IOFrame::try_from(frame)?;
+                    pager.cache_page(&io_frame);
+                };
+            } else if let Some(latch) = self.read_only_latches.remove(id) {
+                drop(latch);
+                if frame.is_dirty() {
+                    let io_frame = IOFrame::try_from(frame)?;
+                    pager.cache_page(&io_frame);
+                };
+            }
+        };
+
         Ok(())
+    }
+
+    pub(crate) fn release_until<FI: FileOps, M: MemoryPool>(
+        &mut self,
+        stop_id: PageId,
+        pager: &mut Pager<FI, M>,
+    ) -> std::io::Result<()> {
+        // Release pages in order until reach stop id.
+        let mut released = Vec::new();
+
+        for id in &self.visited_pages {
+            if *id == stop_id {
+                break;
+            }
+            released.push(*id);
+        }
+
+        // Remove from the visited vector.
+        self.visited_pages.retain(|id| !released.contains(id));
+
+        for id in released {
+            if let Some(frame) = self.tracked_frames.remove(&id) {
+                if let Some(latch) = self.write_latches.remove(&id) {
+                    drop(latch);
+
+                    if frame.is_dirty() {
+                        let io_frame = IOFrame::try_from(frame)?;
+                        pager.cache_page(&io_frame);
+                    }
+                } else if let Some(latch) = self.upgradable_latches.remove(&id) {
+                    drop(latch);
+
+                    if frame.is_dirty() {
+                        let io_frame = IOFrame::try_from(frame)?;
+                        pager.cache_page(&io_frame);
+                    }
+                } else if let Some(latch) = self.read_only_latches.remove(&id) {
+                    drop(latch);
+
+                    if frame.is_dirty() {
+                        let io_frame = IOFrame::try_from(frame)?;
+                        pager.cache_page(&io_frame);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn cleanup<FI: FileOps, M: MemoryPool>(
+        &mut self,
+        pager: &mut Pager<FI, M>,
+    ) -> std::io::Result<()> {
+       
+        for id in self.visited_pages.drain(..) {
+            if let Some(frame) = self.tracked_frames.remove(&id) {
+                if let Some(latch) = self.write_latches.remove(&id) {
+
+                    drop(latch);
+
+                    if frame.is_dirty() {
+                        let io_frame = IOFrame::try_from(frame)?;
+                        pager.cache_page(&io_frame);
+                    };
+                } else if let Some(latch) = self.upgradable_latches.remove(&id) {
+                    drop(latch);
+                    if frame.is_dirty() {
+                        let io_frame = IOFrame::try_from(frame)?;
+                        pager.cache_page(&io_frame);
+                    };
+                } else if let Some(latch) = self.read_only_latches.remove(&id) {
+                    drop(latch);
+                    if frame.is_dirty() {
+                        let io_frame = IOFrame::try_from(frame)?;
+                        pager.cache_page(&io_frame);
+                    };
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn navigate<K: Ord + Clone + Copy + Eq + PartialEq, Vi: Cell<Key = K>>(
+        &self,
+        id: &PageId,
+        key: K,
+    ) -> Option<PageId>
+    where
+        P: InteriorPageOps<Vi, KeyType = K>,
+    {
+        if self.is_node_interior(id) {
+            if let Some(latch) = self.read_only_latches.get(id) {
+                return Some(latch.find_child(&key));
+            } else if let Some(latch) = self.upgradable_latches.get(id) {
+                return Some(latch.find_child(&key));
+            } else if let Some(latch) = self.write_latches.get(id) {
+                return Some(latch.find_child(&key));
+            };
+        };
+        None
+    }
+
+    pub(crate) fn last(&self) -> Option<&PageId> {
+        self.visited_pages.last()
+    }
+
+    pub(crate) fn first(&self) -> Option<&PageId> {
+        self.visited_pages.first()
+    }
+
+    pub(crate) fn read(&self, id: &PageId) -> &ReadOnlyLatch<P> {
+        self.read_only_latches
+            .get(id)
+            .expect("Asked for an invalid pointer. Lock for page was not acquired")
+    }
+
+    pub(crate) fn write(&mut self, id: &PageId) -> &mut WriteLatch<P> {
+        if let Some(frame) = self.tracked_frames.get_mut(id) {
+            frame.mark_dirty();
+        };
+
+        self.write_latches
+            .get_mut(id)
+            .expect("Asked for an invalid pointer. Lock for page was not acquired")
+    }
+
+    pub(crate) fn read_upgradable(&self, id: &PageId) -> &UpgradableLatch<P> {
+        self.upgradable_latches
+            .get(id)
+            .expect("Asked for an invalid pointer. Lock for page was not acquired")
+    }
+
+    /// Returns an iterator over the visited page IDs
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &PageId> {
+        self.visited_pages.iter()
+    }
+
+    /// Returns a mutable iterator over the visited page IDs
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut PageId> {
+        self.visited_pages.iter_mut()
+    }
+
+    /// Consumes the TraverseStack and returns an iterator over owned PageIds
+    pub(crate) fn into_iter(self) -> impl Iterator<Item = PageId> {
+        self.visited_pages.into_iter()
+    }
+
+    /// Returns an iterator over pairs of consecutive page IDs
+    pub(crate) fn iter_pairs(&self) -> impl Iterator<Item = (&PageId, &PageId)> {
+        self.visited_pages
+            .windows(2)
+            .map(|window| (&window[0], &window[1]))
+    }
+
+    /// Returns an iterator over chunks of 2 page IDs
+    pub(crate) fn iter_chunks(&self) -> std::slice::Chunks<'_, PageId> {
+        self.visited_pages.chunks(2)
+    }
+
+    /// Returns an iterator over pairs of consecutive page IDs
+    pub(crate) fn iter_pairs_rev(&self) -> impl Iterator<Item = (&PageId, &PageId)> {
+        self.visited_pages
+            .windows(2)
+            .rev()
+            .map(|window| (&window[1], &window[0])) // Invert the pair too
+    }
+
+    /// Returns the number of nodes in the visited stack
+    pub(crate) fn len(&self) -> usize {
+        self.visited_pages.len()
+    }
+}
+
+impl<'a, P> IntoIterator for &'a TraverseStack<P> {
+    type Item = &'a PageId;
+    type IntoIter = std::slice::Iter<'a, PageId>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.visited_pages.iter()
+    }
+}
+
+impl<'a, P> IntoIterator for &'a mut TraverseStack<P> {
+    type Item = &'a mut PageId;
+    type IntoIter = std::slice::IterMut<'a, PageId>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.visited_pages.iter_mut()
+    }
+}
+
+impl<P> IntoIterator for TraverseStack<P> {
+    type Item = PageId;
+    type IntoIter = std::vec::IntoIter<PageId>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.visited_pages.into_iter()
     }
 }

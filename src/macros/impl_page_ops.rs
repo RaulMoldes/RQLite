@@ -259,6 +259,15 @@ macro_rules! impl_btree_page_ops {
                 }
             }
 
+            fn can_remove(&self, cell_size: usize, min_payload_factor: f32) -> bool {
+                match self {
+                    $enum::$leaf_variant(page) => page.can_remove(cell_size, min_payload_factor),
+                    $enum::$interior_variant(page) => {
+                        page.can_remove(cell_size, min_payload_factor)
+                    }
+                }
+            }
+
             fn fits_in(&self, additional_size: usize, max_payload_factor: f32) -> bool {
                 match self {
                     $enum::$leaf_variant(page) => page.fits_in(additional_size, max_payload_factor),
@@ -270,7 +279,3 @@ macro_rules! impl_btree_page_ops {
         }
     };
 }
-
-
-
-

@@ -24,6 +24,11 @@ pub(crate) trait BTreePageOps {
     fn fits_in(&self, additional_size: usize, max_payload_factor: f32) -> bool
     where
         Self: HeaderOps;
+
+    /// Check if we can remove a cell from a page
+    fn can_remove(&self, cell_size: usize, min_payload_factor: f32) -> bool
+    where
+        Self: HeaderOps;
 }
 
 #[derive(Clone)]
@@ -134,21 +139,22 @@ impl<BTreeCellType: Cell> BTreePageOps for BTreePage<BTreeCellType> {
         false
     }
 
+    fn can_remove(&self, cell_size: usize, min_payload_factor: f32) -> bool
+    where
+        Self: HeaderOps,
+    {
+        let minimum_used_space = (self.page_size() as f32 * min_payload_factor) as usize;
+        let used_space = self.page_size() - self.free_space();
+        used_space - cell_size - SLOT_SIZE >= minimum_used_space
+    }
+
     fn fits_in(&self, additional_size: usize, max_payload_factor: f32) -> bool
     where
         Self: HeaderOps,
     {
         let maximum_used_space = (self.page_size() as f32 * max_payload_factor) as usize;
         let used_space = self.page_size() - self.free_space();
-
-        if let Some(last_item) = self.cell_indices.first() {
-            if let Some(cell) = self.cells.get(&last_item.offset) {
-                if used_space.saturating_add(cell.size()) < maximum_used_space {
-                    return true;
-                }
-            }
-        }
-        false
+        used_space + additional_size + SLOT_SIZE <= maximum_used_space
     }
 }
 

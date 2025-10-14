@@ -3,10 +3,9 @@ use crate::serialization::Serializable;
 use crate::types::PageId;
 use crate::HeaderOps;
 
+use crate::storage::guards::{ReadOnlyLatch, UpgradableLatch, WriteLatch};
 use crate::PageType;
-use parking_lot::{
-    ArcRwLockReadGuard, ArcRwLockUpgradableReadGuard, ArcRwLockWriteGuard, RawRwLock, RwLock,
-};
+use parking_lot::RwLock;
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
 
 pub(crate) struct PageFrame<P> {
@@ -64,10 +63,12 @@ pub(crate) trait Frame<P: Send + Sync>: std::fmt::Debug {
     fn id(&self) -> PageId;
     fn is_free(&self) -> bool;
     fn is_dirty(&self) -> bool;
-    fn into_inner(self) -> std::sync::Arc<RwLock<P>>;
-    fn read(&self) -> ArcRwLockReadGuard<RawRwLock, P>;
-    fn read_for_upgrade(&self) -> ArcRwLockUpgradableReadGuard<RawRwLock, P>;
-    fn write(&self) -> ArcRwLockWriteGuard<RawRwLock, P>;
+    fn into_inner(self) -> Arc<RwLock<P>>;
+    fn read(&self) -> ReadOnlyLatch<P>;
+    fn read_for_upgrade(&self) -> UpgradableLatch<P>;
+    fn write(&self) -> WriteLatch<P>;
+
+    fn mark_dirty(&mut self);
 }
 
 impl<P> PageFrame<P> {
@@ -132,17 +133,20 @@ where
         self.is_dirty.load(Ordering::SeqCst)
     }
 
-    fn read(&self) -> ArcRwLockReadGuard<RawRwLock, P> {
-        self.page.read_arc()
-    }
-
-    fn read_for_upgrade(&self) -> ArcRwLockUpgradableReadGuard<RawRwLock, P> {
-        RwLock::upgradable_read_arc(&self.page)
-    }
-
-    fn write(&self) -> ArcRwLockWriteGuard<RawRwLock, P> {
+    fn mark_dirty(&mut self) {
         self.is_dirty.store(true, Ordering::SeqCst);
-        self.page.write_arc()
+    }
+
+    fn read(&self) -> ReadOnlyLatch<P> {
+        ReadOnlyLatch::lock(&self.page)
+    }
+
+    fn read_for_upgrade(&self) -> UpgradableLatch<P> {
+        UpgradableLatch::lock(&self.page)
+    }
+
+    fn write(&self) -> WriteLatch<P> {
+        WriteLatch::lock(&self.page)
     }
 }
 

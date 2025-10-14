@@ -41,8 +41,7 @@ pub(crate) trait HeaderOps {
     }
 
     fn available_space(&self, max_payload_factor: f32) -> usize {
-        let used_space = self.page_size().saturating_sub(self.free_space());
-        ((self.page_size() as f32 * max_payload_factor) as usize).saturating_sub(used_space)
+        self.max_cell_size(max_payload_factor)
     }
 
     /// Shortcut to get the next overflow page in the overflow chain.
@@ -53,7 +52,7 @@ pub(crate) trait HeaderOps {
     /// If the cell does not fit on a page, but does not excede the maximum size, we create a new page.
     /// If the cell excedes the max_cell_size, we insert what is available and then create an overflow chain to insert the rest of the data.
     fn max_cell_size(&self, max_payload_factor: f32) -> usize {
-        (self.page_size().saturating_sub(PAGE_HEADER_SIZE) as f32 * max_payload_factor) as usize
+        (self.free_space() as f32 * max_payload_factor) as usize
     }
 
     /// Setter for the page type.
@@ -63,17 +62,15 @@ pub(crate) trait HeaderOps {
     fn set_next_overflow(&mut self, overflowpage: PageId);
 
     fn is_on_underflow_state(&self, min_payload_factor: f32) -> bool {
-        self.cell_count() == 0
-            || self.free_space()
-                >= (self.page_size() as f32 - (self.page_size() as f32 * min_payload_factor))
-                    as usize
+        let minimum_used_space = (self.page_size() as f32 * min_payload_factor) as usize;
+        let used_space = self.page_size() - self.free_space();
+        self.cell_count() == 0 || used_space < minimum_used_space
     }
 
     fn is_on_overflow_state(&self, max_payload_factor: f32) -> bool {
-        self.cell_count() > 1
-            && self.free_space()
-                <= (self.page_size() as f32 - (self.page_size() as f32 * max_payload_factor))
-                    as usize
+        let maximum_used_space = (self.page_size() as f32 * max_payload_factor) as usize;
+        let used_space = self.page_size() - self.free_space();
+        self.cell_count() > 1 && used_space > maximum_used_space
     }
 }
 

@@ -1,6 +1,5 @@
 use super::*;
 use crate::serialization::Serializable;
-use crate::storage::guards::*;
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -164,7 +163,7 @@ impl TryFrom<TableFrame> for IOFrame {
 
     fn try_from(table_frame: TableFrame) -> Result<Self, Self::Error> {
         let is_dirty = table_frame.is_dirty();
-        let buffer = TablePageRead(table_frame.read()).into();
+        let buffer = table_frame.read().into();
         Ok(PageFrame::from_buffer_with_metadata(
             buffer,
             is_dirty,
@@ -179,7 +178,7 @@ impl TryFrom<IndexFrame> for IOFrame {
 
     fn try_from(index_frame: IndexFrame) -> Result<Self, Self::Error> {
         let is_dirty = index_frame.is_dirty();
-        let buffer = IndexPageRead(index_frame.read()).into();
+        let buffer = index_frame.read().into();
         Ok(PageFrame::from_buffer_with_metadata(
             buffer,
             is_dirty,
@@ -194,7 +193,7 @@ impl TryFrom<OverflowFrame> for IOFrame {
 
     fn try_from(overflow_frame: OverflowFrame) -> Result<Self, Self::Error> {
         let is_dirty = overflow_frame.is_dirty();
-        let buffer = OvfPageRead(overflow_frame.read()).into();
+        let buffer = overflow_frame.read().into();
 
         Ok(PageFrame::from_buffer_with_metadata(
             buffer,

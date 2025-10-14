@@ -1,5 +1,10 @@
+use crate::io::cache::MemoryPool;
+use crate::io::disk::FileOps;
+use crate::io::frames::{IOFrame, OverflowFrame, PageFrame};
+use crate::io::pager::Pager;
 use crate::storage::Cell;
-use crate::SLOT_SIZE;
+use crate::types::PageId;
+use crate::{PageType, SLOT_SIZE};
 
 pub(crate) fn size_for_cell<BTreeCellType: Cell>(cell: &BTreeCellType) -> usize {
     cell.size() + SLOT_SIZE
@@ -44,68 +49,175 @@ pub(crate) fn split_cells_by_size<BTreeCellType: Cell>(
     (left.to_vec(), right.to_vec())
 }
 
+pub(crate) fn try_get_frame<P: Send + Sync, FI: FileOps, M: MemoryPool>(
+    id: PageId,
+    pager: &mut Pager<FI, M>,
+) -> std::io::Result<PageFrame<P>>
+where
+    PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
+{
+    let buf = pager.get_single(id)?;
+    PageFrame::try_from(buf)
+}
 
+pub(crate) fn try_get_overflow_frame<FI: FileOps, M: MemoryPool>(
+    id: PageId,
+    pager: &mut Pager<FI, M>,
+) -> std::io::Result<OverflowFrame> {
+    let buf = pager.get_single(id)?;
+    OverflowFrame::try_from(buf)
+}
 
+pub(crate) fn allocate_page<P: Send + Sync, FI: FileOps, M: MemoryPool>(
+    page_type: PageType,
+    pager: &mut Pager<FI, M>,
+) -> std::io::Result<PageFrame<P>>
+where
+    PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
+{
+    PageFrame::try_from(pager.alloc_page(page_type)?)
+}
 
-/// Splits a collection of B-Tree cells into multiple groups with approximately equal total size.
-/// This function takes a list of cells that implement the [`Cell`] trait and divides them into
-/// `num_splits` groups such that the **sum of the sizes** of the cells in each group is roughly
-/// balanced.
-/// The number of groups returned will be between 1 and `num_splits`. If fewer cells are
-/// provided than requested splits, each cell will form its own group.
-/// The function aims for even **total size** distribution rather than equal **cell count**.
-/// The result is suitable for balancing B-Tree pages or similar structures where
-/// data size uniformity matters more than item count
-pub(crate) fn split_cells_by_size_evenly<BTreeCellType: Cell + Clone>(
-    mut taken_cells: Vec<BTreeCellType>,
-    num_splits: usize,
+// Linear partition the cell sizes using dynamic programming.
+fn linear_partition_sizes(sizes: &[usize], k: usize) -> Vec<usize> {
+    let n = sizes.len();
+    if n == 0 {
+        return vec![];
+    }
+    let k = std::cmp::min(k, n);
+
+    // prefix sum: S[0] = 0, S[i] = sum sizes[0..i)
+    let mut s = vec![0usize; n + 1];
+    for i in 0..n {
+        s[i + 1] = s[i] + sizes[i];
+    }
+
+    // dp[i][j] = minimal possible largest sum when partitioning first i elems into j groups
+    // use 1-based for i and j to simplify indexing: i in 1..=n, j in 1..=k
+    let mut dp = vec![vec![usize::MAX; k + 1]; n + 1];
+    let mut div = vec![vec![0usize; k + 1]; n + 1]; // divider positions for reconstruction
+
+    // base: j = 1 -> one group: sum up to i
+    for i in 1..=n {
+        dp[i][1] = s[i];
+        div[i][1] = 0;
+    }
+    // base: i = 1 -> j groups -> only possible if j==1
+    dp[1][1] = s[1];
+
+    // fill DP
+    for j in 2..=k {
+        for i in 1..=n {
+            if j > i {
+                dp[i][j] = dp[i][i]; // more groups than items -> treat as i groups
+                div[i][j] = i - 1;
+                continue;
+            }
+            // try all possible previous cut positions p: 0..i-1
+            // dp[i][j] = min_p max(dp[p][j-1], sum(p..i))
+            let mut best = usize::MAX;
+            let mut best_p = 0usize;
+            // optimize: p should be at least j-1 - but we'll iterate
+            for p in (j - 1)..=i - 1 {
+                let left = dp[p][j - 1];
+                let right = s[i] - s[p];
+                let candidate = if left > right { left } else { right };
+                if candidate < best {
+                    best = candidate;
+                    best_p = p;
+                }
+            }
+            dp[i][j] = best;
+            div[i][j] = best_p;
+        }
+    }
+
+    // reconstruct cuts for n items and k groups
+    let mut cuts: Vec<usize> = Vec::with_capacity(k);
+    let mut i = n;
+    let mut j = k;
+    while j > 0 {
+        let p = div[i][j];
+        cuts.push(i); // group ends at i (exclusive end index)
+        i = p;
+        j -= 1;
+        if i == 0 {
+            // remaining groups are empty (shouldn't happen if k <= n)
+            while j > 0 {
+                cuts.push(0);
+                j -= 1;
+            }
+            break;
+        }
+    }
+    cuts.reverse();
+    // `cuts` are the end indices for each group: e.g. [r1, r2, ..., rn] where groups are [0..r1), [r1..r2), ...
+    cuts
+}
+
+/// Computes the optimal cell distribution in a set of groups, given each cell size,
+/// page size and min and max payload fractions. Used during rebalancing specially after delete operations.
+pub(crate) fn redistribute_cells<BTreeCellType: Cell + Clone>(
+    cells: &mut [BTreeCellType],
+    max_payload_fraction: f32,
+    min_payload_fraction: f32,
+    page_size: usize,
 ) -> Vec<Vec<BTreeCellType>> {
-
-    assert!(num_splits > 0, "num_splits must be positive");
-
-    let total_cells = taken_cells.len();
-    if num_splits == 1 {
-        return vec![taken_cells];
+    let n = cells.len();
+    if n == 0 {
+        return vec![];
     }
+    cells.sort_by_key(|c| c.key());
+    let sizes: Vec<usize> = cells.iter().map(|c| c.size()).collect();
+    let total: usize = sizes.iter().sum();
+    let max_payload = (page_size as f32 * max_payload_fraction) as usize;
+    let min_payload = (page_size as f32 * min_payload_fraction) as usize;
 
-    if total_cells <= num_splits {
-        eprintln!(
-            "WARNING: requested {num_splits} splits but only {total_cells} cells available."
-        );
-        return taken_cells.into_iter().map(|c| vec![c]).collect();
-    }
+    // try k = 1..n, prefer smallest k that yields all groups between min..max
+    let mut best_groups: Option<Vec<Vec<BTreeCellType>>> = None;
+    let mut best_max_load = usize::MAX;
 
-    // Order by key
-    taken_cells.sort_by_key(|cell| cell.key());
-
-    // Compute the required size per group
-    let total_size: usize = taken_cells.iter().map(|c| c.size()).sum();
-    let target_size = total_size.div_ceil(num_splits); // div_ceil
-
-    let mut result = Vec::with_capacity(num_splits);
-    let mut current_group = Vec::new();
-    let mut current_size = 0usize;
-    let mut splits_remaining = num_splits;
-
-    for cell in taken_cells.into_iter() {
-        let cell_size = cell.size();
-        let should_close = splits_remaining > 1
-            && current_size > 0
-            && current_size + cell_size >= target_size;
-
-        if should_close {
-            result.push(std::mem::take(&mut current_group));
-            current_size = 0;
-            splits_remaining -= 1;
+    for k in 1..=n {
+        let cuts = linear_partition_sizes(&sizes, k);
+        // build groups from cuts
+        let mut groups_sizes = Vec::with_capacity(cuts.len());
+        let mut groups_cells: Vec<Vec<BTreeCellType>> = Vec::with_capacity(cuts.len());
+        let mut start = 0usize;
+        for &end in &cuts {
+            let mut grp = Vec::new();
+            let mut grp_sum = 0usize;
+            for idx in start..end {
+                grp_sum += sizes[idx];
+                grp.push(cells[idx].clone());
+            }
+            groups_sizes.push(grp_sum);
+            groups_cells.push(grp);
+            start = end;
+        }
+        // check constraints
+        let mut ok = true;
+        let mut max_load = 0usize;
+        for &gs in &groups_sizes {
+            if gs > max_load {
+                max_load = gs;
+            }
+            if gs > max_payload || gs < min_payload {
+                ok = false;
+            }
         }
 
-        current_size += cell_size;
-        current_group.push(cell);
+        if ok {
+            // prefer the smallest k that satisfies constraints
+            return groups_cells;
+        }
+
+        // keep track of best by minimizing the maximum load
+        if max_load < best_max_load {
+            best_max_load = max_load;
+            best_groups = Some(groups_cells);
+        }
     }
 
-    if !current_group.is_empty() {
-        result.push(current_group);
-    }
-
-    result
+    // if no k satisfied the min/max constraints, return best found distribution (minimized max load)
+    best_groups.unwrap_or_else(|| vec![cells.to_vec()])
 }

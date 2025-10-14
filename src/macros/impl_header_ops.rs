@@ -95,9 +95,12 @@ macro_rules! impl_header_ops {
 }
 
 #[macro_export]
-macro_rules! impl_header_ops_rguard {
-    ($guard_type:ident) => {
-        impl HeaderOps for $guard_type {
+macro_rules! impl_header_ops_guard {
+    ($guard_type:ident<$page:ident>) => {
+        impl<$page> HeaderOps for $guard_type<$page>
+        where
+            $page: HeaderOps,
+        {
             fn cell_count(&self) -> usize {
                 self.0.cell_count()
             }
@@ -136,57 +139,6 @@ macro_rules! impl_header_ops_rguard {
 
             fn set_type(&mut self, _page_type: PageType) {
                 panic!("Cannot modify through ReadGuard");
-            }
-
-            fn free_space_start(&self) -> usize {
-                self.0.free_space_start()
-            }
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! impl_header_ops_wguard {
-    ($guard_type:ident) => {
-        impl HeaderOps for $guard_type {
-            fn cell_count(&self) -> usize {
-                self.0.cell_count()
-            }
-
-            fn content_start(&self) -> usize {
-                self.0.content_start()
-            }
-
-            fn free_space(&self) -> usize {
-                self.0.free_space()
-            }
-
-            fn id(&self) -> PageId {
-                self.0.id()
-            }
-
-            fn is_overflow(&self) -> bool {
-                self.0.is_overflow()
-            }
-
-            fn page_size(&self) -> usize {
-                self.0.page_size()
-            }
-
-            fn type_of(&self) -> PageType {
-                self.0.type_of()
-            }
-
-            fn get_next_overflow(&self) -> Option<PageId> {
-                self.0.get_next_overflow()
-            }
-
-            fn set_next_overflow(&mut self, overflowpage: PageId) {
-                self.0.set_next_overflow(overflowpage)
-            }
-
-            fn set_type(&mut self, page_type: PageType) {
-                self.0.set_type(page_type)
             }
 
             fn free_space_start(&self) -> usize {
