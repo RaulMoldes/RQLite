@@ -168,9 +168,7 @@ fn test_insert_varying_sizes() {
 
         let cell = create_test_cell(row_id, vec![i as u8; size]);
 
-        if i == 43 {
-            btree.print_tree(&mut pager);
-        };
+        
         btree.insert(row_id, cell, &mut pager).unwrap();
 
     }

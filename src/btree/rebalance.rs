@@ -514,7 +514,7 @@ where
                 if i <= num_groups.saturating_sub(1) {
                     let cells_for_child = &splitted_groups[i];
                     let num_cells_for_child = cells_for_child.len();
-     
+
                     for cell in cells_for_child {
                         let child_wlock = traversal.write(child_id);
                         child_wlock.insert_child(cell.clone())?;
@@ -637,7 +637,7 @@ where
         pager: &mut Pager<FI, M>,
         method: RebalanceMethod,
     ) -> std::io::Result<()> {
-        let mut nodes_rebalance: Vec<PageId> = traversal.iter().map(|&a| a).collect();
+        let mut nodes_rebalance: Vec<PageId> = traversal.iter().copied().collect();
         nodes_rebalance.reverse();
 
         // Start traversing the tree upwards.
