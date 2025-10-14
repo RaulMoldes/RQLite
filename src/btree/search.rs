@@ -30,8 +30,8 @@ where
         + LeafPageOps<Vl, KeyType = K>
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
-    PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
+     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
+    IOFrame: From<PageFrame<P>>,
 {
     /// Search for a cell by its Key.
     /// If the cell happens to have a linked overflow chain, merge all the pages in the chain to return the reconstructed payload
@@ -65,7 +65,7 @@ where
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
+    IOFrame: From<PageFrame<P>>,
 {
     /// Search for a cell by its Key.
     /// If the cell happens to have a linked overflow chain, merge all the pages in the chain to return the reconstructed payload.

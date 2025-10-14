@@ -48,7 +48,7 @@ impl Serializable for PageId {
         Ok(PageId(u32::from_be_bytes(buffer)))
     }
 
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
         writer.write_all(&self.0.to_be_bytes())?;
         Ok(())
     }

@@ -1,13 +1,15 @@
-use crate::io::frames::{Frame, IOFrame, IndexFrame, OverflowFrame, TableFrame};
-use crate::test_frame_conversion;
-use crate::{
-    types::{Key, PageId},
-    PageType,
-};
+
+use crate::io::pager::Pager;
+
+
+use crate::PageType;
 use std::fs::File;
 use std::io::{Read, Result, Write};
 use tempfile::TempDir;
 mod utils;
+use crate::io::cache::StaticPool;
+use crate::io::disk::{Buffer, FileOps};
+use tempfile::NamedTempFile;
 
 #[cfg(target_os = "linux")]
 mod libfiu;
@@ -76,48 +78,55 @@ fn test_sync_all_with_fiu_injection() -> Result<()> {
     Ok(())
 }
 
-test_frame_conversion!(
-    test_io_to_table_frame_conversion,
-    IOFrame => TableFrame,
-    [
-        (PageId::new_key(), PageType::TableLeaf, 4096, None),
-        (PageId::new_key(), PageType::TableInterior, 4096, Some(PageId::new_key()))
-    ],
-    |frame: &TableFrame, idx: usize| {
-        assert!(frame.is_table(), "Test case {}: Frame should be a table frame", idx);
-        assert!(!frame.is_index(), "Test case {}: Frame should not be an index frame", idx);
+#[test]
+fn test_pager() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+    let mut pager: Pager<Buffer, StaticPool> = Pager::create(path).unwrap();
 
-        // Validar que el page_type es correcto
-        match idx {
-            0 => assert_eq!(frame.page_type(), PageType::TableLeaf),
-            1 => assert_eq!(frame.page_type(), PageType::TableInterior),
-            _ => panic!("Unexpected test case index"),
-        }
-    }
-);
+    // Force to use a small cache size to force eviction
+    pager.start_with(2).unwrap();
 
-test_frame_conversion!(
-    test_io_to_index_frame_conversion,
-    IOFrame => IndexFrame,
-    [
-        (PageId::new_key(), PageType::IndexLeaf, 4096, None),
-        (PageId::new_key(), PageType::IndexInterior, 4096, Some(PageId::new_key()))
-    ],
-    |frame: &IndexFrame, idx: usize| {
-        assert!(frame.is_index(), "Test case {}: Frame should be an index frame", idx);
-        assert!(!frame.is_table(), "Test case {}: Frame should not be a table frame", idx);
-        assert!(!frame.is_dirty(), "Test case {}: Newly converted frame should not be dirty", idx);
-    }
-);
+    // Create three pages (greater than cache capacity)
+    let mut page_ids = Vec::new();
+    for i in 0..3 {
+        let mut frame = pager.alloc_page(PageType::TableLeaf).unwrap();
+        let page_id = frame.id();
+        println!("Generado page id: {}", page_id);
+        page_ids.push(page_id);
 
-test_frame_conversion!(
-    test_io_to_overflow_frame_conversion,
-    IOFrame => OverflowFrame,
-    [
-        (PageId::new_key(), PageType::Overflow, 4096, None)
-    ],
-    |frame: &OverflowFrame, _idx: usize| {
-        assert!(frame.is_overflow(), "Frame should be an overflow frame");
-        assert_eq!(frame.page_type(), PageType::Overflow);
+        // Mark the page as dirty to force writing to disk
+        frame.mark_dirty();
     }
-);
+
+    // Verify that there are only two pages on cache
+    let cached_count = page_ids
+        .iter()
+        .filter(|id| pager.try_get_from_cache(**id).is_some())
+        .count();
+    assert!(
+        cached_count <= 2,
+        "There should be two pages on cache only!"
+    );
+
+    // Flush should evict all dirty pages to the disk
+    assert!(pager.flush().is_ok());
+
+    // After clearing the cache it will get empty.
+    // We should be able to read from the disk now.
+    pager.clear_cache();
+
+    // Verify that we are able to do so
+    for page_id in page_ids {
+        let read_frame = pager.get_single(page_id);
+        assert!(
+            read_frame.is_ok(),
+            "Should be able to read page {:?} from disk",
+            page_id
+        );
+        assert_eq!(read_frame.unwrap().id(), page_id);
+    }
+
+    // Sync all
+    assert!(pager.sync_all().is_ok());
+}

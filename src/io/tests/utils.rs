@@ -22,7 +22,7 @@ impl Serializable for TestPage {
         Ok(TestPage { id })
     }
 
-    fn write_to<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn write_to<W: std::io::Write>(self, writer: &mut W) -> std::io::Result<()> {
         self.id.write_to(writer)?;
         Ok(())
     }

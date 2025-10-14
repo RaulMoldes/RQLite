@@ -1,6 +1,7 @@
 use crate::io::cache::MemoryPool;
 use crate::io::disk::FileOps;
-use crate::io::frames::{IOFrame, OverflowFrame, PageFrame};
+use crate::storage::OverflowPage;
+use crate::io::frames::{IOFrame, PageFrame};
 use crate::io::pager::Pager;
 use crate::storage::Cell;
 use crate::types::PageId;
@@ -63,9 +64,9 @@ where
 pub(crate) fn try_get_overflow_frame<FI: FileOps, M: MemoryPool>(
     id: PageId,
     pager: &mut Pager<FI, M>,
-) -> std::io::Result<OverflowFrame> {
+) -> std::io::Result<PageFrame<OverflowPage>> {
     let buf = pager.get_single(id)?;
-    OverflowFrame::try_from(buf)
+    PageFrame::<OverflowPage>::try_from(buf)
 }
 
 pub(crate) fn allocate_page<P: Send + Sync, FI: FileOps, M: MemoryPool>(

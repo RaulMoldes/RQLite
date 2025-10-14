@@ -105,7 +105,7 @@ impl fmt::Display for Varint {
 }
 
 impl Serializable for Varint {
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
         // ZigZag-encode
         let mut value = Self::encode_zigzag(self.0);
 

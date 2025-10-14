@@ -1,7 +1,8 @@
-use crate::io::frames::{Frame, IOFrame};
+use crate::io::frames::IOFrame;
 use crate::types::PageId;
 use crate::MAX_CACHE_SIZE;
 use std::collections::{HashMap, VecDeque};
+use std::clone::Clone;
 
 #[derive(Debug, Default)]
 pub(crate) struct MemoryStats {
@@ -27,7 +28,7 @@ pub(crate) trait MemoryPool {
     fn cache(&mut self, frame: IOFrame) -> Option<IOFrame>;
     fn evict(&mut self, frame: Option<PageId>) -> Option<IOFrame>;
     fn get(&mut self, id: &PageId) -> Option<IOFrame>;
-    fn clear(&mut self);
+    fn clear(&mut self) -> Vec<IOFrame>;
 }
 
 pub(crate) struct StaticPool {
@@ -91,12 +92,14 @@ impl MemoryPool for StaticPool {
             return None;
         }
 
-        let evicted = self.evict(None);
+        let evicted = if self.capacity <= self.frames.len() {
+            self.evict(None)
+        } else {
+            None
+        };
+
         self.free_list.push_back(id);
         self.frames.insert(id, frame);
-
-        let frames: Vec<PageId> = self.frames.keys().cloned().collect();
-
         evicted
     }
 
@@ -109,26 +112,26 @@ impl MemoryPool for StaticPool {
         }
 
         // TODO: I NEED I WAY TO CHECK FOR OOM ERRORS HERE.
-        if self.frames.len() >= self.capacity {
-            // Pop from the queue until there is one page that we can evict.
-            while let Some(id) = self.free_list.pop_front() {
-                if let Some(frame) = self.frames.remove(&id) {
-                    if frame.is_free() {
-                        self.stats.frames_evicted += 1;
+        //if self.frames.len() >= self.capacity {
+        // Pop from the queue until there is one page that we can evict.
+        while let Some(id) = self.free_list.pop_front() {
+            if let Some(frame) = self.frames.remove(&id) {
+                if frame.is_free() {
+                    self.stats.frames_evicted += 1;
 
-                        return Some(frame);
-                    }
-                    self.free_list.push_back(id);
+                    return Some(frame);
                 }
+                self.free_list.push_back(id);
             }
         }
+        // }
         None
     }
 
     fn get(&mut self, id: &PageId) -> Option<IOFrame> {
         if let Some(frame) = self.frames.get(id) {
             self.stats.cache_hits += 1;
-            return Some(frame.clone());
+            return Some((*frame).clone());
         }
 
         self.stats.cache_misses += 1;
@@ -136,9 +139,16 @@ impl MemoryPool for StaticPool {
         None
     }
 
-    fn clear(&mut self) {
-        self.frames.clear();
+    fn clear(&mut self) -> Vec<IOFrame> {
+        let mut remaining_frames = Vec::with_capacity(self.frames.len());
+        for (_, frame) in self.frames.drain() {
+            // We do not do any checks here because this is like a force-eviction of all pages, useful when a crash happens and we need to write everything to the disk as is.
+            // For safe eviction use [evict].
+            remaining_frames.push(frame);
+        }
+
         self.free_list.clear();
         self.capacity = 0;
+        remaining_frames
     }
 }

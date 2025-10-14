@@ -8,16 +8,16 @@
 //! To achieve maximum portability, we always serialize and deserialize everything using big endian format.
 use crate::serialization::Serializable;
 use crate::{
-    IncrementalVaccum, ReadWriteVersion, TextEncoding, HEADER_SIZE, LEAF_PAYLOAD_FRACTION,
-    MAX_PAGE_SIZE, MAX_PAYLOAD_FRACTION, MIN_PAGE_SIZE, MIN_PAYLOAD_FRACTION, PAGE_SIZE,
-    RQLITE_HEADER_STRING,
+    IncrementalVaccum, RQLiteConfig, ReadWriteVersion, TextEncoding, HEADER_SIZE,
+    LEAF_PAYLOAD_FRACTION, MAX_CACHE_SIZE, MAX_PAGE_SIZE, MAX_PAYLOAD_FRACTION, MIN_PAGE_SIZE,
+    MIN_PAYLOAD_FRACTION, PAGE_SIZE, RQLITE_HEADER_STRING,
 };
 use std::fmt;
 use std::io::{self, Read, Write};
 
 /// Represents the RQLite database header.
 /// Reference: https://www.sqlite.org/fileformat.html
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub(crate) struct Header {
     /// Database page size. Must be a power of two between 512 and 65536
     pub(crate) page_size: u32,
@@ -28,11 +28,11 @@ pub(crate) struct Header {
     /// Nº of bytes reserved at the end of each page. Usually is zero.
     pub(crate) reserved_space: u8,
     /// Maximum embedded payload fraction. Must be 64.
-    pub(crate) max_payload_fraction: u8,
+    pub(crate) max_payload_fraction: f32,
     /// Minimum embedded payload fraction. Must be 32.
-    pub(crate) min_payload_fraction: u8,
+    pub(crate) min_payload_fraction: f32,
     /// Leaf payload fraction. Must be 32.
-    pub(crate) leaf_payload_fraction: u8,
+    pub(crate) leaf_payload_fraction: f32,
     /// File change counter.
     pub(crate) change_counter: u32,
     /// Total number of pages in the database.
@@ -61,7 +61,7 @@ pub(crate) struct Header {
     /// Application ID.
     pub(crate) application_id: u32,
     /// Reserved for future expansion.
-    pub(crate) reserved: [u8; 20],
+    pub(crate) reserved: [u8; 11],
     /// RQlite version valid for.
     /// This is used to determine if the database file is compatible with the current version of RQLite.
     pub(crate) version_valid_for: u32,
@@ -93,22 +93,25 @@ impl Default for Header {
             user_version: 0,
             incremental_vacuum_mode: IncrementalVaccum::Disabled,
             application_id: 0,
-            reserved: [0; 20],
+            reserved: [0; 11],
             version_valid_for: 0,
             rqlite_version_number: 0,
         }
     }
 }
 
+
+
 impl Header {
     /// Creates a new header with a specific page size
-    pub fn create(page_size: u32) -> Self {
+    pub fn create(config: RQLiteConfig) -> Self {
         Header {
-            page_size: page_size
+            page_size: config
+                .page_size
                 .next_multiple_of(2)
                 .clamp(MIN_PAGE_SIZE, MAX_PAGE_SIZE),
-            write_version: ReadWriteVersion::Wal,
-            read_version: ReadWriteVersion::Wal,
+            write_version: config.read_write_version,
+            read_version: config.read_write_version,
             reserved_space: 0,
             max_payload_fraction: MAX_PAYLOAD_FRACTION,
             min_payload_fraction: MIN_PAYLOAD_FRACTION,
@@ -119,13 +122,13 @@ impl Header {
             freelist_pages: 0,
             schema_cookie: 0,
             schema_format_number: 0,
-            default_cache_size: 0,
+            default_cache_size: config.cache_size.unwrap_or(MAX_CACHE_SIZE),
             largest_root_btree_page: 0,
-            text_encoding: TextEncoding::Utf8,
+            text_encoding: config.text_encoding,
             user_version: 0,
-            incremental_vacuum_mode: IncrementalVaccum::Disabled,
+            incremental_vacuum_mode: config.incremental_vacuum_mode,
             application_id: 0,
-            reserved: [0; 20],
+            reserved: [0; 11],
             version_valid_for: 0,
             rqlite_version_number: 0,
         }
@@ -134,7 +137,7 @@ impl Header {
 
 impl Serializable for Header {
     /// Writes the Header to a writer using
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
         // Magic string (bytes 0-15)
         writer.write_all(RQLITE_HEADER_STRING)?;
         // Page size (bytes 16-17)
@@ -145,37 +148,37 @@ impl Serializable for Header {
         writer.write_all(&[self.read_version as u8])?;
         // Reserved space (byte 20)
         writer.write_all(&[self.reserved_space])?;
-        // Max payload fraction (byte 21)
-        writer.write_all(&[self.max_payload_fraction])?;
-        // Min payload fraction (byte 22)
-        writer.write_all(&[self.min_payload_fraction])?;
-        // Leaf payload fraction (byte 23)
-        writer.write_all(&[self.leaf_payload_fraction])?;
-        // Change counter (bytes 24-27)
+        // Max payload fraction (byte 21 to 24)
+        writer.write_all(&self.max_payload_fraction.to_be_bytes())?;
+        // Min payload fraction (byte 25 to 28)
+        writer.write_all(&self.min_payload_fraction.to_be_bytes())?;
+        // Leaf payload fraction (byte 29 to 32)
+        writer.write_all(&self.leaf_payload_fraction.to_be_bytes())?;
+        // Change counter (bytes 33-36)
         writer.write_all(&self.change_counter.to_be_bytes())?;
-        // Database size (bytes 28-31)
+        // Database size (bytes 37-40)
         writer.write_all(&self.database_size.to_be_bytes())?;
-        // First freelist trunk page (bytes 32-35)
+        // First freelist trunk page (bytes 41-44)
         writer.write_all(&self.first_freelist_trunk_page.to_be_bytes())?;
-        // Freelist pages (bytes 36-39)
+        // Freelist pages (bytes 45-48)
         writer.write_all(&self.freelist_pages.to_be_bytes())?;
-        // Schema cookie (bytes 40-43)
+        // Schema cookie (bytes 49-52)
         writer.write_all(&self.schema_cookie.to_be_bytes())?;
-        // Schema format number (bytes 44-47)
+        // Schema format number (bytes 53-56)
         writer.write_all(&self.schema_format_number.to_be_bytes())?;
-        // Default cache size (bytes 48-51)
+        // Default cache size (bytes 57-58)
         writer.write_all(&self.default_cache_size.to_be_bytes())?;
-        // Largest root btree page (bytes 52-55)
+        // Largest root btree page (bytes 59-64)
         writer.write_all(&self.largest_root_btree_page.to_be_bytes())?;
-        // Text encoding (bytes 56-59)
+        // Text encoding (bytes 65-68)
         writer.write_all(&(self.text_encoding as u32).to_be_bytes())?;
-        // User version (bytes 60-63)
+        // User version (bytes 69-72)
         writer.write_all(&self.user_version.to_be_bytes())?;
-        // Incremental vacuum mode (bytes 64-67)
+        // Incremental vacuum mode (bytes 73-76)
         writer.write_all(&(self.incremental_vacuum_mode as u32).to_be_bytes())?;
-        // Application ID (bytes 68-71)
+        // Application ID (bytes 77-80)
         writer.write_all(&self.application_id.to_be_bytes())?;
-        // Reserved (bytes 72-91)
+        // Reserved (bytes 81-91)
         writer.write_all(&self.reserved)?;
         // Version valid for (bytes 92-95)
         writer.write_all(&self.version_valid_for.to_be_bytes())?;
@@ -227,42 +230,44 @@ impl Serializable for Header {
         // Reserved space (byte 20)
         let reserved_space = buffer[20];
 
-        // Payload fractions (bytes 21-23)
-        let max_payload_fraction = buffer[21];
-        let min_payload_fraction = buffer[22];
-        let leaf_payload_fraction = buffer[23];
+        let max_payload_fraction =
+            f32::from_be_bytes([buffer[21], buffer[22], buffer[23], buffer[24]]);
+        let min_payload_fraction =
+            f32::from_be_bytes([buffer[25], buffer[26], buffer[27], buffer[28]]);
+        let leaf_payload_fraction =
+            f32::from_be_bytes([buffer[29], buffer[30], buffer[31], buffer[32]]);
 
-        // Change counter (bytes 24-27)
-        let change_counter = u32::from_be_bytes([buffer[24], buffer[25], buffer[26], buffer[27]]);
+        // Change counter (bytes 33-36)
+        let change_counter = u32::from_be_bytes([buffer[33], buffer[34], buffer[35], buffer[36]]);
 
-        // Database size (bytes 28-31)
-        let database_size = u32::from_be_bytes([buffer[28], buffer[29], buffer[30], buffer[31]]);
+        // Database size (bytes 37-40)
+        let database_size = u32::from_be_bytes([buffer[37], buffer[38], buffer[39], buffer[40]]);
 
-        // First freelist trunk page (bytes 32-35)
+        // First freelist trunk page (bytes 41-34)
         let first_freelist_trunk_page =
-            u32::from_be_bytes([buffer[32], buffer[33], buffer[34], buffer[35]]);
+            u32::from_be_bytes([buffer[41], buffer[42], buffer[43], buffer[44]]);
 
-        // Freelist pages (bytes 36-39)
-        let freelist_pages = u32::from_be_bytes([buffer[36], buffer[37], buffer[38], buffer[39]]);
+        // Freelist pages (bytes 45-48)
+        let freelist_pages = u32::from_be_bytes([buffer[45], buffer[46], buffer[47], buffer[48]]);
 
-        // Schema cookie (bytes 40-43)
-        let schema_cookie = u32::from_be_bytes([buffer[40], buffer[41], buffer[42], buffer[43]]);
+        // Schema cookie (bytes 49-52)
+        let schema_cookie = u32::from_be_bytes([buffer[49], buffer[50], buffer[51], buffer[52]]);
 
-        // Schema format number (bytes 44-47)
+        // Schema format number (bytes 53-56)
         let schema_format_number =
-            u32::from_be_bytes([buffer[44], buffer[45], buffer[46], buffer[47]]);
+            u32::from_be_bytes([buffer[53], buffer[54], buffer[55], buffer[56]]);
 
-        // Default cache size (bytes 48-51)
+        // Default cache size (bytes 57-60)
         let default_cache_size =
-            u32::from_be_bytes([buffer[48], buffer[49], buffer[50], buffer[51]]);
+            u32::from_be_bytes([buffer[57], buffer[58], buffer[59], buffer[60]]);
 
-        // Largest root btree page (bytes 52-55)
+        // Largest root btree page (bytes 61-64)
         let largest_root_btree_page =
-            u32::from_be_bytes([buffer[52], buffer[53], buffer[54], buffer[55]]);
+            u32::from_be_bytes([buffer[61], buffer[62], buffer[63], buffer[64]]);
 
-        // Text encoding (bytes 56-59)
+        // Text encoding (bytes 65-68)
         let text_encoding =
-            match u32::from_be_bytes([buffer[56], buffer[57], buffer[58], buffer[59]]) {
+            match u32::from_be_bytes([buffer[65], buffer[66], buffer[67], buffer[68]]) {
                 1 => TextEncoding::Utf8,
                 2 => TextEncoding::Utf16le,
                 3 => TextEncoding::Utf16be,
@@ -274,12 +279,12 @@ impl Serializable for Header {
                 }
             };
 
-        // User version (bytes 60-63)
-        let user_version = u32::from_be_bytes([buffer[60], buffer[61], buffer[62], buffer[63]]);
+        // User version (bytes 69-72)
+        let user_version = u32::from_be_bytes([buffer[69], buffer[70], buffer[71], buffer[72]]);
 
-        // Incremental vacuum mode (bytes 64-67)
+        // Incremental vacuum mode (bytes 73-76)
         let incremental_vacuum_mode =
-            match u32::from_be_bytes([buffer[64], buffer[65], buffer[66], buffer[67]]) {
+            match u32::from_be_bytes([buffer[73], buffer[74], buffer[75], buffer[76]]) {
                 0 => IncrementalVaccum::Disabled,
                 1 => IncrementalVaccum::Enabled,
                 _ => {
@@ -290,12 +295,12 @@ impl Serializable for Header {
                 }
             };
 
-        // Application ID (bytes 68-71)
-        let application_id = u32::from_be_bytes([buffer[68], buffer[69], buffer[70], buffer[71]]);
+        // Application ID (bytes 77-80)
+        let application_id = u32::from_be_bytes([buffer[77], buffer[78], buffer[79], buffer[80]]);
 
-        // Reserved (bytes 72-91)
-        let mut reserved = [0u8; 20];
-        reserved.copy_from_slice(&buffer[72..92]);
+        // Reserved (bytes 81-91)
+        let mut reserved = [0u8; 11];
+        reserved.copy_from_slice(&buffer[81..92]);
 
         // Version valid for (bytes 92-95)
         let version_valid_for =

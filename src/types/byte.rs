@@ -34,7 +34,7 @@ impl Serializable for Byte {
         Ok(Byte(bytes[0]))
     }
 
-    fn write_to<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn write_to<W: std::io::Write>(self, writer: &mut W) -> std::io::Result<()> {
         writer.write_all(&[self.0])?;
         Ok(())
     }

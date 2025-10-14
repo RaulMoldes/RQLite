@@ -22,7 +22,7 @@ pub(crate) trait Overflowable {
     fn try_insert_with_overflow(
         &mut self,
         content: Self::Content,
-        max_payload_factor: f32
+        max_payload_factor: f32,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         Ok(None)
     }
@@ -30,7 +30,7 @@ pub(crate) trait Overflowable {
     fn try_insert_with_overflow_leaf(
         &mut self,
         content: Self::LeafContent,
-        max_payload_factor: f32
+        max_payload_factor: f32,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         Ok(None)
     }
@@ -38,7 +38,7 @@ pub(crate) trait Overflowable {
     fn try_insert_with_overflow_interior(
         &mut self,
         content: Self::InteriorContent,
-        max_payload_factor: f32
+        max_payload_factor: f32,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         Ok(None)
     }
@@ -129,13 +129,14 @@ impl Serializable for OverflowPage {
         Ok(OverflowPage { header, data })
     }
 
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
+        let page_size = self.page_size();
         self.header.write_to(writer)?;
-        self.data.write_to(writer)?;
         let data_written = self.data.size_of();
+        self.data.write_to(writer)?;
 
-        if data_written < self.page_size() {
-            let padding = vec![0u8; self.page_size() - data_written];
+        if data_written < page_size {
+            let padding = vec![0u8; page_size - data_written];
             writer.write_all(&padding)?;
         }
 
@@ -163,10 +164,8 @@ impl Overflowable for OverflowPage {
     fn try_insert_with_overflow(
         &mut self,
         mut content: Self::Content,
-        max_payload_factor: f32
+        max_payload_factor: f32,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
-
-
         if content.size_of() < self.max_cell_size(max_payload_factor) {
             self.data = content;
             self.header.free_space_ptr -= self.data.size_of() as u16;
@@ -174,11 +173,10 @@ impl Overflowable for OverflowPage {
             return Ok(None);
         }
 
-
         let available = self.available_space(max_payload_factor);
 
         let remaining = content.split_at(available);
-       
+
         self.data = content;
         let new = PageId::new_key();
         self.set_next_overflow(new);

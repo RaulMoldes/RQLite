@@ -23,7 +23,7 @@ where
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
+    IOFrame: From<PageFrame<P>>,
 {
     /// Insert a cell at a leaf page given by the key.
     /// Will generally allow the page to overflow temporarily.
@@ -66,8 +66,8 @@ where
         + LeafPageOps<Vl, KeyType = K>
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
-    PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
+     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
+    IOFrame: From<PageFrame<P>>,
 {
     /// Insert, allowing to overflow.
     fn insert<FI: FileOps, M: MemoryPool>(
@@ -98,13 +98,11 @@ where
             if let Some((overflow_page, content)) = traversal
                 .write(&leaf_node)
                 .try_insert_with_overflow_leaf(value, self.max_payload_fraction)?
-            {    
+            {
                 self.create_overflow_chain(overflow_page, content, pager)?;
             }
         } else {
-
             traversal.write(&leaf_node).insert(key, value)?;
-
         }
 
         let needs_rebalance = traversal
@@ -268,8 +266,6 @@ where
 
             // This splits the node, propagating the cell in the middle.
             self.force_rebalance(caller_id, parent_id.unwrap(), traversal, pager)?;
-            //  //self.print_tree(pager)?;
-            // self.redistribute_pointers(parent_id.unwrap(), traversal, pager)?;
         }
 
         Ok(())

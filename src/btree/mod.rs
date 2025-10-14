@@ -12,12 +12,12 @@ mod tests;
 use crate::btreepage::BTreePageOps;
 use crate::io::cache::MemoryPool;
 use crate::io::disk::FileOps;
-use crate::io::frames::{Frame, OverflowFrame};
+use crate::io::frames::Frame;
 use crate::io::frames::{IOFrame, PageFrame};
 use crate::io::pager::Pager;
 use crate::storage::Cell;
 use crate::storage::{InteriorPageOps, LeafPageOps, Overflowable};
-use crate::types::{PageId, RQLiteType, RowId, Splittable, VarlenaType};
+use crate::types::{PageId, RowId, Splittable, VarlenaType};
 use crate::{HeaderOps, OverflowPage};
 use crate::{
     IndexInteriorCell, IndexLeafCell, RQLiteIndexPage, RQLiteTablePage, TableInteriorCell,
@@ -77,7 +77,7 @@ where
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
+    IOFrame: From<PageFrame<P>>
 {
     pub(crate) fn create<FI: FileOps, M: MemoryPool>(
         pager: &mut Pager<FI, M>,
@@ -177,7 +177,6 @@ where
         mut content: VarlenaType,
         pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
-       
         while let Some((new_page, remaining_content)) =
             overflow_page.try_insert_with_overflow(content, self.max_payload_fraction)?
         {
@@ -198,15 +197,8 @@ where
         page: OverflowPage,
         pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
-        use crate::serialization::Serializable;
-
-        let page_id = page.id();
-        let page_type = page.type_of();
-        let mut buffer = Vec::with_capacity(pager.page_size() as usize);
-        page.write_to(&mut buffer)?;
-
         // Create a frame and cache it.
-        let frame = PageFrame::from_buffer_with_metadata(buffer, false, page_id, page_type);
+        let frame = IOFrame::Overflow(PageFrame::new(page));
         pager.cache_page(&frame);
         Ok(())
     }

@@ -45,7 +45,7 @@ impl Serializable for Slot {
         Ok(Self { offset })
     }
 
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
         writer.write_all(&self.offset.to_be_bytes())?;
 
         Ok(())

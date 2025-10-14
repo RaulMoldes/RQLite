@@ -204,18 +204,19 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
         })
     }
 
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
+        let buffer_size = self.page_size() - self.content_start();
+        let content_start = self.content_start();
         self.header.write_to(writer)?;
 
         for &idx in &self.cell_indices {
             idx.write_to(writer)?;
         }
-        let buffer_size = self.page_size() - self.content_start();
 
         let mut content_buffer = vec![0u8; buffer_size];
 
-        for (offset, cell) in self.cells.iter() {
-            let buffer_offset = *offset as usize - self.content_start();
+        for (offset, cell) in self.cells.into_iter() {
+            let buffer_offset = offset as usize - content_start;
 
             let mut cell_cursor = Cursor::new(&mut content_buffer[buffer_offset..]);
             cell.write_to(&mut cell_cursor)?;

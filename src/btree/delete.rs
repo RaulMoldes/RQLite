@@ -27,7 +27,7 @@ where
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
+    IOFrame: From<PageFrame<P>>
 {
     fn delete<FI: FileOps, M: MemoryPool>(
         &mut self,
@@ -58,7 +58,7 @@ where
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
+    IOFrame: From<PageFrame<P>>
 {
     /// Delete, allowing to underflow
     fn delete<FI: FileOps, M: MemoryPool>(

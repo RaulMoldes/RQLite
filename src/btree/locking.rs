@@ -5,7 +5,7 @@ use crate::io::disk::FileOps;
 use crate::io::frames::{Frame, IOFrame, PageFrame};
 use crate::io::pager::Pager;
 use crate::storage::guards::*;
-use crate::storage::{Cell, InteriorPageOps, HeaderOps};
+use crate::storage::{Cell, HeaderOps, InteriorPageOps};
 use crate::types::PageId;
 use crate::PageType;
 use std::collections::HashMap;
@@ -17,6 +17,7 @@ pub(crate) struct TraverseStack<P> {
     upgradable_latches: HashMap<PageId, UpgradableLatch<P>>,
     tracked_frames: HashMap<PageId, PageFrame<P>>,
     visited_pages: Vec<PageId>,
+    _not_send: std::marker::PhantomData<*mut ()>,
 }
 
 impl<P> Default for TraverseStack<P> {
@@ -27,15 +28,16 @@ impl<P> Default for TraverseStack<P> {
             upgradable_latches: HashMap::new(),
             tracked_frames: HashMap::new(),
             visited_pages: Vec::new(),
+            _not_send: std::marker::PhantomData,
         }
     }
 }
 
 impl<P> TraverseStack<P>
 where
-    P: Send + Sync + HeaderOps,
-    PageFrame<P>: Frame<P> + TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
+    P: Send + Sync + HeaderOps+ std::fmt::Debug,
+     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
+    IOFrame: From<PageFrame<P>>,
 {
     pub(crate) fn track_rlatch<FI: FileOps, M: MemoryPool>(
         &mut self,
@@ -63,7 +65,10 @@ where
         id: PageId,
         pager: &mut Pager<FI, M>,
     ) {
-        if !self.read_only_latches.contains_key(&id) && !self.write_latches.contains_key(&id) && !self.upgradable_latches.contains_key(&id) {
+        if !self.read_only_latches.contains_key(&id)
+            && !self.write_latches.contains_key(&id)
+            && !self.upgradable_latches.contains_key(&id)
+        {
             let frame = try_get_frame(id, pager).expect(
                 "Pointer to page id might be dangling. Unable to get frame from the pager.",
             );
@@ -187,22 +192,10 @@ where
         if let Some(frame) = self.tracked_frames.remove(id) {
             if let Some(latch) = self.write_latches.remove(id) {
                 drop(latch);
-                if frame.is_dirty() {
-                    let io_frame = IOFrame::try_from(frame)?;
-                    pager.cache_page(&io_frame);
-                };
             } else if let Some(latch) = self.upgradable_latches.remove(id) {
                 drop(latch);
-                if frame.is_dirty() {
-                    let io_frame = IOFrame::try_from(frame)?;
-                    pager.cache_page(&io_frame);
-                };
             } else if let Some(latch) = self.read_only_latches.remove(id) {
                 drop(latch);
-                if frame.is_dirty() {
-                    let io_frame = IOFrame::try_from(frame)?;
-                    pager.cache_page(&io_frame);
-                };
             }
         };
 
@@ -231,25 +224,10 @@ where
             if let Some(frame) = self.tracked_frames.remove(&id) {
                 if let Some(latch) = self.write_latches.remove(&id) {
                     drop(latch);
-
-                    if frame.is_dirty() {
-                        let io_frame = IOFrame::try_from(frame)?;
-                        pager.cache_page(&io_frame);
-                    }
                 } else if let Some(latch) = self.upgradable_latches.remove(&id) {
                     drop(latch);
-
-                    if frame.is_dirty() {
-                        let io_frame = IOFrame::try_from(frame)?;
-                        pager.cache_page(&io_frame);
-                    }
                 } else if let Some(latch) = self.read_only_latches.remove(&id) {
                     drop(latch);
-
-                    if frame.is_dirty() {
-                        let io_frame = IOFrame::try_from(frame)?;
-                        pager.cache_page(&io_frame);
-                    }
                 }
             }
         }
@@ -261,29 +239,16 @@ where
         &mut self,
         pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
-       
         for id in self.visited_pages.drain(..) {
             if let Some(frame) = self.tracked_frames.remove(&id) {
                 if let Some(latch) = self.write_latches.remove(&id) {
-
                     drop(latch);
 
-                    if frame.is_dirty() {
-                        let io_frame = IOFrame::try_from(frame)?;
-                        pager.cache_page(&io_frame);
-                    };
+
                 } else if let Some(latch) = self.upgradable_latches.remove(&id) {
                     drop(latch);
-                    if frame.is_dirty() {
-                        let io_frame = IOFrame::try_from(frame)?;
-                        pager.cache_page(&io_frame);
-                    };
                 } else if let Some(latch) = self.read_only_latches.remove(&id) {
                     drop(latch);
-                    if frame.is_dirty() {
-                        let io_frame = IOFrame::try_from(frame)?;
-                        pager.cache_page(&io_frame);
-                    };
                 }
             }
         }

@@ -34,7 +34,7 @@ impl Serializable for Float32 {
         Ok(Float32(value))
     }
 
-    fn write_to<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn write_to<W: std::io::Write>(self, writer: &mut W) -> std::io::Result<()> {
         let bytes = self.0.to_be_bytes();
         writer.write_all(&bytes)?;
 

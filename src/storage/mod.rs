@@ -10,6 +10,7 @@ pub mod page_header;
 pub mod slot;
 
 use crate::btreepage::BTreePageOps;
+use crate::serialization::Serializable;
 use crate::types::{PageId, RQLiteType, RowId, VarlenaType};
 use crate::{impl_btree_page_ops, impl_header_ops, impl_interior_page_ops, impl_leaf_page_ops};
 pub(crate) use btreepage::*;
@@ -88,8 +89,7 @@ impl Overflowable for RQLiteIndexPage {
     fn try_insert_with_overflow_interior(
         &mut self,
         content: IndexInteriorCell,
-        max_payload_factor: f32
-
+        max_payload_factor: f32,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         match self {
             RQLiteIndexPage::Leaf(_) => panic!("Invalid content. Content type must be IndexLeafCell when inserting on IndexLeafPages"),
@@ -100,8 +100,7 @@ impl Overflowable for RQLiteIndexPage {
     fn try_insert_with_overflow_leaf(
         &mut self,
         content: IndexLeafCell,
-        max_payload_factor: f32
-
+        max_payload_factor: f32,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         match self {
             RQLiteIndexPage::Interior(_) => panic!("Invalid content. Content type must be IndexInteriorCell when inserting on IndexInteriorPages"),
@@ -118,8 +117,7 @@ impl Overflowable for RQLiteTablePage {
     fn try_insert_with_overflow_leaf(
         &mut self,
         content: TableLeafCell,
-        max_payload_factor: f32
-
+        max_payload_factor: f32,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         match self {
             RQLiteTablePage::Interior(_) => {
@@ -174,3 +172,23 @@ impl_interior_page_ops!(RQLiteIndexPage<IndexInteriorCell> {
     Leaf = Leaf,
     Interior = Interior,
 });
+
+impl RQLiteIndexPage {
+    pub fn serialize<W: std::io::Write>(self, writer: &mut W) -> std::io::Result<()> {
+        match self {
+            RQLiteIndexPage::Interior(page) => page.write_to(writer)?,
+            RQLiteIndexPage::Leaf(page) => page.write_to(writer)?,
+        }
+        Ok(())
+    }
+}
+
+impl RQLiteTablePage {
+    pub fn serialize<W: std::io::Write>(self, writer: &mut W) -> std::io::Result<()> {
+        match self {
+            RQLiteTablePage::Interior(page) => page.write_to(writer)?,
+            RQLiteTablePage::Leaf(page) => page.write_to(writer)?,
+        }
+        Ok(())
+    }
+}

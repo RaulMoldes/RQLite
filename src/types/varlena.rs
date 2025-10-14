@@ -178,7 +178,7 @@ impl PartialOrd for VarlenaType {
 }
 
 impl Serializable for VarlenaType {
-    fn write_to<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn write_to<W: std::io::Write>(self, writer: &mut W) -> std::io::Result<()> {
         // 1. Write encoding marker (1 byte)
         // If encoding is Some, it's a String, otherwise it's a Blob
         let encoding_marker = match self.encoding {

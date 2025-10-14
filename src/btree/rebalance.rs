@@ -29,7 +29,7 @@ where
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
+    IOFrame: From<PageFrame<P>>,
 {
     // Utility to check if we can borrow a cell from a source node to a destination node.
     /// The op type marker indicates if the borrowing happens atthe front of the node (first cell), or at the back of it.
@@ -116,7 +116,7 @@ where
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
+    IOFrame: From<PageFrame<P>>,
 {
     fn can_borrow<FI: FileOps, M: MemoryPool>(
         &self,
@@ -279,10 +279,8 @@ where
                     self.try_borrow(caller_id, left, traversal, BorrowOpType::Front, pager)?;
 
                 if result {
-
                     let caller_count = traversal.write(&caller_id).cell_count();
                     let left_count = traversal.write(&left).cell_count();
-
                 };
 
                 let still_overflow = {
@@ -465,7 +463,6 @@ where
                     let total_size_for_child: usize =
                         cells_for_child.iter().map(|c| c.size()).sum();
 
-
                     for cell in cells_for_child {
                         let child_wlock = traversal.write(child_id);
                         child_wlock.insert(cell.key(), cell.clone())?;
@@ -504,7 +501,7 @@ where
                 page_size,
             );
             let num_groups = splitted_groups.len();
-                        // If there are more groups than children we need to allocate more pages.
+            // If there are more groups than children we need to allocate more pages.
             while num_groups > all_childs.len() {
                 let new_child = traversal.allocate_for_write(self.interior_page_type(), pager)?;
                 all_childs.push(new_child);

@@ -6,6 +6,7 @@ pub mod cache;
 pub mod disk;
 pub mod frames;
 pub mod pager;
+pub mod wal;
 
 #[cfg(test)]
 mod tests;

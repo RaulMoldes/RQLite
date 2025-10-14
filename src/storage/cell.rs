@@ -103,7 +103,7 @@ impl Cell for TableLeafCell {
 }
 
 impl Serializable for TableLeafCell {
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
         // Write flags byte.
         // It is better to use a byte marker than serializing an invalid overflow page,
         // Cells can be of variable size, and 1 byte <<< 4 bytes (size of a page id).
@@ -190,7 +190,7 @@ impl Cell for TableInteriorCell {
 }
 
 impl Serializable for TableInteriorCell {
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
         self.left_child_page.write_to(writer)?;
         self.key.write_to(writer)?;
 
@@ -265,7 +265,7 @@ impl Cell for IndexLeafCell {
 }
 
 impl Serializable for IndexLeafCell {
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
         // Write flags byte (bit 0 = has overflow)
         let flags = if self.overflow_page.is_some() {
             TRUE
@@ -385,7 +385,7 @@ impl IndexInteriorCell {
 }
 
 impl Serializable for IndexInteriorCell {
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
         // Write flag byte
         let flag = if self.overflow_page.is_some() {
             TRUE

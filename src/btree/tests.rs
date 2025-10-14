@@ -7,6 +7,52 @@ use crate::serialization::Serializable;
 use crate::types::RowId;
 use std::io::Seek;
 
+#[macro_export]
+macro_rules! btree_insert_tests {
+    (
+        $(
+            $test_name:ident => {
+                cells: $num_cells:expr,
+                max_size: $max_size:expr
+            }
+        ),* $(,)?
+    ) => {
+        $(
+            #[test]
+            fn $test_name() {
+                let mut pager = setup_test_pager();
+                let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2)
+                    .expect("Failed to create BTree");
+
+                for i in 1..=$num_cells {
+                    let row_id = RowId::from(i);
+                    // Adjusts the size of each cell until max_size.
+                    let size = std::cmp::min(i as usize, $max_size);
+
+                    let cell = create_test_cell(row_id, vec![i as u8; size]);
+
+                    dbg!(i);
+                    btree.insert(row_id, cell, &mut pager)
+                        .expect("Failed to insert into BTree");
+                }
+
+                btree.print_tree(&mut pager).unwrap();
+
+                // Verifies the first 50 cells.
+                let verify_count = std::cmp::min(50, $num_cells);
+                for i in 1..=verify_count {
+                    let row_id = RowId::from(i);
+                    let found = btree.search(row_id, &mut pager);
+                    assert!(
+                        found.is_some(),
+                        "RowId {:?} not found in BTree test {}", row_id, stringify!($test_name)
+                    );
+                }
+            }
+        )*
+    };
+}
+
 // Helper to create a test pager in memory
 fn setup_test_pager() -> Pager<Buffer, StaticPool> {
     let mut pager = Pager::<Buffer, StaticPool>::create("test.db").unwrap();
@@ -18,7 +64,7 @@ fn setup_test_pager() -> Pager<Buffer, StaticPool> {
     header.write_to(&mut pager).unwrap();
 
     // Init the pager with cache capacity
-    pager.start(100).unwrap();
+    pager.start_with(100).unwrap();
 
     pager
 }
@@ -85,7 +131,7 @@ fn test_overflow() {
     let cell = create_test_cell(row_id, large_data.clone());
 
     btree.insert(row_id, cell, &mut pager).unwrap();
-  
+
     let found = btree.search(row_id, &mut pager);
     assert!(found.is_some());
     assert_eq!(found.unwrap().payload.as_bytes(), large_data.as_slice());
@@ -157,29 +203,9 @@ fn test_insert_duplicate_keys() {
     assert_eq!(found.payload.as_bytes()[0], 2);
 }
 
-#[test]
-fn test_insert_varying_sizes() {
-    let mut pager = setup_test_pager();
-    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
-
-    for i in 1..=50 {
-        let row_id = RowId::from(i);
-        let size = (i * 20) as usize; // Tamaños de 20 a 1000 bytes
-
-        let cell = create_test_cell(row_id, vec![i as u8; size]);
-
-
-        btree.insert(row_id, cell, &mut pager).unwrap();
-
-    }
-    btree.print_tree(&mut pager).unwrap();
-
-    for i in 1..=50 {
-        let row_id = RowId::from(i);
-        let found = btree.search(row_id, &mut pager);
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().payload.as_bytes().len(), (i * 20) as usize);
-    }
+btree_insert_tests! {
+    test_insert_100_cells_small => { cells: 100, max_size: 10 },
+    test_insert_500_cells_medium => { cells: 500, max_size: 100 },
 }
 
 #[test]

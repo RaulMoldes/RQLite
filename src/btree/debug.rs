@@ -39,8 +39,8 @@ where
         + LeafPageOps<Vl, KeyType = K>
         + Overflowable<LeafContent = Vl>
         + fmt::Debug,
-    PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: TryFrom<PageFrame<P>, Error = std::io::Error>,
+     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
+    IOFrame: From<PageFrame<P>>,
 {
     /// Print the tree structure with detailed information about each node
     pub(crate) fn print_tree<FI: FileOps, M: MemoryPool>(
@@ -191,7 +191,7 @@ where
 
         while let Some(overflow_id) = current_id {
             let io_frame = pager.get_single(overflow_id)?;
-            let overflow_frame = OverflowFrame::try_from(io_frame)?;
+            let overflow_frame = PageFrame::<OverflowPage>::try_from(io_frame)?;
             let guard = overflow_frame.read();
 
             let data_size = guard.data.as_bytes().len();

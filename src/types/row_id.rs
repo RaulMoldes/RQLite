@@ -61,7 +61,7 @@ impl Serializable for RowId {
         Ok(RowId(row_id))
     }
 
-    fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn write_to<W: Write>(self, writer: &mut W) -> std::io::Result<()> {
         writer.write_all(&self.0.to_be_bytes())?;
         Ok(())
     }

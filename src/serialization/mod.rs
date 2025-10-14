@@ -12,7 +12,7 @@ pub(crate) trait Serializable {
     where
         Self: Sized;
     /// Writes a value to a byte stream.
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()>;
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()>;
 }
 
 impl Serializable for Vec<u8> {
@@ -22,8 +22,8 @@ impl Serializable for Vec<u8> {
         Ok(buffer)
     }
 
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_all(self)?;
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
+        writer.write_all(&self)?;
         Ok(())
     }
 }

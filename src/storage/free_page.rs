@@ -6,7 +6,7 @@ use crate::types::PageId;
 use crate::{HeaderOps, PageHeader};
 use std::io::{self, Read, Write};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct FreePage {
     pub(crate) header: PageHeader,
     pub(crate) data: Vec<u8>,
@@ -74,7 +74,7 @@ impl Serializable for FreePage {
         })
     }
 
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
         self.header.write_to(writer)?;
         self.data.write_to(writer)?;
         Ok(())

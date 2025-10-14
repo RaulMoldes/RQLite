@@ -1,8 +1,8 @@
 use crate::serialization::Serializable;
 use crate::types::{Byte, PageId};
 use crate::PAGE_SIZE;
-use std::fmt;
 use std::cmp::min;
+use std::fmt;
 use std::io::{self, Read, Write};
 
 /// Page header size is fixed on purpose
@@ -53,7 +53,10 @@ pub(crate) trait HeaderOps {
     /// If the cell does not fit on a page, but does not excede the maximum size, we create a new page.
     /// If the cell excedes the max_cell_size, we insert what is available and then create an overflow chain to insert the rest of the data.
     fn max_cell_size(&self, max_payload_factor: f32) -> usize {
-        min((self.page_size() as f32 * max_payload_factor) as usize, self.free_space() - SLOT_SIZE)
+        min(
+            (self.page_size() as f32 * max_payload_factor) as usize,
+            self.free_space() - SLOT_SIZE,
+        )
     }
 
     /// Setter for the page type.
@@ -174,7 +177,8 @@ pub(crate) struct PageHeader {
 /// This enum should ideally read the byte marker and deserialize the corresponding page depending on that.
 impl Serializable for PageHeader {
     fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let mut buffer = [0u8; PAGE_HEADER_SIZE];
+        let mut buffer = [0u8; PAGE_HEADER_SIZE - 1];
+
         reader.read_exact(&mut buffer[0..16])?;
 
         let page_number = PageId::from(u32::from_be_bytes([
@@ -197,13 +201,10 @@ impl Serializable for PageHeader {
         reader.read_exact(&mut buffer[22..23])?;
         let reserved_space = buffer[22];
 
-        reader.read_exact(&mut buffer[23..24])?;
-        let page_type = PageType::try_from(buffer[23]).unwrap();
-
         Ok(PageHeader {
             page_number,
             page_size,
-            page_type,
+            page_type: PageType::Free,
             next_overflow_page,
             free_space_ptr,
             cell_count,
@@ -213,7 +214,8 @@ impl Serializable for PageHeader {
         })
     }
 
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
+        writer.write_all(&[self.page_type as u8])?;
         self.page_number.write_to(writer)?;
         writer.write_all(&self.page_size.to_be_bytes())?;
         self.right_most_page.write_to(writer)?;
@@ -221,7 +223,7 @@ impl Serializable for PageHeader {
         writer.write_all(&self.free_space_ptr.to_be_bytes())?;
         writer.write_all(&self.cell_count.to_be_bytes())?;
         writer.write_all(&self.content_start_ptr.to_be_bytes())?;
-        writer.write_all(&[self.reserved_space, self.page_type as u8])?;
+        writer.write_all(&[self.reserved_space])?;
         Ok(())
     }
 }

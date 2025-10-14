@@ -205,7 +205,7 @@ impl LeafPageOps<TableLeafCell> for TableLeafPage {
     /// Needs to find the target position when inserting the slot to ensure that cells are ordered.
     fn insert(&mut self, key: Self::KeyType, cell: TableLeafCell) -> std::io::Result<()> {
         let new_offset = self.add_cell(cell)?;
-        
+
         let pos = self
             .cell_indices
             .iter()
