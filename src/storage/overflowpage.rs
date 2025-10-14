@@ -165,14 +165,20 @@ impl Overflowable for OverflowPage {
         mut content: Self::Content,
         max_payload_factor: f32
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
+
+
         if content.size_of() < self.max_cell_size(max_payload_factor) {
             self.data = content;
             self.header.free_space_ptr -= self.data.size_of() as u16;
+
             return Ok(None);
         }
 
+
         let available = self.available_space(max_payload_factor);
+
         let remaining = content.split_at(available);
+       
         self.data = content;
         let new = PageId::new_key();
         self.set_next_overflow(new);

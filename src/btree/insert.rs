@@ -98,13 +98,13 @@ where
             if let Some((overflow_page, content)) = traversal
                 .write(&leaf_node)
                 .try_insert_with_overflow_leaf(value, self.max_payload_fraction)?
-            {
+            {    
                 self.create_overflow_chain(overflow_page, content, pager)?;
             }
         } else {
 
             traversal.write(&leaf_node).insert(key, value)?;
-      
+
         }
 
         let needs_rebalance = traversal
@@ -113,7 +113,7 @@ where
 
         if !needs_rebalance {
             traversal.cleanup(pager)?;
-            //self.print_tree(pager)?;
+
             return Ok(());
         }
 
@@ -126,8 +126,7 @@ where
 
         self.rebalance(&mut traversal, pager, RebalanceMethod::PostInsert)?;
 
-        traversal.cleanup(pager)?; // Hasta que no se hace cleanup las llamadas a print_tree no tienen sentido. Es como hacer commit
-                                   //self.print_tree(pager)?;
+        traversal.cleanup(pager)?;
 
         Ok(())
     }

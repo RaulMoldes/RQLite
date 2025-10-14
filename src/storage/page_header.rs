@@ -2,6 +2,7 @@ use crate::serialization::Serializable;
 use crate::types::{Byte, PageId};
 use crate::PAGE_SIZE;
 use std::fmt;
+use std::cmp::min;
 use std::io::{self, Read, Write};
 
 /// Page header size is fixed on purpose
@@ -41,7 +42,7 @@ pub(crate) trait HeaderOps {
     }
 
     fn available_space(&self, max_payload_factor: f32) -> usize {
-        self.max_cell_size(max_payload_factor)
+        ((self.free_space() - SLOT_SIZE) as f32 * max_payload_factor) as usize
     }
 
     /// Shortcut to get the next overflow page in the overflow chain.
@@ -52,7 +53,7 @@ pub(crate) trait HeaderOps {
     /// If the cell does not fit on a page, but does not excede the maximum size, we create a new page.
     /// If the cell excedes the max_cell_size, we insert what is available and then create an overflow chain to insert the rest of the data.
     fn max_cell_size(&self, max_payload_factor: f32) -> usize {
-        (self.free_space() as f32 * max_payload_factor) as usize
+        min((self.page_size() as f32 * max_payload_factor) as usize, self.free_space() - SLOT_SIZE)
     }
 
     /// Setter for the page type.

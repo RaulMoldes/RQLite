@@ -85,7 +85,7 @@ fn test_overflow() {
     let cell = create_test_cell(row_id, large_data.clone());
 
     btree.insert(row_id, cell, &mut pager).unwrap();
-
+  
     let found = btree.search(row_id, &mut pager);
     assert!(found.is_some());
     assert_eq!(found.unwrap().payload.as_bytes(), large_data.as_slice());
@@ -168,7 +168,7 @@ fn test_insert_varying_sizes() {
 
         let cell = create_test_cell(row_id, vec![i as u8; size]);
 
-        
+
         btree.insert(row_id, cell, &mut pager).unwrap();
 
     }

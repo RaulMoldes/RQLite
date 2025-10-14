@@ -17,7 +17,7 @@ use crate::io::frames::{IOFrame, PageFrame};
 use crate::io::pager::Pager;
 use crate::storage::Cell;
 use crate::storage::{InteriorPageOps, LeafPageOps, Overflowable};
-use crate::types::{PageId, RowId, Splittable, VarlenaType};
+use crate::types::{PageId, RQLiteType, RowId, Splittable, VarlenaType};
 use crate::{HeaderOps, OverflowPage};
 use crate::{
     IndexInteriorCell, IndexLeafCell, RQLiteIndexPage, RQLiteTablePage, TableInteriorCell,
@@ -177,11 +177,13 @@ where
         mut content: VarlenaType,
         pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
+       
         while let Some((new_page, remaining_content)) =
             overflow_page.try_insert_with_overflow(content, self.max_payload_fraction)?
         {
             self.store_overflow_page(overflow_page, pager)?;
             overflow_page = new_page;
+
             content = remaining_content;
         }
 
