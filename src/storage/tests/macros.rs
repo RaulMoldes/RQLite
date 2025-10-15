@@ -20,7 +20,7 @@ macro_rules! test_leaf_page_ops {
                 let key = $create_key(1);
                 let cell = $create_cell(key.clone());
 
-                assert!(page.insert(key.clone(), cell).is_ok());
+                assert!(page.insert(cell).is_ok());
                 assert_eq!(page.cell_count(), 1);
                 assert!(page.find(&key).is_some());
             }
@@ -37,7 +37,7 @@ macro_rules! test_leaf_page_ops {
                 for i in 0..10 {
                     let key = $create_key(i);
                     let cell = $create_cell(key.clone());
-                    assert!(page.insert(key, cell).is_ok());
+                    assert!(page.insert( cell).is_ok());
                 }
 
                 assert_eq!(page.cell_count(), 10);
@@ -68,7 +68,7 @@ macro_rules! test_leaf_page_ops {
                 let key = $create_key(1);
                 let cell = $create_cell(key.clone());
 
-                page.insert(key.clone(), cell).unwrap();
+                page.insert(cell).unwrap();
                 assert!(page.find(&key).is_some());
 
                 let removed = page.remove(&key);
@@ -102,7 +102,7 @@ macro_rules! test_leaf_page_ops {
                 for k in keys {
                     let key = $create_key(k);
                     let cell = $create_cell(key.clone());
-                    page.insert(key, cell).unwrap();
+                    page.insert(cell).unwrap();
                 }
 
                 for k in [1, 2, 3, 5, 8, 9] {

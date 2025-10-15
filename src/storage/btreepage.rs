@@ -2,33 +2,55 @@ use crate::cell::Cell;
 use crate::page_header::PageHeader;
 use crate::page_header::PageType;
 use crate::serialization::Serializable;
-use crate::storage::{cell_append_size, Slot};
+use crate::storage::Slot;
 use crate::types::PageId;
 use crate::HeaderOps;
 use crate::PAGE_HEADER_SIZE;
 use crate::SLOT_SIZE;
-use std::collections::BTreeMap;
 use std::io::{self, Cursor, Read, Write};
 
 /// Trait for functions common to all BTreePages.
 pub(crate) trait BTreePageOps {
-    /// Utility methods to check the status of the page.
-    fn can_pop_at_back(&self, min_payload_factor: f32) -> bool
-    where
-        Self: HeaderOps;
-    /// Check if we can pop at the front of the page
-    fn can_pop_at_front(&self, min_payload_factor: f32) -> bool
-    where
-        Self: HeaderOps;
     /// Check if a new cell fits inside the page.
-    fn fits_in(&self, additional_size: usize, max_payload_factor: f32) -> bool
+    fn fits_in(&self, additional_size: u16) -> bool
     where
         Self: HeaderOps;
 
     /// Check if we can remove a cell from a page
-    fn can_remove(&self, cell_size: usize, min_payload_factor: f32) -> bool
+    fn can_remove(&self, cell_size: u16) -> bool
     where
         Self: HeaderOps;
+
+    fn reset_stats(&mut self)
+    where
+        Self: HeaderOps;
+
+    fn get_overflow_size(&self) -> u16
+    where
+        Self: HeaderOps;
+
+    fn get_underflow_size(&self) -> u16
+    where
+        Self: HeaderOps;
+
+    fn is_on_underflow_state(&self) -> bool
+    where
+        Self: HeaderOps,
+    {
+        self.get_underflow_size() > 0
+    }
+
+    fn is_on_overflow_state(&self) -> bool
+    where
+        Self: HeaderOps,
+    {
+        self.get_overflow_size() > 0
+    }
+
+    // This function is used to compact the cells after deletion has happened.
+    // When you delete a cell at some point, the offsets and the free space pointer can get fucked up.
+    // For example.
+    fn unfuck_cell_offsets(&mut self, removed_offset: u16, removed_size: u16);
 }
 
 #[derive(Clone)]
@@ -44,20 +66,20 @@ pub(crate) struct BTreePage<BTreeCellType: Cell> {
     /// Cells can be identified either by a [`RowId`] or by their physical identifier.
     /// The physical identifier is nothing more than the [`PageId`] + position in the slot array.
     /// This allows to uniquely identify a cell in the database.
-    pub(crate) cells: BTreeMap<u16, BTreeCellType>,
+    pub(crate) cells: Vec<BTreeCellType>,
 }
 
 /// All pages must implement [HeaderOps], as all pages have a Header.
 impl<BTreeCellType: Cell + Serializable> HeaderOps for BTreePage<BTreeCellType> {
-    fn cell_count(&self) -> usize {
+    fn cell_count(&self) -> u16 {
         self.header.cell_count()
     }
 
-    fn content_start(&self) -> usize {
+    fn content_start(&self) -> u16 {
         self.header.content_start()
     }
 
-    fn free_space(&self) -> usize {
+    fn free_space(&self) -> u16 {
         self.header.free_space()
     }
 
@@ -69,7 +91,7 @@ impl<BTreeCellType: Cell + Serializable> HeaderOps for BTreePage<BTreeCellType> 
         self.header.is_overflow()
     }
 
-    fn page_size(&self) -> usize {
+    fn page_size(&self) -> u16 {
         self.header.page_size()
     }
 
@@ -89,8 +111,20 @@ impl<BTreeCellType: Cell + Serializable> HeaderOps for BTreePage<BTreeCellType> 
         self.header.set_type(page_type);
     }
 
-    fn free_space_start(&self) -> usize {
+    fn free_space_start(&self) -> u16 {
         self.header.free_space_start()
+    }
+
+    fn set_cell_count(&mut self, count: u16) {
+        self.header.set_cell_count(count);
+    }
+
+    fn set_content_start_ptr(&mut self, content_start: u16) {
+        self.header.set_content_start_ptr(content_start);
+    }
+
+    fn set_free_space_ptr(&mut self, ptr: u16) {
+        self.header.set_free_space_ptr(ptr);
     }
 }
 
@@ -99,62 +133,78 @@ impl<BTreeCellType: Cell + Serializable> Default for BTreePage<BTreeCellType> {
         BTreePage {
             header: PageHeader::default(),
             cell_indices: Vec::new(),
-            cells: BTreeMap::new(),
+            cells: Vec::new(),
         }
     }
 }
 
 impl<BTreeCellType: Cell> BTreePageOps for BTreePage<BTreeCellType> {
-    fn can_pop_at_back(&self, min_payload_factor: f32) -> bool
+    fn can_remove(&self, cell_size: u16) -> bool
     where
         Self: HeaderOps,
     {
-        let minimum_used_space = (self.page_size() as f32 * min_payload_factor) as usize;
+        let minimum_used_space = self.page_size().div_ceil(2);
         let used_space = self.page_size() - self.free_space();
-
-        if let Some(last_item) = self.cell_indices.last() {
-            if let Some(cell) = self.cells.get(&last_item.offset) {
-                if used_space.saturating_sub(cell.size()) > minimum_used_space {
-                    return true;
-                }
-            }
-        }
-        false
+        (used_space - cell_size - SLOT_SIZE >= minimum_used_space) && self.cell_count() > 1
     }
 
-    fn can_pop_at_front(&self, min_payload_factor: f32) -> bool
+    fn reset_stats(&mut self)
     where
         Self: HeaderOps,
     {
-        let minimum_used_space = (self.page_size() as f32 * min_payload_factor) as usize;
-        let used_space = self.page_size() - self.free_space();
+        let actual_cell_count = self.cell_indices.len() as u16;
+        let actual_cells_size: u16 = self.cells.iter().map(|c| c.size()).sum();
+        let actual_slots_size = actual_cell_count * SLOT_SIZE;
 
-        if let Some(last_item) = self.cell_indices.first() {
-            if let Some(cell) = self.cells.get(&last_item.offset) {
-                if used_space.saturating_sub(cell.size()) > minimum_used_space {
-                    return true;
-                }
-            }
-        }
-        false
+        self.set_free_space_ptr(self.page_size().saturating_sub(actual_cells_size));
+        self.set_cell_count(actual_cell_count);
+        self.set_content_start_ptr(PAGE_HEADER_SIZE + actual_slots_size);
     }
 
-    fn can_remove(&self, cell_size: usize, min_payload_factor: f32) -> bool
+    fn get_overflow_size(&self) -> u16
     where
         Self: HeaderOps,
     {
-        let minimum_used_space = (self.page_size() as f32 * min_payload_factor) as usize;
-        let used_space = self.page_size() - self.free_space();
-        used_space - cell_size - SLOT_SIZE >= minimum_used_space
+        let actual_cells_size = self.cells.iter().map(|c| c.size()).sum();
+        let page_size = self.page_size();
+        let actual_slots_size = self.cell_indices.len() as u16 * SLOT_SIZE;
+        PAGE_HEADER_SIZE
+            .saturating_add(actual_slots_size)
+            .saturating_add(actual_cells_size)
+            .saturating_sub(self.page_size())
     }
 
-    fn fits_in(&self, additional_size: usize, max_payload_factor: f32) -> bool
+    fn get_underflow_size(&self) -> u16
     where
         Self: HeaderOps,
     {
-        let maximum_used_space = (self.page_size() as f32 * max_payload_factor) as usize;
+        let actual_cells_size = self.cells.iter().map(|c| c.size()).sum();
+        let page_size = self.page_size();
+        let actual_slots_size = self.cell_indices.len() as u16 * SLOT_SIZE;
+        page_size
+            .div_ceil(2)
+            .saturating_sub(PAGE_HEADER_SIZE)
+            .saturating_sub(actual_slots_size)
+            .saturating_sub(actual_cells_size)
+    }
+
+    fn fits_in(&self, additional_size: u16) -> bool
+    where
+        Self: HeaderOps,
+    {
+        let maximum_used_space = self.page_size();
         let used_space = self.page_size() - self.free_space();
         used_space + additional_size + SLOT_SIZE <= maximum_used_space
+    }
+
+    fn unfuck_cell_offsets(&mut self, removed_offset: u16, removed_size: u16) {
+        // Identify those slots that need to be unfucked.
+        for slot in self.cell_indices.iter_mut() {
+            if slot.offset < removed_offset {
+                let old_offset = slot.offset;
+                let new_offset = old_offset + removed_size;
+            }
+        }
     }
 }
 
@@ -166,7 +216,7 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
         // First, deserialize the header.
         let header = PageHeader::read_from(reader)?;
 
-        let mut cell_indices = Vec::with_capacity(header.cell_count());
+        let mut cell_indices = Vec::with_capacity(header.cell_count() as usize);
 
         // Deserialize all slots.
         for _ in 0..header.cell_count() {
@@ -179,12 +229,12 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
         let remaining_bytes = header.page_size() - content_start;
 
         // Read exactly the remaining bytes for the page into a temp buffer.
-        let mut remaining_data = vec![0u8; remaining_bytes];
+        let mut remaining_data = vec![0u8; remaining_bytes as usize];
         reader.read_exact(&mut remaining_data)?;
 
-        let mut cells = BTreeMap::new();
+        let mut cells = Vec::new();
         for &cell_index in cell_indices.iter() {
-            let cell_offset = cell_index.offset as usize - header.content_start();
+            let cell_offset = (cell_index.offset - header.content_start()) as usize;
             if cell_offset >= remaining_data.len() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -194,7 +244,7 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
 
             let mut cell_cursor = Cursor::new(&remaining_data[cell_offset..]);
             let cell = C::read_from(&mut cell_cursor)?;
-            cells.insert(cell_index.offset, cell);
+            cells.push(cell);
         }
 
         Ok(BTreePage {
@@ -213,10 +263,11 @@ impl<C: Cell + Serializable> Serializable for BTreePage<C> {
             idx.write_to(writer)?;
         }
 
-        let mut content_buffer = vec![0u8; buffer_size];
+        let mut content_buffer = vec![0u8; buffer_size as usize];
 
-        for (offset, cell) in self.cells.into_iter() {
-            let buffer_offset = offset as usize - content_start;
+        for (i, cell) in self.cells.into_iter().enumerate() {
+            let offset = self.cell_indices[i].offset;
+            let buffer_offset = (offset - content_start) as usize;
 
             let mut cell_cursor = Cursor::new(&mut content_buffer[buffer_offset..]);
             cell.write_to(&mut cell_cursor)?;
@@ -242,7 +293,8 @@ impl<C: Cell> std::fmt::Debug for BTreePage<C> {
             self.header.content_start_ptr
         )?;
 
-        for (offset, cell) in &self.cells {
+        for (i, cell) in self.cells.iter().enumerate() {
+            let offset = self.cell_indices[i].offset;
             writeln!(f, "  Cell at offset {} (size: {:?})", offset, cell.size())?;
             writeln!(f, "Cell {}", cell.key())?;
         }
@@ -265,45 +317,8 @@ where
         Self {
             header,
             cell_indices: Vec::new(),
-            cells: BTreeMap::new(),
+            cells: Vec::new(),
         }
-    }
-
-    pub fn create_with_data(
-        page_id: PageId,
-        page_size: u32,
-        page_type: PageType,
-        right_most_page: Option<PageId>,
-        cell_slots: Vec<Slot>,
-        cells: BTreeMap<u16, C>,
-    ) -> Self {
-        let header = PageHeader::new(page_id, page_size, page_type, right_most_page);
-        Self {
-            header,
-            cell_indices: cell_slots,
-            cells,
-        }
-    }
-
-    // This function is used to compact the cells after deletion has happened.
-    // When you delete a cell at some point, the offsets and the free space pointer can get fucked up.
-    // For example.
-    pub(crate) fn unfuck_cell_offsets(&mut self, removed_offset: u16, removed_size: u16) {
-        // Identify those slots that need to be unfucked.
-        for slot in self.cell_indices.iter_mut() {
-            if slot.offset < removed_offset {
-                let old_offset = slot.offset;
-                let new_offset = old_offset + removed_size;
-
-                // Move the cell to the proper offset.
-                if let Some(cell) = self.cells.remove(&old_offset) {
-                    slot.offset = new_offset;
-                    self.cells.insert(new_offset, cell);
-                }
-            }
-        }
-
-        self.header.free_space_ptr += removed_size;
     }
 
     /// Logic to get a cell at a specific position.
@@ -311,8 +326,74 @@ where
     /// So, we go get the cell offset first, then lookup in the btreemap to get the cell.
     /// If the slot has been marked as deleted, we simply ignore it.
     pub(crate) fn get_cell_at(&self, id: u16) -> Option<C> {
-        if let Some(slot) = self.cell_indices.get(id as usize) {
-            return self.cells.get(&slot.offset).cloned();
+        if let Some(__slot) = self.cell_indices.get(id as usize) {
+            return self.cells.get(id as usize).cloned();
+        };
+        None
+    }
+
+    /// Finds the appropiate position for a cell.
+    /// According to SQLITE documentation:
+    ///
+    /// Attempt to move the b-tree write cursor to an entry with a key that matches the new key being inserted.
+    ///
+    /// If a matching entry is found, then the operation is a replace. Otherwise, if the key is not found, an insert.
+    ///
+    pub(crate) fn find_slot_for_cell(&self, key: &C::Key) -> usize {
+        self.cells
+            .iter()
+            .position(|slot| key <= &slot.key())
+            .unwrap_or(self.cell_indices.len())
+    }
+
+    pub(crate) fn contains_key(&self, key: &C::Key) -> bool {
+        let pos = self.find_slot_for_cell(key);
+        self.cells
+            .get(pos)
+            .map(|existing| &existing.key() == key)
+            .unwrap_or(false)
+    }
+
+    // Documentation of the insert or replace algo:
+    // https://sqlite.org/btreemodule.html#balance_siblings (See Inserting or Replacing cells.)
+    pub(crate) fn insert_or_replace_cell(&mut self, cell: C) {
+        let cell_size = cell.size() + SLOT_SIZE;
+
+        // Decrement the free space ptr and increment the start-of-content ptr.
+        let offset = self.header.free_space_ptr - cell.size();
+        let pos = self.find_slot_for_cell(&cell.key());
+
+        // Check if the cell exists.
+        let exists = self
+            .cells
+            .get(pos)
+            .map(|existing| existing.key() == cell.key())
+            .unwrap_or(false);
+
+        if exists {
+            // Replace the cell according to SQLITE documentation
+            self.cell_indices[pos] = Slot::new(offset);
+            self.cells[pos] = cell;
+        } else {
+            // Insert again.
+            self.cell_indices.insert(pos, Slot::new(offset));
+            self.cells.insert(pos, cell);
+        }
+
+        self.reset_stats();
+    }
+
+    pub(crate) fn delete_cell(&mut self, key: &C::Key) -> Option<C> {
+        if let Some(pos) = self.cells.iter().position(|slot| slot.key() == *key) {
+            let slot = self.cell_indices.remove(pos);
+            let cell = self.cells.remove(pos);
+
+            if slot.offset != self.header.free_space_ptr {
+                self.unfuck_cell_offsets(slot.offset, cell.size());
+            };
+
+            self.reset_stats();
+            return Some(cell);
         };
         None
     }
@@ -321,50 +402,10 @@ where
     pub(crate) fn take_cells(&mut self) -> Vec<C> {
         let old_cells = std::mem::take(&mut self.cells);
         self.cell_indices.clear();
-        self.header.content_start_ptr = PAGE_HEADER_SIZE as u16;
-        self.header.free_space_ptr = self.page_size() as u16;
+        self.header.content_start_ptr = PAGE_HEADER_SIZE;
+        self.header.free_space_ptr = self.page_size();
         self.header.cell_count = 0;
-        old_cells.into_values().collect()
-    }
-
-    /// Add a cell, returning the offset at which was inserted.
-    pub(crate) fn add_cell(&mut self, cell: C) -> io::Result<u16> {
-        // The cell append size is the total cell size + SLOT_SIZE.
-        let cell_size = cell_append_size(&cell);
-        let free_space = self.free_space();
-
-        // Simple check to validate that there is enough space for this cell.
-        if free_space < cell_size {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Not enough bytes to store the cell: needed {} bytes, available {} bytes",
-                    cell_size, free_space
-                ),
-            ));
-        }
-
-        // Decrement the free space ptr and increment the start-of-content ptr.
-
-        self.header.free_space_ptr -= cell.size() as u16;
-        self.header.content_start_ptr += SLOT_SIZE as u16;
-
-        if let Some(cell) = self.cells.get(&(self.free_space_start() as u16)) {
-            panic!(
-                "Error, ya existia una celda en ese slot {}, offset: {}",
-                cell.key(),
-                self.free_space_start()
-            );
-        }
-
-        // Finally insert the cell at the offset in the btreemap
-        self.cells.insert(self.free_space_start() as u16, cell);
-
-        // Increment the cell count.
-        self.header.cell_count += 1;
-
-        // Return the location to where the cell is offseted.
-        Ok(self.free_space_start() as u16)
+        old_cells.into_iter().collect()
     }
 }
 

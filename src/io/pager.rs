@@ -1,11 +1,11 @@
 use crate::header::Header;
 use crate::io::cache::MemoryPool;
 use crate::io::disk::{Buffer, FileOps};
-use std::clone::Clone;
 use crate::io::frames::IOFrame;
 use crate::serialization::Serializable;
 use crate::types::PageId;
 use crate::types::VarlenaType;
+use std::clone::Clone;
 
 use crate::types::{Key, RowId};
 use crate::{PageType, RQLiteConfig, HEADER_SIZE};
@@ -182,8 +182,6 @@ impl<F: FileOps, M: MemoryPool> Pager<F, M> {
         let mut wal_path = PathBuf::from(path.as_ref());
         wal_path.set_file_name(__WAL);
         let wal = WriteAheadLog::create(wal_path)?;
-
-
 
         Ok(Self {
             file,

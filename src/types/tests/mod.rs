@@ -105,19 +105,23 @@ test_serializable!(
 );
 
 #[test]
-fn test_varlena_comparison_matches_u32() {
-    let val1: u32 = 10;
-    let val2: u32 = 20;
-    let val3: u32 = 10;
-
-    let varlena1 = VarlenaType::from_raw_bytes(&val1.to_be_bytes(), None);
-    let varlena2 = VarlenaType::from_raw_bytes(&val2.to_be_bytes(), None);
-    let varlena3 = VarlenaType::from_raw_bytes(&val3.to_be_bytes(), None);
-
-    assert_eq!(val1 < val2, varlena1 < varlena2);
-    assert_eq!(val1 > val2, varlena1 > varlena2);
-    assert_eq!(val1 == val3, varlena1 == varlena3);
-    assert_eq!(val1 != val2, varlena1 != varlena2);
+fn test_row_id_ordering() {
+    let mut values = [
+        RowId::from(1),
+        RowId::from(3),
+        RowId::from(2),
+        RowId::from(0),
+    ];
+    let values_sorted = [
+        RowId::from(0),
+        RowId::from(1),
+        RowId::from(2),
+        RowId::from(3),
+    ];
+    values.sort();
+    for (i, val) in values_sorted.iter().enumerate() {
+        assert_eq!(values[i], *val, "ERROR: Row id ordering mismatch {}", i);
+    }
 }
 
 #[test]

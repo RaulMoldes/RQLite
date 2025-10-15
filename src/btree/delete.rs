@@ -22,12 +22,12 @@ where
         + Sync
         + HeaderOps
         + BTreePageOps
-        + InteriorPageOps<Vi, KeyType = K>
-        + LeafPageOps<Vl, KeyType = K>
+        + InteriorPageOps<Vi>
+        + LeafPageOps<Vl>
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: From<PageFrame<P>>
+    IOFrame: From<PageFrame<P>>,
 {
     fn delete<FI: FileOps, M: MemoryPool>(
         &mut self,
@@ -53,12 +53,12 @@ where
         + Sync
         + HeaderOps
         + BTreePageOps
-        + InteriorPageOps<Vi, KeyType = K>
-        + LeafPageOps<Vl, KeyType = K>
+        + InteriorPageOps<Vi>
+        + LeafPageOps<Vl>
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: From<PageFrame<P>>
+    IOFrame: From<PageFrame<P>>,
 {
     /// Delete, allowing to underflow
     fn delete<FI: FileOps, M: MemoryPool>(
@@ -71,9 +71,7 @@ where
         let last_id = *traversal.last().unwrap();
 
         let cell_size = traversal.write(&last_id).find(&key).unwrap().size();
-        let will_underflow = !traversal
-            .write(&last_id)
-            .can_remove(cell_size, self.min_payload_fraction);
+        let will_underflow = !traversal.write(&last_id).can_remove(cell_size);
 
         if !will_underflow {
             traversal.release_until(last_id, pager)?;
@@ -94,10 +92,7 @@ where
     ) -> std::io::Result<()> {
         let (is_underflow, cell_count) = {
             let r_lock = traversal.write(&caller_id);
-            (
-                r_lock.is_on_underflow_state(self.min_payload_fraction),
-                r_lock.cell_count(),
-            )
+            (r_lock.is_on_underflow_state(), r_lock.cell_count())
         };
 
         let is_leaf = traversal.is_node_leaf(&caller_id);
@@ -109,17 +104,17 @@ where
         }
 
         // PHASE 1: We first need to check if we can borrow from our siblings.
-        self.try_borrow_from_siblings(caller_id, parent_id.unwrap(), traversal, pager)?;
+        self.try_borrow_from_sibling(caller_id, parent_id.unwrap(), traversal, pager)?;
 
         // PHASE 2: If still on underflow state, we are fucked up.
         let still_underflow = {
             let r_lock = traversal.write(&caller_id);
-            r_lock.is_on_underflow_state(self.min_payload_fraction)
+            r_lock.is_on_underflow_state()
         };
 
         // NO OTHER OPPORTUNITY THAN MERGING WITH OUR FRIENDS
         if still_underflow {
-            self.force_rebalance(caller_id, parent_id.unwrap(), traversal, pager)?;
+            self.balance_siblings(caller_id, parent_id.unwrap(), traversal, pager)?;
         }
 
         Ok(())

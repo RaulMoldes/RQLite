@@ -5,14 +5,14 @@ pub(crate) const HEADER_SIZE: usize = 110;
 /// Magic string that identifies the RQLite file format.
 pub(crate) const RQLITE_HEADER_STRING: &[u8; 16] = b"RQLite format 3\0";
 /// Default max embedded payload fraction.C
-pub(crate) const MAX_PAYLOAD_FRACTION: f32 = 0.95;
+pub(crate) const MAX_PAYLOAD_FRACTION: u8 = 64;
 /// Default min embedded payload fraction.
-pub(crate) const MIN_PAYLOAD_FRACTION: f32 = 0.1;
+pub(crate) const MIN_PAYLOAD_FRACTION: u8 = 32;
 pub(crate) const MIN_PAGE_SIZE: u32 = 512;
 
 pub(crate) const MAX_PAGE_SIZE: u32 = 65536;
 /// Default leaf payload fraction.
-pub(crate) const LEAF_PAYLOAD_FRACTION: f32 = 0.95;
+pub(crate) const LEAF_PAYLOAD_FRACTION: u8 = 32;
 /// Default cache size of the database (num pages)
 pub(crate) const MAX_CACHE_SIZE: u32 = 10000;
 /// Default page size of the database

@@ -21,7 +21,7 @@ macro_rules! btree_insert_tests {
             #[test]
             fn $test_name() {
                 let mut pager = setup_test_pager();
-                let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2)
+                let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 64, 32, 32)
                     .expect("Failed to create BTree");
 
                 for i in 1..=$num_cells {
@@ -31,9 +31,13 @@ macro_rules! btree_insert_tests {
 
                     let cell = create_test_cell(row_id, vec![i as u8; size]);
 
-                    dbg!(i);
+
                     btree.insert(row_id, cell, &mut pager)
                         .expect("Failed to insert into BTree");
+
+
+
+
                 }
 
                 btree.print_tree(&mut pager).unwrap();
@@ -82,7 +86,7 @@ fn create_test_cell(row_id: RowId, data: Vec<u8>) -> TableLeafCell {
 #[test]
 fn test_single_record() {
     let mut pager = setup_test_pager();
-    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
+    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 64, 32, 32).unwrap();
 
     let row_id = RowId::from(1);
     let cell = create_test_cell(row_id, vec![1, 2, 3, 4]);
@@ -100,7 +104,7 @@ fn test_single_record() {
 #[test]
 fn test_multiple_sequential_inserts() {
     let mut pager = setup_test_pager();
-    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
+    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 64, 32, 32).unwrap();
 
     // Insert 100 registers
     for i in 1..=100 {
@@ -122,7 +126,7 @@ fn test_multiple_sequential_inserts() {
 #[test]
 fn test_overflow() {
     let mut pager = setup_test_pager();
-    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.3, 0.1).unwrap();
+    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 64, 32, 32).unwrap();
 
     let row_id = RowId::from(1);
 
@@ -141,7 +145,7 @@ fn test_overflow() {
 #[test]
 fn test_root_split() {
     let mut pager = setup_test_pager();
-    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.3, 0.1).unwrap();
+    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 64, 32, 32).unwrap();
 
     let original_root = btree.root;
 
@@ -154,7 +158,7 @@ fn test_root_split() {
         let cell = create_test_cell(row_id, data);
         btree.insert(row_id, cell, &mut pager).unwrap();
 
-        if i.is_multiple_of(4) {
+        if i.is_multiple_of(2) {
             btree.print_tree(&mut pager).unwrap();
         }
     }
@@ -189,7 +193,7 @@ fn test_root_split() {
 #[test]
 fn test_insert_duplicate_keys() {
     let mut pager = setup_test_pager();
-    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
+    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 64, 32, 32).unwrap();
 
     let row_id = RowId::from(1);
     let cell1 = create_test_cell(row_id, vec![1; 10]);
@@ -204,14 +208,14 @@ fn test_insert_duplicate_keys() {
 }
 
 btree_insert_tests! {
-    test_insert_100_cells_small => { cells: 100, max_size: 10 },
-    test_insert_500_cells_medium => { cells: 500, max_size: 100 },
+    test_insert_100_cells_medium => { cells: 100, max_size: 100 },
+    test_insert_500_cells_small => { cells: 500, max_size: 25 },
 }
 
 #[test]
 fn test_delete_single_element() {
     let mut pager = setup_test_pager();
-    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
+    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 64, 32, 32).unwrap();
 
     let row_id = RowId::from(1);
     let cell = create_test_cell(row_id, vec![1; 10]);
@@ -225,7 +229,7 @@ fn test_delete_single_element() {
 #[test]
 fn test_delete_all_elements() {
     let mut pager = setup_test_pager();
-    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
+    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 64, 32, 32).unwrap();
 
     for i in 1..=50 {
         let row_id = RowId::from(i);
@@ -247,7 +251,7 @@ fn test_delete_all_elements() {
 #[test]
 fn test_delete_and_reinsert() {
     let mut pager = setup_test_pager();
-    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 0.8, 0.2).unwrap();
+    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 64, 32, 32).unwrap();
 
     for i in 1..=50 {
         let row_id = RowId::from(i);
@@ -274,4 +278,27 @@ fn test_delete_and_reinsert() {
         let found = btree.search(row_id, &mut pager).unwrap();
         assert_eq!(found.payload.as_bytes()[0], i as u8 + 100);
     }
+}
+
+#[test]
+fn test_scan() {
+    let mut pager = setup_test_pager();
+    let mut btree = TableBTree::create(&mut pager, BTreeType::Table, 64, 32, 32).unwrap();
+
+    // Insert enough records to span multiple pages
+    let num_records = 300usize;
+    for i in 1..=num_records {
+        let row_id = RowId::from(i as u32);
+        let cell = create_test_cell(row_id, vec![i as u8; 50]);
+        btree.insert(row_id, cell, &mut pager).unwrap();
+    }
+
+    btree.print_tree(&mut pager).unwrap();
+
+    // Scan all records sequentially
+    let start_id = RowId::from(1);
+    let all_cells = btree.scan(start_id, num_records, &mut pager);
+    let scanned_count = all_cells.len();
+
+    assert_eq!(scanned_count, num_records);
 }

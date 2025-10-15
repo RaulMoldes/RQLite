@@ -23,8 +23,8 @@ impl Splittable for VarlenaType {
         }
     }
 
-    fn split_at(&mut self, offset: usize) -> Self {
-        let new_data = self.data.split_off(offset);
+    fn split_at(&mut self, offset: u16) -> Self {
+        let new_data = self.data.split_off(offset as usize);
         let new_length = self.length - Varint(offset as i64);
         self.length = Varint(offset as i64);
 
@@ -111,8 +111,8 @@ impl VarlenaType {
         None
     }
 
-    pub fn total_size_bytes(&self) -> usize {
-        1 + self.length.size_of() + self.data.len()
+    pub fn total_size_bytes(&self) -> u16 {
+        1 + self.length.size_of() + self.data.len() as u16
     }
 
     pub fn effective_size(&self) -> usize {
@@ -134,7 +134,7 @@ impl RQLiteType for VarlenaType {
         }
     }
 
-    fn size_of(&self) -> usize {
+    fn size_of(&self) -> u16 {
         self.total_size_bytes()
     }
 }

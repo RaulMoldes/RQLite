@@ -8,9 +8,7 @@ macro_rules! impl_interior_page_ops {
         }
     ) => {
         impl InteriorPageOps<$cell> for $enum {
-            type KeyType = $key_type;
-
-            fn find_child(&self, key: &Self::KeyType) -> PageId {
+            fn find_child(&self, key: &$key_type) -> PageId {
                 match self {
                     $enum::$interior_variant(page) => page.find_child(key),
                     $enum::$leaf_variant(_) => {
@@ -19,22 +17,9 @@ macro_rules! impl_interior_page_ops {
                 }
             }
 
-            fn try_pop_back_interior(&mut self, min_payload_factor: f32) -> Option<$cell> {
+            fn try_pop_children(&mut self, required_size: u16) -> Option<Vec<$cell>> {
                 match self {
-                    $enum::$interior_variant(page) => {
-                        page.try_pop_back_interior(min_payload_factor)
-                    }
-                    $enum::$leaf_variant(_) => {
-                        panic!("Leaf pages don't have rightmost child!")
-                    }
-                }
-            }
-
-            fn try_pop_front_interior(&mut self, min_payload_factor: f32) -> Option<$cell> {
-                match self {
-                    $enum::$interior_variant(page) => {
-                        page.try_pop_front_interior(min_payload_factor)
-                    }
+                    $enum::$interior_variant(page) => page.try_pop_children(required_size),
                     $enum::$leaf_variant(_) => {
                         panic!("Leaf pages don't have rightmost child!")
                     }
@@ -77,15 +62,9 @@ macro_rules! impl_interior_page_ops {
                 }
             }
 
-            fn try_insert_child(
-                &mut self,
-                cell: $cell,
-                max_payload_fraction: f32,
-            ) -> std::io::Result<()> {
+            fn try_insert_children(&mut self, cells: Vec<$cell>) -> std::io::Result<()> {
                 match self {
-                    $enum::$interior_variant(page) => {
-                        page.try_insert_child(cell, max_payload_fraction)
-                    }
+                    $enum::$interior_variant(page) => page.try_insert_children(cells),
                     $enum::$leaf_variant(_) => {
                         panic!("Cannot insert child into leaf page!")
                     }
@@ -110,9 +89,9 @@ macro_rules! impl_interior_page_ops {
                 }
             }
 
-            fn remove_child(&mut self, page_id: PageId) {
+            fn take_child(&mut self, page_id: PageId) -> Option<$cell> {
                 match self {
-                    $enum::$interior_variant(page) => page.remove_child(page_id),
+                    $enum::$interior_variant(page) => page.take_child(page_id),
                     $enum::$leaf_variant(_) => {
                         panic!("Cannot remove child from leaf page!")
                     }
@@ -132,11 +111,24 @@ macro_rules! impl_leaf_page_ops {
         }
     ) => {
         impl LeafPageOps<$cell> for $enum {
-            type KeyType = $key_type;
-
-            fn find(&self, key: &Self::KeyType) -> Option<&$cell> {
+            fn find(&self, key: &$key_type) -> Option<&$cell> {
                 match self {
                     $enum::$leaf_variant(page) => page.find(key),
+                    $enum::$interior_variant(_) => {
+                        panic!("Cannot use leaf search functions on interior pages!")
+                    }
+                }
+            }
+
+            fn scan<'a>(
+                &'a self,
+                start_key: <$cell as Cell>::Key,
+            ) -> impl Iterator<Item = &'a $cell> + 'a
+            where
+                $cell: 'a,
+            {
+                match self {
+                    $enum::$leaf_variant(page) => page.scan(start_key),
                     $enum::$interior_variant(_) => {
                         panic!("Cannot use leaf search functions on interior pages!")
                     }
@@ -170,24 +162,11 @@ macro_rules! impl_leaf_page_ops {
                 }
             }
 
-            fn try_pop_back_leaf(&mut self, min_payload_factor: f32) -> Option<$cell> {
+            fn try_pop(&mut self, required_size: u16) -> Option<Vec<$cell>> {
                 match self {
-                    $enum::$leaf_variant(page) => page.try_pop_back_leaf(min_payload_factor),
+                    $enum::$leaf_variant(page) => page.try_pop(required_size),
                     $enum::$interior_variant(_) => {
-                        panic!(
-                            "Invalid use of leaf page function! Use try_pop_back_interior instead"
-                        )
-                    }
-                }
-            }
-
-            fn try_pop_front_leaf(&mut self, min_payload_factor: f32) -> Option<$cell> {
-                match self {
-                    $enum::$leaf_variant(page) => page.try_pop_front_leaf(min_payload_factor),
-                    $enum::$interior_variant(_) => {
-                        panic!(
-                            "Invalid use of leaf page function! Use try_pop_front_interior instead"
-                        )
+                        panic!("Invalid use of leaf page function! Use try_pop_child instead")
                     }
                 }
             }
@@ -201,30 +180,25 @@ macro_rules! impl_leaf_page_ops {
                 }
             }
 
-            fn insert(&mut self, key: Self::KeyType, cell: $cell) -> std::io::Result<()> {
+            fn insert(&mut self, cell: $cell) -> std::io::Result<()> {
                 match self {
-                    $enum::$leaf_variant(page) => page.insert(key, cell),
+                    $enum::$leaf_variant(page) => page.insert(cell),
                     $enum::$interior_variant(_) => {
                         panic!("Cannot insert into interior page using leaf operations!")
                     }
                 }
             }
 
-            fn try_insert(
-                &mut self,
-                key: Self::KeyType,
-                cell: $cell,
-                max_payload_fraction: f32,
-            ) -> std::io::Result<()> {
+            fn try_insert(&mut self, cells: Vec<$cell>) -> std::io::Result<()> {
                 match self {
-                    $enum::$leaf_variant(page) => page.try_insert(key, cell, max_payload_fraction),
+                    $enum::$leaf_variant(page) => page.try_insert(cells),
                     $enum::$interior_variant(_) => {
                         panic!("Cannot insert into interior page using leaf operations!")
                     }
                 }
             }
 
-            fn remove(&mut self, key: &Self::KeyType) -> Option<$cell> {
+            fn remove(&mut self, key: &$key_type) -> Option<$cell> {
                 match self {
                     $enum::$leaf_variant(page) => page.remove(key),
                     $enum::$interior_variant(_) => {
@@ -245,35 +219,49 @@ macro_rules! impl_btree_page_ops {
         }
     ) => {
         impl BTreePageOps for $enum {
-            fn can_pop_at_back(&self, min_payload_factor: f32) -> bool {
+            fn can_remove(&self, cell_size: u16) -> bool {
                 match self {
-                    $enum::$leaf_variant(page) => page.can_pop_at_back(min_payload_factor),
-                    $enum::$interior_variant(page) => page.can_pop_at_back(min_payload_factor),
+                    $enum::$leaf_variant(page) => page.can_remove(cell_size),
+                    $enum::$interior_variant(page) => page.can_remove(cell_size),
                 }
             }
 
-            fn can_pop_at_front(&self, min_payload_factor: f32) -> bool {
+            fn unfuck_cell_offsets(&mut self, removed_offset: u16, removed_size: u16) {
                 match self {
-                    $enum::$leaf_variant(page) => page.can_pop_at_front(min_payload_factor),
-                    $enum::$interior_variant(page) => page.can_pop_at_front(min_payload_factor),
-                }
-            }
-
-            fn can_remove(&self, cell_size: usize, min_payload_factor: f32) -> bool {
-                match self {
-                    $enum::$leaf_variant(page) => page.can_remove(cell_size, min_payload_factor),
+                    $enum::$leaf_variant(page) => {
+                        page.unfuck_cell_offsets(removed_offset, removed_size)
+                    }
                     $enum::$interior_variant(page) => {
-                        page.can_remove(cell_size, min_payload_factor)
+                        page.unfuck_cell_offsets(removed_offset, removed_size)
                     }
                 }
             }
 
-            fn fits_in(&self, additional_size: usize, max_payload_factor: f32) -> bool {
+            fn fits_in(&self, additional_size: u16) -> bool {
                 match self {
-                    $enum::$leaf_variant(page) => page.fits_in(additional_size, max_payload_factor),
-                    $enum::$interior_variant(page) => {
-                        page.fits_in(additional_size, max_payload_factor)
-                    }
+                    $enum::$leaf_variant(page) => page.fits_in(additional_size),
+                    $enum::$interior_variant(page) => page.fits_in(additional_size),
+                }
+            }
+
+            fn reset_stats(&mut self) {
+                match self {
+                    $enum::$leaf_variant(page) => page.reset_stats(),
+                    $enum::$interior_variant(page) => page.reset_stats(),
+                }
+            }
+
+            fn get_overflow_size(&self) -> u16 {
+                match self {
+                    $enum::$leaf_variant(page) => page.get_overflow_size(),
+                    $enum::$interior_variant(page) => page.get_overflow_size(),
+                }
+            }
+
+            fn get_underflow_size(&self) -> u16 {
+                match self {
+                    $enum::$leaf_variant(page) => page.get_underflow_size(),
+                    $enum::$interior_variant(page) => page.get_underflow_size(),
                 }
             }
         }

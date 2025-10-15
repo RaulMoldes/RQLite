@@ -11,7 +11,7 @@ use crate::PageType;
 use std::collections::BTreeMap;
 
 use super::{
-    redistribute_cells, BorrowOpType, DeleteOps, InsertOps, RebalanceMethod, TraverseStack,
+    redistribute_cells, split_cells_by_size, DeleteOps, InsertOps, RebalanceMethod, TraverseStack,
 };
 
 /// BTree rebalance operations go here.
@@ -24,8 +24,8 @@ where
         + Sync
         + HeaderOps
         + BTreePageOps
-        + InteriorPageOps<Vi, KeyType = K>
-        + LeafPageOps<Vl, KeyType = K>
+        + InteriorPageOps<Vi>
+        + LeafPageOps<Vl>
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
@@ -39,12 +39,25 @@ where
         source_node: PageId,
         dest_node: PageId,
         traversal: &mut TraverseStack<P>,
-        op_type: BorrowOpType,
         pager: &mut Pager<FI, M>,
-    ) -> bool;
+    ) -> (bool, u16);
 
-    /// Try to release part of the data to your siblings.
-    fn try_release_to_siblings<FI: FileOps, M: MemoryPool>(
+    /// According to SQLITE documentation:
+    ///
+    /// The balance deeper sub-algorithm is used when the root page of a b-tree is overfull. It creates a new page and copies the entire contents of the overfull root page to it.
+    /// The root page is then zeroed and the new page installed as its only child.
+    /// The balancing algorithm is then run on the new child page (in case it is overfull).
+    ///
+    /// NOTE for me: The way I have implemented the B+Tree algo, the new allocated root child will always be overfull. In consequence, this algorithm distributes the cells between itself and a new node which will become the new RIGHT-MOST-CHILD of its parent.
+    fn balance_deeper<FI: FileOps, M: MemoryPool>(
+        &mut self,
+        root: PageId,
+        traversal: &mut TraverseStack<P>,
+        pager: &mut Pager<FI, M>,
+    ) -> std::io::Result<()>;
+
+    /// Try to release part of the data to your right sibling.
+    fn try_release_to_sibling<FI: FileOps, M: MemoryPool>(
         &mut self,
         caller_id: PageId,
         parent_id: PageId,
@@ -52,8 +65,8 @@ where
         pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()>;
 
-    /// Try to release part of the data to your siblings.
-    fn try_borrow_from_siblings<FI: FileOps, M: MemoryPool>(
+    /// Try to borrow part of the data from your left sibling.
+    fn try_borrow_from_sibling<FI: FileOps, M: MemoryPool>(
         &mut self,
         caller_id: PageId,
         parent_id: PageId,
@@ -67,11 +80,10 @@ where
         source_node: PageId,
         dest_node: PageId,
         traversal: &mut TraverseStack<P>,
-        op_type: BorrowOpType,
         pager: &mut Pager<FI, M>,
-    ) -> std::io::Result<bool>;
+    ) -> std::io::Result<()>;
 
-    fn force_rebalance<FI: FileOps, M: MemoryPool>(
+    fn balance_siblings<FI: FileOps, M: MemoryPool>(
         &mut self,
         caller_id: PageId,
         parent_id: PageId,
@@ -111,8 +123,8 @@ where
         + Sync
         + HeaderOps
         + BTreePageOps
-        + InteriorPageOps<Vi, KeyType = K>
-        + LeafPageOps<Vl, KeyType = K>
+        + InteriorPageOps<Vi>
+        + LeafPageOps<Vl>
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
@@ -123,60 +135,112 @@ where
         source_node: PageId,
         dest_node: PageId,
         traversal: &mut TraverseStack<P>,
-        op_type: BorrowOpType,
         pager: &mut Pager<FI, M>,
-    ) -> bool {
+    ) -> (bool, u16) {
         // Check the type of the node.
         let is_leaf = traversal.is_node_leaf(&source_node);
         let is_interior = traversal.is_node_interior(&source_node);
 
+        let source_is_overflow = traversal.write(&source_node).is_on_overflow_state();
+        let dest_is_underflow = traversal.write(&dest_node).is_on_underflow_state();
+
         // Validate that both nodes are the same type.
         assert_eq!(traversal.write(&source_node).type_of(), traversal.write(&dest_node).type_of(), "Cannot send cells between nodes of different types!. Source is of type {}, but destination is of type {}",traversal.write(&source_node).type_of(), traversal.write(&dest_node).type_of());
-        let cell_count = traversal.write(&source_node).cell_count() as u16;
+        let cell_count = traversal.write(&source_node).cell_count();
 
-        // Compute the size we are about to insert.
-        let additional_size = if is_leaf {
-            let cell = match op_type {
-                BorrowOpType::Front => traversal.write(&source_node).get_cell_at_leaf(0).unwrap(),
-                BorrowOpType::Back => traversal
-                    .write(&source_node)
-                    .get_cell_at_leaf(cell_count - 1)
-                    .unwrap(),
-            };
-            cell.size()
-        } else if is_interior {
-            let cell = match op_type {
-                BorrowOpType::Front => traversal
-                    .write(&source_node)
-                    .get_cell_at_interior(0)
-                    .unwrap(),
-                BorrowOpType::Back => traversal
-                    .write(&source_node)
-                    .get_cell_at_interior(cell_count - 1)
-                    .unwrap(),
-            };
-            cell.size()
-        } else {
-            panic!(
-                "Invalid type of node. Node was not a valid Btree node: {}",
-                traversal.write(&source_node).type_of()
-            )
+        if !source_is_overflow && !dest_is_underflow {
+            return (false, 0u16);
         };
 
-        let fits = traversal
-            .write(&dest_node)
-            .fits_in(additional_size, self.max_payload_fraction);
+        // Compute the size we are about to insert.
+        let additional_size = if source_is_overflow {
+            traversal.write(&source_node).get_overflow_size()
+        } else {
+            traversal.write(&dest_node).get_underflow_size()
+        };
+
+        let fits = traversal.write(&dest_node).fits_in(additional_size);
+
+        let can_pop = traversal.write(&source_node).can_remove(additional_size);
         // Get the final result based on op type and the size we are about to insert.
-        (matches!(op_type, BorrowOpType::Front)
-            && traversal
-                .write(&source_node)
-                .can_pop_at_front(self.max_payload_fraction)
-            && fits)
-            || (matches!(op_type, BorrowOpType::Back)
-                && traversal
-                    .write(&source_node)
-                    .can_pop_at_back(self.max_payload_fraction)
-                && fits)
+        (fits && can_pop, additional_size)
+    }
+
+    fn balance_deeper<FI: FileOps, M: MemoryPool>(
+        &mut self,
+        root: PageId,
+        traversal: &mut TraverseStack<P>,
+        pager: &mut Pager<FI, M>,
+    ) -> std::io::Result<()> {
+        // Main node (old root) that will get splitted in two is the caller id here.
+        let old_root_type = traversal.write(&root).type_of();
+        let is_leaf = traversal.is_node_leaf(&root);
+        // Create two new pages, grabbing the locks mutably.
+        // I prefer to grab the locks here from the beginning as it facilitates writing this and there is no deadlock risk, since we are the ones creating the nodes.
+        let new_root = traversal.allocate_for_write(self.interior_page_type(), pager)?;
+        let sibling = traversal.allocate_for_write(old_root_type, pager)?;
+
+        // Take the cells outside the root node in order to redistribute them in two new child nodes that are going to be created. Here we need a new root and a new leaf.
+        // The new root will have as children the old one (ourselves, caller) and our new sibling.
+        // We also need to make sure to fix the pointers at the end.
+
+        // CASE A: we are splitting a leaf node.
+        if is_leaf {
+            // If it is the root, there is no point in grabbing the lock to the parent as that would cause a deadlock since if we are the root [parent_id == caller_id].
+            // Then, we grab the lock with mutable access as usual.
+            let taken_cells = traversal.write(&root).take_leaf_cells();
+            // The split cells by size function splits the cells evenly to make sure the tree stays balanced afterwards.
+            let (left_cells, right_cells) = split_cells_by_size(taken_cells);
+            // To maintain our left-biased distribution in the tree, we need to make sure that the propagated key is always a copy of the max key in the left side of the tree.
+            // Remember this is a [BPLUSTREE] not a [BTREE], so the data resides only on the leaf nodes.
+            let propagated_key = left_cells.last().unwrap().key();
+            // Create the mid cell that will be propagated to the created root node and which acts as a separator key between the left and right siblings.
+            let propagated = Vi::create(propagated_key, Some(root));
+            traversal.write(&new_root).insert_child(propagated)?;
+            // Also, set the right most child to point to the new node.
+            traversal.write(&new_root).set_rightmost_child(sibling);
+
+            // Now its time to insert the cells in their proper locations.
+            // Left half contains the left side keys (key <= propagated_key)
+            // So they will be inserted at the left side of the root.
+            for cell in left_cells {
+                traversal.write(&root).insert(cell)?;
+            }
+
+            for cell in right_cells {
+                traversal.write(&sibling).insert(cell)?;
+            }
+
+            // Then, also we need to set the right most node of the leaf node to maintain our linked list of leaf nodes (for scan searches).
+            traversal.write(&root).set_next(sibling);
+        }
+        // CASE B: we are splitting an interior node
+        else {
+            let taken_cells = traversal.write(&root).take_interior_cells();
+            // The split cells by size function splits the cells evenly to make sure the tree stays balanced afterwards.
+            let (left_cells, right_cells) = split_cells_by_size(taken_cells);
+            // To maintain our left-biased distribution in the tree, we need to make sure that the propagated key is always a copy of the max key in the left side of the tree.
+            let propagated_key = left_cells.last().unwrap().key();
+            // Create the mid cell that will be propagated to the created root node and which acts as a separator key between the left and right siblings.
+            let propagated = Vi::create(propagated_key, Some(root));
+            traversal.write(&new_root).insert_child(propagated)?;
+            // Also, set the right most child to point to the new node.
+            traversal.write(&new_root).set_rightmost_child(sibling);
+            // Now its time to insert the cells in their proper locations.
+            // Left half contains the left side keys (key <= propagated_key)
+            // So they will be inserted at the left side of the root.
+            for cell in left_cells {
+                traversal.write(&root).insert_child(cell)?;
+            }
+
+            for cell in right_cells {
+                traversal.write(&sibling).insert_child(cell)?;
+            }
+        }
+
+        self.set_root(new_root);
+
+        Ok(())
     }
 
     // Attempt to borrow a single cell from a source node to a dest node.
@@ -185,141 +249,61 @@ where
         source_node: PageId,
         dest_node: PageId,
         traversal: &mut TraverseStack<P>,
-        op_type: BorrowOpType,
         pager: &mut Pager<FI, M>,
-    ) -> std::io::Result<bool> {
-        if !self.can_borrow(source_node, dest_node, traversal, op_type, pager) {
-            return Ok(false);
+    ) -> std::io::Result<()> {
+        let (can_borrow, borrow_size) = self.can_borrow(source_node, dest_node, traversal, pager);
+
+        if !can_borrow {
+            return Ok(());
         }
 
         let is_leaf = traversal.is_node_leaf(&source_node);
         if is_leaf {
-            let some_cell = match op_type {
-                BorrowOpType::Front => traversal
-                    .write(&source_node)
-                    .try_pop_front_leaf(self.min_payload_fraction),
-                BorrowOpType::Back => traversal
-                    .write(&source_node)
-                    .try_pop_back_leaf(self.min_payload_fraction),
-            };
-
-            if let Some(popped_cell) = some_cell {
+            if let Some(popped_cells) = traversal.write(&source_node).try_pop(borrow_size) {
                 // Acquire the write lock atomically and insert the cell.
                 // It should be safe to do it as we have already checked it, but double checking is no issue too.
                 if traversal
                     .write(&dest_node)
-                    .try_insert(
-                        popped_cell.key(),
-                        popped_cell.clone(),
-                        self.max_payload_fraction,
-                    )
+                    .try_insert(popped_cells.clone())
                     .is_err()
                 {
                     // If we do not succeed on our attempt to insert the cell we just force the re-insertion on the caller.
-                    traversal
-                        .write(&source_node)
-                        .insert(popped_cell.key(), popped_cell)?;
+
+                    for popped_cell in popped_cells {
+                        traversal.write(&source_node).insert(popped_cell)?;
+                    }
                     // We need to make sure to downgrade the locks at the end of each iteration to avoid deadlocks. This should be made easier when i introduce the lock manager.
-                    return Ok(false);
-                }
-
-                return Ok(true);
-            }
-        // For interior nodes, insert and popping functions have different signature. Additionally, we should use the
-        } else {
-            let some_cell = match op_type {
-                BorrowOpType::Front => traversal
-                    .write(&source_node)
-                    .try_pop_front_interior(self.min_payload_fraction),
-                BorrowOpType::Back => traversal
-                    .write(&source_node)
-                    .try_pop_back_interior(self.min_payload_fraction),
-            };
-
-            if let Some(popped_cell) = some_cell {
-                // Acquire the write lock atomically and insert the cell.
-                // It should be safe to do it as we have already checked it, but double checking is no issue too.
-                if traversal
-                    .write(&dest_node)
-                    .try_insert_child(popped_cell.clone(), self.max_payload_fraction)
-                    .is_err()
-                {
-                    // If we do not succeed on our attempt to insert the cell we just force the re-insertion on the caller.
-                    traversal.write(&source_node).insert_child(popped_cell)?;
-                    // We need to make sure to downgrade the locks at the end of each iteration to avoid deadlocks. This should be made easier when i introduce the lock manager.
-                    return Ok(false);
-                }
-
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// Attempt to release data to your siblings on a leaf node.
-    fn try_release_to_siblings<FI: FileOps, M: MemoryPool>(
-        &mut self,
-        caller_id: PageId,
-        parent_id: PageId,
-        traversal: &mut TraverseStack<P>,
-        pager: &mut Pager<FI, M>,
-    ) -> std::io::Result<()> {
-        // Grab the exclusive lock on the parent, since we are going to be fucking up our siblings in the midtime we do not want any reader to access this section of the tree
-
-        let (left_sibling, right_sibling) = traversal.write(&parent_id).get_siblings_for(caller_id);
-        let is_leaf = traversal.is_node_leaf(&caller_id);
-
-        // If there is a left sibling, we first borrow from it by popping from ourseleves at the front, since we avoid the need to fix all pointers later.
-        if let Some(left) = left_sibling {
-            traversal.track_wlatch(left, pager);
-            let mut stop = false;
-            // While we are on overflow state, we keep borrowing.
-            while !stop {
-                let result =
-                    self.try_borrow(caller_id, left, traversal, BorrowOpType::Front, pager)?;
-
-                if result {
-                    let caller_count = traversal.write(&caller_id).cell_count();
-                    let left_count = traversal.write(&left).cell_count();
-                };
-
-                let still_overflow = {
-                    let caller_wlock = traversal.write(&caller_id);
-                    caller_wlock.is_on_overflow_state(self.max_payload_fraction)
-                };
-
-                stop = !result || !still_overflow
-            }
-        }
-
-        let still_overflow = {
-            let caller_wlock = traversal.write(&caller_id);
-            caller_wlock.is_on_overflow_state(self.max_payload_fraction)
-        };
-
-        // If we are still on overflow state, we need to go to the right node.
-        if still_overflow {
-            // If there is a left sibling, try borrow at the back of it.
-            if let Some(right) = right_sibling {
-                traversal.track_wlatch(right, pager);
-                let mut stop = false;
-                // Start the loop.
-                while !stop {
-                    let result =
-                        self.try_borrow(caller_id, right, traversal, BorrowOpType::Back, pager)?;
-                    let still_overflow = {
-                        let caller_wlock = traversal.write(&caller_id);
-                        caller_wlock.is_on_overflow_state(self.max_payload_fraction)
-                    };
-
-                    stop = !result || !still_overflow
                 }
             }
         }
         Ok(())
     }
 
-    fn try_borrow_from_siblings<FI: FileOps, M: MemoryPool>(
+    /// Attempt to release data to your right sibling on a leaf node.
+    fn try_release_to_sibling<FI: FileOps, M: MemoryPool>(
+        &mut self,
+        caller_id: PageId,
+        parent_id: PageId,
+        traversal: &mut TraverseStack<P>,
+        pager: &mut Pager<FI, M>,
+    ) -> std::io::Result<()> {
+        let is_leaf = traversal.is_node_leaf(&caller_id);
+
+        if !is_leaf {
+            return Ok(());
+        };
+
+        let (_, right_sibling) = traversal.write(&parent_id).get_siblings_for(caller_id);
+
+        // If there is a left sibling, we first borrow from it by popping from ourseleves at the front, since we avoid the need to fix all pointers later.
+        if let Some(right) = right_sibling {
+            traversal.track_wlatch(right, pager);
+            self.try_borrow(caller_id, right, traversal, pager)?;
+        };
+        Ok(())
+    }
+
+    fn try_borrow_from_sibling<FI: FileOps, M: MemoryPool>(
         &mut self,
         caller_id: PageId,
         parent_id: PageId,
@@ -328,50 +312,14 @@ where
     ) -> std::io::Result<()> {
         // Grab the exclusive lock on the parent, since we are going to be fucking up our siblings in the midtime we do not want any reader to access this section of the tree
 
-        let (left_sibling, right_sibling) = traversal.write(&parent_id).get_siblings_for(caller_id);
+        let (left_sibling, _) = traversal.write(&parent_id).get_siblings_for(caller_id);
         let is_leaf = traversal.is_node_leaf(&caller_id);
 
         // If there is a left sibling, we first borrow from it by popping from ourseleves at the front, since we avoid the need to fix all pointers later.
         if let Some(left) = left_sibling {
             traversal.track_wlatch(left, pager);
-            let mut stop = false;
-            // While we are on overflow state, we keep borrowing.
-            while !stop {
-                let result =
-                    self.try_borrow(left, caller_id, traversal, BorrowOpType::Back, pager)?;
-                let still_overflow = {
-                    let caller_wlock = traversal.write(&caller_id);
-                    caller_wlock.is_on_overflow_state(self.max_payload_fraction)
-                };
-
-                stop = result && still_overflow
-            }
-        }
-
-        let still_overflow = {
-            let caller_wlock = traversal.write(&caller_id);
-            caller_wlock.is_on_overflow_state(self.max_payload_fraction)
+            self.try_borrow(left, caller_id, traversal, pager)?;
         };
-
-        // If we are still on overflow state, we need to go to the right node.
-        if still_overflow {
-            // If there is a left sibling, try borrow at the back of it.
-            if let Some(right) = right_sibling {
-                traversal.track_wlatch(right, pager);
-                let mut stop = false;
-                // Start the loop.
-                while !stop {
-                    let result =
-                        self.try_borrow(right, caller_id, traversal, BorrowOpType::Front, pager)?;
-                    let still_overflow = {
-                        let caller_wlock = traversal.write(&caller_id);
-                        caller_wlock.is_on_overflow_state(self.max_payload_fraction)
-                    };
-
-                    stop = result && still_overflow
-                }
-            }
-        }
 
         Ok(())
     }
@@ -407,7 +355,12 @@ where
         Ok(new_cell)
     }
 
-    fn force_rebalance<FI: FileOps, M: MemoryPool>(
+    /// This is my implementation of https://sqlite.org/btreemodule.html#balance_siblings
+    /// According to SQLITE documentation:
+    /// The balance-siblings algorithm shall redistribute the b-tree cells currently stored on a overfull or underfull page and up to two sibling pages,
+    /// adding or removing siblings as required,
+    /// such that no sibling page is overfull and the minimum possible number of sibling pages is used to store the redistributed b-tree cells.
+    fn balance_siblings<FI: FileOps, M: MemoryPool>(
         &mut self,
         caller_id: PageId,
         parent_id: PageId,
@@ -447,7 +400,7 @@ where
                 &mut all_cells,
                 self.max_payload_fraction,
                 self.min_payload_fraction,
-                page_size,
+                page_size as usize,
             );
             let num_groups = splitted_groups.len();
 
@@ -460,12 +413,10 @@ where
             for (i, child_id) in all_childs.iter().enumerate() {
                 if i <= num_groups.saturating_sub(1) {
                     let cells_for_child = &splitted_groups[i];
-                    let total_size_for_child: usize =
-                        cells_for_child.iter().map(|c| c.size()).sum();
 
                     for cell in cells_for_child {
                         let child_wlock = traversal.write(child_id);
-                        child_wlock.insert(cell.key(), cell.clone())?;
+                        child_wlock.insert(cell.clone())?;
                     }
                     if i < num_groups.saturating_sub(1) {
                         let next_child = all_childs[i + 1];
@@ -498,7 +449,7 @@ where
                 &mut all_cells,
                 self.max_payload_fraction,
                 self.min_payload_fraction,
-                page_size,
+                page_size as usize,
             );
             let num_groups = splitted_groups.len();
             // If there are more groups than children we need to allocate more pages.
@@ -510,7 +461,6 @@ where
             for (i, child_id) in all_childs.iter().enumerate() {
                 if i <= num_groups.saturating_sub(1) {
                     let cells_for_child = &splitted_groups[i];
-                    let num_cells_for_child = cells_for_child.len();
 
                     for cell in cells_for_child {
                         let child_wlock = traversal.write(child_id);
@@ -574,7 +524,7 @@ where
             // We only require reading from the children here so there is no point in storing the write lock
             traversal.track_wlatch(*node_id, pager);
             let child_w_lock = traversal.write(node_id);
-            let child_cell_count = child_w_lock.cell_count() as u16;
+            let child_cell_count = child_w_lock.cell_count();
             if child_cell_count < 1 {
                 continue;
             };

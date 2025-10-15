@@ -1,8 +1,8 @@
 #[macro_export]
-macro_rules! impl_header_ops {
+macro_rules! impl_header_ops_enum {
     ($enum:ident { $($variant:ident),* $(,)? }) => {
         impl HeaderOps for $enum {
-            fn cell_count(&self) -> usize {
+            fn cell_count(&self) -> u16 {
                 match self {
                     $(
                         $enum::$variant(page) => page.cell_count(),
@@ -11,7 +11,7 @@ macro_rules! impl_header_ops {
             }
 
 
-            fn content_start(&self) -> usize {
+            fn content_start(&self) -> u16 {
                 match self {
                     $(
                         $enum::$variant(page) => page.content_start(),
@@ -19,7 +19,7 @@ macro_rules! impl_header_ops {
                 }
             }
 
-            fn free_space(&self) -> usize {
+            fn free_space(&self) -> u16 {
                 match self {
                     $(
                         $enum::$variant(page) => page.free_space(),
@@ -43,7 +43,7 @@ macro_rules! impl_header_ops {
                 }
             }
 
-            fn page_size(&self) -> usize {
+            fn page_size(&self) -> u16 {
                 match self {
                     $(
                         $enum::$variant(page) => page.page_size(),
@@ -83,10 +83,36 @@ macro_rules! impl_header_ops {
                 }
             }
 
-            fn free_space_start(&self) -> usize {
+            fn free_space_start(&self) -> u16 {
                 match self {
                     $(
                         $enum::$variant(page) => page.free_space_start(),
+                    )*
+                }
+            }
+
+
+             fn set_free_space_ptr(&mut self, ptr: u16) {
+                match self {
+                    $(
+                        $enum::$variant(page) => page.set_free_space_ptr(ptr),
+                    )*
+                }
+            }
+
+
+             fn set_content_start_ptr(&mut self, ptr: u16) {
+                match self {
+                    $(
+                        $enum::$variant(page) => page.set_content_start_ptr(ptr),
+                    )*
+                }
+            }
+
+             fn set_cell_count(&mut self, count: u16) {
+                match self {
+                    $(
+                        $enum::$variant(page) => page.set_cell_count(count),
                     )*
                 }
             }
@@ -95,54 +121,115 @@ macro_rules! impl_header_ops {
 }
 
 #[macro_export]
-macro_rules! impl_header_ops_guard {
-    ($guard_type:ident<$page:ident>) => {
-        impl<$page> HeaderOps for $guard_type<$page>
-        where
-            $page: HeaderOps,
-        {
-            fn cell_count(&self) -> usize {
-                self.0.cell_count()
-            }
-
-            fn content_start(&self) -> usize {
-                self.0.content_start()
-            }
-
-            fn free_space(&self) -> usize {
-                self.0.free_space()
-            }
-
-            fn id(&self) -> PageId {
-                self.0.id()
-            }
-
-            fn is_overflow(&self) -> bool {
-                self.0.is_overflow()
-            }
-
-            fn page_size(&self) -> usize {
-                self.0.page_size()
-            }
-
+macro_rules! impl_header_ops {
+    ($page_type:ty) => {
+        impl HeaderOps for $page_type {
             fn type_of(&self) -> PageType {
-                self.0.type_of()
+                self.header.type_of()
             }
 
-            fn get_next_overflow(&self) -> Option<PageId> {
-                self.0.get_next_overflow()
+            fn page_size(&self) -> u16 {
+                self.header.page_size()
+            }
+
+            fn content_start(&self) -> u16 {
+                self.header.content_start()
             }
 
             fn set_next_overflow(&mut self, overflowpage: PageId) {
-                panic!("Cannot modify through ReadGuard");
+                self.header.set_next_overflow(overflowpage)
             }
 
-            fn set_type(&mut self, _page_type: PageType) {
-                panic!("Cannot modify through ReadGuard");
+            fn free_space_start(&self) -> u16 {
+                self.header.free_space_start()
             }
 
-            fn free_space_start(&self) -> usize {
-                self.0.free_space_start()
+            fn cell_count(&self) -> u16 {
+                self.header.cell_count()
+            }
+
+            fn is_overflow(&self) -> bool {
+                self.header.is_overflow()
+            }
+
+            fn id(&self) -> PageId {
+                self.header.id()
+            }
+
+            fn get_next_overflow(&self) -> Option<PageId> {
+                self.header.get_next_overflow()
+            }
+
+            fn set_type(&mut self, page_type: PageType) {
+                self.header.set_type(page_type)
+            }
+
+            fn set_cell_count(&mut self, count: u16) {
+                self.header.set_cell_count(count)
+            }
+
+            fn set_content_start_ptr(&mut self, content_start: u16) {
+                self.header.set_content_start_ptr(content_start)
+            }
+
+            fn set_free_space_ptr(&mut self, ptr: u16) {
+                self.header.set_free_space_ptr(ptr)
+            }
+        }
+    };
+
+    ($page_type:ident<$generic:ident: $trait_bound:path>) => {
+        impl<$generic: $trait_bound> HeaderOps for $page_type<$generic> {
+            fn type_of(&self) -> PageType {
+                self.header.type_of()
+            }
+
+            fn page_size(&self) -> u32 {
+                self.header.page_size()
+            }
+
+            fn content_start(&self) -> u16 {
+                self.header.content_start()
+            }
+
+            fn set_next_overflow(&mut self, overflowpage: PageId) {
+                self.header.set_next_overflow(overflowpage)
+            }
+
+            fn free_space_start(&self) -> u16 {
+                self.header.free_space_start()
+            }
+
+            fn cell_count(&self) -> u16 {
+                self.header.cell_count()
+            }
+
+            fn is_overflow(&self) -> bool {
+                self.header.is_overflow()
+            }
+
+            fn id(&self) -> PageId {
+                self.header.id()
+            }
+
+            fn get_next_overflow(&self) -> Option<PageId> {
+                self.header.get_next_overflow()
+            }
+
+            fn set_type(&mut self, page_type: PageType) {
+                self.header.set_type(page_type)
+            }
+
+            fn set_cell_count(&mut self, count: u16) {
+                self.header.set_cell_count(count)
+            }
+
+            fn set_content_start_ptr(&mut self, content_start: u16) {
+                self.header.set_content_start_ptr(content_start)
+            }
+
+            fn set_free_space_ptr(&mut self, ptr: u16) {
+                self.header.set_free_space_ptr(ptr)
             }
         }
     };

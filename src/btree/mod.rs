@@ -54,8 +54,9 @@ pub(crate) enum RebalanceMethod {
 #[derive(Debug)]
 pub(crate) struct BTree<K, Vl, Vi, P: Send + Sync> {
     pub(crate) root: PageId,
-    pub(crate) min_payload_fraction: f32,
-    pub(crate) max_payload_fraction: f32,
+    pub(crate) min_payload_fraction: u8,
+    pub(crate) max_payload_fraction: u8,
+    pub(crate) leaf_payload_fraction: u8,
     pub(crate) tree_type: BTreeType,
     __key_marker: std::marker::PhantomData<K>,
     __val_leaf_marker: std::marker::PhantomData<Vl>,
@@ -72,18 +73,19 @@ where
         + Sync
         + HeaderOps
         + BTreePageOps
-        + InteriorPageOps<Vi, KeyType = K>
-        + LeafPageOps<Vl, KeyType = K>
+        + InteriorPageOps<Vi>
+        + LeafPageOps<Vl>
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: From<PageFrame<P>>
+    IOFrame: From<PageFrame<P>>,
 {
     pub(crate) fn create<FI: FileOps, M: MemoryPool>(
         pager: &mut Pager<FI, M>,
         tree_type: BTreeType,
-        max_payload_fraction: f32,
-        min_payload_fraction: f32,
+        max_payload_fraction: u8,
+        min_payload_fraction: u8,
+        leaf_payload_fraction: u8,
     ) -> std::io::Result<Self> {
         let page_type = match tree_type {
             BTreeType::Table => crate::PageType::TableLeaf,
@@ -95,6 +97,7 @@ where
             tree_type,
             max_payload_fraction,
             min_payload_fraction,
+            leaf_payload_fraction,
             __key_marker: std::marker::PhantomData,
             __val_leaf_marker: std::marker::PhantomData,
             __val_int_marker: std::marker::PhantomData,
@@ -177,9 +180,11 @@ where
         mut content: VarlenaType,
         pager: &mut Pager<FI, M>,
     ) -> std::io::Result<()> {
-        while let Some((new_page, remaining_content)) =
-            overflow_page.try_insert_with_overflow(content, self.max_payload_fraction)?
-        {
+        while let Some((new_page, remaining_content)) = overflow_page.try_insert_with_overflow(
+            content,
+            self.max_payload_fraction,
+            self.min_payload_fraction,
+        )? {
             self.store_overflow_page(overflow_page, pager)?;
             overflow_page = new_page;
 

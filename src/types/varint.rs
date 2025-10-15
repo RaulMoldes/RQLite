@@ -69,7 +69,7 @@ impl RQLiteType for Varint {
     }
 
     // Computes the serialized size of a Varint.
-    fn size_of(&self) -> usize {
+    fn size_of(&self) -> u16 {
         let mut value = Self::encode_zigzag(self.0);
         let mut size = 0;
 

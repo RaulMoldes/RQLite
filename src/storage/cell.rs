@@ -17,7 +17,7 @@ pub(crate) trait Cell: Clone + Send + Sync + Debug {
     type Key: Ord + std::fmt::Display;
     type Data: Serializable;
 
-    fn size(&self) -> usize;
+    fn size(&self) -> u16;
 
     fn create(key: Self::Key, data: Option<Self::Data>) -> Self;
 
@@ -89,7 +89,7 @@ impl Cell for TableLeafCell {
         Some(&mut self.payload)
     }
 
-    fn size(&self) -> usize {
+    fn size(&self) -> u16 {
         // The overflow page pointer if only serialized if set. If not set, we avoid serializing it.
         // Therefore the size of a cell is variable, depending on it having an overflow page to point to.
         let overflow_size = if let Some(page) = self.overflow_page {
@@ -169,7 +169,7 @@ impl Cell for TableInteriorCell {
     fn key(&self) -> Self::Key {
         self.key
     }
-    fn size(&self) -> usize {
+    fn size(&self) -> u16 {
         self.left_child_page.size_of() + self.key.size_of()
     }
 
@@ -253,7 +253,7 @@ impl Cell for IndexLeafCell {
         }
     }
 
-    fn size(&self) -> usize {
+    fn size(&self) -> u16 {
         let overflow_size = if let Some(page) = self.overflow_page {
             page.size_of()
         } else {
@@ -364,7 +364,7 @@ impl Cell for IndexInteriorCell {
         }
     }
 
-    fn size(&self) -> usize {
+    fn size(&self) -> u16 {
         let overflow_size = if let Some(overflow_page) = self.overflow_page {
             overflow_page.size_of()
         } else {

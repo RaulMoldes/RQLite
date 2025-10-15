@@ -1,16 +1,15 @@
 use crate::serialization::Serializable;
 use crate::types::{Byte, PageId};
 use crate::PAGE_SIZE;
-use std::cmp::min;
 use std::fmt;
 use std::io::{self, Read, Write};
 
 /// Page header size is fixed on purpose
 /// This way you do not need to compute the total size at runtime.
-pub(crate) const PAGE_HEADER_SIZE: usize = 24;
+pub(crate) const PAGE_HEADER_SIZE: u16 = 24;
 
 /// As said on [crate::storage::slot.rs] slot size is also fixed.
-pub(crate) const SLOT_SIZE: usize = 2;
+pub(crate) const SLOT_SIZE: u16 = 2;
 
 /// Trait that all pages (header + buffer with data)
 /// Will implement, although values will be computed at the header leve, which is where metadata lives.
@@ -19,16 +18,16 @@ pub(crate) trait HeaderOps {
     fn type_of(&self) -> PageType;
 
     /// Return the page size. This allows standard pages to create overflowpages when needed.
-    fn page_size(&self) -> usize;
+    fn page_size(&self) -> u16;
 
     /// Returns a pointer to the start of the data content on the given page.
-    fn content_start(&self) -> usize;
+    fn content_start(&self) -> u16;
 
     /// Returns a pointer to the start of the free space at the page data content.
-    fn free_space_start(&self) -> usize;
+    fn free_space_start(&self) -> u16;
 
     /// Returns the total number of cells in the page.
-    fn cell_count(&self) -> usize;
+    fn cell_count(&self) -> u16;
 
     /// Whether the page is or not an overflow page.
     fn is_overflow(&self) -> bool;
@@ -37,12 +36,15 @@ pub(crate) trait HeaderOps {
     fn id(&self) -> PageId;
 
     /// Return the availble space (bytes) in the page.
-    fn free_space(&self) -> usize {
+    fn free_space(&self) -> u16 {
         self.free_space_start().saturating_sub(self.content_start())
     }
 
-    fn available_space(&self, max_payload_factor: f32) -> usize {
-        ((self.free_space() - SLOT_SIZE) as f32 * max_payload_factor) as usize
+    fn min_cell_size(&self, min_payload_factor: u8) -> u16 {
+        let size = self.page_size() as u32;
+        (size
+            .saturating_mul(min_payload_factor as u32)
+            .div_ceil(u8::MAX as u32)) as u16
     }
 
     /// Shortcut to get the next overflow page in the overflow chain.
@@ -52,11 +54,11 @@ pub(crate) trait HeaderOps {
     /// The logic is the following:
     /// If the cell does not fit on a page, but does not excede the maximum size, we create a new page.
     /// If the cell excedes the max_cell_size, we insert what is available and then create an overflow chain to insert the rest of the data.
-    fn max_cell_size(&self, max_payload_factor: f32) -> usize {
-        min(
-            (self.page_size() as f32 * max_payload_factor) as usize,
-            self.free_space() - SLOT_SIZE,
-        )
+    fn max_cell_size(&self, max_payload_factor: u8) -> u16 {
+        let size = self.page_size() as u32;
+        (size
+            .saturating_mul(max_payload_factor as u32)
+            .div_ceil(u8::MAX as u32)) as u16
     }
 
     /// Setter for the page type.
@@ -65,17 +67,9 @@ pub(crate) trait HeaderOps {
     /// Set the pointer to the next overflow page.
     fn set_next_overflow(&mut self, overflowpage: PageId);
 
-    fn is_on_underflow_state(&self, min_payload_factor: f32) -> bool {
-        let minimum_used_space = (self.page_size() as f32 * min_payload_factor) as usize;
-        let used_space = self.page_size() - self.free_space();
-        self.cell_count() == 0 || used_space < minimum_used_space
-    }
-
-    fn is_on_overflow_state(&self, max_payload_factor: f32) -> bool {
-        let maximum_used_space = (self.page_size() as f32 * max_payload_factor) as usize;
-        let used_space = self.page_size() - self.free_space();
-        self.cell_count() > 1 && used_space > maximum_used_space
-    }
+    fn set_free_space_ptr(&mut self, ptr: u16);
+    fn set_cell_count(&mut self, count: u16);
+    fn set_content_start_ptr(&mut self, content_start: u16);
 }
 
 /// 1-byte Page enum.
@@ -177,7 +171,7 @@ pub(crate) struct PageHeader {
 /// This enum should ideally read the byte marker and deserialize the corresponding page depending on that.
 impl Serializable for PageHeader {
     fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let mut buffer = [0u8; PAGE_HEADER_SIZE - 1];
+        let mut buffer = [0u8; (PAGE_HEADER_SIZE - 1) as usize];
 
         reader.read_exact(&mut buffer[0..16])?;
 
@@ -250,24 +244,24 @@ impl HeaderOps for PageHeader {
         self.page_type
     }
 
-    fn page_size(&self) -> usize {
-        self.page_size as usize
+    fn page_size(&self) -> u16 {
+        self.page_size as u16
     }
 
-    fn content_start(&self) -> usize {
-        self.content_start_ptr as usize
+    fn content_start(&self) -> u16 {
+        self.content_start_ptr
     }
 
     fn set_next_overflow(&mut self, overflowpage: PageId) {
         self.next_overflow_page = overflowpage
     }
 
-    fn free_space_start(&self) -> usize {
-        self.free_space_ptr as usize
+    fn free_space_start(&self) -> u16 {
+        self.free_space_ptr
     }
 
-    fn cell_count(&self) -> usize {
-        self.cell_count as usize
+    fn cell_count(&self) -> u16 {
+        self.cell_count
     }
 
     fn is_overflow(&self) -> bool {
@@ -288,6 +282,18 @@ impl HeaderOps for PageHeader {
     fn set_type(&mut self, page_type: PageType) {
         self.page_type = page_type
     }
+
+    fn set_cell_count(&mut self, count: u16) {
+        self.cell_count = count
+    }
+
+    fn set_content_start_ptr(&mut self, content_start: u16) {
+        self.content_start_ptr = content_start
+    }
+
+    fn set_free_space_ptr(&mut self, ptr: u16) {
+        self.free_space_ptr = ptr
+    }
 }
 
 impl Default for PageHeader {
@@ -299,7 +305,7 @@ impl Default for PageHeader {
             next_overflow_page: PageId::from(0),
             free_space_ptr: (PAGE_SIZE) as u16,
             cell_count: 0,
-            content_start_ptr: (PAGE_HEADER_SIZE) as u16,
+            content_start_ptr: PAGE_HEADER_SIZE,
             page_type: PageType::Free,
             reserved_space: 0,
         }
@@ -322,7 +328,7 @@ impl PageHeader {
             // Therefore the free space pointer grows towards the beginning of the page.
             free_space_ptr: (PAGE_SIZE) as u16,
             cell_count: 0,
-            content_start_ptr: (PAGE_HEADER_SIZE) as u16,
+            content_start_ptr: PAGE_HEADER_SIZE,
             page_type,
             reserved_space: 0,
         }

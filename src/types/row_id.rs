@@ -23,7 +23,7 @@ fn __gen_new_row() -> RowId {
 }
 
 impl RQLiteType for RowId {
-    fn size_of(&self) -> usize {
+    fn size_of(&self) -> u16 {
         4
     }
 

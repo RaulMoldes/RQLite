@@ -12,7 +12,9 @@ pub mod slot;
 use crate::btreepage::BTreePageOps;
 use crate::serialization::Serializable;
 use crate::types::{PageId, RQLiteType, RowId, VarlenaType};
-use crate::{impl_btree_page_ops, impl_header_ops, impl_interior_page_ops, impl_leaf_page_ops};
+use crate::{
+    impl_btree_page_ops, impl_header_ops_enum, impl_interior_page_ops, impl_leaf_page_ops,
+};
 pub(crate) use btreepage::*;
 pub(crate) use cell::*;
 pub(crate) use free_page::*;
@@ -89,22 +91,24 @@ impl Overflowable for RQLiteIndexPage {
     fn try_insert_with_overflow_interior(
         &mut self,
         content: IndexInteriorCell,
-        max_payload_factor: f32,
+        max_payload_factor: u8,
+        min_payload_factor: u8,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         match self {
             RQLiteIndexPage::Leaf(_) => panic!("Invalid content. Content type must be IndexLeafCell when inserting on IndexLeafPages"),
-            RQLiteIndexPage::Interior(page) => page.try_insert_with_overflow(content,max_payload_factor)
+            RQLiteIndexPage::Interior(page) => page.try_insert_with_overflow(content,max_payload_factor, min_payload_factor)
         }
     }
 
     fn try_insert_with_overflow_leaf(
         &mut self,
         content: IndexLeafCell,
-        max_payload_factor: f32,
+        max_payload_factor: u8,
+        min_payload_factor: u8,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         match self {
             RQLiteIndexPage::Interior(_) => panic!("Invalid content. Content type must be IndexInteriorCell when inserting on IndexInteriorPages"),
-            RQLiteIndexPage::Leaf(page) => page.try_insert_with_overflow(content, max_payload_factor)
+            RQLiteIndexPage::Leaf(page) => page.try_insert_with_overflow(content, max_payload_factor, min_payload_factor)
         }
     }
 }
@@ -117,14 +121,15 @@ impl Overflowable for RQLiteTablePage {
     fn try_insert_with_overflow_leaf(
         &mut self,
         content: TableLeafCell,
-        max_payload_factor: f32,
+        max_payload_factor: u8,
+        min_payload_factor: u8,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         match self {
             RQLiteTablePage::Interior(_) => {
                 panic!("Invalid content. Table interior pages are not overflowable.")
             }
             RQLiteTablePage::Leaf(page) => {
-                page.try_insert_with_overflow(content, max_payload_factor)
+                page.try_insert_with_overflow(content, max_payload_factor, min_payload_factor)
             }
         }
     }
@@ -136,8 +141,8 @@ unsafe impl Send for RQLiteTablePage {}
 unsafe impl Sync for RQLiteIndexPage {}
 unsafe impl Sync for RQLiteTablePage {}
 
-impl_header_ops!(RQLiteTablePage { Leaf, Interior });
-impl_header_ops!(RQLiteIndexPage { Leaf, Interior });
+impl_header_ops_enum!(RQLiteTablePage { Leaf, Interior });
+impl_header_ops_enum!(RQLiteIndexPage { Leaf, Interior });
 
 impl_leaf_page_ops!(RQLiteTablePage<TableLeafCell> {
     KeyType = RowId,

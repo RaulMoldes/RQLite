@@ -56,11 +56,11 @@ pub(crate) trait RQLiteType: Serializable + Ord + PartialEq + Eq + Display {
         RQLiteTypeMarker::Null
     }
 
-    fn size_of(&self) -> usize;
+    fn size_of(&self) -> u16;
 }
 
 pub(crate) trait Splittable {
-    fn split_at(&mut self, offset: usize) -> Self;
+    fn split_at(&mut self, offset: u16) -> Self;
     fn merge_with(&mut self, other: Self);
 }
 

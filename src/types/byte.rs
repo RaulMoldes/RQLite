@@ -13,7 +13,7 @@ impl RQLiteType for Byte {
         RQLiteTypeMarker::Byte
     }
 
-    fn size_of(&self) -> usize {
+    fn size_of(&self) -> u16 {
         1
     }
 }

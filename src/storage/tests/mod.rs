@@ -1,54 +1,14 @@
-use crate::storage::btreepage::BTreePage;
 use crate::storage::cell::{IndexInteriorCell, IndexLeafCell, TableInteriorCell, TableLeafCell};
 use crate::storage::{IndexInteriorPage, IndexLeafPage, TableInteriorPage, TableLeafPage};
+use crate::test_serializable;
 use crate::types::{Key, PageId};
 use crate::types::{RowId, VarlenaType};
-use crate::{test_serializable, OverflowPage};
 use crate::{HeaderOps, InteriorPageOps, LeafPageOps, PageType, TextEncoding};
 mod utils;
 use utils::*;
 
 #[macro_use]
 mod macros;
-
-test_serializable!(
-    test_table_leaf_page,
-    BTreePage<TableLeafCell>,
-    [create_table_leaf_page(), create_table_leaf_page()],
-    validate_table_leaf_page
-);
-
-test_serializable!(
-    test_table_interior_page,
-    BTreePage<TableInteriorCell>,
-    [create_table_interior_page(), create_table_interior_page()],
-    validate_table_interior_page
-);
-
-test_serializable!(
-    test_index_leaf_page,
-    BTreePage<IndexLeafCell>,
-    [create_index_leaf_page(), create_index_leaf_page()],
-    validate_index_leaf_page
-);
-
-test_serializable!(
-    test_index_interior_page,
-    BTreePage<IndexInteriorCell>,
-    [create_index_interior_page(), create_index_interior_page()],
-    validate_index_interior_page
-);
-
-test_serializable!(
-    test_overflow_page,
-    OverflowPage,
-    [
-        create_overflow_page(PageId::from(1000), b"Small data"),
-        create_overflow_page(PageId::from(2000), &vec![0xAB; 3000]), // Large data
-        create_overflow_page(PageId::from(3000), b"")
-    ],
-    validate_overflow_page
-);
 
 test_serializable!(
     test_index_interior_cell,

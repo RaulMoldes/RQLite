@@ -3,7 +3,7 @@ use crate::serialization::Serializable;
 
 use super::PageType;
 use crate::types::PageId;
-use crate::{HeaderOps, PageHeader};
+use crate::{impl_header_ops, HeaderOps, PageHeader};
 use std::io::{self, Read, Write};
 
 #[derive(Clone, Debug)]
@@ -12,51 +12,7 @@ pub(crate) struct FreePage {
     pub(crate) data: Vec<u8>,
 }
 
-impl HeaderOps for FreePage {
-    fn cell_count(&self) -> usize {
-        self.header.cell_count()
-    }
-
-    fn free_space_start(&self) -> usize {
-        self.header.free_space_start()
-    }
-
-    fn set_next_overflow(&mut self, overflowpage: PageId) {
-        self.header.set_next_overflow(overflowpage);
-    }
-
-    fn content_start(&self) -> usize {
-        self.header.content_start()
-    }
-
-    fn free_space(&self) -> usize {
-        self.header.free_space()
-    }
-
-    fn id(&self) -> crate::types::PageId {
-        self.header.id()
-    }
-
-    fn is_overflow(&self) -> bool {
-        self.header.is_overflow()
-    }
-
-    fn page_size(&self) -> usize {
-        self.header.page_size()
-    }
-
-    fn type_of(&self) -> super::PageType {
-        self.header.type_of()
-    }
-
-    fn get_next_overflow(&self) -> Option<PageId> {
-        self.header.get_next_overflow()
-    }
-
-    fn set_type(&mut self, page_type: super::PageType) {
-        self.header.set_type(page_type);
-    }
-}
+impl_header_ops!(FreePage);
 
 impl Serializable for FreePage {
     fn read_from<R: Read>(reader: &mut R) -> io::Result<Self>
@@ -67,7 +23,7 @@ impl Serializable for FreePage {
 
         // Free pages are assumed to be empty.
         let data_size = header.page_size() - PAGE_HEADER_SIZE;
-        let buffer = vec![0u8; data_size];
+        let buffer = vec![0u8; data_size as usize];
         Ok(FreePage {
             header,
             data: buffer,

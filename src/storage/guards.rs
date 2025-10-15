@@ -1,7 +1,5 @@
 use super::{RQLiteIndexPage, RQLiteTablePage};
-use crate::types::PageId;
-use crate::{impl_header_ops_guard, OverflowPage};
-use crate::{HeaderOps, PageType};
+use crate::OverflowPage;
 use parking_lot::{
     ArcRwLockReadGuard, ArcRwLockUpgradableReadGuard, ArcRwLockWriteGuard, RawRwLock, RwLock,
 };
@@ -23,15 +21,12 @@ use std::sync::Arc;
 /// has a static lifetime. As parking lot locks are low size, there should be no memory issues on that.
 pub(crate) struct ReadOnlyLatch<P>(pub ArcRwLockReadGuard<RawRwLock, P>);
 
-impl_header_ops_guard!(ReadOnlyLatch<P>);
-
 impl<P> ReadOnlyLatch<P> {
     pub(crate) fn lock(lock: &Arc<RwLock<P>>) -> Self {
         Self(lock.read_arc())
     }
 }
 pub(crate) struct WriteLatch<P>(pub ArcRwLockWriteGuard<RawRwLock, P>);
-impl_header_ops_guard!(WriteLatch<P>);
 
 impl<P> WriteLatch<P> {
     pub(crate) fn lock(lock: &Arc<RwLock<P>>) -> Self {
@@ -53,7 +48,6 @@ impl<P> DerefMut for WriteLatch<P> {
 }
 
 pub(crate) struct UpgradableLatch<P>(pub ArcRwLockUpgradableReadGuard<RawRwLock, P>);
-impl_header_ops_guard!(UpgradableLatch<P>);
 
 impl<P> UpgradableLatch<P> {
     pub(crate) fn lock(lock: &Arc<RwLock<P>>) -> Self {

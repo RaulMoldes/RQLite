@@ -35,8 +35,8 @@ impl<P> Default for TraverseStack<P> {
 
 impl<P> TraverseStack<P>
 where
-    P: Send + Sync + HeaderOps+ std::fmt::Debug,
-     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
+    P: Send + Sync + HeaderOps + std::fmt::Debug,
+    PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
     IOFrame: From<PageFrame<P>>,
 {
     pub(crate) fn track_rlatch<FI: FileOps, M: MemoryPool>(
@@ -122,8 +122,8 @@ where
         pager: &mut Pager<FI, M>,
     ) -> std::io::Result<PageId> {
         let frame = allocate_page(page_type, pager)?;
-        let latch = frame.write();
         let id = frame.id();
+        let latch = frame.write();
         self.visited_pages.push(id);
         self.tracked_frames.insert(id, frame);
         self.write_latches.insert(id, latch);
@@ -148,18 +148,32 @@ where
         self.visited_pages.reverse();
     }
 
-    pub(crate) fn is_node_leaf(&self, page_id: &PageId) -> bool {
-        self.tracked_frames
-            .get(page_id)
-            .map(|p| p.is_leaf())
-            .unwrap_or(false)
+    pub(crate) fn is_node_interior(&self, page_id: &PageId) -> bool {
+        if let Some(latch) = self.write_latches.get(page_id) {
+            return matches!(latch.type_of(), PageType::IndexInterior)
+                || matches!(latch.type_of(), PageType::TableInterior);
+        } else if let Some(latch) = self.upgradable_latches.get(page_id) {
+            return matches!(latch.type_of(), PageType::IndexInterior)
+                || matches!(latch.type_of(), PageType::TableInterior);
+        } else if let Some(latch) = self.read_only_latches.get(page_id) {
+            return matches!(latch.type_of(), PageType::IndexInterior)
+                || matches!(latch.type_of(), PageType::TableInterior);
+        }
+        false
     }
 
-    pub(crate) fn is_node_interior(&self, page_id: &PageId) -> bool {
-        self.tracked_frames
-            .get(page_id)
-            .map(|p| p.is_interior())
-            .unwrap_or(false)
+    pub(crate) fn is_node_leaf(&self, page_id: &PageId) -> bool {
+        if let Some(latch) = self.write_latches.get(page_id) {
+            return matches!(latch.type_of(), PageType::IndexLeaf)
+                || matches!(latch.type_of(), PageType::TableLeaf);
+        } else if let Some(latch) = self.upgradable_latches.get(page_id) {
+            return matches!(latch.type_of(), PageType::IndexLeaf)
+                || matches!(latch.type_of(), PageType::TableLeaf);
+        } else if let Some(latch) = self.read_only_latches.get(page_id) {
+            return matches!(latch.type_of(), PageType::IndexLeaf)
+                || matches!(latch.type_of(), PageType::TableLeaf);
+        }
+        false
     }
 
     pub(crate) fn upgrade_latch(&mut self, id: PageId) {
@@ -243,8 +257,6 @@ where
             if let Some(frame) = self.tracked_frames.remove(&id) {
                 if let Some(latch) = self.write_latches.remove(&id) {
                     drop(latch);
-
-
                 } else if let Some(latch) = self.upgradable_latches.remove(&id) {
                     drop(latch);
                 } else if let Some(latch) = self.read_only_latches.remove(&id) {
@@ -262,7 +274,7 @@ where
         key: K,
     ) -> Option<PageId>
     where
-        P: InteriorPageOps<Vi, KeyType = K>,
+        P: InteriorPageOps<Vi>,
     {
         if self.is_node_interior(id) {
             if let Some(latch) = self.read_only_latches.get(id) {

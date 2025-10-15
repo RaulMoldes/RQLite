@@ -1,38 +1,39 @@
 use crate::io::cache::MemoryPool;
 use crate::io::disk::FileOps;
-use crate::storage::OverflowPage;
 use crate::io::frames::{IOFrame, PageFrame};
 use crate::io::pager::Pager;
 use crate::storage::Cell;
+use crate::storage::OverflowPage;
 use crate::types::PageId;
+use crate::PAGE_HEADER_SIZE;
 use crate::{PageType, SLOT_SIZE};
 
-pub(crate) fn size_for_cell<BTreeCellType: Cell>(cell: &BTreeCellType) -> usize {
+pub(crate) fn size_for_cell<BTreeCellType: Cell>(cell: &BTreeCellType) -> u16 {
     cell.size() + SLOT_SIZE
 }
 
-pub(crate) fn compute_total_size<BTreeCellType: Cell>(cells: &[BTreeCellType]) -> usize {
-    cells.iter().map(|c| SLOT_SIZE + c.size()).sum()
+pub(crate) fn compute_total_size<BTreeCellType: Cell>(cells: &[BTreeCellType]) -> u16 {
+    cells.iter().map(|c| size_for_cell(c)).sum()
 }
 
 pub(crate) fn check_valid_size<BTreeCellType: Cell>(
     cells: &[BTreeCellType],
-    max_payload_fraction: f32,
-    min_payload_fraction: f32,
-    page_size: usize,
+    max_payload_fraction: u8,
+    min_payload_fraction: u8,
+    page_size: u16,
 ) -> bool {
-    let total_size: usize = cells.iter().map(|c| SLOT_SIZE + c.size()).sum();
-    (total_size + crate::PAGE_HEADER_SIZE <= (max_payload_fraction * page_size as f32) as usize)
-        && (total_size + crate::PAGE_HEADER_SIZE
-            >= (min_payload_fraction * page_size as f32) as usize)
+    let total_size: u16 = compute_total_size(cells);
+    (total_size + PAGE_HEADER_SIZE <= (max_payload_fraction as u16 * page_size).div_ceil(255))
+        && (total_size + PAGE_HEADER_SIZE
+            >= (min_payload_fraction as u16 * page_size).div_ceil(255))
 }
 
 pub(crate) fn split_cells_by_size<BTreeCellType: Cell>(
     mut taken_cells: Vec<BTreeCellType>,
 ) -> (Vec<BTreeCellType>, Vec<BTreeCellType>) {
     taken_cells.sort_by_key(|cell| cell.key());
-    let sizes: Vec<usize> = taken_cells.iter().map(|cell| cell.size()).collect();
-    let total_size: usize = sizes.iter().sum();
+    let sizes: Vec<u16> = taken_cells.iter().map(|cell| cell.size()).collect();
+    let total_size: u16 = sizes.iter().sum();
     let half_size = total_size.div_ceil(2);
 
     // Look for the point where the accumulated result crosses the mid point.
@@ -160,8 +161,8 @@ fn linear_partition_sizes(sizes: &[usize], k: usize) -> Vec<usize> {
 /// page size and min and max payload fractions. Used during rebalancing specially after delete operations.
 pub(crate) fn redistribute_cells<BTreeCellType: Cell + Clone>(
     cells: &mut [BTreeCellType],
-    max_payload_fraction: f32,
-    min_payload_fraction: f32,
+    max_payload_fraction: u8,
+    min_payload_fraction: u8,
     page_size: usize,
 ) -> Vec<Vec<BTreeCellType>> {
     let n = cells.len();
@@ -169,10 +170,10 @@ pub(crate) fn redistribute_cells<BTreeCellType: Cell + Clone>(
         return vec![];
     }
     cells.sort_by_key(|c| c.key());
-    let sizes: Vec<usize> = cells.iter().map(|c| c.size()).collect();
+    let sizes: Vec<usize> = cells.iter().map(|c| c.size() as usize).collect();
     let total: usize = sizes.iter().sum();
-    let max_payload = (page_size as f32 * max_payload_fraction) as usize;
-    let min_payload = (page_size as f32 * min_payload_fraction) as usize;
+    let max_payload = (page_size * max_payload_fraction as usize).div_ceil(255);
+    let min_payload = (page_size * min_payload_fraction as usize).div_ceil(255);
 
     // try k = 1..n, prefer smallest k that yields all groups between min..max
     let mut best_groups: Option<Vec<Vec<BTreeCellType>>> = None;

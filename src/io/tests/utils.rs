@@ -32,22 +32,22 @@ unsafe impl Send for TestPage {}
 unsafe impl Sync for TestPage {}
 
 impl crate::HeaderOps for TestPage {
-    fn cell_count(&self) -> usize {
-        0usize
+    fn cell_count(&self) -> u16 {
+        0u16
     }
 
-    fn free_space_start(&self) -> usize {
-        0usize
+    fn free_space_start(&self) -> u16 {
+        0u16
     }
 
-    fn set_next_overflow(&mut self, overflowpage: PageId) {}
+    fn set_next_overflow(&mut self, _overflowpage: PageId) {}
 
-    fn content_start(&self) -> usize {
-        0usize
+    fn content_start(&self) -> u16 {
+        0u16
     }
 
-    fn free_space(&self) -> usize {
-        0usize
+    fn free_space(&self) -> u16 {
+        0u16
     }
 
     fn id(&self) -> PageId {
@@ -58,8 +58,8 @@ impl crate::HeaderOps for TestPage {
         false
     }
 
-    fn page_size(&self) -> usize {
-        0usize
+    fn page_size(&self) -> u16 {
+        0u16
     }
 
     fn type_of(&self) -> crate::PageType {
@@ -70,5 +70,11 @@ impl crate::HeaderOps for TestPage {
         None
     }
 
-    fn set_type(&mut self, page_type: crate::storage::PageType) {}
+    fn set_type(&mut self, _page_type: crate::storage::PageType) {}
+
+    fn set_cell_count(&mut self, _count: u16) {}
+
+    fn set_content_start_ptr(&mut self, _content_start: u16) {}
+
+    fn set_free_space_ptr(&mut self, _ptr: u16) {}
 }

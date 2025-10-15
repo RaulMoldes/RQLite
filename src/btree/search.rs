@@ -26,11 +26,11 @@ where
         + Sync
         + HeaderOps
         + BTreePageOps
-        + InteriorPageOps<Vi, KeyType = K>
-        + LeafPageOps<Vl, KeyType = K>
+        + InteriorPageOps<Vi>
+        + LeafPageOps<Vl>
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
-     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
+    PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
     IOFrame: From<PageFrame<P>>,
 {
     /// Search for a cell by its Key.
@@ -40,6 +40,14 @@ where
         key: K,
         pager: &mut Pager<FI, M>,
     ) -> Option<Vl>;
+
+    /// Scan the tree for a list of cells.
+    fn scan<FI: FileOps, M: MemoryPool>(
+        &mut self,
+        key: K,
+        num_records: usize,
+        pager: &mut Pager<FI, M>,
+    ) -> Vec<Vl>;
 
     /// Navigate down to the leaf that should contain the key
     /// Accumulates the visited pages in a [`Vec<PageId>`] in order to be able to later traverse backwards without recursing.
@@ -60,8 +68,8 @@ where
         + Sync
         + HeaderOps
         + BTreePageOps
-        + InteriorPageOps<Vi, KeyType = K>
-        + LeafPageOps<Vl, KeyType = K>
+        + InteriorPageOps<Vi>
+        + LeafPageOps<Vl>
         + Overflowable<LeafContent = Vl>
         + std::fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
@@ -84,6 +92,48 @@ where
             }
         }
         None
+    }
+
+
+    /// Scan the tree, collecting [num_records] cells using the pointers that exist between leaves.
+    /// Need to test what happens when the tree grows over height == 2, but for now this seems valid.
+    /// The method navigates to the first cell, identified by key, and then scans over all leaf pages collecting as many cells as required.
+    /// Once it has collected enough, it stops the scan,
+    ///
+    /// TODO: It might be useful to add a parameter to determine if we want to scan the whole database until the end. Currently this can be done by setting num_records to a very large value.
+    fn scan<FI: FileOps, M: MemoryPool>(
+        &mut self,
+        key: K,
+        num_records: usize,
+        pager: &mut Pager<FI, M>,
+    ) -> Vec<Vl> {
+        let mut traversal = self.traverse(key, pager, TraverseMode::Read);
+        let mut output = Vec::with_capacity(num_records);
+
+        let last_node = match traversal.last() {
+            Some(node) => node,
+            None => return output,
+        };
+
+        let mut current_page = Some(*last_node);
+
+        while let Some(page_id) = current_page {
+            traversal.track_rlatch(page_id, pager);
+            let r_lock = traversal.read(&page_id);
+
+            // Collect cells till we reach the limit
+            let remaining = num_records - output.len();
+            output.extend(r_lock.scan(key).take(remaining).cloned());
+
+            // If limit is reached, terminate
+            if output.len() >= num_records {
+                return output;
+            }
+
+            current_page = r_lock.get_next();
+        }
+
+        output
     }
 
     fn traverse<FI: FileOps, M: MemoryPool>(

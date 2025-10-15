@@ -4,7 +4,7 @@ use crate::SLOT_SIZE;
 use std::io::{self, Read, Write};
 
 /// Compute the total size that a new cell will occupy, considering the size of a single slot
-pub(crate) fn cell_append_size<C: Cell>(cell: &C) -> usize {
+pub(crate) fn cell_append_size<C: Cell>(cell: &C) -> u16 {
     SLOT_SIZE + cell.size()
 }
 

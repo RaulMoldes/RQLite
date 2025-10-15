@@ -9,8 +9,8 @@ where
     P: Send
         + Sync
         + HeaderOps
-        + InteriorPageOps<Vi, KeyType = K>
-        + LeafPageOps<Vl, KeyType = K>
+        + InteriorPageOps<Vi>
+        + LeafPageOps<Vl>
         + Overflowable<LeafContent = Vl>
         + fmt::Debug,
     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
@@ -35,11 +35,11 @@ where
     P: Send
         + Sync
         + HeaderOps
-        + InteriorPageOps<Vi, KeyType = K>
-        + LeafPageOps<Vl, KeyType = K>
+        + InteriorPageOps<Vi>
+        + LeafPageOps<Vl>
         + Overflowable<LeafContent = Vl>
         + fmt::Debug,
-     PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
+    PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
     IOFrame: From<PageFrame<P>>,
 {
     /// Print the tree structure with detailed information about each node
@@ -101,12 +101,12 @@ where
         let frame = PageFrame::try_from(io_frame)?;
         let guard = frame.read();
 
-        let mut cells: Vec<Vl> = Vec::with_capacity(guard.cell_count());
+        let mut cells: Vec<Vl> = Vec::with_capacity(guard.cell_count() as usize);
         for i in 0..guard.cell_count() {
-            cells.push(guard.get_cell_at_leaf(i as u16).unwrap());
+            cells.push(guard.get_cell_at_leaf(i).unwrap());
         }
         let cell_count = cells.len();
-        let total_size: usize = cells.iter().map(|c| c.size()).sum();
+        let total_size: u16 = cells.iter().map(|c| c.size()).sum();
 
         println!(
             "{}│  Cells: {} | Total Size: {} bytes",
@@ -147,9 +147,9 @@ where
         let frame = PageFrame::try_from(io_frame)?;
         let guard = frame.read();
 
-        let mut cells: Vec<Vi> = Vec::with_capacity(guard.cell_count());
+        let mut cells: Vec<Vi> = Vec::with_capacity(guard.cell_count() as usize);
         for i in 0..guard.cell_count() {
-            cells.push(guard.get_cell_at_interior(i as u16).unwrap());
+            cells.push(guard.get_cell_at_interior(i).unwrap());
         }
         let rightmost = guard.get_rightmost_child();
 

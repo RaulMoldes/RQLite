@@ -1,10 +1,9 @@
+use crate::btreepage::BTreePageOps;
 use crate::storage::cell::Cell;
 use crate::storage::cell::IndexInteriorCell;
 use crate::storage::cell::TableInteriorCell;
 use crate::storage::overflowpage::Overflowable;
-use crate::storage::Slot;
-use crate::types::{Key, PageId, Splittable, VarlenaType};
-use crate::SLOT_SIZE;
+use crate::types::{Key, PageId, RowId, Splittable, VarlenaType};
 use crate::{BTreePage, HeaderOps, OverflowPage};
 use std::io;
 
@@ -15,35 +14,46 @@ pub(crate) type IndexInteriorPage = BTreePage<IndexInteriorCell>;
 /// The functionality is similar to that of leaf pages.
 /// The main difference is that on interior pages you return pointers to other pages,
 /// while on leaf pages you return the actual data content.
-pub(crate) trait InteriorPageOps<BTreeCellType: Cell> {
-    /// Type of key for this interior page.
-    /// It is the [RowId] for Table Pages and the payload (VarlenaType) for Index Pages.
-    type KeyType: Ord;
+pub(crate) trait InteriorPageOps<BTreeCellType: Cell>
+where
+    Self: HeaderOps + BTreePageOps,
+{
     /// Set the right most child
     fn set_rightmost_child(&mut self, page_id: PageId);
     /// Get the right most child for navigation.
     fn get_rightmost_child(&self) -> Option<PageId>;
 
-    /// [TRY INSERT]: Insert a child at a given key with prebious overflow check.
-    fn try_insert_child(
-        &mut self,
-        cell: BTreeCellType,
-        max_payload_fraction: f32,
-    ) -> io::Result<()>;
-
     /// Insert a child at a given key.
     fn insert_child(&mut self, cell: BTreeCellType) -> io::Result<()>;
+
+    /// [TRY INSERT]: Insert a child at a given key with prebious overflow check.
+    fn try_insert_children(&mut self, cells: Vec<BTreeCellType>) -> io::Result<()> {
+        let size: u16 = cells.iter().map(|c| c.size()).sum();
+
+        if size >= self.free_space() {
+            return Err(
+                std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Attempted to insert with overflow: Required size: {}, page_size: {}, free space: {}", size, self.page_size(), self.free_space()
+                ),
+            )
+            );
+        };
+        for cell in cells {
+            self.insert_child(cell)?;
+        }
+        Ok(())
+    }
+
     /// Find a child on the page given by its key. If it does not find it, will return the rightmost child
-    fn find_child(&self, key: &Self::KeyType) -> PageId;
-    /// Remove a child given by its key.
-    fn remove_child(&mut self, page_id: PageId);
+    fn find_child(&self, key: &BTreeCellType::Key) -> PageId;
+    /// Remove a child given by its page id.
+    fn take_child(&mut self, page_id: PageId) -> Option<BTreeCellType>;
     /// Take interior cells.
     fn take_interior_cells(&mut self) -> Vec<BTreeCellType>;
-    /// [TRY_POP_BACK]: Tries to remove the last cell. Before removing it it checks if it will underflow.
-    fn try_pop_back_interior(&mut self, min_payload_factor: f32) -> Option<BTreeCellType>;
-
-    /// [TRY_POP_FRONT]: Tries to remove the first cell. Before removing it it checks if it will underflow.
-    fn try_pop_front_interior(&mut self, min_payload_factor: f32) -> Option<BTreeCellType>;
+    /// [TRY_POP: Tries to remove cells. Before removing it it checks if it will underflow.
+    fn try_pop_children(&mut self, required_size: u16) -> Option<Vec<BTreeCellType>>;
     /// Get a cell from interior page.
     fn get_cell_at_interior(&self, id: u16) -> Option<BTreeCellType>;
     /// Get the siblings for a specific child.
@@ -51,8 +61,6 @@ pub(crate) trait InteriorPageOps<BTreeCellType: Cell> {
 }
 
 impl InteriorPageOps<TableInteriorCell> for TableInteriorPage {
-    type KeyType = crate::types::RowId;
-
     /// Get the child at the right of the page
     fn get_rightmost_child(&self) -> Option<PageId> {
         if self.header.right_most_page.is_valid() {
@@ -61,102 +69,21 @@ impl InteriorPageOps<TableInteriorCell> for TableInteriorPage {
         None
     }
 
-    fn try_insert_child(
-        &mut self,
-        cell: TableInteriorCell,
-        max_payload_fraction: f32,
-    ) -> io::Result<()> {
-        let size = SLOT_SIZE + cell.size();
-        let current_used_space = self.page_size() - self.free_space();
-        if current_used_space + size >= (max_payload_fraction * self.page_size() as f32) as usize {
-            return Err(
-                std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "Attempted to insert with overflow: Required size: {}, page_size: {}, max payload fraction: {}", size, self.page_size(), max_payload_fraction
-                ),
-            )
-            );
-        };
-
-        self.insert_child(cell)
-    }
-
-    fn try_pop_back_interior(&mut self, min_payload_factor: f32) -> Option<TableInteriorCell> {
-        let mut size = usize::MAX;
-
-        if let Some(last_slot) = self.cell_indices.last() {
-            if let Some(last_cell) = self.cells.get(&last_slot.offset) {
-                size = last_cell.size() + SLOT_SIZE
-            };
-        };
-
-        if self.cell_count() <= 1
-            || self.free_space() + size
-                >= (self.page_size() as f32 - (self.page_size() as f32 * min_payload_factor))
-                    as usize
-        {
-            return None;
-        };
-
-        let slot = self.cell_indices.pop().unwrap();
-        let cell = self.cells.remove(&slot.offset).unwrap();
-        self.header.cell_count -= 1;
-        self.header.content_start_ptr -= SLOT_SIZE as u16;
-        if slot.offset != self.header.free_space_ptr {
-            self.unfuck_cell_offsets(slot.offset, cell.size() as u16);
-        } else {
-            self.header.free_space_ptr += cell.size() as u16;
-        };
-        Some(cell)
-    }
-
-    fn try_pop_front_interior(&mut self, min_payload_factor: f32) -> Option<TableInteriorCell> {
-        let mut size = usize::MAX;
-
-        if let Some(first_slot) = self.cell_indices.first() {
-            if let Some(first_cell) = self.cells.get(&first_slot.offset) {
-                size = first_cell.size() + SLOT_SIZE
-            };
-        };
-
-        if self.cell_count() <= 1
-            || self.free_space() + size
-                >= (self.page_size() as f32 - (self.page_size() as f32 * min_payload_factor))
-                    as usize
-        {
-            return None;
-        };
-
-        let slot = self.cell_indices.remove(0);
-        let cell = self.cells.remove(&slot.offset).unwrap();
-        self.header.cell_count -= 1;
-        self.header.content_start_ptr -= SLOT_SIZE as u16;
-        if slot.offset != self.header.free_space_ptr {
-            self.unfuck_cell_offsets(slot.offset, cell.size() as u16);
-        } else {
-            self.header.free_space_ptr += cell.size() as u16;
-        };
-        Some(cell)
-    }
-
     fn get_siblings_for(&self, child_id: PageId) -> (Option<PageId>, Option<PageId>) {
         let mut position: Option<usize> = None;
 
         // First, find the child position.
-        for (i, slot) in self.cell_indices.iter().enumerate() {
-            if let Some(cell) = self.cells.get(&slot.offset) {
-                if child_id == cell.left_child().unwrap() {
-                    position = Some(i);
-                    break;
-                }
+        for (i, slot) in self.cells.iter().enumerate() {
+            if child_id == slot.left_child().unwrap() {
+                position = Some(i);
+                break;
             }
         }
 
         // Position was found, then try get the left and right childs
         if let Some(pos) = position {
             // Special case, position  is the last one
-            if pos == self.cell_count() - 1 {
+            if pos == self.cell_count() as usize - 1 {
                 return (
                     self.get_cell_at_interior((pos - 1) as u16)
                         .and_then(|p| p.left_child()),
@@ -173,7 +100,7 @@ impl InteriorPageOps<TableInteriorCell> for TableInteriorPage {
         } else if let Some(right_most) = self.get_rightmost_child() {
             if right_most == child_id {
                 return (
-                    self.get_cell_at_interior((self.cell_count() - 1) as u16)
+                    self.get_cell_at_interior(self.cell_count() - 1)
                         .and_then(|p| p.left_child()),
                     None,
                 );
@@ -197,12 +124,10 @@ impl InteriorPageOps<TableInteriorCell> for TableInteriorPage {
     /// Find a child.
     /// The idea is to iterate over the slot array, skipping deleted slots.
     /// If we find a key that is bigger than target, navigate to the left. If not, navigate to the right. This creates. a left-biased distribution which is preferred on B+Trees.
-    fn find_child(&self, key: &Self::KeyType) -> PageId {
-        for slot in &self.cell_indices {
-            if let Some(cell) = self.cells.get(&slot.offset) {
-                if key <= &cell.key {
-                    return cell.left_child_page;
-                }
+    fn find_child(&self, key: &RowId) -> PageId {
+        for slot in &self.cells {
+            if key <= &slot.key {
+                return slot.left_child_page;
             }
         }
         self.header.right_most_page
@@ -211,58 +136,59 @@ impl InteriorPageOps<TableInteriorCell> for TableInteriorPage {
     /// Insert a child given by its [PageId] and with a given key.
     /// Internally creates a new cell for insertion.
     fn insert_child(&mut self, cell: TableInteriorCell) -> io::Result<()> {
-        let new_offset = self.add_cell(cell)?;
-
-        let pos = self
-            .cell_indices
-            .iter()
-            .position(|slot| {
-                if let Some(cell) = self.cells.get(&slot.offset) {
-                    cell.key > cell.key()
-                } else {
-                    false
-                }
-            })
-            .unwrap_or(self.cell_indices.len());
-
-        self.cell_indices.insert(pos, Slot::new(new_offset));
-
+        self.insert_or_replace_cell(cell);
         Ok(())
     }
 
-    /// Remove a child given by its PageId. Returns the page id to the caller.
-    fn remove_child(&mut self, page_id: PageId) {
-        if let Some(child) = self.get_rightmost_child() {
-            if child == page_id {
-                self.set_rightmost_child(PageId::from(0));
-                return;
-            }
+    /// Remove a child given by its PageId. Returns the cell to the caller.
+    /// The caller can either ignore the returned cell or do something with it. Typically, if the cell contains an overflow chain, you would remove also all pages in the chain, adding them to the freelist.
+    fn take_child(&mut self, page_id: PageId) -> Option<TableInteriorCell> {
+        if let Some(pos) = self
+            .cells
+            .iter()
+            .position(|slot| slot.left_child_page == page_id)
+        {
+            let slot = self.cell_indices.remove(pos);
+            let cell = self.cells.remove(pos);
+
+            if slot.offset != self.header.free_space_ptr {
+                self.unfuck_cell_offsets(slot.offset, cell.size());
+            };
+
+            self.reset_stats();
+            return Some(cell);
+        };
+        None
+    }
+
+    fn try_pop_children(&mut self, required_size: u16) -> Option<Vec<TableInteriorCell>> {
+        if !self.can_remove(required_size) {
+            return None;
+        };
+
+        let mut total_size = 0;
+        let mut popped_cells = Vec::new();
+
+        while total_size < required_size {
+            let slot = self.cell_indices.pop().unwrap();
+            let cell = self.cells.pop().unwrap();
+
+            // This should not be called on each iteration since we are popping at the end of the queue of cells.
+            if slot.offset != self.header.free_space_ptr {
+                self.unfuck_cell_offsets(slot.offset, cell.size());
+            };
+
+            self.reset_stats();
+            total_size += cell.size();
+            popped_cells.push(cell);
         }
 
-        if let Some(pos) = self.cell_indices.iter().position(|slot| {
-            if let Some(cell) = self.cells.get(&slot.offset) {
-                cell.left_child_page == page_id
-            } else {
-                false
-            }
-        }) {
-            let slot = self.cell_indices.remove(pos);
-            let cell = self.cells.remove(&slot.offset).unwrap();
-            self.header.cell_count -= 1;
-            self.header.content_start_ptr -= SLOT_SIZE as u16;
-            if slot.offset != self.header.free_space_ptr {
-                self.unfuck_cell_offsets(slot.offset, cell.size() as u16);
-            } else {
-                self.header.free_space_ptr += cell.size() as u16;
-            };
-        };
+        Some(popped_cells)
     }
 }
 
 /// All explanations at the top are valid for [IndexPages], with the difference that they use IndexCells and Varlena as the Key type.
 impl InteriorPageOps<IndexInteriorCell> for IndexInteriorPage {
-    type KeyType = VarlenaType;
-
     fn get_rightmost_child(&self) -> Option<PageId> {
         if self.header.right_most_page.is_valid() {
             return Some(self.header.right_most_page);
@@ -270,62 +196,29 @@ impl InteriorPageOps<IndexInteriorCell> for IndexInteriorPage {
         None
     }
 
-    fn try_pop_back_interior(&mut self, min_payload_factor: f32) -> Option<IndexInteriorCell> {
-        let mut size = usize::MAX;
-
-        if let Some(last_slot) = self.cell_indices.last() {
-            if let Some(last_cell) = self.cells.get(&last_slot.offset) {
-                size = last_cell.size() + SLOT_SIZE
-            };
-        };
-
-        if self.cell_count() <= 1
-            || self.free_space() + size
-                >= (self.page_size() as f32 - (self.page_size() as f32 * min_payload_factor))
-                    as usize
-        {
+    fn try_pop_children(&mut self, required_size: u16) -> Option<Vec<IndexInteriorCell>> {
+        if !self.can_remove(required_size) {
             return None;
         };
 
-        let slot = self.cell_indices.pop().unwrap();
-        let cell = self.cells.remove(&slot.offset).unwrap();
-        self.header.cell_count -= 1;
-        self.header.content_start_ptr -= SLOT_SIZE as u16;
-        if slot.offset != self.header.free_space_ptr {
-            self.unfuck_cell_offsets(slot.offset, cell.size() as u16);
-        } else {
-            self.header.free_space_ptr += cell.size() as u16;
-        };
-        Some(cell)
-    }
+        let mut total_size = 0u16;
+        let mut popped_cells = Vec::new();
 
-    fn try_pop_front_interior(&mut self, min_payload_factor: f32) -> Option<IndexInteriorCell> {
-        let mut size = usize::MAX;
+        while total_size < required_size {
+            let slot = self.cell_indices.pop().unwrap();
+            let cell = self.cells.pop().unwrap();
 
-        if let Some(first_slot) = self.cell_indices.first() {
-            if let Some(first_cell) = self.cells.get(&first_slot.offset) {
-                size = first_cell.size() + SLOT_SIZE
+            // This should not be called on each iteration since we are popping at the end of the queue of cells
+            if slot.offset != self.header.free_space_ptr {
+                self.unfuck_cell_offsets(slot.offset, cell.size());
             };
-        };
 
-        if self.cell_count() <= 1
-            || self.free_space() + size
-                >= (self.page_size() as f32 - (self.page_size() as f32 * min_payload_factor))
-                    as usize
-        {
-            return None;
-        };
+            self.reset_stats();
+            total_size += cell.size();
+            popped_cells.push(cell);
+        }
 
-        let slot = self.cell_indices.remove(0);
-        let cell = self.cells.remove(&slot.offset).unwrap();
-        self.header.cell_count -= 1;
-        self.header.content_start_ptr -= SLOT_SIZE as u16;
-        if slot.offset != self.header.free_space_ptr {
-            self.unfuck_cell_offsets(slot.offset, cell.size() as u16);
-        } else {
-            self.header.free_space_ptr += cell.size() as u16;
-        };
-        Some(cell)
+        Some(popped_cells)
     }
 
     fn take_interior_cells(&mut self) -> Vec<IndexInteriorCell> {
@@ -343,19 +236,17 @@ impl InteriorPageOps<IndexInteriorCell> for IndexInteriorPage {
         let mut position: Option<usize> = None;
 
         // First, find the child position.
-        for (i, slot) in self.cell_indices.iter().enumerate() {
-            if let Some(cell) = self.cells.get(&slot.offset) {
-                if child_id == cell.left_child().unwrap() {
-                    position = Some(i);
-                    break;
-                }
+        for (i, slot) in self.cells.iter().enumerate() {
+            if child_id == slot.left_child().unwrap() {
+                position = Some(i);
+                break;
             }
         }
 
         // Position was found, then try get the left and right childs
         if let Some(pos) = position {
             // Special case, position  is the last one
-            if pos == self.cell_count() - 1 {
+            if pos == self.cell_count() as usize - 1 {
                 return (
                     self.get_cell_at_interior((pos - 1) as u16)
                         .and_then(|p| p.left_child()),
@@ -372,7 +263,7 @@ impl InteriorPageOps<IndexInteriorCell> for IndexInteriorPage {
         } else if let Some(right_most) = self.get_rightmost_child() {
             if right_most == child_id {
                 return (
-                    self.get_cell_at_interior((self.cell_count() - 1) as u16)
+                    self.get_cell_at_interior(self.cell_count() - 1)
                         .and_then(|p| p.left_child()),
                     None,
                 );
@@ -381,72 +272,32 @@ impl InteriorPageOps<IndexInteriorCell> for IndexInteriorPage {
         (None, None)
     }
 
-    fn find_child(&self, key: &Self::KeyType) -> PageId {
-        for slot in &self.cell_indices {
-            if let Some(cell) = self.cells.get(&slot.offset) {
-                if key <= &cell.payload {
-                    return cell.left_child_page;
-                }
+    fn find_child(&self, key: &VarlenaType) -> PageId {
+        for slot in &self.cells {
+            if key <= &slot.payload {
+                return slot.left_child_page;
             }
         }
         self.header.right_most_page
     }
 
     /// Remove a child given by its PageId. Returns the page id to the caller.
-    fn remove_child(&mut self, page_id: PageId) {
-        if let Some(pos) = self.cell_indices.iter().position(|slot| {
-            if let Some(cell) = self.cells.get(&slot.offset) {
-                cell.left_child_page == page_id
-            } else {
-                false
-            }
-        }) {
+    fn take_child(&mut self, page_id: PageId) -> Option<IndexInteriorCell> {
+        if let Some(pos) = self
+            .cells
+            .iter()
+            .position(|slot| slot.left_child().unwrap() == page_id)
+        {
             let slot = self.cell_indices.remove(pos);
-            let cell = self.cells.remove(&slot.offset).unwrap();
-            self.header.cell_count -= 1;
-            self.header.content_start_ptr -= SLOT_SIZE as u16;
-            self.header.free_space_ptr -= cell.size() as u16;
-        };
-    }
-
-    fn try_insert_child(
-        &mut self,
-        cell: IndexInteriorCell,
-        max_payload_fraction: f32,
-    ) -> io::Result<()> {
-        let size = SLOT_SIZE + cell.size();
-        let current_used_space = self.page_size() - self.free_space();
-        if current_used_space + size >= (max_payload_fraction * self.page_size() as f32) as usize {
-            return Err(
-                std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "Attempted to insert with overflow: Required size: {}, page_size: {}, max payload fraction: {}", size, self.page_size(), max_payload_fraction
-                ),
-            )
-            );
-        };
-
-        self.insert_child(cell)
+            let cell = self.cells.remove(pos);
+            self.reset_stats();
+            return Some(cell);
+        }
+        None
     }
 
     fn insert_child(&mut self, cell: IndexInteriorCell) -> io::Result<()> {
-        let new_offset = self.add_cell(cell)?;
-
-        let pos = self
-            .cell_indices
-            .iter()
-            .position(|slot| {
-                if let Some(cell) = self.cells.get(&slot.offset) {
-                    cell.payload > cell.key()
-                } else {
-                    false
-                }
-            })
-            .unwrap_or(self.cell_indices.len());
-
-        self.cell_indices.insert(pos, Slot::new(new_offset));
-
+        self.insert_or_replace_cell(cell);
         Ok(())
     }
 }
@@ -461,32 +312,22 @@ impl Overflowable for IndexInteriorPage {
     fn try_insert_with_overflow(
         &mut self,
         mut content: Self::Content,
-        max_payload_factor: f32,
+        max_payload_factor: u8,
+        min_payload_factor: u8,
     ) -> std::io::Result<Option<(OverflowPage, VarlenaType)>> {
         if self.max_cell_size(max_payload_factor) >= content.size() {
             self.insert_child(content)?;
             return Ok(None);
         };
 
-        let pos = self
-            .cell_indices
-            .iter()
-            .position(|slot| {
-                if let Some(cell) = self.cells.get(&slot.offset) {
-                    cell.payload > content.payload
-                } else {
-                    false
-                }
-            })
-            .unwrap_or(self.cell_indices.len());
-
-        let fitting_size = self.available_space(max_payload_factor);
+        let fitting_size = self.min_cell_size(min_payload_factor);
         let remaining = content.payload.split_at(fitting_size);
         let new_id = PageId::new_key();
         content.set_overflow(new_id);
         self.set_next_overflow(new_id);
-        let new_offset = self.add_cell(content)?;
-        self.cell_indices.insert(pos, Slot::new(new_offset));
+
+        // Insert or replace the cell
+        self.insert_or_replace_cell(content);
         let overflowpage = OverflowPage::create(new_id, self.page_size() as u32, None);
         Ok(Some((overflowpage, remaining)))
     }

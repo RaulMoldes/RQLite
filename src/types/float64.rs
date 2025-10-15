@@ -11,7 +11,7 @@ impl RQLiteType for Float64 {
         RQLiteTypeMarker::Float64
     }
 
-    fn size_of(&self) -> usize {
+    fn size_of(&self) -> u16 {
         8
     }
 }

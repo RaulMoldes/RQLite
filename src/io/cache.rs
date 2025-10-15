@@ -1,8 +1,8 @@
 use crate::io::frames::IOFrame;
 use crate::types::PageId;
 use crate::MAX_CACHE_SIZE;
-use std::collections::{HashMap, VecDeque};
 use std::clone::Clone;
+use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug, Default)]
 pub(crate) struct MemoryStats {

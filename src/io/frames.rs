@@ -28,7 +28,8 @@ impl<P> Clone for PageFrame<P> {
 }
 
 impl<P> PageFrame<P>
-where P: HeaderOps
+where
+    P: HeaderOps,
 {
     pub(crate) fn page_type(&self) -> PageType {
         self.page.read().type_of()
@@ -72,9 +73,8 @@ pub(crate) trait Frame<P: Send + Sync>: std::fmt::Debug {
 }
 
 impl<P> PageFrame<P> {
-    pub(crate) fn new( page: P) -> Self {
+    pub(crate) fn new(page: P) -> Self {
         Self {
-
             page: Arc::new(RwLock::new(page)),
             is_dirty: Arc::new(AtomicBool::new(false)),
         }
@@ -137,11 +137,9 @@ impl Clone for IOFrame {
             IOFrame::Overflow(p) => IOFrame::Overflow(p.clone()),
             IOFrame::Table(p) => IOFrame::Table(p.clone()),
             IOFrame::Index(p) => IOFrame::Index(p.clone()),
-
         }
     }
 }
-
 
 impl IOFrame {
     pub(crate) fn page_type(&self) -> PageType {
@@ -199,20 +197,37 @@ impl IOFrame {
     }
 }
 
-
 impl IOFrame {
-
-    pub(crate) fn create(page_id: PageId, page_type: PageType, page_size: u32, right_most_page: Option<PageId>) -> Self
-    {
+    pub(crate) fn create(
+        page_id: PageId,
+        page_type: PageType,
+        page_size: u32,
+        right_most_page: Option<PageId>,
+    ) -> Self {
         match page_type {
-            PageType::Free => IOFrame::Free(PageFrame::new(FreePage::create(page_id, page_size, right_most_page))),
-            PageType::Overflow => IOFrame::Overflow(PageFrame::new(OverflowPage::create(page_id, page_size, right_most_page))),
-            PageType::IndexInterior => IOFrame::Index(PageFrame::new(RQLiteIndexPage::Interior(IndexInteriorPage::create(page_id, page_size, page_type, right_most_page)))),
-            PageType::IndexLeaf => IOFrame::Index(PageFrame::new(RQLiteIndexPage::Leaf(IndexLeafPage::create(page_id, page_size, page_type, right_most_page)))),
-            PageType::TableInterior => IOFrame::Table(PageFrame::new(RQLiteTablePage::Interior(TableInteriorPage::create(page_id, page_size, page_type, right_most_page)))),
-            PageType::TableLeaf => IOFrame::Table(PageFrame::new(RQLiteTablePage::Leaf(TableLeafPage::create(page_id, page_size, page_type, right_most_page))))
+            PageType::Free => IOFrame::Free(PageFrame::new(FreePage::create(
+                page_id,
+                page_size,
+                right_most_page,
+            ))),
+            PageType::Overflow => IOFrame::Overflow(PageFrame::new(OverflowPage::create(
+                page_id,
+                page_size,
+                right_most_page,
+            ))),
+            PageType::IndexInterior => IOFrame::Index(PageFrame::new(RQLiteIndexPage::Interior(
+                IndexInteriorPage::create(page_id, page_size, page_type, right_most_page),
+            ))),
+            PageType::IndexLeaf => IOFrame::Index(PageFrame::new(RQLiteIndexPage::Leaf(
+                IndexLeafPage::create(page_id, page_size, page_type, right_most_page),
+            ))),
+            PageType::TableInterior => IOFrame::Table(PageFrame::new(RQLiteTablePage::Interior(
+                TableInteriorPage::create(page_id, page_size, page_type, right_most_page),
+            ))),
+            PageType::TableLeaf => IOFrame::Table(PageFrame::new(RQLiteTablePage::Leaf(
+                TableLeafPage::create(page_id, page_size, page_type, right_most_page),
+            ))),
         }
-
     }
     pub(crate) fn id(&self) -> PageId {
         match self {
@@ -220,10 +235,8 @@ impl IOFrame {
             IOFrame::Overflow(p) => p.id(),
             IOFrame::Table(p) => p.id(),
             IOFrame::Index(p) => p.id(),
-
         }
     }
-
 
     pub(crate) fn is_free(&self) -> bool {
         match self {
@@ -251,7 +264,6 @@ impl IOFrame {
             IOFrame::Index(p) => p.mark_dirty(),
         }
     }
-
 }
 /// IOFRAMES are serialized when writing their contents to the disk.
 /// Therefore they are not dirty when we read them back.
@@ -280,7 +292,6 @@ impl Serializable for IOFrame {
                 let inner = RQLiteTablePage::Leaf(page);
 
                 Ok(IOFrame::Table(PageFrame {
-
                     page: Arc::new(RwLock::new(inner)),
                     is_dirty: Arc::new(AtomicBool::new(false)),
                 }))
@@ -292,7 +303,6 @@ impl Serializable for IOFrame {
                 let inner = RQLiteTablePage::Interior(page);
 
                 Ok(IOFrame::Table(PageFrame {
-
                     page: Arc::new(RwLock::new(inner)),
                     is_dirty: Arc::new(AtomicBool::new(false)),
                 }))
@@ -367,8 +377,6 @@ impl Serializable for IOFrame {
     }
 }
 
-
-
 impl From<PageFrame<RQLiteTablePage>> for IOFrame {
     fn from(frame: PageFrame<RQLiteTablePage>) -> Self {
         IOFrame::Table(frame)
@@ -392,7 +400,6 @@ impl From<PageFrame<FreePage>> for IOFrame {
         IOFrame::Free(frame)
     }
 }
-
 
 impl TryFrom<IOFrame> for PageFrame<RQLiteTablePage> {
     type Error = std::io::Error;

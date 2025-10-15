@@ -6,7 +6,7 @@
       "request": "launch",
       "name": "Debug Rust test (rqlite)",
       "program": "${workspaceFolder}/target/debug/deps/rqlite-6faf5282a4b5ecad",
-      "args": ["--nocapture", "test_pager"],
+      "args": ["--nocapture", "test_insert_500_cells_medium"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {

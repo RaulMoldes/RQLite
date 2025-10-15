@@ -61,7 +61,7 @@ impl std::fmt::Display for PageId {
 }
 
 impl RQLiteType for PageId {
-    fn size_of(&self) -> usize {
+    fn size_of(&self) -> u16 {
         4
     }
 
