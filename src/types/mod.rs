@@ -4,20 +4,23 @@ use crate::serialization::Serializable;
 use std::cmp::Ord;
 use std::fmt::Display;
 
+pub mod bool;
 pub mod byte;
-pub mod float32;
-pub mod float64;
-pub mod page_id;
-pub mod row_id;
+pub mod char;
+pub mod date;
+pub mod datetime;
+pub mod id;
+pub mod numeric;
+pub mod varchar;
 pub mod varint;
 pub mod varlena;
-
-use crate::impl_arithmetic_ops;
 pub use byte::Byte;
-pub use float32::Float32;
-pub use float64::Float64;
-pub use page_id::PageId;
-pub use row_id::RowId;
+pub use date::Date;
+
+
+
+pub use id::*;
+pub use numeric::*;
 pub use varint::Varint;
 pub use varlena::VarlenaType;
 
@@ -26,23 +29,28 @@ mod tests;
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum RQLiteTypeMarker {
-    /// 0: NULL
+pub(crate) enum DataTypeMarker {
     Null = 0,
-    /// 1: Varint (Variable-sized integer)
-    Integer = 1,
-    /// 2: 32 bit floating point number (single precision)
-    Float32 = 2,
-    /// 2: 64 bit floating point number (IEEE 754)
-    Float64 = 3,
-    /// 3: Byte type: used to represent booleans.
-    Byte = 4,
-    /// 12: BLOB with variable length specified by the following varint
-    Blob = 5,
-    /// 13: String with variable length specified by the following varint
-    String = 6,
-    /// Key: special type for page and row ids.
-    Key = 7,
+    VarInt = 1,
+    SmallInt = 2,
+    HalfInt = 3,
+    Int = 4,
+    Bigint = 5,
+    SmallUInt = 6,
+    HalfUInt = 7,
+    UInt = 8,
+    BigUInt = 9,
+    Float = 10,
+    Double = 11,
+    Byte = 12,
+    Blob = 13,
+    Varchar = 14,
+    Text = 15,
+    Key = 16,
+    Date = 17,
+    Char = 18,
+    Boolean = 19,
+    DateTime = 20,
 }
 
 pub(crate) trait Key:
@@ -51,9 +59,9 @@ pub(crate) trait Key:
     fn new_key() -> Self;
 }
 
-pub(crate) trait RQLiteType: Serializable + Ord + PartialEq + Eq + Display {
-    fn _type_of(&self) -> RQLiteTypeMarker {
-        RQLiteTypeMarker::Null
+pub(crate) trait DataType: Serializable + Ord + PartialEq + Eq + Display {
+    fn _type_of(&self) -> DataTypeMarker {
+        DataTypeMarker::Null
     }
 
     fn size_of(&self) -> u16;
@@ -63,7 +71,3 @@ pub(crate) trait Splittable {
     fn split_at(&mut self, offset: u16) -> Self;
     fn merge_with(&mut self, other: Self);
 }
-
-impl_arithmetic_ops!(Float32);
-impl_arithmetic_ops!(Float64);
-impl_arithmetic_ops!(Varint);

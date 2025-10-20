@@ -3,7 +3,7 @@ use crate::impl_header_ops;
 use crate::page_header::PAGE_HEADER_SIZE;
 use crate::serialization::Serializable;
 use crate::types::varlena::VarlenaType;
-use crate::types::{Key, PageId, RQLiteType, Splittable};
+use crate::types::{DataType, Key, PageId, Splittable};
 use crate::{HeaderOps, PageHeader};
 use std::io::Cursor;
 use std::io::{self, Read, Write};

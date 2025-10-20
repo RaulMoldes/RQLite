@@ -94,7 +94,6 @@ where
         None
     }
 
-
     /// Scan the tree, collecting [num_records] cells using the pointers that exist between leaves.
     /// Need to test what happens when the tree grows over height == 2, but for now this seems valid.
     /// The method navigates to the first cell, identified by key, and then scans over all leaf pages collecting as many cells as required.

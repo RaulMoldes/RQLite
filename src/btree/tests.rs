@@ -210,6 +210,8 @@ fn test_insert_duplicate_keys() {
 btree_insert_tests! {
     test_insert_100_cells_medium => { cells: 100, max_size: 100 },
     test_insert_500_cells_small => { cells: 500, max_size: 25 },
+
+    test_insert_1000000000_cells => { cells: 1000000000, max_size: 50 },
 }
 
 #[test]

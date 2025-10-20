@@ -1,7 +1,10 @@
+use crate::io::disk::FileOps;
 use std::fs::File;
 use std::io::{Read, Result, Write};
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
 mod utils;
+use crate::io::wal::{WalEntry, WriteAheadLog};
+use utils::*;
 
 const TEST_PAGE_SIZE: u32 = 4096;
 
@@ -68,6 +71,41 @@ fn test_sync_all_with_fiu_injection() -> Result<()> {
         result.is_ok(),
         "sync_all should succeed after disabling fault injection"
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_wal_iterator() -> Result<()> {
+    let tmpfile = NamedTempFile::new()?;
+    let path = tmpfile.path();
+    let mut wal = WriteAheadLog::create(path)?;
+    let entries: Vec<WalEntry> = gen_wal_entries(100000, 100);
+    for e in entries.iter() {
+        wal.append(e.clone())?;
+    }
+    validate_wal(wal, entries);
+    Ok(())
+}
+
+#[test]
+fn test_wal_persistence() -> Result<()> {
+    let tmpfile = NamedTempFile::new()?;
+    let path = tmpfile.path();
+    let entries: Vec<WalEntry> = gen_wal_entries(10000, 100);
+    // The scope of the wal starts here.
+    {
+        let mut wal = WriteAheadLog::create(path)?;
+
+        for e in entries.iter() {
+            wal.append(e.clone())?;
+        }
+        // Flushing the wal should keep the contents in disk
+        wal.flush()?;
+    } // The wal is dropped here, but content must remain intact.
+
+    let wal = WriteAheadLog::open(path)?;
+    validate_wal(wal, entries);
 
     Ok(())
 }

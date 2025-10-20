@@ -11,7 +11,7 @@ pub mod slot;
 
 use crate::btreepage::BTreePageOps;
 use crate::serialization::Serializable;
-use crate::types::{PageId, RQLiteType, RowId, VarlenaType};
+use crate::types::{DataType, PageId, RowId, VarlenaType};
 use crate::{
     impl_btree_page_ops, impl_header_ops_enum, impl_interior_page_ops, impl_leaf_page_ops,
 };

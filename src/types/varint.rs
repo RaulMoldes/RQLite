@@ -1,5 +1,5 @@
 use crate::serialization::Serializable;
-use crate::types::{RQLiteType, RQLiteTypeMarker};
+use crate::types::{DataType, DataTypeMarker};
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
@@ -62,10 +62,10 @@ impl Varint {
     }
 }
 
-impl RQLiteType for Varint {
+impl DataType for Varint {
     /// Returns the RQLite type Varint
-    fn _type_of(&self) -> RQLiteTypeMarker {
-        RQLiteTypeMarker::Integer
+    fn _type_of(&self) -> DataTypeMarker {
+        DataTypeMarker::VarInt
     }
 
     // Computes the serialized size of a Varint.
@@ -166,3 +166,5 @@ impl Serializable for Varint {
         ))
     }
 }
+
+crate::impl_arithmetic_ops!(Varint);

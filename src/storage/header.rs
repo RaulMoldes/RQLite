@@ -7,6 +7,7 @@
 //!
 //! To achieve maximum portability, we always serialize and deserialize everything using big endian format.
 use crate::serialization::Serializable;
+use crate::types::LogId;
 use crate::{
     IncrementalVaccum, RQLiteConfig, ReadWriteVersion, TextEncoding, HEADER_SIZE,
     LEAF_PAYLOAD_FRACTION, MAX_CACHE_SIZE, MAX_PAGE_SIZE, MAX_PAYLOAD_FRACTION, MIN_PAGE_SIZE,
@@ -14,7 +15,6 @@ use crate::{
 };
 use std::fmt;
 use std::io::{self, Read, Write};
-
 /// Represents the RQLite database header.
 /// Reference: https://www.sqlite.org/fileformat.html
 #[derive(Debug, PartialEq, Clone)]
@@ -60,8 +60,10 @@ pub(crate) struct Header {
     pub(crate) incremental_vacuum_mode: IncrementalVaccum,
     /// Application ID.
     pub(crate) application_id: u32,
+    /// Largest flushed log sequence number so far.
+    pub(crate) flushed_lsn: LogId,
     /// Reserved for future expansion.
-    pub(crate) reserved: [u8; 20],
+    pub(crate) reserved: [u8; 16],
     /// RQlite version valid for.
     /// This is used to determine if the database file is compatible with the current version of RQLite.
     pub(crate) version_valid_for: u32,
@@ -93,7 +95,8 @@ impl Default for Header {
             user_version: 0,
             incremental_vacuum_mode: IncrementalVaccum::Disabled,
             application_id: 0,
-            reserved: [0; 20],
+            flushed_lsn: LogId::from(0),
+            reserved: [0; 16],
             version_valid_for: 0,
             rqlite_version_number: 0,
         }
@@ -126,7 +129,8 @@ impl Header {
             user_version: 0,
             incremental_vacuum_mode: config.incremental_vacuum_mode,
             application_id: 0,
-            reserved: [0; 20],
+            flushed_lsn: LogId::from(0),
+            reserved: [0; 16],
             version_valid_for: 0,
             rqlite_version_number: 0,
         }
@@ -176,6 +180,8 @@ impl Serializable for Header {
         writer.write_all(&(self.incremental_vacuum_mode as u32).to_be_bytes())?;
         // Application ID
         writer.write_all(&self.application_id.to_be_bytes())?;
+        // Largest flushed lsn.
+        self.flushed_lsn.write_to(writer)?;
         // Reserved
         writer.write_all(&self.reserved)?;
         // Version valid for
@@ -289,9 +295,13 @@ impl Serializable for Header {
         // Application ID
         let application_id = u32::from_be_bytes([buffer[68], buffer[69], buffer[70], buffer[71]]);
 
+        let flushed_lsn = LogId::from(u32::from_be_bytes([
+            buffer[72], buffer[73], buffer[74], buffer[75],
+        ]));
+
         // Reserved
-        let mut reserved = [0u8; 20];
-        reserved.copy_from_slice(&buffer[82..92]);
+        let mut reserved = [0u8; 16];
+        reserved.copy_from_slice(&buffer[76..92]);
 
         // Version valid for
         let version_valid_for =
@@ -321,6 +331,7 @@ impl Serializable for Header {
             user_version,
             incremental_vacuum_mode,
             application_id,
+            flushed_lsn,
             reserved,
             version_valid_for,
             rqlite_version_number,
@@ -348,6 +359,7 @@ impl fmt::Display for Header {
         writeln!(f, "  User Version: {}", self.user_version)?;
         writeln!(f, "  Application ID: {:#x}", self.application_id)?;
         writeln!(f, "  SQLite Version: {}", self.rqlite_version_number)?;
+        writeln!(f, "  Largest flushed log seq number: {}", self.flushed_lsn)?;
         Ok(())
     }
 }

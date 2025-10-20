@@ -1,15 +1,15 @@
 use crate::serialization::Serializable;
-use crate::types::byte::{Byte, FALSE, TRUE};
+use crate::types::byte::Byte;
 use crate::types::varlena::VarlenaType;
+use crate::types::DataType;
 use crate::types::PageId;
-use crate::types::RQLiteType;
 use crate::types::RowId;
 use std::fmt::Debug;
 use std::io::{self, Read, Write};
 
 fn has_overflow<R: Read>(reader: &mut R) -> io::Result<bool> {
     let byte = Byte::read_from(reader)?;
-    Ok(byte == TRUE)
+    Ok(byte == Byte::TRUE)
 }
 
 /// Trait for all cells to implement
@@ -98,7 +98,7 @@ impl Cell for TableLeafCell {
             0
         };
 
-        self.row_id.size_of() + self.payload.size_of() + overflow_size + TRUE.size_of()
+        self.row_id.size_of() + self.payload.size_of() + overflow_size + Byte::TRUE.size_of()
     }
 }
 
@@ -108,9 +108,9 @@ impl Serializable for TableLeafCell {
         // It is better to use a byte marker than serializing an invalid overflow page,
         // Cells can be of variable size, and 1 byte <<< 4 bytes (size of a page id).
         let flag = if self.overflow_page.is_some() {
-            TRUE
+            Byte::TRUE
         } else {
-            FALSE
+            Byte::FALSE
         };
         flag.write_to(writer)?;
 
@@ -260,7 +260,7 @@ impl Cell for IndexLeafCell {
             0
         };
 
-        TRUE.size_of() + self.payload.size_of() + overflow_size + self.row_id.size_of()
+        Byte::TRUE.size_of() + self.payload.size_of() + overflow_size + self.row_id.size_of()
     }
 }
 
@@ -268,9 +268,9 @@ impl Serializable for IndexLeafCell {
     fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
         // Write flags byte (bit 0 = has overflow)
         let flags = if self.overflow_page.is_some() {
-            TRUE
+            Byte::TRUE
         } else {
-            FALSE
+            Byte::FALSE
         };
         flags.write_to(writer)?;
         self.row_id.write_to(writer)?;
@@ -371,7 +371,7 @@ impl Cell for IndexInteriorCell {
             0
         };
 
-        TRUE.size_of() // flags byte
+        Byte::TRUE.size_of() // flags byte
             + self.left_child_page.size_of() // left_child_page
             + self.payload.size_of()
             + overflow_size
@@ -388,9 +388,9 @@ impl Serializable for IndexInteriorCell {
     fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
         // Write flag byte
         let flag = if self.overflow_page.is_some() {
-            TRUE
+            Byte::TRUE
         } else {
-            FALSE
+            Byte::FALSE
         };
         flag.write_to(writer)?;
 

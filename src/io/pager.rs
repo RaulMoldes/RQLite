@@ -1,21 +1,17 @@
 use crate::header::Header;
 use crate::io::cache::MemoryPool;
-use crate::io::disk::{Buffer, FileOps};
+use crate::io::disk::FileOps;
 use crate::io::frames::IOFrame;
+use crate::io::journal::Journal;
+use crate::io::wal::WriteAheadLog;
 use crate::serialization::Serializable;
+use crate::types::Key;
 use crate::types::PageId;
-use crate::types::VarlenaType;
-use std::clone::Clone;
-
-use crate::types::{Key, RowId};
 use crate::{PageType, RQLiteConfig, HEADER_SIZE};
-
-use crate::io::wal::{DeleteEntry, PutEntry, WalEntryType, WriteAheadLog};
-
-use std::fs::File;
+use std::clone::Clone;
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const __WAL: &str = "rqlite-wal.db";
 const __JOURNAL: &str = "rqlite-journal.db";
@@ -26,7 +22,7 @@ fn page_offset(page_id: PageId, page_size: u32) -> u32 {
 /// Implementation of SQLite pager. Reference: [https://sqlite.org/src/file/src/pager.c]
 pub struct Pager<F: FileOps, M: MemoryPool> {
     file: F,
-    pub(crate) cache: M,
+    cache: M,
     journal: Journal,
     wal: WriteAheadLog,
     header: Header,
@@ -56,7 +52,6 @@ impl<F: FileOps, M: MemoryPool> Write for Pager<F, M> {
     fn flush(&mut self) -> std::io::Result<()> {
         while let Some(frame) = self.cache.evict(None) {
             if frame.is_dirty() {
-                println!("EL FRAME NO ESTABA DIRTY");
                 self.journal.push_page(frame)?;
             }
         }
@@ -145,7 +140,7 @@ impl<F: FileOps, M: MemoryPool> FileOps for Pager<F, M> {
     fn truncate(&mut self) -> std::io::Result<()> {
         self.file.truncate()?;
 
-        self.wal.truncate()?;
+        // self.wal.truncate()?;
 
         self.journal.truncate()?;
         self.cache.clear();
@@ -156,7 +151,7 @@ impl<F: FileOps, M: MemoryPool> FileOps for Pager<F, M> {
     /// Todo: write dirty pages to disk here.
     fn sync_all(&self) -> std::io::Result<()> {
         self.file.sync_all()?;
-        self.wal.sync_all()?;
+        // self.wal.sync_all()?;
         self.journal.sync_all()?;
 
         Ok(())
@@ -191,6 +186,11 @@ impl<F: FileOps, M: MemoryPool> Pager<F, M> {
             header,
         })
     }
+
+    /*pub(crate) fn begin(&mut self) -> std::io::Result<()>{
+
+    };*/
+
     pub(crate) fn start_with(&mut self, cache_capacity: usize) -> std::io::Result<()> {
         self.cache.set_capacity(cache_capacity);
 
@@ -303,138 +303,5 @@ impl<F: FileOps, M: MemoryPool> Pager<F, M> {
             }
         }
         Ok(frame)
-    }
-
-    fn log_tuple(
-        &mut self,
-        page_number: PageId,
-        row_id: RowId,
-        new_content: Option<VarlenaType>,
-    ) -> io::Result<()> {
-        let entry = if let Some(content) = new_content {
-            WalEntryType::Put(PutEntry {
-                page_id: page_number,
-                row_id,
-                content,
-            })
-        } else {
-            WalEntryType::Delete(DeleteEntry {
-                page_id: page_number,
-                row_id,
-            })
-        };
-
-        entry.write_to(&mut self.wal)?;
-        Ok(())
-    }
-}
-
-pub struct Journal {
-    page_size: u32,
-    buffer: Buffer,
-    file: File,
-}
-
-impl Journal {
-    pub fn push_page(&mut self, page: IOFrame) -> io::Result<()> {
-        println!("PAGINA ESCRITA EN EL JOURNAL {}", page.id());
-        page.write_to(&mut self.buffer)?;
-        Ok(())
-    }
-
-    fn push_pages(&mut self, pages: Vec<IOFrame>) -> io::Result<()> {
-        for page in pages {
-            self.push_page(page)?;
-        }
-        Ok(())
-    }
-
-    pub fn set_page_size(&mut self, page_size: u32) {
-        self.page_size = page_size
-    }
-
-    pub fn iter(&mut self) -> JournalIterator<'_> {
-        JournalIterator { journal: self }
-    }
-}
-
-impl FileOps for Journal {
-    fn create(path: impl AsRef<Path>) -> io::Result<Self>
-    where
-        Self: Sized,
-    {
-        let file = File::create(&path)?;
-        let buffer = Buffer::create(&path)?;
-        Ok(Self {
-            page_size: 0,
-            buffer,
-            file,
-        })
-    }
-
-    fn open(path: impl AsRef<Path>) -> io::Result<Self>
-    where
-        Self: Sized,
-    {
-        let buffer = Buffer::open(&path)?;
-        // The buffer will automatically read the contents of the file.
-        let file = File::open(&path)?;
-        Ok(Self {
-            page_size: 0,
-            file,
-            buffer,
-        })
-    }
-
-    fn remove(path: impl AsRef<Path>) -> io::Result<()> {
-        File::remove(path)
-    }
-
-    fn sync_all(&self) -> io::Result<()> {
-        self.file.sync_all()
-    }
-
-    fn truncate(&mut self) -> io::Result<()> {
-        self.buffer.truncate()?;
-        self.file.truncate()
-    }
-}
-
-impl Write for Journal {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.buffer.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.file.truncate()?;
-        self.file.seek(SeekFrom::Start(0))?;
-
-        self.file.write_all(self.buffer.as_slice())?;
-        self.buffer.truncate()?;
-        Ok(())
-    }
-}
-
-impl Seek for Journal {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        self.buffer.seek(pos)
-    }
-}
-
-impl Read for Journal {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.buffer.read(buf)
-    }
-}
-
-pub(crate) struct JournalIterator<'a> {
-    journal: &'a mut Journal,
-}
-
-impl<'a> Iterator for JournalIterator<'a> {
-    type Item = IOFrame;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        IOFrame::read_from(&mut self.journal).ok()
     }
 }

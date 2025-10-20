@@ -2,14 +2,14 @@ use crate::page_header::PAGE_HEADER_SIZE;
 use crate::serialization::Serializable;
 
 use super::PageType;
-use crate::types::PageId;
+use crate::types::{PageId, VarlenaType};
 use crate::{impl_header_ops, HeaderOps, PageHeader};
 use std::io::{self, Read, Write};
 
 #[derive(Clone, Debug)]
 pub(crate) struct FreePage {
     pub(crate) header: PageHeader,
-    pub(crate) data: Vec<u8>,
+    pub(crate) data: VarlenaType,
 }
 
 impl_header_ops!(FreePage);
@@ -26,7 +26,7 @@ impl Serializable for FreePage {
         let buffer = vec![0u8; data_size as usize];
         Ok(FreePage {
             header,
-            data: buffer,
+            data: VarlenaType::from_raw_bytes(&buffer, None),
         })
     }
 
@@ -42,7 +42,7 @@ impl FreePage {
         let header = PageHeader::new(page_id, page_size, PageType::Free, right_most_page);
         Self {
             header,
-            data: Vec::new(),
+            data: VarlenaType::from_raw_bytes(&[], None),
         }
     }
 }

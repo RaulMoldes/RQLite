@@ -1,12 +1,12 @@
 use crate::serialization::Serializable;
-use crate::types::{Byte, PageId};
+use crate::types::{LogId, PageId};
 use crate::PAGE_SIZE;
 use std::fmt;
 use std::io::{self, Read, Write};
 
 /// Page header size is fixed on purpose
 /// This way you do not need to compute the total size at runtime.
-pub(crate) const PAGE_HEADER_SIZE: u16 = 24;
+pub(crate) const PAGE_HEADER_SIZE: u16 = 28;
 
 /// As said on [crate::storage::slot.rs] slot size is also fixed.
 pub(crate) const SLOT_SIZE: u16 = 2;
@@ -72,65 +72,17 @@ pub(crate) trait HeaderOps {
     fn set_content_start_ptr(&mut self, content_start: u16);
 }
 
-/// 1-byte Page enum.
-/// Byte(0x00) is reserved for FALSE marker and Byte(0x01) is reserved for TRUE marker.
-/// Therefore we start from Byte(2)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub(crate) enum PageType {
+// 1-byte Page enum.
+// Byte(0x00) is reserved for FALSE marker and Byte(0x01) is reserved for TRUE marker.
+// Therefore we start from Byte(2)
+crate::serializable_enum!(pub(crate) enum PageType: u8 {
     IndexInterior = 0x02,
     TableInterior = 0x05,
     IndexLeaf = 0x0A,
     TableLeaf = 0x0D,
     Overflow = 0x10,
     Free = 0x00,
-}
-impl std::fmt::Display for PageType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PageType::IndexInterior => write!(f, " Page type: Index Interior"),
-            PageType::TableInterior => write!(f, " Page type: Table Interior"),
-            PageType::IndexLeaf => write!(f, " Page type: Index Leaf"),
-            PageType::TableLeaf => write!(f, " Page type: Table Leaf"),
-            PageType::Overflow => write!(f, " Page type: Overflow"),
-            PageType::Free => write!(f, " Page type: Free"),
-        }?;
-
-        Ok(())
-    }
-}
-/// Shortcut to convert a PageType value to a byte and back.
-impl TryFrom<u8> for PageType {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0x02 => Ok(PageType::IndexInterior),
-            0x05 => Ok(PageType::TableInterior),
-            0x0A => Ok(PageType::IndexLeaf),
-            0x0D => Ok(PageType::TableLeaf),
-            0x10 => Ok(PageType::Overflow),
-            0x00 => Ok(PageType::Free),
-            _ => Err("Invalid page type value"),
-        }
-    }
-}
-
-impl TryFrom<Byte> for PageType {
-    type Error = &'static str;
-
-    fn try_from(value: Byte) -> Result<Self, Self::Error> {
-        match value {
-            Byte(0x02) => Ok(PageType::IndexInterior),
-            Byte(0x05) => Ok(PageType::TableInterior),
-            Byte(0x0A) => Ok(PageType::IndexLeaf),
-            Byte(0x0D) => Ok(PageType::TableLeaf),
-            Byte(0x10) => Ok(PageType::Overflow),
-            Byte(0x00) => Ok(PageType::Free),
-            _ => Err("Invalid page type value"),
-        }
-    }
-}
+});
 
 /// [`PageHeader`] data structure, containing page metadata.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -162,7 +114,11 @@ pub(crate) struct PageHeader {
     /// Type of this page.
     pub(crate) page_type: PageType,
 
-    /// Reserved space to align to 24 bytes
+    /// Id of most recent log record of this page
+    /// ARIES recovery protocol: https://people.eecs.berkeley.edu/~kubitron/courses/cs262a-F12/lectures/lec05-aries-rev.pdf
+    pub(crate) page_lsn: LogId,
+
+    /// Reserved space to align to 28 bytes
     pub(crate) reserved_space: u8,
 }
 
@@ -192,8 +148,12 @@ impl Serializable for PageHeader {
         let cell_count = u16::from_be_bytes([buffer[18], buffer[19]]);
         let content_start_ptr = u16::from_be_bytes([buffer[20], buffer[21]]);
 
-        reader.read_exact(&mut buffer[22..23])?;
-        let reserved_space = buffer[22];
+        let page_lsn = LogId::from(u32::from_be_bytes([
+            buffer[22], buffer[23], buffer[24], buffer[25],
+        ]));
+
+        reader.read_exact(&mut buffer[26..27])?;
+        let reserved_space = buffer[26];
 
         Ok(PageHeader {
             page_number,
@@ -202,6 +162,7 @@ impl Serializable for PageHeader {
             next_overflow_page,
             free_space_ptr,
             cell_count,
+            page_lsn,
             content_start_ptr,
             right_most_page,
             reserved_space,
@@ -217,6 +178,7 @@ impl Serializable for PageHeader {
         writer.write_all(&self.free_space_ptr.to_be_bytes())?;
         writer.write_all(&self.cell_count.to_be_bytes())?;
         writer.write_all(&self.content_start_ptr.to_be_bytes())?;
+        self.page_lsn.write_to(writer)?;
         writer.write_all(&[self.reserved_space])?;
         Ok(())
     }
@@ -229,6 +191,7 @@ impl fmt::Display for PageHeader {
         writeln!(f, "  Cell Count: {}", self.cell_count)?;
         writeln!(f, "  Free space pointer: {}", self.free_space_ptr)?;
         writeln!(f, "  Content start pointer: {}", self.content_start_ptr)?;
+        writeln!(f, " Page Log Sequence Number: {}", self.page_lsn)?;
         if self.next_overflow_page != PageId::from(0) {
             writeln!(f, "  Next Overflow Page: {}", self.next_overflow_page)?;
         }
@@ -303,6 +266,7 @@ impl Default for PageHeader {
             page_number: PageId::from(0),
             right_most_page: PageId::from(0),
             next_overflow_page: PageId::from(0),
+            page_lsn: LogId::from(0),
             free_space_ptr: (PAGE_SIZE) as u16,
             cell_count: 0,
             content_start_ptr: PAGE_HEADER_SIZE,
@@ -327,6 +291,7 @@ impl PageHeader {
             // NOTE that cells are inserted at the end of the page.
             // Therefore the free space pointer grows towards the beginning of the page.
             free_space_ptr: (PAGE_SIZE) as u16,
+            page_lsn: LogId::from(0),
             cell_count: 0,
             content_start_ptr: PAGE_HEADER_SIZE,
             page_type,

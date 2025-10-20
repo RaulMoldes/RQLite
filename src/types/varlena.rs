@@ -1,14 +1,24 @@
 //! Types module.
-use super::{varint::Varint, RQLiteType, RQLiteTypeMarker, Splittable};
+use super::{DataType, DataTypeMarker, Splittable};
 use crate::serialization::Serializable;
 use crate::TextEncoding;
+use std::ops::{Index, Range, RangeFrom, RangeFull, RangeTo};
 
 use std::cmp::Ordering;
 use std::cmp::{Ord, PartialOrd};
 
+// Helper function for string encoding
+fn encode_str(s: &str, encoding: TextEncoding) -> Vec<u8> {
+    match encoding {
+        TextEncoding::Utf8 => s.as_bytes().to_vec(),
+        TextEncoding::Utf16be => s.encode_utf16().flat_map(|ch| ch.to_be_bytes()).collect(),
+        TextEncoding::Utf16le => s.encode_utf16().flat_map(|ch| ch.to_le_bytes()).collect(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VarlenaType {
-    length: Varint,
+    length: u16,
     data: Vec<u8>,
     encoding: Option<TextEncoding>,
 }
@@ -25,8 +35,8 @@ impl Splittable for VarlenaType {
 
     fn split_at(&mut self, offset: u16) -> Self {
         let new_data = self.data.split_off(offset as usize);
-        let new_length = self.length - Varint(offset as i64);
-        self.length = Varint(offset as i64);
+        let new_length = self.length - offset;
+        self.length = offset;
 
         Self {
             data: new_data,
@@ -37,11 +47,46 @@ impl Splittable for VarlenaType {
 }
 
 impl VarlenaType {
+    pub(crate) fn is_allocated(&self) -> bool {
+        self.data.capacity() == self.length as usize
+    }
+
+    pub(crate) fn empty() -> Self {
+        Self {
+            length: 0,
+            data: Vec::new(),
+            encoding: None,
+        }
+    }
+
+    pub(crate) fn from_string(s: impl AsRef<str>) -> Self {
+        Self::from_str(s.as_ref(), TextEncoding::Utf8)
+    }
+
+    pub(crate) fn from_blob(data: impl Into<Vec<u8>>) -> Self {
+        let data = data.into();
+        let length = data.len() as u16;
+        Self {
+            length,
+            data,
+            encoding: None,
+        }
+    }
+
+    pub(crate) fn with_capacity(size: u16, encoding: Option<TextEncoding>) -> Self {
+        let len = size as usize;
+        Self {
+            data: Vec::with_capacity(len),
+            length: 0, // Start from 0 since capacity does not mean data.
+            encoding,
+        }
+    }
+
     pub(crate) fn from_raw_bytes(data: &[u8], encoding: Option<TextEncoding>) -> Self {
-        let len = data.len() as i64;
+        let len = data.len() as u16;
         Self {
             data: data.to_vec(),
-            length: Varint(len),
+            length: len,
             encoding,
         }
     }
@@ -49,7 +94,7 @@ impl VarlenaType {
         match encoding {
             TextEncoding::Utf8 => {
                 let data = s.as_bytes().to_vec();
-                let length = Varint(data.len() as i64);
+                let length = data.len() as u16;
                 Self {
                     length,
                     data,
@@ -61,7 +106,7 @@ impl VarlenaType {
                 for ch in s.encode_utf16() {
                     data.extend_from_slice(&ch.to_be_bytes());
                 }
-                let length = Varint(data.len() as i64);
+                let length = data.len() as u16;
                 Self {
                     length,
                     data,
@@ -73,7 +118,7 @@ impl VarlenaType {
                 for ch in s.encode_utf16() {
                     data.extend_from_slice(&ch.to_le_bytes());
                 }
-                let length = Varint(data.len() as i64);
+                let length = data.len() as u16;
                 Self {
                     length,
                     data,
@@ -84,7 +129,7 @@ impl VarlenaType {
     }
 
     /// Returns the data as a string if it's a String type
-    pub fn as_string(&self) -> Option<String> {
+    pub(crate) fn as_string(&self) -> Option<String> {
         if let Some(enconding) = self.encoding {
             match enconding {
                 TextEncoding::Utf8 => {
@@ -111,26 +156,99 @@ impl VarlenaType {
         None
     }
 
-    pub fn total_size_bytes(&self) -> u16 {
-        1 + self.length.size_of() + self.data.len() as u16
+    pub(crate) fn total_size_bytes(&self) -> u16 {
+        3 + self.data.len() as u16
     }
 
-    pub fn effective_size(&self) -> usize {
+    pub(crate) fn effective_size(&self) -> usize {
         self.data.len()
     }
 
     /// Returns the data as bytes
-    pub fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.data
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.length as usize
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.data.capacity()
+    }
+
+    pub(crate) fn encoding(&self) -> Option<TextEncoding> {
+        self.encoding
+    }
+
+    pub(crate) fn is_string(&self) -> bool {
+        self.encoding.is_some()
+    }
+
+    pub(crate) fn is_blob(&self) -> bool {
+        self.encoding.is_none()
+    }
+
+    // Type checking methods
+    pub(crate) fn is_utf8(&self) -> bool {
+        matches!(self.encoding, Some(TextEncoding::Utf8))
+    }
+
+    pub(crate) fn is_utf16(&self) -> bool {
+        matches!(
+            self.encoding,
+            Some(TextEncoding::Utf16be | TextEncoding::Utf16le)
+        )
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.data.clear();
+        self.length = 0;
+    }
+
+    pub(crate) fn truncate(&mut self, len: usize) {
+        if len < self.len() {
+            self.data.truncate(len);
+            self.length = len as u16;
+        }
+    }
+
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        self.data.reserve(additional);
+    }
+
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.data.shrink_to_fit();
+    }
+
+    pub(crate) fn extend_from_slice(&mut self, data: &[u8]) -> Result<(), &'static str> {
+        let new_len = self.length as usize + data.len();
+        if new_len > u16::MAX as usize {
+            return Err("Data would exceed maximum length");
+        }
+
+        self.data.extend_from_slice(data);
+        self.length = new_len as u16;
+        Ok(())
+    }
+
+    pub fn extend_from_str(&mut self, s: &str) -> Result<(), &'static str> {
+        let encoding = self.encoding.ok_or("Cannot write string to blob")?;
+        let bytes = encode_str(s, encoding);
+        self.extend_from_slice(&bytes)
     }
 }
 
-impl RQLiteType for VarlenaType {
-    fn _type_of(&self) -> RQLiteTypeMarker {
+impl DataType for VarlenaType {
+    fn _type_of(&self) -> DataTypeMarker {
         if self.encoding.is_some() {
-            RQLiteTypeMarker::String
+            DataTypeMarker::Text
         } else {
-            RQLiteTypeMarker::Blob
+            DataTypeMarker::Blob
         }
     }
 
@@ -190,7 +308,7 @@ impl Serializable for VarlenaType {
         writer.write_all(&[encoding_marker])?;
 
         // 2. Write length as varint
-        self.length.write_to(writer)?;
+        writer.write_all(&self.length.to_be_bytes())?;
 
         // 3. Write data
         writer.write_all(&self.data)?;
@@ -219,11 +337,13 @@ impl Serializable for VarlenaType {
             }
         };
 
-        // 2. Read length as varint
-        let length = Varint::read_from(reader)?;
+        // 2. Read length as byte
+        let mut buffer = [0u8; 2];
+        reader.read_exact(&mut buffer)?;
+        let length = u16::from_be_bytes([buffer[0], buffer[1]]);
 
         // 3. Read data
-        let data_len = length.0 as usize;
+        let data_len = length as usize;
         let mut data = vec![0u8; data_len];
         reader.read_exact(&mut data)?;
 
@@ -232,5 +352,89 @@ impl Serializable for VarlenaType {
             data,
             encoding,
         })
+    }
+}
+
+// Implement Index for convenient byte access
+impl Index<usize> for VarlenaType {
+    type Output = u8;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.data[index]
+    }
+}
+
+impl Index<Range<usize>> for VarlenaType {
+    type Output = [u8];
+
+    fn index(&self, range: Range<usize>) -> &Self::Output {
+        &self.data[range]
+    }
+}
+
+impl Index<RangeFull> for VarlenaType {
+    type Output = [u8];
+
+    fn index(&self, _: RangeFull) -> &Self::Output {
+        &self.data[..]
+    }
+}
+
+impl Index<RangeFrom<usize>> for VarlenaType {
+    type Output = [u8];
+
+    fn index(&self, range: RangeFrom<usize>) -> &Self::Output {
+        &self.data[range]
+    }
+}
+
+impl Index<RangeTo<usize>> for VarlenaType {
+    type Output = [u8];
+
+    fn index(&self, range: RangeTo<usize>) -> &Self::Output {
+        &self.data[range]
+    }
+}
+
+// Implement AsRef for convenience
+impl AsRef<[u8]> for VarlenaType {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+// Implement From traits for easy construction
+impl From<String> for VarlenaType {
+    fn from(s: String) -> Self {
+        Self::from_string(s)
+    }
+}
+
+impl From<&str> for VarlenaType {
+    fn from(s: &str) -> Self {
+        Self::from_string(s)
+    }
+}
+
+impl From<Vec<u8>> for VarlenaType {
+    fn from(data: Vec<u8>) -> Self {
+        Self::from_blob(data)
+    }
+}
+
+impl From<&[u8]> for VarlenaType {
+    fn from(data: &[u8]) -> Self {
+        Self::from_blob(data.to_vec())
+    }
+}
+
+// TryFrom for fallible conversions
+impl TryFrom<VarlenaType> for String {
+    type Error = String;
+
+    fn try_from(value: VarlenaType) -> Result<Self, Self::Error> {
+        value
+            .as_string()
+            .ok_or_else(|| "Cannot convert blob to string".to_string())
     }
 }

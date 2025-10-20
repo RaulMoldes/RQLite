@@ -1,16 +1,18 @@
 use crate::serialization::Serializable;
-use crate::types::{RQLiteType, RQLiteTypeMarker};
+use crate::types::{DataType, DataTypeMarker};
 use std::fmt::Display;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Byte(pub u8);
 
-pub const TRUE: Byte = Byte(0x01);
-pub const FALSE: Byte = Byte(0x00);
+impl Byte {
+    pub const TRUE: Byte = Byte(0x01);
+    pub const FALSE: Byte = Byte(0x00);
+}
 
-impl RQLiteType for Byte {
-    fn _type_of(&self) -> RQLiteTypeMarker {
-        RQLiteTypeMarker::Byte
+impl DataType for Byte {
+    fn _type_of(&self) -> DataTypeMarker {
+        DataTypeMarker::Byte
     }
 
     fn size_of(&self) -> u16 {
