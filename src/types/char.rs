@@ -127,7 +127,7 @@ impl Serializable for Char {
         char::from_u32(code_point).map(Char).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Invalid Unicode code point: 0x{:08X}", code_point),
+                format!("Invalid Unicode code point: 0x{code_point}"),
             )
         })
     }

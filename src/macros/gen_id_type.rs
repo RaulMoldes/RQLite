@@ -3,7 +3,7 @@
 macro_rules! define_id_type {
     ($name:ident, $counter_name:ident, $display_name:literal) => {
         // Global counter for this ID type
-        static $counter_name: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        static $counter_name: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
         #[derive(Debug, Clone, Hash, PartialEq, Eq, Copy, Default)]
         pub struct $name(u32);
@@ -12,6 +12,14 @@ macro_rules! define_id_type {
             // Generate a new ID with atomic counter
             fn __gen_new() -> Self {
                 Self($counter_name.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            }
+
+            pub const fn to_be_bytes(self) -> [u8; 4] {
+                self.0.to_be_bytes()
+            }
+
+            pub const fn from_be_bytes(bytes: [u8; 4]) -> Self {
+                Self(u32::from_be_bytes(bytes))
             }
         }
 

@@ -41,6 +41,14 @@ macro_rules! numeric_type {
                 pub const fn into_inner(self) -> $inner {
                     self.0
                 }
+
+                pub const fn to_be_bytes(self) -> [u8; $size]{
+                    self.0.to_be_bytes()
+                }
+
+                pub const fn from_be_bytes(bytes: [u8; $size]) -> Self {
+                    Self(<$inner>::from_be_bytes(bytes))
+                }
             }
 
             // Implement DataType

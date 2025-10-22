@@ -1,5 +1,4 @@
 use crate::io::disk::{Buffer, FileOps};
-use crate::io::frames::IOFrame;
 use crate::serialization::Serializable;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -12,7 +11,7 @@ pub struct Journal {
 }
 
 impl Journal {
-    pub fn push_page(&mut self, page: IOFrame) -> std::io::Result<()> {
+    pub fn push_page(&mut self, page: MemFrame) -> std::io::Result<()> {
         page.write_to(&mut self.buffer)?;
         Ok(())
     }

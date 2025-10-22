@@ -1,5 +1,3 @@
-use super::{RQLiteIndexPage, RQLiteTablePage};
-use crate::OverflowPage;
 use parking_lot::{
     ArcRwLockReadGuard, ArcRwLockUpgradableReadGuard, ArcRwLockWriteGuard, RawRwLock, RwLock,
 };
@@ -82,15 +80,3 @@ impl<P> Deref for ReadOnlyLatch<P> {
         &self.0
     }
 }
-
-pub(crate) type TablePageWrite = WriteLatch<RQLiteTablePage>;
-pub(crate) type TablePageRead = ReadOnlyLatch<RQLiteTablePage>;
-pub(crate) type TablePageUpgradable = UpgradableLatch<RQLiteTablePage>;
-
-pub(crate) type IndexPageWrite = WriteLatch<RQLiteIndexPage>;
-pub(crate) type IndexPageRead = ReadOnlyLatch<RQLiteIndexPage>;
-pub(crate) type IndexPageUpgradable = UpgradableLatch<RQLiteIndexPage>;
-
-pub(crate) type OvfPageWrite = WriteLatch<OverflowPage>;
-pub(crate) type OvfPageRead = ReadOnlyLatch<OverflowPage>;
-pub(crate) type OvfPageUpgradable = UpgradableLatch<OverflowPage>;

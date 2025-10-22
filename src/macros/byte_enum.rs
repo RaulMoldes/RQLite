@@ -1,7 +1,7 @@
-/// Macro to generate serializable enums with automatic TryFrom implementation
+/// Macro to generate enums with automatic TryFrom implementation
 /// Supports different representation types (u8, u16, u32, u64)
 #[macro_export]
-macro_rules! serializable_enum {
+macro_rules! byte_enum {
     // Version with custom repr type
     (
         $(#[$meta:meta])*

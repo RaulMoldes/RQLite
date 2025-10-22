@@ -35,23 +35,24 @@ pub struct TimeOfDay {
 }
 
 impl TimeOfDay {
-    pub const fn new(hour: u8, minute: u8, second: u8) -> Option<Self> {
-        if hour < 24 && minute < 60 && second < 60 {
-            Some(Self {
-                hour,
-                minute,
-                second,
-            })
-        } else {
-            None
+    pub(crate) fn new(hour: u8, minute: u8, second: u8) -> Self {
+        debug_assert!(
+            hour < 24 && minute < 60 && second < 60,
+            "Invalid datetime format! {hour}hh-{minute}mm-{second}ss",
+
+        );
+        Self {
+            hour,
+            minute,
+            second,
         }
     }
 
-    pub const fn as_seconds(self) -> u32 {
+    pub(crate) fn as_seconds(self) -> u32 {
         (self.hour as u32 * 3600) + (self.minute as u32 * 60) + self.second as u32
     }
 
-    pub const fn from_seconds(seconds: u32) -> Self {
+    pub(crate) fn from_seconds(seconds: u32) -> Self {
         let hour = (seconds / 3600) as u8;
         let minute = ((seconds % 3600) / 60) as u8;
         let second = (seconds % 60) as u8;
@@ -61,10 +62,7 @@ impl TimeOfDay {
             second,
         }
     }
-
-
 }
-
 
 impl Display for TimeOfDay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -88,9 +86,9 @@ impl DateTime {
         seconds_since_epoch: u64::MAX,
     };
 
-    /// Create from `Date` and `TimeOfDay`
+    /// Create from [`Date`] and [`TimeOfDay`]
     pub fn from_date_and_time(date: Date, time: TimeOfDay) -> Self {
-        let seconds = date.days_since_epoch() as u64 * 86_400 + time.as_seconds() as u64;
+        let seconds = date.days() as u64 * 86_400 + time.as_seconds() as u64;
         Self {
             seconds_since_epoch: seconds,
         }
@@ -99,7 +97,7 @@ impl DateTime {
     /// Extract date portion
     pub fn date(self) -> Date {
         let days = (self.seconds_since_epoch / 86_400) as u32;
-        Date::from_days_since_epoch(days)
+        Date::from_days(days)
     }
 
     /// Extract time portion
@@ -109,10 +107,10 @@ impl DateTime {
     }
 
     /// Create from components
-    pub fn new(year: u32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> Option<Self> {
-        let date = Date::new(year, month, day)?;
-        let time = TimeOfDay::new(hour, minute, second)?;
-        Some(Self::from_date_and_time(date, time))
+    pub(crate) fn new(year: u32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> Self {
+        let date = Date::new(year, month, day);
+        let time = TimeOfDay::new(hour, minute, second);
+        Self::from_date_and_time(date, time)
     }
 
     /// Create from seconds since epoch
@@ -141,7 +139,7 @@ impl DateTime {
     pub fn parse_iso(s: &str) -> Result<Self, String> {
         let parts: Vec<&str> = s.split('T').collect();
         if parts.len() != 2 {
-            return Err(format!("Invalid datetime format: {}", s));
+            return Err(format!("Invalid datetime format: {s}"));
         }
 
         let date = Date::parse_iso(parts[0])?;
@@ -153,19 +151,13 @@ impl DateTime {
         let hour = time_parts[0].parse::<u8>().map_err(|_| "Invalid hour")?;
         let minute = time_parts[1].parse::<u8>().map_err(|_| "Invalid minute")?;
         let second = time_parts[2].parse::<u8>().map_err(|_| "Invalid second")?;
-        let time = TimeOfDay::new(hour, minute, second)
-            .ok_or_else(|| format!("Invalid time: {}", parts[1]))?;
-
+        let time = TimeOfDay::new(hour, minute, second);
         Ok(Self::from_date_and_time(date, time))
     }
 
     /// Format as ISO 8601 string
     pub fn to_iso_string(self) -> String {
-        format!(
-            "{}T{}",
-            self.date().to_iso_string(),
-            self.time()
-        )
+        format!("{}T{}", self.date().to_iso_string(), self.time())
     }
 
     /// Add seconds

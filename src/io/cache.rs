@@ -1,6 +1,6 @@
-use crate::io::frames::IOFrame;
+use crate::io::frames::MemFrame;
+use crate::storage::page::MemPage;
 use crate::types::PageId;
-use crate::MAX_CACHE_SIZE;
 use std::clone::Clone;
 use std::collections::{HashMap, VecDeque};
 
@@ -22,28 +22,17 @@ impl std::fmt::Display for MemoryStats {
     }
 }
 
-pub(crate) trait MemoryPool {
-    fn init() -> Self;
-    fn set_capacity(&mut self, capacity: usize);
-    fn cache(&mut self, frame: IOFrame) -> Option<IOFrame>;
-    fn evict(&mut self, frame: Option<PageId>) -> Option<IOFrame>;
-    fn get(&mut self, id: &PageId) -> Option<IOFrame>;
-    fn clear(&mut self) -> Vec<IOFrame>;
-}
-
-pub(crate) struct StaticPool {
+pub(crate) struct PageCache {
     capacity: usize,
-    frames: HashMap<PageId, IOFrame>,
+    frames: HashMap<PageId, MemFrame<MemPage>>,
     free_list: VecDeque<PageId>, // Queue of frames in eviction order
     stats: MemoryStats,          // Tracking stats
 }
 
 #[cfg(test)]
-impl StaticPool {
+impl PageCache {
     pub fn new(capacity: usize) -> Self {
-        let capacity = capacity.min(MAX_CACHE_SIZE as usize);
-
-        StaticPool {
+        PageCache {
             capacity,
             frames: HashMap::with_capacity(capacity),
             free_list: VecDeque::with_capacity(capacity),
@@ -60,18 +49,17 @@ impl StaticPool {
     }
 }
 
-impl MemoryPool for StaticPool {
-    fn init() -> Self {
-        StaticPool {
-            capacity: 0,
-            frames: HashMap::new(),
-            free_list: VecDeque::new(),
+impl PageCache {
+    fn with_capacity(capacity: usize) -> Self {
+        PageCache {
+            capacity,
+            frames: HashMap::with_capacity(capacity),
+            free_list: VecDeque::with_capacity(capacity),
             stats: MemoryStats::default(),
         }
     }
 
     fn set_capacity(&mut self, capacity: usize) {
-        let capacity = capacity.min(MAX_CACHE_SIZE as usize);
         self.capacity = capacity;
         self.frames.reserve(self.capacity - self.frames.capacity());
         self.free_list
@@ -79,8 +67,8 @@ impl MemoryPool for StaticPool {
     }
 
     /// Add a list of frames to the buffer pool.
-    fn cache(&mut self, frame: IOFrame) -> Option<IOFrame> {
-        let id = frame.id();
+    fn cache(&mut self, frame: MemFrame<MemPage>) -> Option<MemFrame<MemPage>> {
+        let id = frame.read().page_number();
 
         // If the frame already exists, update it
         if self.frames.contains_key(&id) {
@@ -103,7 +91,7 @@ impl MemoryPool for StaticPool {
         evicted
     }
 
-    fn evict(&mut self, frame: Option<PageId>) -> Option<IOFrame> {
+    fn evict(&mut self, frame: Option<PageId>) -> Option<MemFrame<MemPage>> {
         if let Some(frame_id) = frame {
             if let Some(frame_data) = self.frames.remove(&frame_id) {
                 self.stats.frames_evicted += 1;
@@ -128,7 +116,7 @@ impl MemoryPool for StaticPool {
         None
     }
 
-    fn get(&mut self, id: &PageId) -> Option<IOFrame> {
+    fn get(&mut self, id: &PageId) -> Option<MemFrame<MemPage>> {
         if let Some(frame) = self.frames.get(id) {
             self.stats.cache_hits += 1;
             return Some((*frame).clone());
@@ -139,7 +127,7 @@ impl MemoryPool for StaticPool {
         None
     }
 
-    fn clear(&mut self) -> Vec<IOFrame> {
+    fn clear(&mut self) -> Vec<MemFrame<MemPage>> {
         let mut remaining_frames = Vec::with_capacity(self.frames.len());
         for (_, frame) in self.frames.drain() {
             // We do not do any checks here because this is like a force-eviction of all pages, useful when a crash happens and we need to write everything to the disk as is.

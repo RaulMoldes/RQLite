@@ -1,9 +1,8 @@
-use crate::types::{Byte, Float32, Float64, Key, PageId, RowId, Varint, VarlenaType};
+use crate::types::{
+    Byte, Date, DateTime, Float32, Float64, Key, PageId, RowId, Varchar, Varint, VarlenaType,
+};
 
-use crate::{test_serializable, TextEncoding};
-mod utils;
-
-use utils::*;
+use crate::{test_ordering, test_serializable, TextEncoding};
 
 test_serializable!(
     test_page_id,
@@ -14,8 +13,7 @@ test_serializable!(
         PageId::new_key(),
         PageId::new_key(),
         PageId::new_key()
-    ],
-    validate_page_id
+    ]
 );
 
 test_serializable!(
@@ -27,8 +25,7 @@ test_serializable!(
         RowId::new_key(),
         RowId::new_key(),
         RowId::new_key()
-    ],
-    validate_row_id
+    ]
 );
 
 test_serializable!(
@@ -41,8 +38,7 @@ test_serializable!(
         Varint(300),
         Varint(163),
         Varint(-62)
-    ],
-    validate_varint
+    ]
 );
 
 test_serializable!(
@@ -56,8 +52,7 @@ test_serializable!(
         Float32(f32::MIN),
         Float32(f32::INFINITY),
         Float32(f32::NEG_INFINITY)
-    ],
-    validate_f32
+    ]
 );
 
 test_serializable!(
@@ -69,15 +64,13 @@ test_serializable!(
         Float64(-1.23456789),
         Float64(f64::MAX),
         Float64(f64::MIN)
-    ],
-    validate_f64
+    ]
 );
 
 test_serializable!(
     test_byte,
     Byte,
-    [Byte(0), Byte(1), Byte(127), Byte(128), Byte(255)],
-    validate_byte
+    [Byte(0), Byte(1), Byte(127), Byte(128), Byte(255)]
 );
 
 test_serializable!(
@@ -89,8 +82,7 @@ test_serializable!(
         VarlenaType::from_str("Hello", TextEncoding::Utf8),
         VarlenaType::from_str("My name is Berto", TextEncoding::Utf8),
         VarlenaType::from_str("NULL", TextEncoding::Utf8)
-    ],
-    validate_varlena
+    ]
 );
 
 test_serializable!(
@@ -100,44 +92,103 @@ test_serializable!(
         VarlenaType::from_raw_bytes(&[12, 34, 56, 3], None),
         VarlenaType::from_raw_bytes(&[12, 34, 64, 4], None),
         VarlenaType::from_raw_bytes(&[12, 34, 64, 4, 45, 65, 76, 48], None)
-    ],
-    validate_varlena
+    ]
 );
 
-#[test]
-fn test_row_id_ordering() {
-    let mut values = [
+test_serializable!(
+    test_date,
+    Date,
+    [
+        Date::parse_iso("2025-10-20").unwrap(),
+        Date::parse_iso("2025-10-20").unwrap(),
+        Date::parse_iso("2025-10-20").unwrap()
+    ]
+);
+
+test_serializable!(
+    test_varchar,
+    Varchar,
+    [
+        Varchar::from_str("Hello world", TextEncoding::Utf8),
+        Varchar::from_str("Hello world 2", TextEncoding::Utf16le),
+        Varchar::from_str("Hello world 3", TextEncoding::Utf16be)
+    ]
+);
+
+// Tests RowId
+test_ordering!(
+    test_rowid_ordering,
+    RowId,
+    [
         RowId::from(1),
         RowId::from(3),
         RowId::from(2),
-        RowId::from(0),
-    ];
-    let values_sorted = [
+        RowId::from(0)
+    ],
+    [
         RowId::from(0),
         RowId::from(1),
         RowId::from(2),
-        RowId::from(3),
-    ];
-    values.sort();
-    for (i, val) in values_sorted.iter().enumerate() {
-        assert_eq!(values[i], *val, "ERROR: Row id ordering mismatch {}", i);
-    }
-}
+        RowId::from(3)
+    ]
+);
 
-#[test]
-fn test_varlena_ordering() {
-    let values = vec![5u32, 1, 9, 3, 7];
-    let mut u32_sorted = values.clone();
-    u32_sorted.sort();
+// Tests Date
+test_ordering!(
+    test_date_ordering,
+    Date,
+    [
+        Date::parse_iso("2025-01-03").unwrap(),
+        Date::parse_iso("2025-01-01").unwrap(),
+        Date::parse_iso("2025-01-02").unwrap()
+    ],
+    [
+        Date::parse_iso("2025-01-01").unwrap(),
+        Date::parse_iso("2025-01-02").unwrap(),
+        Date::parse_iso("2025-01-03").unwrap()
+    ]
+);
 
-    let mut varlena_vec: Vec<VarlenaType> = values
-        .iter()
-        .map(|v| VarlenaType::from_raw_bytes(&v.to_be_bytes(), None))
-        .collect();
-    varlena_vec.sort();
+// Tests VarlenaType
+test_ordering!(
+    test_varlena_ordering,
+    VarlenaType,
+    [
+        VarlenaType::from_raw_bytes(&5u32.to_be_bytes(), None),
+        VarlenaType::from_raw_bytes(&1u32.to_be_bytes(), None),
+        VarlenaType::from_raw_bytes(&9u32.to_be_bytes(), None)
+    ],
+    [
+        VarlenaType::from_raw_bytes(&1u32.to_be_bytes(), None),
+        VarlenaType::from_raw_bytes(&5u32.to_be_bytes(), None),
+        VarlenaType::from_raw_bytes(&9u32.to_be_bytes(), None)
+    ]
+);
 
-    for (i, val) in u32_sorted.iter().enumerate() {
-        let expected_varlena = VarlenaType::from_raw_bytes(&val.to_be_bytes(), None);
-        assert_eq!(varlena_vec[i], expected_varlena);
-    }
-}
+test_serializable!(
+    test_datetime_serialization,
+    DateTime,
+    [
+        DateTime::from_seconds_since_epoch(0),
+        DateTime::parse_iso("2025-01-01T00:00:00").unwrap(),
+        DateTime::parse_iso("2025-10-20T14:30:45").unwrap(),
+        DateTime::parse_iso("1999-12-31T23:59:59").unwrap()
+    ]
+);
+
+test_ordering!(
+    test_datetime_ordering,
+    DateTime,
+    [
+        DateTime::parse_iso("2025-10-20T14:30:45").unwrap(),
+        DateTime::parse_iso("2023-05-01T00:00:00").unwrap(),
+        DateTime::parse_iso("2024-12-31T23:59:59").unwrap(),
+        DateTime::parse_iso("2025-01-01T00:00:00").unwrap()
+    ],
+    [
+        DateTime::parse_iso("2023-05-01T00:00:00").unwrap(),
+        DateTime::parse_iso("2024-12-31T23:59:59").unwrap(),
+        DateTime::parse_iso("2025-01-01T00:00:00").unwrap(),
+        DateTime::parse_iso("2025-10-20T14:30:45").unwrap()
+    ]
+);

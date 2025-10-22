@@ -19,9 +19,16 @@ pub use date::Date;
 
 
 
+
 pub use id::*;
+#[allow(unused_imports)]
 pub use numeric::*;
+#[allow(unused_imports)]
+pub use varchar::Varchar;
+#[allow(unused_imports)]
 pub use varint::Varint;
+#[allow(unused_imports)]
+pub use datetime::DateTime;
 pub use varlena::VarlenaType;
 
 #[cfg(test)]

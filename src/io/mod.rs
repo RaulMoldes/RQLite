@@ -5,9 +5,9 @@
 pub mod cache;
 pub mod disk;
 pub mod frames;
-pub mod journal;
-pub mod pager;
-pub mod wal;
+//pub mod journal;
+//pub mod pager;
+//pub mod wal;
 
 #[cfg(test)]
 mod tests;

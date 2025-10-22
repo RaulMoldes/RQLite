@@ -1,445 +1,307 @@
-use crate::serialization::Serializable;
-use crate::types::byte::Byte;
-use crate::types::varlena::VarlenaType;
-use crate::types::DataType;
-use crate::types::PageId;
-use crate::types::RowId;
-use std::fmt::Debug;
-use std::io::{self, Read, Write};
+use std::{alloc::Layout, fmt::Debug, mem, ptr::NonNull};
 
-fn has_overflow<R: Read>(reader: &mut R) -> io::Result<bool> {
-    let byte = Byte::read_from(reader)?;
-    Ok(byte == Byte::TRUE)
+
+#[cfg(test)]
+use crate::{dynamic_buffer_tests, static_buffer_tests};
+
+use crate::configs::CELL_ALIGNMENT;
+use crate::{scalar, sized};
+use crate::{storage::buffer::BufferWithMetadata, types::PageId};
+
+// Slot offset of a cell
+scalar! {
+    pub struct Slot(u16);
 }
 
-/// Trait for all cells to implement
-pub(crate) trait Cell: Clone + Send + Sync + Debug {
-    type Key: Ord + std::fmt::Display;
-    type Data: Serializable;
-
-    fn size(&self) -> u16;
-
-    fn create(key: Self::Key, data: Option<Self::Data>) -> Self;
-
-    fn key(&self) -> Self::Key;
-
-    fn payload(&self) -> Option<&VarlenaType> {
-        None
-    }
-
-    fn set_left_child(&mut self, child: PageId) {}
-
-    fn payload_mut(&mut self) -> Option<&mut VarlenaType> {
-        None
-    }
-
-    fn left_child(&self) -> Option<PageId> {
-        None
-    }
-
-    fn overflow_page(&self) -> Option<PageId> {
-        None
-    }
+scalar! {
+    pub struct PageOffset(u16);
 }
 
-/// Each cell on a B-Tree page can be of different types.
-/// Table leaf cells is where the actual data is stored.
-#[derive(Debug, Clone)]
-pub struct TableLeafCell {
-    /// Physical row_id (row identifier).
-    pub row_id: RowId,
-    /// Payload content in bytes. The payload is the actual data stored in the cell.
-    pub payload: VarlenaType,
-    /// Pointer to the overflow page that stores the rest of the data if it does not fit in this page.
-    pub overflow_page: Option<PageId>,
+pub const SLOT_SIZE: usize = std::mem::size_of::<Slot>();
+
+sized! {
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    #[repr(C)]
+    pub(crate) struct CellHeader {
+        size: u16, //  Size is the totla size of the cell
+        is_overflow: bool,
+        padding: u8, // Padding is the padding added at the end to match alignment requirements.
+        // Therefore one can get the usable size by substracting size - padding.
+        left_child: PageId,
+    };
+    pub const CELL_HEADER_SIZE
 }
 
-impl TableLeafCell {
-    /// Setter for the overflow page pointer for a table leaf cell.
-    pub(crate) fn set_overflow(&mut self, id: PageId) {
-        self.overflow_page = Some(id);
-    }
-}
-
-impl Cell for TableLeafCell {
-    type Key = RowId;
-    type Data = VarlenaType;
-
-    fn key(&self) -> Self::Key {
-        self.row_id
+impl CellHeader {
+    pub fn is_overflow(&self) -> bool {
+        self.is_overflow
     }
 
-    fn overflow_page(&self) -> Option<PageId> {
-        self.overflow_page
-    }
-
-    fn create(key: Self::Key, data: Option<Self::Data>) -> Self {
+    pub fn new(size: usize, padding: usize, left_child: Option<PageId>) -> Self {
         Self {
-            row_id: key,
-            payload: data.unwrap(),
-            overflow_page: None,
+            size: size as u16,
+            padding: padding as u8,
+            is_overflow: false,
+            left_child: left_child.unwrap_or(PageId::from(0)),
         }
     }
 
-    fn payload(&self) -> Option<&VarlenaType> {
-        Some(&self.payload)
-    }
-
-    fn payload_mut(&mut self) -> Option<&mut VarlenaType> {
-        Some(&mut self.payload)
-    }
-
-    fn size(&self) -> u16 {
-        // The overflow page pointer if only serialized if set. If not set, we avoid serializing it.
-        // Therefore the size of a cell is variable, depending on it having an overflow page to point to.
-        let overflow_size = if let Some(page) = self.overflow_page {
-            page.size_of()
-        } else {
-            0
-        };
-
-        self.row_id.size_of() + self.payload.size_of() + overflow_size + Byte::TRUE.size_of()
-    }
-}
-
-impl Serializable for TableLeafCell {
-    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
-        // Write flags byte.
-        // It is better to use a byte marker than serializing an invalid overflow page,
-        // Cells can be of variable size, and 1 byte <<< 4 bytes (size of a page id).
-        let flag = if self.overflow_page.is_some() {
-            Byte::TRUE
-        } else {
-            Byte::FALSE
-        };
-        flag.write_to(writer)?;
-
-        // Write cell content
-        self.row_id.write_to(writer)?;
-
-        // Write the overflow page if present
-        if let Some(overflow_page) = self.overflow_page {
-            overflow_page.write_to(writer)?;
-        }
-
-        // Write payload as a chunk of bytes.
-        self.payload.write_to(writer)?;
-
-        Ok(())
-    }
-
-    fn read_from<R: Read>(reader: &mut R) -> io::Result<Self>
-    where
-        Self: Sized,
-    {
-        let has_overflow = has_overflow(reader)?;
-
-        let row_id = RowId::read_from(reader)?;
-
-        // Read overflow page if flag is set
-        let overflow_page = if has_overflow {
-            Some(PageId::read_from(reader)?)
-        } else {
-            None
-        };
-
-        let payload = VarlenaType::read_from(reader)?;
-
-        Ok(TableLeafCell {
-            row_id,
-            payload,
-            overflow_page,
-        })
-    }
-}
-
-/// Table interior cells are used to store the keys that define the boundaries between child pages.
-#[derive(Debug, Clone)]
-pub struct TableInteriorCell {
-    /// Page_number (pointer) to the left_child.
-    pub left_child_page: PageId,
-    /// Key that defines the boundary between the left and right child.
-    pub key: RowId, // RowId
-}
-
-impl Cell for TableInteriorCell {
-    type Key = RowId;
-    type Data = PageId;
-
-    fn key(&self) -> Self::Key {
-        self.key
-    }
-    fn size(&self) -> u16 {
-        self.left_child_page.size_of() + self.key.size_of()
-    }
-
-    fn left_child(&self) -> Option<PageId> {
-        Some(self.left_child_page)
-    }
-
-    fn set_left_child(&mut self, child: PageId) {
-        self.left_child_page = child
-    }
-
-    fn create(key: Self::Key, data: Option<Self::Data>) -> Self {
+    pub fn new_overflow(size: usize, padding: usize, left_child: Option<PageId>) -> Self {
         Self {
-            key,
-            left_child_page: data.unwrap(),
-        }
-    }
-}
-
-impl Serializable for TableInteriorCell {
-    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
-        self.left_child_page.write_to(writer)?;
-        self.key.write_to(writer)?;
-
-        Ok(())
-    }
-
-    fn read_from<R: Read>(reader: &mut R) -> io::Result<Self>
-    where
-        Self: Sized,
-    {
-        // Read left_child_page
-        let left_child_page = PageId::read_from(reader)?;
-        // Read key
-        let key = RowId::read_from(reader)?;
-
-        Ok(TableInteriorCell {
-            left_child_page,
-            key,
-        })
-    }
-}
-
-impl TableInteriorCell {
-    pub fn new(left_child_page: PageId, key: RowId) -> Self {
-        Self {
-            left_child_page,
-            key,
-        }
-    }
-}
-
-/// Each cell in a B-Tree index leaf page contains a payload and a rowid.
-#[derive(Debug, Clone)]
-pub struct IndexLeafCell {
-    /// Payload content in bytes (Index Key)
-    pub payload: VarlenaType,
-    /// RowId that references the actual row in the table
-    pub row_id: RowId,
-    /// References to the page of overflow
-    pub overflow_page: Option<PageId>,
-}
-
-impl Cell for IndexLeafCell {
-    type Key = VarlenaType;
-    type Data = RowId;
-
-    fn key(&self) -> Self::Key {
-        self.payload.clone()
-    }
-
-    fn overflow_page(&self) -> Option<PageId> {
-        self.overflow_page
-    }
-
-    fn create(key: Self::Key, data: Option<Self::Data>) -> Self {
-        Self {
-            row_id: data.unwrap(),
-            payload: key,
-            overflow_page: None,
+            size: size as u16,
+            padding: padding as u8,
+            is_overflow: true,
+            left_child: left_child.unwrap_or(PageId::from(0)),
         }
     }
 
-    fn size(&self) -> u16 {
-        let overflow_size = if let Some(page) = self.overflow_page {
-            page.size_of()
+    pub(crate) fn left_child(&self) -> PageId {
+        self.left_child
+    }
+}
+
+/// A cell is a structure that stores a single BTree entry.
+///
+/// Each cell stores the binary entry (AKA payload or key) and a pointer to the
+/// BTree node that contains cells with keys smaller than that stored in the
+/// cell itself.
+pub type Cell = BufferWithMetadata<CellHeader>;
+
+impl Cell {
+    pub fn new(payload: &[u8]) -> Self {
+        // Align payload size to CELL_ALIGNMENT
+        let payload_size = payload.len().next_multiple_of(CELL_ALIGNMENT as usize);
+
+        // Create buffer with total size = header + aligned payload
+        let mut buffer = BufferWithMetadata::<CellHeader>::with_capacity(
+            payload_size, // usable space for data
+            CELL_ALIGNMENT as usize,
+        );
+
+        // Initialize header
+        let header = CellHeader {
+            size: payload_size as u16,
+            is_overflow: false,
+            padding: (payload_size.saturating_sub(payload.len())) as u8,
+            left_child: PageId::from(0),
+        };
+        *buffer.metadata_mut() = header;
+
+        // Copy payload and update length
+        buffer.push_bytes(payload);
+
+        buffer
+    }
+
+    /// Creates a cell from a fragment of a page (zero-copy when possible)
+    pub unsafe fn from_page_fragment(ptr: NonNull<[u8]>, alignment: usize) -> Self {
+        // Create buffer from existing memory
+        let mut buffer = BufferWithMetadata::<CellHeader>::from_non_null(ptr, alignment);
+
+        // The header should already be initialized in the page memory
+        // Set the length based on the header's size field
+        let size = buffer.metadata().size;
+        buffer.set_len(size as usize);
+        buffer
+    }
+
+    /// Creates a new overflow cell by extending the `payload` buffer with the
+    /// `overflow_page` number.
+    pub fn new_overflow(payload: &[u8], overflow_page: PageId) -> Self {
+        let mut buffer = Self::new(payload);
+
+        if buffer.metadata().padding >= std::mem::size_of::<PageId>() as u8 {
+            buffer.metadata_mut().padding -= std::mem::size_of::<PageId>() as u8;
         } else {
-            0
+            let required_capacity = (std::mem::size_of::<PageId>()
+                - buffer.metadata().padding as usize)
+                + buffer.capacity();
+            buffer.metadata_mut().padding -= std::mem::size_of::<PageId>() as u8;
+            buffer.grow(required_capacity);
         };
 
-        Byte::TRUE.size_of() + self.payload.size_of() + overflow_size + self.row_id.size_of()
+        buffer.push_bytes(&overflow_page.to_be_bytes());
+        buffer.metadata_mut().is_overflow = true;
+        buffer
     }
-}
 
-impl Serializable for IndexLeafCell {
-    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
-        // Write flags byte (bit 0 = has overflow)
-        let flags = if self.overflow_page.is_some() {
-            Byte::TRUE
-        } else {
-            Byte::FALSE
-        };
-        flags.write_to(writer)?;
-        self.row_id.write_to(writer)?;
-        // Write payload
-        self.payload.write_to(writer)?;
-
-        // Write overflow page if present
-        if let Some(overflow_page) = self.overflow_page {
-            overflow_page.write_to(writer)?;
+    /// Returns the first overflow page of this cell.
+    pub fn overflow_page(&self) -> PageId {
+        if !self.metadata().is_overflow {
+            return PageId::from(0);
         }
 
-        Ok(())
+        // If the cell constains an overflow page we can extract it from the last four bytes of its content data.
+        PageId::from_be_bytes(
+            self.used()[self.len() - mem::size_of::<PageId>()..]
+                .try_into()
+                .expect("failed deserializing overflow page number"),
+        )
     }
 
-    fn read_from<R: Read>(reader: &mut R) -> io::Result<Self>
-    where
-        Self: Sized,
-    {
-        // Read flags
-        let has_overflow = has_overflow(reader)?;
-        // Read Rowid:
-        let row_id = RowId::read_from(reader)?;
-        // Read payload
-        let payload = VarlenaType::read_from(reader)?;
+    /// Total size of the cell including the header.
+    pub fn total_size(&self) -> u16 {
+        (CELL_HEADER_SIZE + self.size()) as u16
+    }
 
-        // Read overflow page if flag is set
-        let overflow_page = if has_overflow {
-            Some(PageId::read_from(reader)?)
-        } else {
-            None
+    /// Total size of the cell including the header and the slot array pointer
+    /// needed to store the offset.
+    pub fn storage_size(&self) -> u16 {
+        (self.total_size() as usize + SLOT_SIZE) as u16
+    }
+
+    /// See [`BtreePage`] for details.
+    pub fn aligned_size_of(data: &[u8]) -> u16 {
+        Layout::from_size_align(data.len(), CELL_ALIGNMENT as usize)
+            .unwrap()
+            .pad_to_align()
+            .size() as u16
+    }
+
+    /// Split the cell so that the payload
+    pub fn split_payload(&mut self, max_size: usize) -> Option<Cell> {
+        // Ensure we have data to split
+        if self.len() <= max_size {
+            // Why the fuck are you calling this method even if you are not big enough to be splitted??
+            return None;
         };
 
-        Ok(IndexLeafCell {
-            payload,
-            row_id,
-            overflow_page,
-        })
+        let new_size = self.size().saturating_sub(max_size);
+        let new_aligned = new_size.next_multiple_of(CELL_ALIGNMENT as usize);
+        let padding = new_aligned.saturating_sub(new_size);
+
+        let overflow_metadata = CellHeader::new_overflow(new_size, padding, None);
+
+        // Get the overflow portion
+        let overflow = Cell::from_slice_exact(
+            &self.used()[max_size..],
+            overflow_metadata,
+            CELL_ALIGNMENT as usize,
+        );
+
+        // Similar to [`Vec::shrink_to_fit()`] but this way it obliges me to explicitly specify the new length and capacity which is better for myself.
+        self.set_len(max_size);
+        // Truncate the current cell to the split point
+        self.shrink_to(max_size);
+        Some(overflow)
     }
 }
 
-impl IndexLeafCell {
-    pub fn new(payload: VarlenaType, row_id: RowId) -> Self {
-        Self {
-            payload,
-            row_id,
+#[cfg(test)]
+dynamic_buffer_tests!(
+    cell_dyn,
+    CellHeader,
+    size = 64,
+    align = CELL_ALIGNMENT.into()
+);
 
-            overflow_page: None,
-        }
+#[cfg(test)]
+static_buffer_tests!(
+    cell_sta,
+    CellHeader,
+    size = 64,
+    align = CELL_ALIGNMENT.into()
+);
+
+#[cfg(test)]
+mod cell_tests {
+    use super::*;
+
+    #[test]
+    fn test_cell_creation() {
+        // Validates normal cell creation from payload.
+        let payload = b"hello world";
+        let cell = Cell::new(payload);
+
+        // Check metadata
+        assert_eq!(
+            cell.metadata().size as usize,
+            payload.len().next_multiple_of(CELL_ALIGNMENT as usize)
+        );
+        assert!(!cell.metadata().is_overflow);
+
+        // Check data content
+        assert_eq!(&cell.used()[..payload.len()], payload);
+
+        // Check padding is correctly added
+        assert_eq!(cell.size() % CELL_ALIGNMENT as usize, 0);
+        assert_eq!(cell.len(), payload.len(), "Payload size mismatch.");
+
+        let expected_total_size = CELL_HEADER_SIZE + cell.size();
+        let expected_storage_size = expected_total_size + SLOT_SIZE;
+
+        assert_eq!(cell.total_size() as usize, expected_total_size);
+        assert_eq!(cell.storage_size() as usize, expected_storage_size);
     }
 
-    pub(crate) fn set_overflow(&mut self, id: PageId) {
-        self.overflow_page = Some(id);
-    }
-}
+    #[test]
+    fn test_cell_overflow_creation() {
+        let payload = b"overflow test";
+        let overflow_page = PageId::from(42);
+        let cell = Cell::new_overflow(payload, overflow_page);
 
-/// Each cell in a B-Tree index interior page contains a pointer to the left child and a key.
-#[derive(Debug, Clone)]
-pub struct IndexInteriorCell {
-    /// Page_number (pointer) to the left child.
-    pub left_child_page: PageId,
-    /// Payload content in bytes. The payload is the actual data stored in the cell.
-    pub payload: VarlenaType,
-    /// References to the page of overflow (if the payload does not fit in this page).
-    pub overflow_page: Option<PageId>,
-}
+        assert!(cell.metadata().is_overflow);
+        assert_eq!(cell.overflow_page(), overflow_page);
 
-impl Cell for IndexInteriorCell {
-    type Key = VarlenaType;
-    type Data = PageId;
-    fn key(&self) -> Self::Key {
-        self.payload.clone()
+        let data_len = cell.len() - mem::size_of::<PageId>();
+        assert_eq!(&cell.used()[..data_len], payload);
+
+        let expected_total_size = CELL_HEADER_SIZE + cell.size();
+        let expected_storage_size = expected_total_size + SLOT_SIZE;
+
+        assert_eq!(cell.total_size() as usize, expected_total_size);
+        assert_eq!(cell.storage_size() as usize, expected_storage_size);
     }
 
-    fn left_child(&self) -> Option<PageId> {
-        Some(self.left_child_page)
+    #[test]
+    fn test_from_page_fragment() {
+        // TODO. Will add this test once [`Page`] is completely implemented.
     }
 
-    fn set_left_child(&mut self, child: PageId) {
-        self.left_child_page = child
-    }
+    #[test]
+    fn test_cell_split() {
+        // Validates normal cell creation from payload.
+        let payload =
+            b"hello world, I am a very big cell which is going to be splitted on this test!";
+        let mut cell = Cell::new(payload);
+        // Check metadata
+        assert_eq!(
+            cell.metadata().size as usize,
+            payload.len().next_multiple_of(CELL_ALIGNMENT as usize)
+        );
+        assert!(!cell.metadata().is_overflow);
 
-    fn overflow_page(&self) -> Option<PageId> {
-        self.overflow_page
-    }
+        // Check data content
+        assert_eq!(&cell.used()[..payload.len()], payload);
 
-    fn create(key: Self::Key, data: Option<Self::Data>) -> Self {
-        Self {
-            payload: key,
-            left_child_page: data.unwrap(),
-            overflow_page: None,
-        }
-    }
+        // Check padding is correctly added
+        assert_eq!(cell.size() % CELL_ALIGNMENT as usize, 0);
+        assert_eq!(cell.len(), payload.len(), "Payload size mismatch.");
 
-    fn size(&self) -> u16 {
-        let overflow_size = if let Some(overflow_page) = self.overflow_page {
-            overflow_page.size_of()
-        } else {
-            0
-        };
+        let expected_total_size = CELL_HEADER_SIZE + cell.size();
+        let expected_storage_size = expected_total_size + SLOT_SIZE;
 
-        Byte::TRUE.size_of() // flags byte
-            + self.left_child_page.size_of() // left_child_page
-            + self.payload.size_of()
-            + overflow_size
-    }
-}
+        let original_capacity = cell.capacity();
+        let original_size = cell.size();
 
-impl IndexInteriorCell {
-    pub(crate) fn set_overflow(&mut self, id: PageId) {
-        self.overflow_page = Some(id);
-    }
-}
-
-impl Serializable for IndexInteriorCell {
-    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
-        // Write flag byte
-        let flag = if self.overflow_page.is_some() {
-            Byte::TRUE
-        } else {
-            Byte::FALSE
-        };
-        flag.write_to(writer)?;
-
-        // Write left_child_page and payload size
-        self.left_child_page.write_to(writer)?;
-        self.payload.write_to(writer)?;
-
-        // Write overflow page if present
-        if let Some(overflow_page) = self.overflow_page {
-            overflow_page.write_to(writer)?;
-        }
-
-        Ok(())
-    }
-
-    fn read_from<R: Read>(reader: &mut R) -> io::Result<Self>
-    where
-        Self: Sized,
-    {
-        // Read flag
-        let has_overflow = has_overflow(reader)?;
-
-        // Read left_child_page
-        let left_child_page = PageId::read_from(reader)?;
-
-        // Read payload
-        let payload = VarlenaType::read_from(reader)?;
-
-        // Read overflow page if flag is set
-        let overflow_page = if has_overflow {
-            Some(PageId::read_from(reader)?)
-        } else {
-            None
-        };
-
-        Ok(IndexInteriorCell {
-            left_child_page,
-            payload,
-            overflow_page,
-        })
-    }
-}
-
-impl IndexInteriorCell {
-    pub fn new(left_child_page: PageId, payload: VarlenaType) -> Self {
-        Self {
-            left_child_page,
-            payload,
-            overflow_page: None,
-        }
+        assert_eq!(cell.total_size() as usize, expected_total_size);
+        assert_eq!(cell.storage_size() as usize, expected_storage_size);
+        let current_size = cell.len();
+        let max_size = 12; // Randomly chosen number.
+        let remaining = cell.split_payload(max_size);
+        // Cell must have shrunk to [max_size]
+        assert_eq!(cell.capacity(), max_size);
+        assert_eq!(cell.data().len(), max_size);
+        assert_eq!(cell.size(), max_size + std::mem::size_of::<CellHeader>());
+        assert!(remaining.is_some());
+        // We need to get the cell back to original capacity
+        cell.grow(original_capacity);
+        // Let's see if we can reconstruct the cell.
+        cell.push_bytes(remaining.unwrap().used());
+        // Cell capacity and size should have been set back.
+        assert_eq!(cell.capacity(), original_capacity);
+        assert_eq!(cell.size(), original_size);
+        // The result should be that we have exactly the same data as at the beginning.
+        assert_eq!(cell.used().len(), payload.len());
     }
 }

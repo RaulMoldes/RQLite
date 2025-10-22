@@ -5,6 +5,7 @@ use crate::TextEncoding;
 use std::cmp::Ordering;
 use std::cmp::{Ord, PartialOrd};
 
+#[derive(Debug, Clone)]
 pub struct Varchar(VarlenaType);
 
 impl Varchar {
@@ -21,6 +22,10 @@ impl Varchar {
             self.0.extend_from_str(value)?;
         };
         Ok(())
+    }
+
+    pub(crate) fn from_str(s: &str, encoding: TextEncoding) -> Self {
+        Self(VarlenaType::from_str(s, encoding))
     }
 }
 

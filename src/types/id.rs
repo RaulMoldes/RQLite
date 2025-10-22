@@ -10,3 +10,5 @@ impl PageId {
         self.0 != 0
     }
 }
+
+pub const PAGE_ZERO: PageId = PageId(0);

@@ -1,46 +1,18 @@
-use crate::io::disk::FileOps;
-use std::fs::File;
-use std::io::{Read, Result, Write};
-use tempfile::{NamedTempFile, TempDir};
-mod utils;
-use crate::io::wal::{WalEntry, WriteAheadLog};
-use utils::*;
+use crate::io::disk::{DirectIO, FOpenMode, FileOperations};
+
+use std::io::SeekFrom;
+use std::io::{Read, Result, Seek, Write};
+use tempfile::TempDir;
 
 const TEST_PAGE_SIZE: u32 = 4096;
 
 #[cfg(target_os = "linux")]
 mod libfiu;
 
-#[test]
-fn test_sync_all() -> Result<()> {
-    // Create a temporary directory for the test
-    let temp_dir = TempDir::new()?;
-    let file_path = temp_dir.path().join("test_sync.db");
-
-    // Write the data and call `sync`
-    {
-        let mut file = File::create(&file_path)?;
-        let test_data = b"Hello, persistent world!";
-        file.write_all(test_data)?;
-        file.flush()?;
-        file.sync_all()?;
-        // File closes here
-    }
-
-    // Verify the data is persisted after opening the file.
-    let mut file = File::open(&file_path)?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-
-    assert_eq!(contents, "Hello, persistent world!");
-
-    Ok(())
-}
-
 // TODO: FIND A WAY TO PROPERLY TEST THIS
 #[test]
 #[cfg(target_os = "linux")]
-#[ignore = "Using LIBFIU to test syscall failures on userspace. For now it does not seem to be properly reporting failures on sync error fails so I disabled it."]
+#[ignore = "Ignored due to libfiu not working properly."]
 fn test_sync_all_with_fiu_injection() -> Result<()> {
     if !libfiu::init() {
         eprintln!("This test requires libfiu installed: ");
@@ -51,8 +23,12 @@ fn test_sync_all_with_fiu_injection() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let file_path = temp_dir.path().join("test_fiu.db");
 
-    let mut file = File::create(&file_path)?;
-    file.write_all(b"test data")?;
+    let mut file = DirectIO::create(&file_path, FOpenMode::ReadWrite)?;
+    let mut buffer = [0u8; 4096];
+    buffer[..14].copy_from_slice(b"Hello O_DIRECT");
+    let ptr = DirectIO::ensure_aligned(&mut buffer)?;
+
+    file.write_all(ptr)?;
     file.flush()?;
 
     // Activate fault injection for fsync
@@ -76,36 +52,47 @@ fn test_sync_all_with_fiu_injection() -> Result<()> {
 }
 
 #[test]
-fn test_wal_iterator() -> Result<()> {
-    let tmpfile = NamedTempFile::new()?;
-    let path = tmpfile.path();
-    let mut wal = WriteAheadLog::create(path)?;
-    let entries: Vec<WalEntry> = gen_wal_entries(100000, 100);
-    for e in entries.iter() {
-        wal.append(e.clone())?;
-    }
-    validate_wal(wal, entries);
-    Ok(())
-}
+#[cfg(target_os = "linux")]
+fn test_direct_io() -> std::io::Result<()> {
+    const BLOCK_SIZE: usize = 4096;
+    let path = "/tmp/test_odirect.bin";
 
-#[test]
-fn test_wal_persistence() -> Result<()> {
-    let tmpfile = NamedTempFile::new()?;
-    let path = tmpfile.path();
-    let entries: Vec<WalEntry> = gen_wal_entries(10000, 100);
-    // The scope of the wal starts here.
-    {
-        let mut wal = WriteAheadLog::create(path)?;
+    // Ensure clean slate
+    let _ = std::fs::remove_file(path);
 
-        for e in entries.iter() {
-            wal.append(e.clone())?;
-        }
-        // Flushing the wal should keep the contents in disk
-        wal.flush()?;
-    } // The wal is dropped here, but content must remain intact.
+    // Create DirectIO file
+    let mut file = DirectIO::create(path, FOpenMode::ReadWrite)?;
 
-    let wal = WriteAheadLog::open(path)?;
-    validate_wal(wal, entries);
+    // Original data to write
+    let mut buffer = [0u8; BLOCK_SIZE];
+    buffer[..14].copy_from_slice(b"Hello O_DIRECT");
+
+    // Use ensure_aligned to get an aligned buffer of BLOCK_SIZE
+    let slice = DirectIO::ensure_aligned(&mut buffer)?;
+
+    // Write to file
+    let written = file.write(slice)?;
+    assert_eq!(written, BLOCK_SIZE);
+
+    // Flush to disk
+    file.sync_all()?;
+
+    // Seek to start
+    file.seek(SeekFrom::Start(0))?;
+
+    // Prepare read buffer using ensure_aligned
+    let mut zero_buf = vec![0u8; BLOCK_SIZE];
+    let mut read_slice = DirectIO::ensure_aligned(&mut zero_buf)?.to_owned(); // to_owned to get mutable slice
+
+    // Read back
+    let read_bytes = file.read(&mut read_slice)?;
+    assert_eq!(read_bytes, BLOCK_SIZE);
+
+    // Check that the data matches the original
+    assert_eq!(&read_slice[..buffer.len()], buffer);
+
+    // Cleanup file
+    DirectIO::remove(path)?;
 
     Ok(())
 }
