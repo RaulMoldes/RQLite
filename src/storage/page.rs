@@ -13,8 +13,8 @@ use crate::{
     },
     sized,
     storage::{
-        buffer::BufferWithMetadata,
-        cell::{Cell,  Slot, CELL_HEADER_SIZE, SLOT_SIZE},
+        buffer::{AllocatorKind, BufferWithMetadata},
+        cell::{Cell, Slot, CELL_HEADER_SIZE, SLOT_SIZE},
     },
     types::{Key, LogId, PageId, PAGE_ZERO},
 };
@@ -34,16 +34,16 @@ sized! {
     #[derive(Debug)]
     #[repr(C)]
     pub struct BtreePageHeader {
-        page_number: PageId,
-        num_slots: u16,
-        free_space_ptr: u32,
-        page_size: u32,
-        free_space: u32,
-        page_lsn: LogId,
-        padding: u32,
-        right_child: PageId,
-        next_sibling: PageId,
-        previous_sibling: PageId
+        pub page_number: PageId,
+        pub num_slots: u16,
+        pub free_space_ptr: u32,
+        pub page_size: u32,
+        pub free_space: u32,
+        pub page_lsn: LogId,
+        pub padding: u32,
+        pub right_child: PageId,
+        pub next_sibling: PageId,
+        pub previous_sibling: PageId
     };
     const BTREE_PAGE_HEADER_SIZE
 }
@@ -52,10 +52,10 @@ sized! {
     #[derive(Debug, PartialEq, Clone, Copy)]
     #[repr(C)]
     pub(crate) struct OverflowPageHeader {
-        page_number: PageId,
-        next: PageId,
-        num_bytes: u32,
-        padding: u32,
+        pub page_number: PageId,
+        pub next: PageId,
+        pub num_bytes: u32,
+        pub padding: u32,
     };
     pub const OVERFLOW_HEADER_SIZE
 }
@@ -77,17 +77,17 @@ sized! {
     #[derive(Debug, Clone, Copy, PartialEq)]
     #[repr(C, align(8))]
     pub(crate) struct DatabaseHeader {
-        axmo: u32,
-        page_size: u32,
-        total_pages: u32,
-        free_pages: u32,
-        first_free_page: PageId,
-        last_free_page: PageId,
-        rw_version: crate::ReadWriteVersion,
-        text_encoding: crate::TextEncoding,
-        incremental_vacuum_mode: crate::IncrementalVaccum,
-        flushed_lsn: LogId,
-        default_cache_size: u16,
+        pub axmo: u32,
+        pub page_size: u32,
+        pub total_pages: u32,
+        pub free_pages: u32,
+        pub first_free_page: PageId,
+        pub last_free_page: PageId,
+        pub rw_version: crate::ReadWriteVersion,
+        pub text_encoding: crate::TextEncoding,
+        pub incremental_vacuum_mode: crate::IncrementalVaccum,
+        pub flushed_lsn: LogId,
+        pub cache_size: u16,
         reserved: [u8; 20],
     };
     pub const DB_HEADER_SIZE
@@ -107,7 +107,7 @@ impl DatabaseHeader {
             text_encoding: TextEncoding::Utf8,
             rw_version: ReadWriteVersion::Legacy,
             incremental_vacuum_mode: IncrementalVaccum::Disabled,
-            default_cache_size: DEFAULT_CACHE_SIZE,
+            cache_size: DEFAULT_CACHE_SIZE,
             reserved: [0; 20],
         }
     }
@@ -147,19 +147,17 @@ impl BtreePageHeader {
 
 pub type BtreePage = BufferWithMetadata<BtreePageHeader>;
 
-impl BtreePage {
-    pub fn alloc(size: u32) -> Self {
+impl Page for BtreePage {
+    fn alloc(size: u32, allocator: AllocatorKind) -> Self {
         assert!(
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
             "page size {size} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}"
         );
 
-
-        dbg!(size);
-
         let mut buffer = BufferWithMetadata::<BtreePageHeader>::new_unchecked(
             size as usize,
             PAGE_ALIGNMENT as usize,
+            allocator,
         );
 
         buffer.set_len(size as usize);
@@ -168,6 +166,12 @@ impl BtreePage {
         buffer
     }
 
+    fn page_number(&self) -> PageId {
+        self.metadata().page_number
+    }
+}
+
+impl BtreePage {
     fn max_allowed_payload_size(&self) -> u16 {
         max_payload_size_in(self.capacity()) as u16
     }
@@ -301,13 +305,12 @@ impl BtreePage {
         );
 
         if let Err(mut cell) = self.try_insert(index, cell) {
-
             // Align the max cell size downwards. We want the max cell size to not excede the page size so aligning upwards as we would do with [next_multiple_of] does not make much sense.
             let usable_space = self.metadata().free_space as usize;
             let mut max_cell_payload_size = max_payload_size_in(usable_space);
             assert!(max_cell_payload_size > 0, "Attempted to create a cell without payload! Cells must have at least 1 byte for data.");
             max_cell_payload_size -= std::mem::size_of::<PageId>();
-            let some_cell =  cell.split_payload(max_cell_payload_size);
+            let some_cell = cell.split_payload(max_cell_payload_size);
             self.insert(index, cell);
             return some_cell;
         }
@@ -327,7 +330,7 @@ impl BtreePage {
 
             Err(mut new_cell) => {
                 let old_cell = self.remove(index);
-                 // Align the max cell size downwards. We want the max cell size to not excede the page size so aligning upwards as we would do with [next_multiple_of] does not make much sense.
+                // Align the max cell size downwards. We want the max cell size to not excede the page size so aligning upwards as we would do with [next_multiple_of] does not make much sense.
                 let usable_space = self.metadata().free_space as usize;
                 let mut max_cell_payload_size = max_payload_size_in(usable_space);
                 assert!(max_cell_payload_size > 0, "Attempted to create a cell without payload! Cells must have at least 1 byte for data.");
@@ -532,11 +535,10 @@ impl BtreePage {
 }
 
 pub(crate) type OverflowPage = BufferWithMetadata<OverflowPageHeader>;
-pub(crate) type FreePage = BufferWithMetadata<OverflowPageHeader>;
 pub(crate) type PageZero = BufferWithMetadata<DatabaseHeader>;
 
-impl OverflowPage {
-    pub fn alloc(size: u32) -> Self {
+impl Page for OverflowPage {
+    fn alloc(size: u32, allocator: AllocatorKind) -> Self {
         assert!(
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
             "page size {size} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}"
@@ -544,6 +546,7 @@ impl OverflowPage {
         let mut buf = BufferWithMetadata::<OverflowPageHeader>::new_unchecked(
             size as usize,
             PAGE_ALIGNMENT as usize,
+            allocator,
         );
 
         // Pages cannot grow like cells do. Therefore we automatically set the length at the beginning and leave it as is.
@@ -554,23 +557,34 @@ impl OverflowPage {
         buf
     }
 
+    fn page_number(&self) -> PageId {
+        self.metadata().page_number
+    }
+}
+
+impl OverflowPage {
     /// Returns a read-only reference to the payload (not the entire data).
     pub fn payload(&self) -> &[u8] {
         &self.data()[..self.metadata().num_bytes as usize]
     }
 }
 
-impl PageZero {
+impl Page for PageZero {
     /// Creates a new page in memory.
-    pub fn alloc() -> Self {
+    fn alloc(size: u32, allocator: AllocatorKind) -> Self {
         let mut buf = BufferWithMetadata::<DatabaseHeader>::new_unchecked(
-            DB_HEADER_SIZE,
+            size as usize,
             PAGE_ALIGNMENT as usize,
+            allocator,
         );
         buf.set_len(DB_HEADER_SIZE);
         *buf.metadata_mut() = DatabaseHeader::init();
 
         buf
+    }
+
+    fn page_number(&self) -> PageId {
+        PAGE_ZERO
     }
 }
 
@@ -582,29 +596,28 @@ pub(crate) enum MemPage {
     Btree(BtreePage),
 }
 
-/// See [`crate::paging::pager::BtreePager::get_as`]
-trait PageFrom = From<BufferWithMetadata<BtreePageHeader>>
-    + From<BufferWithMetadata<OverflowPageHeader>>
-    + From<BufferWithMetadata<DatabaseHeader>>
-    + Into<MemPage>;
+pub trait Page: Into<MemPage> + AsRef<[u8]> + AsMut<[u8]>
+where
+    Self: for<'a> TryFrom<(&'a [u8], usize, AllocatorKind), Error = &'static str>,
+{
+    fn alloc(size: u32, allocator: AllocatorKind) -> Self;
+    fn page_number(&self) -> PageId;
+}
 
 impl MemPage {
-    /// Allocates a dummy page in memory.
-    ///
-    /// Used by the [`crate::paging::cache`] module to fill up the buffer pool.
-    /// [`Self::reinit_as`] can be used to convert the type to a different one
-    /// reusing the same allocation, so it doesn't matter what type we choose
-    /// here. We're choosing the most common type.
-    pub fn alloc(size: u32) -> Self {
-        assert!(
-            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
-            "page size {size} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}"
-        );
-        MemPage::Btree(BtreePage::alloc(size))
+    pub(crate) fn page_number(&self) -> PageId {
+        match self {
+            Self::Btree(p) => p.page_number(),
+            Self::Overflow(p) => p.page_number(),
+            Self::Zero(p) => PAGE_ZERO,
+        }
     }
 
     /// Converts this page into another type.
-    fn reinit_as<P: PageFrom>(&mut self) {
+    fn reinit_as<T>(&mut self)
+    where
+        BufferWithMetadata<T>: Into<MemPage>,
+    {
         // SAFETY: We basically move out of self temporarily to create the new
         // type and then write the new variant back. If we already have mutable
         // access to self this should be "safe". At this point I already hate
@@ -612,22 +625,27 @@ impl MemPage {
         unsafe {
             let mem_page = ptr::from_mut(self);
 
-            let converted = match mem_page.read() {
-                Self::Zero(zero) => P::from(zero),
-                Self::Overflow(overflow) => P::from(overflow),
-                Self::Btree(page) => P::from(page),
+            let converted: BufferWithMetadata<_> = match mem_page.read() {
+                Self::Zero(zero) => panic!("Attempted to reinitialize page zero. This is not valid. Page Zero is a reserved page to store the database header!"),
+                Self::Overflow(overflow) => overflow.cast(),
+                Self::Btree(page) => page.cast()
             };
 
             mem_page.write(converted.into())
         }
     }
 
-    pub fn page_number(&self) -> PageId {
-        match self {
-            Self::Btree(page) => page.metadata().page_number,
-            Self::Zero(_) => PAGE_ZERO,
-            Self::Overflow(page) => page.metadata().page_number,
-        }
+
+    // Free pages have the same header as overflow pages.
+    // We are reusing the same header type to reduce the boiler plate.
+    // It is the responsability of the database header to distinguish between pages that are used for the free list and pages that are actual overflow pages.
+    pub fn dealloc(&mut self) {
+        self.reinit_as::<OverflowPageHeader>();
+    }
+
+
+    pub fn is_free_page(&self) -> bool {
+        matches!(self, MemPage::Overflow(_))
     }
 
     /// Returns `true` if the page is in overflow state.
@@ -644,7 +662,7 @@ impl AsRef<[u8]> for MemPage {
         match self {
             Self::Zero(page) => page.as_ref(),
             Self::Overflow(page) => page.as_ref(),
-            Self::Btree(page) => page.as_ref(),
+            Self::Btree(page) => page.as_ref()
         }
     }
 }
@@ -798,7 +816,6 @@ crate::static_buffer_tests!(
 
 
 
-
 /// Specific tests for BtreePages.
 #[cfg(test)]
 mod btree_page_tests {
@@ -808,7 +825,7 @@ mod btree_page_tests {
 
     #[test]
     fn test_page_allocation() {
-        let mut page = BtreePage::alloc(MIN_PAGE_SIZE + 1);
+        let mut page = BtreePage::alloc(MIN_PAGE_SIZE + 1, AllocatorKind::GlobalAllocator);
         assert_eq!(page.len() as u32, MIN_PAGE_SIZE + 1);
         // Verify initial state
         assert_eq!(page.num_slots(), 0);
@@ -850,7 +867,7 @@ mod btree_page_tests {
 
     #[test]
     fn test_cell_ops() {
-        let mut page = BtreePage::alloc(MIN_PAGE_SIZE);
+        let mut page = BtreePage::alloc(MIN_PAGE_SIZE, AllocatorKind::GlobalAllocator);
 
         // Test push
         let cell1 = Cell::new(b"first");
@@ -859,8 +876,6 @@ mod btree_page_tests {
         assert!(cell1.len() == b"first".len());
         page.push(cell1.clone());
         page.push(cell2.clone());
-
-        assert!(page.is_empty());
 
         assert_eq!(page.num_slots(), 2);
         assert_eq!(page.cell(Slot(0)).used(), b"first");
@@ -903,7 +918,7 @@ mod btree_page_tests {
 
     #[test]
     fn test_free_space() {
-        let mut page = BtreePage::alloc(MIN_PAGE_SIZE);
+        let mut page = BtreePage::alloc(MIN_PAGE_SIZE, AllocatorKind::GlobalAllocator);
         let initial_free = page.metadata().free_space;
 
         // Add cell and check free space decreases
@@ -921,10 +936,9 @@ mod btree_page_tests {
         assert_eq!(page.metadata().free_space, initial_free);
     }
 
-
     #[test]
     fn test_defragmentation() {
-        let mut page = BtreePage::alloc(4096);
+        let mut page = BtreePage::alloc(4096, AllocatorKind::GlobalAllocator);
 
         // Add multiple cells
         for i in 0..10 {
@@ -944,7 +958,9 @@ mod btree_page_tests {
 
         // Try to insert a cell that requires defragmentation
         let large_cell = Cell::new(&[0u8; 100]);
-        if large_cell.storage_size() <= free_space as u16 && large_cell.storage_size() > effective as u16 {
+        if large_cell.storage_size() <= free_space as u16
+            && large_cell.storage_size() > effective as u16
+        {
             // This should trigger defragmentation internally
             page.insert(Slot(0), large_cell);
 
@@ -952,5 +968,8 @@ mod btree_page_tests {
             assert!(page.num_slots() > 0);
         }
     }
+
+    crate::test_page_casting!(test_btree_overflow, Btree, BtreePage, Overflow, OverflowPageHeader);
+    crate::test_page_casting!(test_overflow_btree, Overflow, OverflowPage, Btree, BtreePageHeader);
 
 }

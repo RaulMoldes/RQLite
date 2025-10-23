@@ -29,13 +29,12 @@ pub(crate) struct PageCache {
     stats: MemoryStats,          // Tracking stats
 }
 
-#[cfg(test)]
 impl PageCache {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new() -> Self {
         PageCache {
-            capacity,
-            frames: HashMap::with_capacity(capacity),
-            free_list: VecDeque::with_capacity(capacity),
+            capacity: 0,
+            frames: HashMap::new(),
+            free_list: VecDeque::new(),
             stats: MemoryStats::default(),
         }
     }
@@ -50,7 +49,7 @@ impl PageCache {
 }
 
 impl PageCache {
-    fn with_capacity(capacity: usize) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         PageCache {
             capacity,
             frames: HashMap::with_capacity(capacity),
@@ -59,7 +58,7 @@ impl PageCache {
         }
     }
 
-    fn set_capacity(&mut self, capacity: usize) {
+    pub fn set_capacity(&mut self, capacity: usize) {
         self.capacity = capacity;
         self.frames.reserve(self.capacity - self.frames.capacity());
         self.free_list
@@ -67,9 +66,7 @@ impl PageCache {
     }
 
     /// Add a list of frames to the buffer pool.
-    fn cache(&mut self, frame: MemFrame<MemPage>) -> Option<MemFrame<MemPage>> {
-        let id = frame.read().page_number();
-
+    pub fn insert(&mut self, id: PageId, frame: MemFrame<MemPage>) -> Option<MemFrame<MemPage>> {
         // If the frame already exists, update it
         if self.frames.contains_key(&id) {
             if let Some(old_frame) = self.frames.get_mut(&id) {
@@ -116,7 +113,7 @@ impl PageCache {
         None
     }
 
-    fn get(&mut self, id: &PageId) -> Option<MemFrame<MemPage>> {
+    pub fn get(&mut self, id: &PageId) -> Option<MemFrame<MemPage>> {
         if let Some(frame) = self.frames.get(id) {
             self.stats.cache_hits += 1;
             return Some((*frame).clone());
@@ -127,7 +124,7 @@ impl PageCache {
         None
     }
 
-    fn clear(&mut self) -> Vec<MemFrame<MemPage>> {
+    pub fn clear(&mut self) -> Vec<MemFrame<MemPage>> {
         let mut remaining_frames = Vec::with_capacity(self.frames.len());
         for (_, frame) in self.frames.drain() {
             // We do not do any checks here because this is like a force-eviction of all pages, useful when a crash happens and we need to write everything to the disk as is.

@@ -39,7 +39,6 @@ impl TimeOfDay {
         debug_assert!(
             hour < 24 && minute < 60 && second < 60,
             "Invalid datetime format! {hour}hh-{minute}mm-{second}ss",
-
         );
         Self {
             hour,

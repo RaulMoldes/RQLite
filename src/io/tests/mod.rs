@@ -24,11 +24,10 @@ fn test_sync_all_with_fiu_injection() -> Result<()> {
     let file_path = temp_dir.path().join("test_fiu.db");
 
     let mut file = DirectIO::create(&file_path, FOpenMode::ReadWrite)?;
-    let mut buffer = [0u8; 4096];
+    let buffer = DirectIO::alloc_aligned(4096)?;
     buffer[..14].copy_from_slice(b"Hello O_DIRECT");
-    let ptr = DirectIO::ensure_aligned(&mut buffer)?;
 
-    file.write_all(ptr)?;
+    file.write_all(buffer)?;
     file.flush()?;
 
     // Activate fault injection for fsync
@@ -64,14 +63,11 @@ fn test_direct_io() -> std::io::Result<()> {
     let mut file = DirectIO::create(path, FOpenMode::ReadWrite)?;
 
     // Original data to write
-    let mut buffer = [0u8; BLOCK_SIZE];
+    let buffer = DirectIO::alloc_aligned(4096)?;
     buffer[..14].copy_from_slice(b"Hello O_DIRECT");
 
-    // Use ensure_aligned to get an aligned buffer of BLOCK_SIZE
-    let slice = DirectIO::ensure_aligned(&mut buffer)?;
-
     // Write to file
-    let written = file.write(slice)?;
+    let written = file.write(buffer)?;
     assert_eq!(written, BLOCK_SIZE);
 
     // Flush to disk
@@ -81,15 +77,13 @@ fn test_direct_io() -> std::io::Result<()> {
     file.seek(SeekFrom::Start(0))?;
 
     // Prepare read buffer using ensure_aligned
-    let mut zero_buf = vec![0u8; BLOCK_SIZE];
-    let mut read_slice = DirectIO::ensure_aligned(&mut zero_buf)?.to_owned(); // to_owned to get mutable slice
-
+    let zero_buf = DirectIO::alloc_aligned(4096)?;
     // Read back
-    let read_bytes = file.read(&mut read_slice)?;
+    let read_bytes = file.read(zero_buf)?;
     assert_eq!(read_bytes, BLOCK_SIZE);
 
     // Check that the data matches the original
-    assert_eq!(&read_slice[..buffer.len()], buffer);
+    assert_eq!(&zero_buf[..buffer.len()], buffer);
 
     // Cleanup file
     DirectIO::remove(path)?;

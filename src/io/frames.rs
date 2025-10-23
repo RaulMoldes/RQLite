@@ -66,3 +66,39 @@ where
         WriteLatch::lock(&self.inner)
     }
 }
+
+impl<P> MemFrame<P>
+where
+    P: Send + Sync + std::fmt::Debug,
+{
+    /// Callables that allow to execute a custom function on any type that implements [TryFrom<P>]
+    /// [`try_with_variant`] allows to execute callbacks on shared references taken over frames acquiring and automatically releasing the latches.
+    ///
+    /// These are pretty handy when we want to grab the lock on a page, apply a transform and inmediately release it.
+    ///
+    /// Notes on functor and closures traits in case you are interested: https://doc.rust-lang.org/std/ops/trait.Fn.html
+    ///
+    /// Basically, anything that is [Fn] will also be [FnMut] and [FnOnce],
+    /// and everything that is [FnMut] is also [FnOnce], the compiler can coerce the Function types in that order. However, [FnOnce] cannot be coerced into [FnMut] neither into [Fn].
+    ///
+    /// So [try_with_variant] will accept a [FnOnce], that is a functor that takes a shared reference over a Frame. While [try_with_variant_mut] will take a [FnMut] (a functor that takes an exclusive reference over a Frame).
+    pub fn try_with_variant<V, F, R, E>(&self, f: F) -> Result<R, E>
+    where
+        F: FnOnce(&V) -> R,
+        for<'a> &'a P: TryInto<&'a V, Error = E>,
+    {
+        let guard = self.read();
+        let variant = (&*guard).try_into()?;
+        Ok(f(variant))
+    }
+
+    pub fn try_with_variant_mut<V, F, R, E>(&self, f: F) -> Result<R, E>
+    where
+        F: FnOnce(&mut V) -> R,
+        for<'a> &'a mut P: TryInto<&'a mut V, Error = E>,
+    {
+        let mut guard = self.write();
+        let variant = (&mut *guard).try_into()?;
+        Ok(f(variant))
+    }
+}

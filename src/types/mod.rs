@@ -17,9 +17,8 @@ pub mod varlena;
 pub use byte::Byte;
 pub use date::Date;
 
-
-
-
+#[allow(unused_imports)]
+pub use datetime::DateTime;
 pub use id::*;
 #[allow(unused_imports)]
 pub use numeric::*;
@@ -27,8 +26,6 @@ pub use numeric::*;
 pub use varchar::Varchar;
 #[allow(unused_imports)]
 pub use varint::Varint;
-#[allow(unused_imports)]
-pub use datetime::DateTime;
 pub use varlena::VarlenaType;
 
 #[cfg(test)]

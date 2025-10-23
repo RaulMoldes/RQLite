@@ -1,12 +1,14 @@
 use std::{alloc::Layout, fmt::Debug, mem, ptr::NonNull};
 
-
 #[cfg(test)]
 use crate::{dynamic_buffer_tests, static_buffer_tests};
 
 use crate::configs::CELL_ALIGNMENT;
 use crate::{scalar, sized};
-use crate::{storage::buffer::BufferWithMetadata, types::PageId};
+use crate::{
+    storage::buffer::{AllocatorKind, BufferWithMetadata},
+    types::PageId,
+};
 
 // Slot offset of a cell
 scalar! {
@@ -76,6 +78,7 @@ impl Cell {
         let mut buffer = BufferWithMetadata::<CellHeader>::with_capacity(
             payload_size, // usable space for data
             CELL_ALIGNMENT as usize,
+            AllocatorKind::GlobalAllocator,
         );
 
         // Initialize header
@@ -96,7 +99,11 @@ impl Cell {
     /// Creates a cell from a fragment of a page (zero-copy when possible)
     pub unsafe fn from_page_fragment(ptr: NonNull<[u8]>, alignment: usize) -> Self {
         // Create buffer from existing memory
-        let mut buffer = BufferWithMetadata::<CellHeader>::from_non_null(ptr, alignment);
+        let mut buffer = BufferWithMetadata::<CellHeader>::from_non_null(
+            ptr,
+            alignment,
+            AllocatorKind::GlobalAllocator,
+        );
 
         // The header should already be initialized in the page memory
         // Set the length based on the header's size field

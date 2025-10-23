@@ -11,7 +11,7 @@ macro_rules! static_buffer_tests {
             fn [<test_alloc_$name>]() {
                 use std::mem;
                 let buffer: BufferWithMetadata<$meta_type> =
-                    BufferWithMetadata::new_unchecked($size, $align);
+                    BufferWithMetadata::new_unchecked($size, $align, AllocatorKind::GlobalAllocator);
 
                 assert_eq!(buffer.size(), $size);
                 assert_eq!(buffer.alignment(), $align);
@@ -40,7 +40,7 @@ macro_rules! static_buffer_tests {
             #[should_panic(expected = "buffer overflow")]
             fn [<test_buffer_overflow_$name>]() {
                 let mut buf: BufferWithMetadata<$meta_type> =
-                    BufferWithMetadata::new_unchecked($size, $align);
+                    BufferWithMetadata::new_unchecked($size, $align, AllocatorKind::GlobalAllocator);
                 let cap = buf.capacity();
                 buf.push_bytes(&vec![0xAB; cap]);
                 buf.push_bytes(&[1]); // should panic
@@ -63,7 +63,7 @@ macro_rules! dynamic_buffer_tests {
             #[test]
             fn [<test_used_bytes_$name>]() {
                 let mut buf: BufferWithMetadata<$meta_type> =
-                    BufferWithMetadata::new_unchecked($size, $align);
+                    BufferWithMetadata::new_unchecked($size, $align, AllocatorKind::GlobalAllocator);
 
                 assert_eq!(buf.len(), 0);
 
@@ -83,7 +83,7 @@ macro_rules! dynamic_buffer_tests {
             #[test]
             fn [<test_consistency_$name>]() {
                 let mut buf: BufferWithMetadata<$meta_type> =
-                    BufferWithMetadata::new_unchecked($size, $align);
+                    BufferWithMetadata::new_unchecked($size, $align, AllocatorKind::GlobalAllocator);
                 let cap = buf.capacity();
                 assert_eq!(buf.used().len(), 0);
                 buf.push_bytes(&[0xAB; 10]);
@@ -95,7 +95,7 @@ macro_rules! dynamic_buffer_tests {
             #[should_panic(expected = "buffer overflow")]
             fn [<test_buffer_overflow_$name>]() {
                 let mut buf: BufferWithMetadata<$meta_type> =
-                    BufferWithMetadata::new_unchecked($size, $align);
+                    BufferWithMetadata::new_unchecked($size, $align, AllocatorKind::GlobalAllocator);
                 let cap = buf.capacity();
                 buf.push_bytes(&vec![0xAB; cap]);
                 buf.push_bytes(&[1]); // should panic
@@ -105,7 +105,7 @@ macro_rules! dynamic_buffer_tests {
             #[test]
             fn [<test_grow_capacity_$name>]() {
                 let mut buf: BufferWithMetadata<$meta_type> =
-                    BufferWithMetadata::new_unchecked($size, $align);
+                    BufferWithMetadata::new_unchecked($size, $align, AllocatorKind::GlobalAllocator);
 
                 // Fill with some data
                 buf.push_bytes(&[1, 2, 3, 4]);
@@ -123,6 +123,30 @@ macro_rules! dynamic_buffer_tests {
             }
 
 
+        }
+    };
+}
+
+
+/// Macro to create page casting tests
+#[macro_export]
+macro_rules! test_page_casting {
+    ($test_name:ident, $variant:ident, $from:ty, $to:ident, $header:ty) => {
+        #[test]
+        fn $test_name() -> std::io::Result<()> {
+
+            let mut page = MemPage::$variant(<$from>::alloc(4096, AllocatorKind::GlobalAllocator));
+
+            // Reinit to new type
+            page.reinit_as::<$header>();
+
+            // Verify conversion
+            let is_target = matches!(page, MemPage::$to(_));
+
+           
+            assert!(is_target, "Page should be converted to target type");
+
+            Ok(())
         }
     };
 }
