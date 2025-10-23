@@ -31,4 +31,4 @@ use jemallocator::Jemalloc;
 static GLOBAL: Jemalloc = Jemalloc;
 pub(crate) use configs::*;
 
-use types::DataType;
+
