@@ -635,14 +635,12 @@ impl MemPage {
         }
     }
 
-
     // Free pages have the same header as overflow pages.
     // We are reusing the same header type to reduce the boiler plate.
     // It is the responsability of the database header to distinguish between pages that are used for the free list and pages that are actual overflow pages.
     pub fn dealloc(&mut self) {
         self.reinit_as::<OverflowPageHeader>();
     }
-
 
     pub fn is_free_page(&self) -> bool {
         matches!(self, MemPage::Overflow(_))
@@ -662,7 +660,7 @@ impl AsRef<[u8]> for MemPage {
         match self {
             Self::Zero(page) => page.as_ref(),
             Self::Overflow(page) => page.as_ref(),
-            Self::Btree(page) => page.as_ref()
+            Self::Btree(page) => page.as_ref(),
         }
     }
 }
@@ -812,9 +810,6 @@ crate::static_buffer_tests!(
     size = DB_HEADER_SIZE,
     align = PAGE_ALIGNMENT as usize
 );
-
-
-
 
 /// Specific tests for BtreePages.
 #[cfg(test)]
@@ -969,7 +964,18 @@ mod btree_page_tests {
         }
     }
 
-    crate::test_page_casting!(test_btree_overflow, Btree, BtreePage, Overflow, OverflowPageHeader);
-    crate::test_page_casting!(test_overflow_btree, Overflow, OverflowPage, Btree, BtreePageHeader);
-
+    crate::test_page_casting!(
+        test_btree_overflow,
+        Btree,
+        BtreePage,
+        Overflow,
+        OverflowPageHeader
+    );
+    crate::test_page_casting!(
+        test_overflow_btree,
+        Overflow,
+        OverflowPage,
+        Btree,
+        BtreePageHeader
+    );
 }

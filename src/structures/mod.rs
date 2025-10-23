@@ -1,11 +1,5 @@
-mod debug;
-mod delete;
-mod insert;
-mod locking;
-mod rebalance;
-mod search;
-mod utils;
-
+//mod btree;
+/*
 #[cfg(test)]
 mod tests;
 
@@ -212,3 +206,4 @@ where
 pub(crate) type TableBTree = BTree<RowId, TableLeafCell, TableInteriorCell, RQLiteTablePage>;
 
 pub(crate) type IndexBTree = BTree<VarlenaType, IndexLeafCell, IndexInteriorCell, RQLiteIndexPage>;
+*/

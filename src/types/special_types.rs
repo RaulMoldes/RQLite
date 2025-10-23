@@ -1,9 +1,7 @@
-use crate::serialization::Serializable;
-use crate::types::{DataType, DataTypeMarker};
+
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
-use std::io::{self, Read, Write};
 const MAX_VARINT_LEN: usize = 9;
 
 // Varint stands for variable-length integer.
@@ -62,28 +60,6 @@ impl Varint {
     }
 }
 
-impl DataType for Varint {
-    /// Returns the RQLite type Varint
-    fn _type_of(&self) -> DataTypeMarker {
-        DataTypeMarker::VarInt
-    }
-
-    // Computes the serialized size of a Varint.
-    fn size_of(&self) -> u16 {
-        let mut value = Self::encode_zigzag(self.0);
-        let mut size = 0;
-
-        loop {
-            size += 1;
-            value >>= 7;
-            if value == 0 {
-                break;
-            }
-        }
-
-        size
-    }
-}
 
 impl PartialOrd for Varint {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -104,66 +80,77 @@ impl fmt::Display for Varint {
     }
 }
 
-impl Serializable for Varint {
-    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
-        // ZigZag-encode
+
+impl Varint {
+    /// Serializes a VarInt to a byte vector.
+    pub fn to_bytes(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(MAX_VARINT_LEN);
         let mut value = Self::encode_zigzag(self.0);
 
-        // Write byte by byte adding the continuation bit
         loop {
             let mut byte = (value & 0x7F) as u8;
             value >>= 7;
-
             if value != 0 {
                 byte |= 0x80; // Set continuation bit
             }
-
-            writer.write_all(&[byte])?;
-
+            bytes.push(byte);
             if value == 0 {
                 break;
             }
         }
-
-        Ok(())
+        bytes
     }
 
-    fn read_from<R: Read>(reader: &mut R) -> io::Result<Self>
-    where
-        Self: Sized,
-    {
+    /// Deserializes a [VarInt] from an slice of bytes
+    pub fn from_bytes(bytes: &[u8]) -> std::io::Result<(Self, usize)> {
         let mut result: u64 = 0;
         let mut shift = 0;
+        let mut bytes_read = 0;
 
-        for _ in 0..MAX_VARINT_LEN {
-            let mut byte = [0u8; 1];
-            reader.read_exact(&mut byte)?;
-            let b = byte[0];
+        for (i, &b) in bytes.iter().enumerate() {
+            if i >= MAX_VARINT_LEN {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Varint too long",
+                ));
+            }
 
-            // Extract the first 7 bits of data
             result |= ((b & 0x7F) as u64) << shift;
+            bytes_read += 1;
 
-            // If there is no continuation bit, terminate
             if (b & 0x80) == 0 {
-                // Decode using ZigZag decoding
-                return Ok(Varint(Self::decode_zigzag(result)));
+                return Ok((Varint(Self::decode_zigzag(result)), bytes_read));
             }
 
             shift += 7;
-
-            // Prevent overflow
             if shift >= 64 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
                     "Varint shift overflow",
                 ));
             }
         }
 
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Varint too long",
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Incomplete varint",
         ))
+    }
+}
+
+
+impl From<Varint> for Vec<u8> {
+    fn from(v: Varint) -> Vec<u8> {
+        v.to_bytes()
+    }
+}
+
+impl TryFrom<&[u8]> for Varint {
+    type Error = std::io::Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        let (varint, _) = Varint::from_bytes(bytes)?;
+        Ok(varint)
     }
 }
 

@@ -1,10 +1,12 @@
+use std::cell::RefCell;
 use std::io::{Read, Seek, Write};
+use std::sync::Arc;
 
 use crate::io::cache::PageCache;
 use crate::io::disk::{DirectIO, FileOperations};
 use crate::io::frames::MemFrame;
 use crate::storage::buffer::AllocatorKind;
-use crate::storage::page::{ OverflowPage, MemPage, Page, PageZero};
+use crate::storage::page::{MemPage, OverflowPage, Page, PageZero};
 use crate::types::{PageId, PAGE_ZERO};
 use crate::{RQLiteConfig, DEFAULT_CACHE_SIZE, PAGE_ALIGNMENT};
 
@@ -197,6 +199,8 @@ impl Pager {
         Ok(())
     }
 }
+
+type SharedPager = Arc<RefCell<Pager>>;
 
 #[cfg(test)]
 mod tests {

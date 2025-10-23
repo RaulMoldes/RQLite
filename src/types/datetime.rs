@@ -1,16 +1,11 @@
-use crate::serialization::Serializable;
-use crate::types::{DataType, DataTypeMarker, Date};
-use std::cmp::{Ord, Ordering, PartialOrd};
+use crate::types::{UInt64,Date};
+use std::cmp::{Ord, PartialOrd};
 use std::fmt::{self, Display};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Represents a date and time (UTC-based)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DateTime {
-    /// Seconds since Unix epoch (1970-01-01T00:00:00Z)
-    seconds_since_epoch: u64,
-}
+pub type DateTime = UInt64;
 
 /// Duration in seconds
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -71,37 +66,31 @@ impl Display for TimeOfDay {
 
 impl DateTime {
     /// Unix epoch (1970-01-01T00:00:00Z)
-    pub const UNIX_EPOCH: Self = Self {
-        seconds_since_epoch: 0,
-    };
+    pub const UNIX_EPOCH: Self = Self(0);
 
     /// Minimum representable datetime
-    pub const MIN: Self = Self {
-        seconds_since_epoch: u64::MIN,
-    };
+    pub const MIN: Self = Self(u64::MIN);
 
     /// Maximum representable datetime
-    pub const MAX: Self = Self {
-        seconds_since_epoch: u64::MAX,
-    };
+    pub const MAX: Self = Self(u64::MAX);
+
 
     /// Create from [`Date`] and [`TimeOfDay`]
     pub fn from_date_and_time(date: Date, time: TimeOfDay) -> Self {
         let seconds = date.days() as u64 * 86_400 + time.as_seconds() as u64;
-        Self {
-            seconds_since_epoch: seconds,
-        }
+        Self(seconds)
+
     }
 
     /// Extract date portion
     pub fn date(self) -> Date {
-        let days = (self.seconds_since_epoch / 86_400) as u32;
+        let days = (self.0 / 86_400) as u32;
         Date::from_days(days)
     }
 
     /// Extract time portion
     pub fn time(self) -> TimeOfDay {
-        let seconds_in_day = (self.seconds_since_epoch.rem_euclid(86_400)) as u32;
+        let seconds_in_day = (self.0.rem_euclid(86_400)) as u32;
         TimeOfDay::from_seconds(seconds_in_day)
     }
 
@@ -114,14 +103,12 @@ impl DateTime {
 
     /// Create from seconds since epoch
     pub const fn from_seconds_since_epoch(seconds: u64) -> Self {
-        Self {
-            seconds_since_epoch: seconds,
-        }
+        Self(seconds)
     }
 
     /// Get seconds since epoch
     pub const fn seconds_since_epoch(self) -> u64 {
-        self.seconds_since_epoch
+        self.0
     }
 
     /// Current UTC datetime (from system clock)
@@ -129,9 +116,8 @@ impl DateTime {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
-        Self {
-            seconds_since_epoch: now.as_secs(),
-        }
+        Self(now.as_secs())
+
     }
 
     /// Parse from ISO 8601: "YYYY-MM-DDTHH:MM:SS"
@@ -161,15 +147,14 @@ impl DateTime {
 
     /// Add seconds
     pub fn add_seconds(self, seconds: u64) -> Option<Self> {
-        self.seconds_since_epoch
+        self.0
             .checked_add(seconds)
             .map(Self::from_seconds_since_epoch)
     }
 
     /// Subtract seconds
     pub fn sub_seconds(self, seconds: u64) -> Option<Self> {
-        self.seconds_since_epoch
-            .checked_sub(seconds)
+        self.0.checked_sub(seconds)
             .map(Self::from_seconds_since_epoch)
     }
 
@@ -180,7 +165,7 @@ impl DateTime {
 
     /// Difference in seconds
     pub const fn seconds_between(self, other: Self) -> u64 {
-        other.seconds_since_epoch - self.seconds_since_epoch
+        other.0 - self.0
     }
 
     /// Difference in whole days
@@ -189,51 +174,7 @@ impl DateTime {
     }
 }
 
-impl DataType for DateTime {
-    fn _type_of(&self) -> DataTypeMarker {
-        DataTypeMarker::DateTime
-    }
 
-    fn size_of(&self) -> u16 {
-        8 // 8 bytes for u64
-    }
-}
-
-impl Display for DateTime {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_iso_string())
-    }
-}
-
-impl Serializable for DateTime {
-    fn read_from<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self>
-    where
-        Self: Sized,
-    {
-        let mut bytes = [0u8; 8];
-        reader.read_exact(&mut bytes)?;
-        let seconds = u64::from_be_bytes(bytes);
-        Ok(DateTime::from_seconds_since_epoch(seconds))
-    }
-
-    fn write_to<W: std::io::Write>(self, writer: &mut W) -> std::io::Result<()> {
-        let bytes = self.seconds_since_epoch.to_be_bytes();
-        writer.write_all(&bytes)?;
-        Ok(())
-    }
-}
-
-impl PartialOrd for DateTime {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for DateTime {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.seconds_since_epoch.cmp(&other.seconds_since_epoch)
-    }
-}
 
 // Arithmetic
 impl Add<Seconds> for DateTime {
@@ -262,12 +203,7 @@ impl SubAssign<Seconds> for DateTime {
     }
 }
 
-impl Sub<DateTime> for DateTime {
-    type Output = Seconds;
-    fn sub(self, other: DateTime) -> Self::Output {
-        Seconds(self.seconds_between(other))
-    }
-}
+
 
 // Conversions
 impl From<(Date, TimeOfDay)> for DateTime {

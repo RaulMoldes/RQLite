@@ -7,13 +7,14 @@
 #![allow(unused_variables)]
 #![feature(slice_ptr_get)]
 #![feature(concat_bytes)]
-//mod btree;
+
 mod configs;
 mod database;
 mod io;
 mod macros;
 mod serialization;
 mod storage;
+mod structures;
 mod types;
 
 /// Jemalloc apparently has better alignment guarantees than rust's standard allocator.

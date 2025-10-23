@@ -127,14 +127,12 @@ macro_rules! dynamic_buffer_tests {
     };
 }
 
-
 /// Macro to create page casting tests
 #[macro_export]
 macro_rules! test_page_casting {
     ($test_name:ident, $variant:ident, $from:ty, $to:ident, $header:ty) => {
         #[test]
         fn $test_name() -> std::io::Result<()> {
-
             let mut page = MemPage::$variant(<$from>::alloc(4096, AllocatorKind::GlobalAllocator));
 
             // Reinit to new type
@@ -143,7 +141,6 @@ macro_rules! test_page_casting {
             // Verify conversion
             let is_target = matches!(page, MemPage::$to(_));
 
-           
             assert!(is_target, "Page should be converted to target type");
 
             Ok(())

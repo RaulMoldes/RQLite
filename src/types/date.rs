@@ -1,10 +1,11 @@
+//! Implementation of the date type was moved here to not put so much boilerplate code on the sized_types module.
 use crate::named_enum;
-use crate::serialization::Serializable;
-use crate::types::{DataType, DataTypeMarker};
-use std::cmp::{Ord, Ordering, PartialOrd};
-use std::fmt::{self, Display};
+use crate::types::UInt32;
+
+use std::cmp::{Ord,  PartialOrd};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use std::time::{SystemTime, UNIX_EPOCH};
+
 
 const MONTH_DAYS: [u16; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 /// Check if this year is a leap year
@@ -35,13 +36,11 @@ pub(crate) const fn ymd_to_days(year: u32, month: u8, day: u8) -> u32 {
     (total_days - 719162) as u32
 }
 
+
 /// Days since Unix epoch (1970-01-01)
 /// This allows us to represent dates from approximately year -5877641 to year 5881580
 /// Using u32 for storage efficiency (4 bytes)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Date {
-    days_since_epoch: u32,
-}
+pub type Date = UInt32;
 
 /// Duration in days
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -121,19 +120,14 @@ impl Weekday {
 
 impl Date {
     /// Unix epoch (1970-01-01)
-    pub const UNIX_EPOCH: Self = Self {
-        days_since_epoch: 0,
-    };
+    pub const UNIX_EPOCH: Self = Self(0);
 
     /// Minimum representable date
-    pub const MIN: Self = Self {
-        days_since_epoch: u32::MIN,
-    };
+    pub const MIN: Self = Self(u32::MIN);
+
 
     /// Maximum representable date
-    pub const MAX: Self = Self {
-        days_since_epoch: u32::MAX,
-    };
+    pub const MAX: Self = Self(u32::MAX);
 
     /// Create a new Date from year, month, and day
     pub(crate) fn new(year: u32, month: u8, day: u8) -> Self {
@@ -152,21 +146,18 @@ impl Date {
             day
         );
 
-        Self {
-            days_since_epoch: ymd_to_days(year, month, day),
-        }
+        Self(ymd_to_days(year, month, day))
+
     }
 
     /// Create a Date from days since Unix epoch
     pub(crate) fn from_days(days: u32) -> Self {
-        Self {
-            days_since_epoch: days,
-        }
+        Self(days)
     }
 
     /// Get the number of days since Unix epoch
     pub(crate) fn days(self) -> u32 {
-        self.days_since_epoch
+        self.0
     }
 
     /// Create today's date
@@ -175,9 +166,8 @@ impl Date {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
 
-        Self {
-            days_since_epoch: today.as_secs().div_ceil(3600).div_ceil(24) as u32,
-        }
+        Self(today.as_secs().div_ceil(3600).div_ceil(24) as u32)
+
     }
 
     /// Parse from ISO 8601 format (YYYY-MM-DD)
@@ -225,7 +215,7 @@ impl Date {
     pub(crate) fn yyyy_mm_dd(self) -> (u32, u8, u8) {
         // Algorithm adapted from Howard Hinnant’s date algorithms
         // https://howardhinnant.github.io/date/date.html
-        let days = self.days_since_epoch as i32 + 719_468;
+        let days = self.0 as i32 + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097; // [0, 146096]
         let yoe = (4000 * (doe + 1)) / 1_461_001; // [0, 399]
@@ -240,7 +230,7 @@ impl Date {
     /// Calculate day of the week (Monday = 1 … Sunday = 7)
     pub(crate) fn weekday(self) -> Weekday {
         // 1970-01-01 was a Thursday
-        let weekday_num = ((self.days_since_epoch + 4) % 7) + 1;
+        let weekday_num = ((self.0 + 4) % 7) + 1;
         Weekday::from_u8(weekday_num as u8).unwrap()
     }
 
@@ -277,27 +267,23 @@ impl Date {
 
     /// Add days to the date
     pub const fn add_days(self, days: u32) -> Option<Self> {
-        match self.days_since_epoch.checked_add(days) {
-            Some(result) => Some(Self {
-                days_since_epoch: result,
-            }),
+        match self.0.checked_add(days) {
+            Some(result) => Some(Self(result)),
             None => None,
         }
     }
 
     /// Subtract days from the date
     pub const fn sub_days(self, days: u32) -> Option<Self> {
-        match self.days_since_epoch.checked_sub(days) {
-            Some(result) => Some(Self {
-                days_since_epoch: result,
-            }),
+        match self.0.checked_sub(days) {
+            Some(result) => Some(Self(result)),
             None => None,
         }
     }
 
     /// Get the difference in days between two dates
     pub const fn days_between(self, other: Self) -> u32 {
-        other.days_since_epoch - self.days_since_epoch
+        other.0 - self.0
     }
 
     /// Check if this date is a weekend
@@ -320,51 +306,7 @@ impl Date {
     }
 }
 
-impl DataType for Date {
-    fn _type_of(&self) -> DataTypeMarker {
-        DataTypeMarker::Date
-    }
 
-    fn size_of(&self) -> u16 {
-        4 // 4 bytes for u32
-    }
-}
-
-impl Display for Date {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_iso_string())
-    }
-}
-
-impl Serializable for Date {
-    fn read_from<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self>
-    where
-        Self: Sized,
-    {
-        let mut bytes = [0u8; 4];
-        reader.read_exact(&mut bytes)?;
-        let days = u32::from_be_bytes(bytes);
-        Ok(Date::from_days(days))
-    }
-
-    fn write_to<W: std::io::Write>(self, writer: &mut W) -> std::io::Result<()> {
-        let bytes = self.days_since_epoch.to_be_bytes();
-        writer.write_all(&bytes)?;
-        Ok(())
-    }
-}
-
-impl PartialOrd for Date {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Date {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.days_since_epoch.cmp(&other.days_since_epoch)
-    }
-}
 
 // Arithmetic operations
 impl Add<Days> for Date {
@@ -395,13 +337,7 @@ impl SubAssign<Days> for Date {
     }
 }
 
-impl Sub<Date> for Date {
-    type Output = Days;
 
-    fn sub(self, other: Date) -> Self::Output {
-        Days(self.days_between(other))
-    }
-}
 
 // Conversions
 impl From<(u32, u8, u8)> for Date {
