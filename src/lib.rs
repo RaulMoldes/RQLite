@@ -16,11 +16,14 @@ mod serialization;
 mod storage;
 mod types;
 
-// Jemalloc apparently has better alignment guarantees than rust's standard allocator.
-// Rust's global system allocator does not seem to guarantee that allocations are aligned. Therefore we prefer to use [`Jemalloc`], to ensure allocations are aligned.
-//
-//  Docs on Jemalloc: https://manpages.debian.org/jessie/libjemalloc-dev/jemalloc.3.en.html.
-// We also provide an API with a custom Direct-IO allocator (see [io::disk::linux] for details), but Jemalloc has performed better in benchmarks.
+/// Jemalloc apparently has better alignment guarantees than rust's standard allocator.
+/// Rust's global system allocator does not seem to guarantee that allocations are aligned.
+/// Therefore we prefer to use [Jemalloc], to ensure allocations are aligned.
+///
+///  Docs on Jemalloc: https://manpages.debian.org/jessie/libjemalloc-dev/jemalloc.3.en.html.
+///
+/// More on alignment guarantees: https://github.com/jemalloc/jemalloc/issues/1533
+/// We also provide an API with a custom [Direct-IO] allocator (see [io::disk::linux] for details), but Jemalloc has performed better in benchmarks.
 use jemallocator::Jemalloc;
 
 #[global_allocator]
