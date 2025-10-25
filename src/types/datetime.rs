@@ -1,15 +1,19 @@
-use crate::types::{UInt64,Date};
+use crate::types::Date;
 use std::cmp::{Ord, PartialOrd};
 use std::fmt::{self, Display};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Represents a date and time (UTC-based)
-pub type DateTime = UInt64;
+// Represents a date and time (UTC-based)
+crate::scalar! {
+    pub struct DateTime(u64);
+}
 
-/// Duration in seconds
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Seconds(pub u64);
+// Duration in seconds
+crate::scalar! {
+    pub struct Seconds(u64);
+
+}
 
 impl Seconds {
     pub const fn new(seconds: u64) -> Self {
@@ -74,12 +78,10 @@ impl DateTime {
     /// Maximum representable datetime
     pub const MAX: Self = Self(u64::MAX);
 
-
     /// Create from [`Date`] and [`TimeOfDay`]
     pub fn from_date_and_time(date: Date, time: TimeOfDay) -> Self {
         let seconds = date.days() as u64 * 86_400 + time.as_seconds() as u64;
         Self(seconds)
-
     }
 
     /// Extract date portion
@@ -117,7 +119,6 @@ impl DateTime {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
         Self(now.as_secs())
-
     }
 
     /// Parse from ISO 8601: "YYYY-MM-DDTHH:MM:SS"
@@ -154,7 +155,8 @@ impl DateTime {
 
     /// Subtract seconds
     pub fn sub_seconds(self, seconds: u64) -> Option<Self> {
-        self.0.checked_sub(seconds)
+        self.0
+            .checked_sub(seconds)
             .map(Self::from_seconds_since_epoch)
     }
 
@@ -173,8 +175,6 @@ impl DateTime {
         (self.seconds_between(other) / 86_400) as i32
     }
 }
-
-
 
 // Arithmetic
 impl Add<Seconds> for DateTime {
@@ -202,8 +202,6 @@ impl SubAssign<Seconds> for DateTime {
         *self = *self - s;
     }
 }
-
-
 
 // Conversions
 impl From<(Date, TimeOfDay)> for DateTime {

@@ -1,4 +1,4 @@
-use crate::{scalar, float_scalar};
+use crate::{float_scalar, scalar};
 
 scalar! {
     pub struct Int8(i8);
@@ -44,8 +44,6 @@ pub type Byte = UInt8;
 pub type Char = UInt8;
 pub type Bool = UInt8;
 
-
-
 impl Char {
     pub const NULL: Self = Self(b'\0');
     pub const MAX: Self = Self(0xFF);
@@ -58,7 +56,6 @@ impl Char {
             None
         }
     }
-
 
     pub const fn is_ascii(self) -> bool {
         self.0 <= 127
@@ -104,7 +101,6 @@ impl Char {
             None
         }
     }
-
 
     pub const fn len_utf8(self) -> usize {
         1

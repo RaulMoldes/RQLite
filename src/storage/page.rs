@@ -15,9 +15,11 @@ use crate::{
     storage::{
         buffer::{AllocatorKind, BufferWithMetadata},
         cell::{Cell, Slot, CELL_HEADER_SIZE, SLOT_SIZE},
+        latches::Latch,
     },
     types::{Key, LogId, PageId, PAGE_ZERO},
 };
+use std::ops::{Deref, DerefMut};
 
 fn max_payload_size_in(usable_space: usize) -> usize {
     (usable_space - CELL_HEADER_SIZE - SLOT_SIZE) & !(CELL_ALIGNMENT as usize - 1)
@@ -176,6 +178,24 @@ impl BtreePage {
         max_payload_size_in(self.capacity()) as u16
     }
 
+
+     pub fn ideal_max_payload_size(page_size: usize, min_cells: usize) -> usize {
+        debug_assert!(
+            min_cells > 0,
+            "if you're not gonna store any cells then why are you even calling this function?"
+        );
+
+        let ideal_size =
+            max_payload_size_in(Self::usable_space(page_size) as usize / min_cells);
+
+        debug_assert!(
+            ideal_size > 0,
+            "page size {page_size} is too small to store {min_cells} cells"
+        );
+
+        ideal_size
+    }
+
     pub fn num_slots(&self) -> u16 {
         self.metadata().num_slots
     }
@@ -216,7 +236,7 @@ impl BtreePage {
     }
 
     /// Read-only reference to a cell.
-    fn cell(&self, index: Slot) -> &Cell {
+    pub(crate) fn cell(&self, index: Slot) -> &Cell {
         let cell = self.get_cell_at(index);
         // SAFETY: Same as [`Self::cell_at_offset`].
         unsafe { cell.as_ref() }
@@ -251,6 +271,11 @@ impl BtreePage {
             self.num_slots() + 1
         };
         (0..len).map(|i| self.child(Slot(i)))
+    }
+
+    pub fn iter_cells(&self) -> impl DoubleEndedIterator<Item = &Cell> + '_ {
+        let len = self.num_slots() + 1;
+        (0..len).map(|i| self.cell(Slot(i)))
     }
 
     /// Returns `true` if this page is underflow
@@ -290,7 +315,7 @@ impl BtreePage {
     /// Inserts the `cell` at `index`, possibly overflowing.
     /// If we overflow, return the portion of the cell that did not fit.
     /// The caller is responsible of creating an overflow chain in consequence.
-    fn insert(&mut self, index: Slot, cell: Cell) -> Option<Cell> {
+    pub fn insert(&mut self, index: Slot, cell: Cell) -> Option<Cell> {
         assert!(
             cell.data.len() <= self.max_allowed_payload_size() as usize,
             "attempt to store payload of size {} when max allowed payload size is {}",
@@ -319,7 +344,7 @@ impl BtreePage {
 
     /// Attempts to replace the cell at `index` with `new_cell`.
     /// Returns the old cell and possibly the content of the new cell that did not fit in the page if that is the case. See [`ìnsert`] for details.
-    fn replace(&mut self, index: Slot, new_cell: Cell) -> (Cell, Option<Cell>) {
+    pub fn replace(&mut self, index: Slot, new_cell: Cell) -> (Cell, Option<Cell>) {
         debug_assert!(
             !self.has_overflown(),
             "overflow cells are not replaced so replace() should not run on overflow pages"
@@ -693,72 +718,68 @@ impl From<PageZero> for MemPage {
     }
 }
 
-impl<'p> TryFrom<&'p MemPage> for &'p BtreePage {
+impl<'p> TryFrom<&'p Latch<MemPage>> for &'p BtreePage {
     type Error = String;
 
-    fn try_from(mem_page: &'p MemPage) -> Result<Self, Self::Error> {
-        match mem_page {
+    fn try_from(latch: &'p Latch<MemPage>) -> Result<Self, Self::Error> {
+        match latch.deref() {
             MemPage::Btree(page) => Ok(page),
             other => Err(format!("attempt to convert {other:?} into BtreePage")),
         }
     }
 }
 
-impl<'p> TryFrom<&'p mut MemPage> for &'p mut BtreePage {
+impl<'p> TryFrom<&'p mut Latch<MemPage>> for &'p mut BtreePage {
     type Error = String;
 
-    fn try_from(mem_page: &'p mut MemPage) -> Result<Self, Self::Error> {
-        match mem_page {
+    fn try_from(latch: &'p mut Latch<MemPage>) -> Result<Self, Self::Error> {
+        match latch.deref_mut() {
             MemPage::Btree(page) => Ok(page),
             other => Err(format!("attempt to convert {other:?} into BtreePage")),
         }
     }
 }
 
-impl<'p> TryFrom<&'p MemPage> for &'p PageZero {
+impl<'p> TryFrom<&'p Latch<MemPage>> for &'p PageZero {
     type Error = String;
 
-    fn try_from(mem_page: &'p MemPage) -> Result<Self, Self::Error> {
-        match mem_page {
-            MemPage::Zero(page_zero) => Ok(page_zero),
-            other => Err(format!("attempt to convert {other:?} into BtreePageZero")),
+    fn try_from(latch: &'p Latch<MemPage>) -> Result<Self, Self::Error> {
+        match latch.deref() {
+            MemPage::Zero(page) => Ok(page),
+            other => Err(format!("attempt to convert {other:?} into BtreePage")),
         }
     }
 }
 
-impl<'p> TryFrom<&'p mut MemPage> for &'p mut PageZero {
+impl<'p> TryFrom<&'p mut Latch<MemPage>> for &'p mut PageZero {
     type Error = String;
 
-    fn try_from(mem_page: &'p mut MemPage) -> Result<Self, Self::Error> {
-        match mem_page {
-            MemPage::Zero(page_zero) => Ok(page_zero),
-            other => Err(format!("attempt to convert {other:?} into BtreePageZero")),
+    fn try_from(latch: &'p mut Latch<MemPage>) -> Result<Self, Self::Error> {
+        match latch.deref_mut() {
+            MemPage::Zero(page) => Ok(page),
+            other => Err(format!("attempt to convert {other:?} into BtreePage")),
         }
     }
 }
 
-impl<'p> TryFrom<&'p MemPage> for &'p OverflowPage {
+impl<'p> TryFrom<&'p Latch<MemPage>> for &'p OverflowPage {
     type Error = String;
 
-    fn try_from(mem_page: &'p MemPage) -> Result<Self, Self::Error> {
-        match mem_page {
+    fn try_from(latch: &'p Latch<MemPage>) -> Result<Self, Self::Error> {
+        match latch.deref() {
             MemPage::Overflow(page) => Ok(page),
-            other => Err(format!(
-                "attempt to convert {other:?} into OverflowBtreePage"
-            )),
+            other => Err(format!("attempt to convert {other:?} into BtreePage")),
         }
     }
 }
 
-impl<'p> TryFrom<&'p mut MemPage> for &'p mut OverflowPage {
+impl<'p> TryFrom<&'p mut Latch<MemPage>> for &'p mut OverflowPage {
     type Error = String;
 
-    fn try_from(mem_page: &'p mut MemPage) -> Result<Self, Self::Error> {
-        match mem_page {
+    fn try_from(latch: &'p mut Latch<MemPage>) -> Result<Self, Self::Error> {
+        match latch.deref_mut() {
             MemPage::Overflow(page) => Ok(page),
-            other => Err(format!(
-                "attempt to convert {other:?} into OverflowBtreePage"
-            )),
+            other => Err(format!("attempt to convert {other:?} into BtreePage")),
         }
     }
 }

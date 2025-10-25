@@ -1,4 +1,4 @@
-use crate::storage::latches::{ReadOnlyLatch, UpgradableLatch, WriteLatch};
+use crate::storage::latches::Latch;
 
 use parking_lot::RwLock;
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
@@ -54,16 +54,16 @@ where
         self.is_dirty.store(true, Ordering::SeqCst);
     }
 
-    pub(crate) fn read(&self) -> ReadOnlyLatch<P> {
-        ReadOnlyLatch::lock(&self.inner)
+    pub(crate) fn read(&self) -> Latch<P> {
+        Latch::read(&self.inner)
     }
 
-    pub(crate) fn read_for_upgrade(&self) -> UpgradableLatch<P> {
-        UpgradableLatch::lock(&self.inner)
+    pub(crate) fn upgradable(&self) -> Latch<P> {
+        Latch::upgradable(&self.inner)
     }
 
-    pub(crate) fn write(&self) -> WriteLatch<P> {
-        WriteLatch::lock(&self.inner)
+    pub(crate) fn write(&self) -> Latch<P> {
+        Latch::write(&self.inner)
     }
 }
 
@@ -85,20 +85,20 @@ where
     pub fn try_with_variant<V, F, R, E>(&self, f: F) -> Result<R, E>
     where
         F: FnOnce(&V) -> R,
-        for<'a> &'a P: TryInto<&'a V, Error = E>,
+        for<'a> &'a Latch<P>: TryInto<&'a V, Error = E>,
     {
         let guard = self.read();
-        let variant = (&*guard).try_into()?;
+        let variant: &V = (&guard).try_into()?;
         Ok(f(variant))
     }
 
     pub fn try_with_variant_mut<V, F, R, E>(&self, f: F) -> Result<R, E>
     where
         F: FnOnce(&mut V) -> R,
-        for<'a> &'a mut P: TryInto<&'a mut V, Error = E>,
+        for<'a> &'a mut Latch<P>: TryInto<&'a mut V, Error = E>,
     {
         let mut guard = self.write();
-        let variant = (&mut *guard).try_into()?;
+        let variant: &mut V = (&mut guard).try_into()?;
         Ok(f(variant))
     }
 }

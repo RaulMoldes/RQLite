@@ -1,163 +1,152 @@
 //mod btree;
-/*
-#[cfg(test)]
-mod tests;
 
-use crate::btreepage::BTreePageOps;
-use crate::io::cache::MemoryPool;
-use crate::io::disk::FileOps;
-use crate::io::frames::Frame;
-use crate::io::frames::{IOFrame, PageFrame};
-use crate::io::pager::Pager;
-use crate::storage::Cell;
-use crate::storage::{InteriorPageOps, LeafPageOps, Overflowable};
-use crate::types::{PageId, RowId, Splittable, VarlenaType};
-use crate::{HeaderOps, OverflowPage};
-use crate::{
-    IndexInteriorCell, IndexLeafCell, RQLiteIndexPage, RQLiteTablePage, TableInteriorCell,
-    TableLeafCell,
+//#[cfg(test)]
+//mod tests;
+
+use crate::io::frames::MemFrame;
+use crate::io::pager::{access_pager_mut,access_pager, SharedPager};
+use crate::TextEncoding;
+use std::cmp::Ordering;
+
+use crate::storage::page::{BtreePage, MemPage, OverflowPage};
+use crate::storage::{
+    cell::{Cell, Slot},
+    latches::Latch,
 };
 
-pub(crate) use delete::DeleteOps;
-pub(crate) use insert::InsertOps;
-pub(crate) use locking::TraverseStack;
-pub(crate) use rebalance::RebalanceOps;
-pub(crate) use search::SearchOps;
-pub(crate) use utils::*;
+use crate::types::{DataType, PageId, SizedType, PAGE_ZERO};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(u8)]
-pub(crate) enum BTreeType {
-    Table,
-    Index,
+type Position = (PageId, Slot);
+
+pub(crate) enum SearchResult {
+    Found(Position),  // Key found -> return its position
+    NotFound(PageId), // Key not found, return the last visited page id.
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(u8)]
-pub(crate) enum BorrowOpType {
-    Front,
-    Back,
+pub(crate) enum SlotSearchResult {
+    FoundInplace(Position),
+    FoundBetween(Position),
+    NotFound,
 }
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(u8)]
-pub(crate) enum RebalanceMethod {
-    PostDelete,
-    PostInsert,
+
+enum Payload<'b> {
+    Boxed(Box<[u8]>),
+    Reference(&'b [u8]),
+}
+
+impl<'b> AsRef<[u8]> for Payload<'b> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Reference(reference) => reference,
+            Self::Boxed(boxed) => boxed,
+        }
+    }
 }
 
 #[derive(Debug)]
-pub(crate) struct BTree<K, Vl, Vi, P: Send + Sync> {
+pub(crate) struct BPlusTree<K>
+where
+    K: Ord + for<'a> TryFrom<&'a [u8], Error = std::io::Error> + AsMut<[u8]> + AsRef<[u8]>,
+{
     pub(crate) root: PageId,
-    pub(crate) min_payload_fraction: u8,
-    pub(crate) max_payload_fraction: u8,
-    pub(crate) leaf_payload_fraction: u8,
-    pub(crate) tree_type: BTreeType,
-    __key_marker: std::marker::PhantomData<K>,
-    __val_leaf_marker: std::marker::PhantomData<Vl>,
-    __val_int_marker: std::marker::PhantomData<Vi>,
-    __page_marker: std::marker::PhantomData<P>,
+    pub(crate) shared_pager: SharedPager,
+    pub(crate) min_keys: usize,
+    __comparator: std::marker::PhantomData<K>,
 }
 
-impl<K, Vl, Vi, P> BTree<K, Vl, Vi, P>
-where
-    K: Ord + Clone + Copy + Eq + PartialEq,
-    Vl: Cell<Key = K>,
-    Vi: Cell<Key = K, Data = PageId>,
-    P: Send
-        + Sync
-        + HeaderOps
-        + BTreePageOps
-        + InteriorPageOps<Vi>
-        + LeafPageOps<Vl>
-        + Overflowable<LeafContent = Vl>
-        + std::fmt::Debug,
-    PageFrame<P>: TryFrom<IOFrame, Error = std::io::Error>,
-    IOFrame: From<PageFrame<P>>,
-{
-    pub(crate) fn create<FI: FileOps, M: MemoryPool>(
-        pager: &mut Pager<FI, M>,
-        tree_type: BTreeType,
-        max_payload_fraction: u8,
-        min_payload_fraction: u8,
-        leaf_payload_fraction: u8,
-    ) -> std::io::Result<Self> {
-        let page_type = match tree_type {
-            BTreeType::Table => crate::PageType::TableLeaf,
-            BTreeType::Index => crate::PageType::IndexLeaf,
-        };
-        let id = pager.alloc_page(page_type)?.id();
-        Ok(Self {
-            root: id,
-            tree_type,
-            max_payload_fraction,
-            min_payload_fraction,
-            leaf_payload_fraction,
-            __key_marker: std::marker::PhantomData,
-            __val_leaf_marker: std::marker::PhantomData,
-            __val_int_marker: std::marker::PhantomData,
-            __page_marker: std::marker::PhantomData,
-        })
-    }
+struct LatchStackFrame {
+    latches: HashMap<PageId, Latch<MemPage>>,
+    traversal: Vec<PageId>,
+}
 
-    pub(crate) fn is_table(&self) -> bool {
-        matches!(self.tree_type, BTreeType::Table)
-    }
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NodeAccessMode {
+    Read,
+    Write,
+    ReadWrite,
+}
 
-    pub(crate) fn is_index(&self) -> bool {
-        matches!(self.tree_type, BTreeType::Index)
-    }
+thread_local! {
+    static LATCH_STACK: RefCell<LatchStackFrame> =
+        RefCell::new(LatchStackFrame { latches: HashMap::new(), traversal: Vec::new() });
+}
 
-    pub(crate) fn debug_assert_page_type(&self, frame: &PageFrame<P>) {
-        debug_assert!(
-            frame.is_table() && self.is_table() || frame.is_index() && self.is_index(),
-            "Invalid frame: the tree is of type {:?}, but frame is of type: {:?}",
-            self.tree_type,
-            frame.page_type()
-        );
-    }
-
-    pub(crate) fn interior_page_type(&self) -> crate::PageType {
-        match self.tree_type {
-            BTreeType::Table => crate::PageType::TableInterior,
-            BTreeType::Index => crate::PageType::IndexInterior,
-        }
-    }
-
-    pub(crate) fn leaf_page_type(&self) -> crate::PageType {
-        match self.tree_type {
-            BTreeType::Table => crate::PageType::TableLeaf,
-            BTreeType::Index => crate::PageType::IndexLeaf,
-        }
-    }
-
-    /// Reconstruct the overflow payload of a cell.
-    /// Modifies the cell in place, creating a super big cell with all the merged payload content.
-    /// The cell can then be used by the system for retrieving data to users.
-    fn try_reconstruct_overflow_payload<C: Cell<Key = K>, FI: FileOps, M: MemoryPool>(
-        &self,
-        cell: &mut C,
-        pager: &mut Pager<FI, M>,
-    ) -> std::io::Result<()> {
-        if let Some(overflowpage) = cell.overflow_page() {
-            // If there is an overflow page, traverse the linked list of overflow pages to reconstruct the data.
-            let mut current_overflow_id = Some(overflowpage);
-            while let Some(overflow_id) = current_overflow_id {
-                // Read the Overflow page
-                let overflow_frame = try_get_overflow_frame(overflow_id, pager).unwrap();
-                current_overflow_id = if let Some(payload) = cell.payload_mut() {
-                    // There is no problem in relasing the lock inmediately on overflow pages since we have grabbed the lock of the main btree page that holds the content.
-                    // No one will be able to enter any of the pages in the overflow list for write until we have released it.
-                    let ovf_guard = overflow_frame.read();
-                    let overflow_data = ovf_guard.data_owned().unwrap();
-                    payload.merge_with(overflow_data);
-                    ovf_guard.get_next_overflow()
-                } else {
-                    None
+impl LatchStackFrame {
+    fn acquire(&mut self, key: PageId, value: MemFrame<MemPage>, access_mode: NodeAccessMode) {
+        if let Some(existing_latch) = self.latches.get(&key) {
+            match (existing_latch, access_mode) {
+                (Latch::Upgradable(p), NodeAccessMode::Write) => {
+                    let write_latch = self.latches.remove(&key).unwrap().upgrade();
+                    self.latches.insert(key, write_latch);
                 }
+                (Latch::Write(p), NodeAccessMode::Read) => {
+                    let read_latch = self.latches.remove(&key).unwrap().downgrade();
+                    self.latches.insert(key, read_latch);
+                }
+                (Latch::Read(p), NodeAccessMode::Write) => {
+                    panic!("Attempted to acquire a write latch on a node that was borrowed for read. Must use upgradable latches for this use case.")
+                }
+                _ => {}
             }
+        } else {
+            self.acquire_unchecked(key, value, access_mode);
         }
+    }
 
-        Ok(())
+    fn acquire_unchecked(
+        &mut self,
+        key: PageId,
+        value: MemFrame<MemPage>,
+        access_mode: NodeAccessMode,
+    ) {
+        match access_mode {
+            NodeAccessMode::Read => self.latches.insert(key, value.read()),
+            NodeAccessMode::Write => self.latches.insert(key, value.write()),
+            NodeAccessMode::ReadWrite => self.latches.insert(key, value.upgradable()),
+        };
+    }
+
+    fn release(&mut self, key: &PageId) {
+        self.latches.remove(key);
+    }
+
+    fn visit(&mut self, key: PageId) {
+        self.traversal.push(key);
+    }
+
+    fn get(&self, key: &PageId) -> Option<&Latch<MemPage>> {
+        self.latches.get(key)
+    }
+
+    fn get_mut(&mut self, key: &PageId) -> Option<&mut Latch<MemPage>> {
+        self.latches.get_mut(key)
+    }
+
+    fn last(&mut self) -> Option<PageId> {
+        self.traversal.pop()
+    }
+
+    fn clear(&mut self) {
+        self.latches.clear();
+        self.traversal.clear();
+    }
+}
+
+impl<K> BPlusTree<K>
+where
+    K: Ord + SizedType + std::fmt::Display + for<'a> TryFrom<&'a [u8], Error = std::io::Error> + AsRef<[u8]> + AsMut<[u8]>,
+{
+    pub(crate) fn new(pager: SharedPager, root: PageId, min_keys: usize) -> Self {
+        Self {
+            shared_pager: Arc::clone(&pager),
+            root,
+            min_keys,
+            __comparator: std::marker::PhantomData,
+        }
     }
 
     fn is_root(&self, id: PageId) -> bool {
@@ -168,42 +157,342 @@ where
         self.root = new_root
     }
 
-    fn create_overflow_chain<FI: FileOps, M: MemoryPool>(
-        &self,
-        mut overflow_page: OverflowPage,
-        mut content: VarlenaType,
-        pager: &mut Pager<FI, M>,
-    ) -> std::io::Result<()> {
-        while let Some((new_page, remaining_content)) = overflow_page.try_insert_with_overflow(
-            content,
-            self.max_payload_fraction,
-            self.min_payload_fraction,
-        )? {
-            self.store_overflow_page(overflow_page, pager)?;
-            overflow_page = new_page;
+    fn visit_node(&self, page_id: &PageId, access_mode: NodeAccessMode) -> std::io::Result<()> {
+        let latch_page =
+            access_pager_mut(&self.shared_pager, |p| p.read_page::<BtreePage>(page_id))?;
 
-            content = remaining_content;
+        LATCH_STACK
+            .try_with(|l| {
+                if l.try_borrow_mut()
+                    .map(|mut stack| {
+                        // Lock coupling strategy is demonstrated here.
+                        stack.acquire(*page_id, latch_page, access_mode);
+                        if let Some(last) = stack.last() {
+                            if last != *page_id {
+                                stack.release(&last);
+                            };
+                        };
+                        stack.visit(*page_id);
+                    })
+                    .is_err()
+                {
+                    std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "Unable to access latch stack mutably",
+                    );
+                };
+            })
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Unable to access latch stack mutably",
+                )
+            })?;
+        Ok(())
+    }
+
+    fn with_latched_page<T>(
+        &self,
+        page_id: &PageId,
+        f: impl FnOnce(&Latch<MemPage>) -> Result<T, std::io::Error>,
+    ) -> std::io::Result<T> {
+        LATCH_STACK
+            .try_with(|l| -> Result<T, std::io::Error> {
+                let stack = l.try_borrow().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "Unable to access latch stack inmutably",
+                    )
+                })?;
+                let page = stack.get(page_id).ok_or(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Attempted to access an unacquired latch!",
+                ))?;
+
+                f(page)
+            })
+            .map_err(|_| std::io::Error::other("Latch stack is unavailable"))?
+    }
+
+    fn with_latched_page_mut<T>(
+        &self,
+        page_id: &PageId,
+        f: impl FnOnce(&mut Latch<MemPage>) -> Result<T, std::io::Error>,
+    ) -> std::io::Result<T> {
+        LATCH_STACK
+            .try_with(|l| -> Result<T, std::io::Error> {
+                let mut stack = l.try_borrow_mut().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "Unable to access latch stack inmutably",
+                    )
+                })?;
+                let page = stack.get_mut(page_id).ok_or(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Attempted to access an unacquired latch!",
+                ))?;
+
+                f(page)
+            })
+            .map_err(|_| std::io::Error::other("Latch stack is unavailable"))?
+    }
+
+    pub fn search(
+        &self,
+        page_id: &PageId,
+        entry: &K,
+        access_mode: NodeAccessMode,
+    ) -> std::io::Result<SearchResult> {
+        self.visit_node(page_id, access_mode)?;
+
+        let is_leaf = self.with_latched_page(&page_id, |p| {
+            let btreepage: &BtreePage = p.try_into().unwrap();
+            Ok(btreepage.is_leaf())
+        })?;
+
+        if is_leaf {
+            return self.binary_search_leaf(page_id, entry);
+        };
+
+        let child = self.find_child(page_id, entry)?;
+
+        match child {
+            SearchResult::NotFound(last_page) => self.search(&last_page, entry, access_mode),
+            SearchResult::Found((last_page, _)) => self.search(&last_page, entry, access_mode),
+        }
+    }
+
+    fn find_child(&self, page_id: &PageId, search_key: &K) -> std::io::Result<SearchResult> {
+        self.with_latched_page(&page_id, |p| {
+            let btreepage: &BtreePage = p.try_into().unwrap();
+
+            let mut result = SearchResult::NotFound(btreepage.metadata().right_child);
+
+            for cell in btreepage.iter_cells() {
+                let content: Payload = if cell.metadata().is_overflow() {
+                    self.reassemble_payload(cell)?
+                } else {
+                    Payload::Reference(cell.used())
+                };
+
+                let payload_key = K::try_from(content.as_ref())?;
+                match &payload_key.cmp(search_key) {
+                    Ordering::Less => {
+                        result = SearchResult::NotFound(cell.metadata().left_child());
+                        break;
+                    }
+                    Ordering::Equal => {
+                        result = SearchResult::Found((cell.metadata().left_child(), Slot(0)));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            Ok(result)
+        })
+    }
+
+    fn find_slot(&self, page_id: &PageId, search_key: &K) -> std::io::Result<SlotSearchResult> {
+        self.with_latched_page(&page_id, |p| {
+            let btreepage: &BtreePage = p.try_into().unwrap();
+
+            let mut result = SlotSearchResult::NotFound;
+            for (i, cell) in btreepage.iter_cells().enumerate() {
+                let content: Payload = if cell.metadata().is_overflow() {
+                    self.reassemble_payload(cell)?
+                } else {
+                    Payload::Reference(cell.used())
+                };
+
+                let payload_key = K::try_from(content.as_ref())?;
+                match &payload_key.cmp(search_key) {
+                    Ordering::Less => {
+                        result = SlotSearchResult::FoundBetween((*page_id, Slot(i as u16)));
+                        break;
+                    }
+                    Ordering::Equal => {
+                        result = SlotSearchResult::FoundInplace((*page_id, Slot(i as u16)));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            Ok(result)
+        })
+    }
+
+    fn reassemble_payload(&self, cell: &Cell) -> std::io::Result<Payload> {
+        let mut overflow_page = cell.overflow_page();
+        let mut payload = Vec::from(&cell.used()[..cell.len() - std::mem::size_of::<PageId>()]);
+
+        while overflow_page.is_valid() {
+            self.visit_node(&overflow_page, NodeAccessMode::ReadWrite)?;
+
+            let next = self.with_latched_page(&overflow_page, |p2|{
+                            let ovfpage: &OverflowPage = p2.try_into().unwrap();
+                            payload.extend_from_slice(ovfpage.payload());
+                            let next = ovfpage.metadata().next;
+                            debug_assert_ne!(
+                                        next, overflow_page,
+                                        "overflow page that points to itself causes infinite loop on reassemble_payload(): {:?}",
+                            ovfpage.metadata(),
+                            );
+
+                            Ok(next)
+                        })?;
+
+            overflow_page = next;
         }
 
-        self.store_overflow_page(overflow_page, pager)?;
-
-        Ok(())
+        Ok(Payload::Boxed(payload.into_boxed_slice()))
     }
 
-    /// Save a table page to the pager
-    fn store_overflow_page<FI: FileOps, M: MemoryPool>(
+    fn binary_search_leaf(
         &self,
-        page: OverflowPage,
-        pager: &mut Pager<FI, M>,
-    ) -> std::io::Result<()> {
-        // Create a frame and cache it.
-        let frame = IOFrame::Overflow(PageFrame::new(page));
-        pager.cache_page(&frame);
-        Ok(())
+        page_id: &PageId,
+        search_key: &K,
+    ) -> std::io::Result<SearchResult> {
+        // Now get the btree page.
+        self.with_latched_page(page_id, |p| {
+            let btreepage: &BtreePage = p.try_into().unwrap();
+            let mut slot_count = Slot(btreepage.num_slots());
+            let mut left = Slot(0);
+            let mut right = slot_count;
+
+            while left < right {
+                let mid = left + slot_count / Slot(2);
+                let cell = btreepage.cell(mid);
+
+                let content: Payload = if cell.metadata().is_overflow() {
+                    self.reassemble_payload(cell)?
+                } else {
+                    Payload::Reference(cell.used())
+                };
+
+                // The key content is always the first bytes of the cell
+                let payload_key = K::try_from(content.as_ref())?;
+                match payload_key.cmp(search_key) {
+                    Ordering::Equal => return Ok(SearchResult::Found((*page_id, mid))),
+                    Ordering::Greater => right = mid,
+                    Ordering::Less => left = mid + 1,
+                };
+
+                slot_count = right - left;
+            }
+            Ok(SearchResult::NotFound(*page_id))
+        })
+    }
+
+    fn insert(&mut self, page_id: &PageId, data: &[u8]) -> std::io::Result<()> {
+        let search_key = K::try_from(data)?;
+        let search_result = self.search(page_id, &search_key, NodeAccessMode::Write)?;
+
+
+
+        match search_result {
+            SearchResult::Found((page_id, slot)) => Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "The key {search_key} already exists on page {page_id} at position {slot}",
+                ),
+            )),
+
+            SearchResult::NotFound(page_id) => {
+                let slot_result = self.find_slot(&page_id, &search_key)?;
+
+                match slot_result {
+                    SlotSearchResult::NotFound => self.with_latched_page_mut(&page_id, |p| {
+                        let btreepage: &mut BtreePage = p.try_into().unwrap();
+                        let index = btreepage.max_slot_index();
+                        let cell = self.build_cell(data)?;
+                        if let Some(remaining) = btreepage.insert(index, cell){
+                                // TODO . REVIEW IF OVERFLOW CAN STILL HAPPEN.
+                            };
+                        Ok(())
+                    }),
+
+                    SlotSearchResult::FoundBetween((_, index)) => {
+                        self.with_latched_page_mut(&page_id, |p| {
+                            let btreepage: &mut BtreePage = p.try_into().unwrap();
+                            let cell = self.build_cell(data)?;
+                            if let Some(remaining) = btreepage.insert(index, cell){
+                                // TODO . REVIEW IF OVERFLOW CAN STILL HAPPEN.
+                            };
+                            Ok(())
+                        })
+                    }
+
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+
+    fn build_cell(&self,  payload: &[u8]) -> std::io::Result<Cell> {
+
+        let page_size = access_pager(&self.shared_pager, |pager | {
+            Ok(pager.page_size() as usize)
+        })?;
+
+        let max_payload_size =
+            BtreePage::ideal_max_payload_size(page_size, self.min_keys);
+
+            if payload.len() <= max_payload_size {
+                return Ok(Cell::new(payload));
+            }
+
+        // Store payload in chunks, link overflow pages and return the cell.
+        let first_cell_payload_size = max_payload_size - std::mem::size_of::<PageId>();
+        let mut overflow_page_number = access_pager_mut(&self.shared_pager, |pager | {
+                 pager.alloc_page::<OverflowPage>()
+        })?;
+
+
+        let cell = Cell::new_overflow(
+            &payload[..first_cell_payload_size],
+            overflow_page_number,
+        );
+
+        let mut stored_bytes = first_cell_payload_size;
+
+        loop {
+            let overflow_bytes = std::cmp::min(
+                OverflowPage::usable_space(page_size as usize) as usize,
+                payload[stored_bytes..].len(),
+            );
+
+            self.visit_node(&overflow_page_number, NodeAccessMode::Write)?;
+
+            self.with_latched_page_mut(&overflow_page_number, |p|{
+                let overflow_page: &mut OverflowPage = p.try_into().unwrap();
+                overflow_page.data_mut()[..overflow_bytes]
+                .copy_from_slice(&payload[stored_bytes..stored_bytes + overflow_bytes]);
+                overflow_page.metadata_mut().num_bytes = overflow_bytes as _;
+                stored_bytes += overflow_bytes;
+                Ok(())
+            })?;
+
+             if stored_bytes >= payload.len() {
+                    break;
+             }
+
+            let next_overflow_page = access_pager_mut(&self.shared_pager, |pager | {
+                    pager.alloc_page::<OverflowPage>()
+             })?;
+
+            self.with_latched_page_mut(&overflow_page_number, |p|{
+                 let overflow_page: &mut OverflowPage = p.try_into().unwrap();
+                 overflow_page.metadata_mut().next = next_overflow_page;
+                 Ok(())
+            })?;
+
+            overflow_page_number = next_overflow_page;
+        }
+
+        Ok(cell)
+
     }
 }
-
-pub(crate) type TableBTree = BTree<RowId, TableLeafCell, TableInteriorCell, RQLiteTablePage>;
-
-pub(crate) type IndexBTree = BTree<VarlenaType, IndexLeafCell, IndexInteriorCell, RQLiteIndexPage>;
-*/

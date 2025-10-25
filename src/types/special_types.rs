@@ -1,52 +1,66 @@
-
+use crate::types::SizedType;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
+
 const MAX_VARINT_LEN: usize = 9;
 
-// Varint stands for variable-length integer.
+// VarInt stands for variable-length integer.
 //
 // It is a special type that is encoded using 8 bytes, and depending on the value, will occupy more or less space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Varint(pub i64);
+pub struct VarInt(pub i64);
 
-impl TryFrom<Varint> for usize {
+impl TryFrom<VarInt> for usize {
     type Error = &'static str;
 
-    fn try_from(value: Varint) -> Result<Self, Self::Error> {
+    fn try_from(value: VarInt) -> Result<Self, Self::Error> {
         if value.0 < 0 {
-            Err("cannot convert negative Varint to usize")
+            Err("cannot convert negative VarInt to usize")
         } else {
             Ok(value.0 as usize)
         }
     }
 }
 
-impl TryFrom<Varint> for u32 {
+impl SizedType for VarInt {
+    /// Returns the number of bytes this varint will occupy when serialized.
+    fn size(&self) -> usize {
+        let mut value = Self::encode_zigzag(self.0);
+        let mut size = 1;
+        while value >= 0x80 {
+            value >>= 7;
+            size += 1;
+        }
+        size
+    }
+}
+
+impl TryFrom<VarInt> for u32 {
     type Error = &'static str;
 
-    fn try_from(value: Varint) -> Result<Self, Self::Error> {
+    fn try_from(value: VarInt) -> Result<Self, Self::Error> {
         if value.0 < 0 {
-            Err("cannot convert negative Varint to usize")
+            Err("cannot convert negative VarInt to usize")
         } else {
             Ok(value.0 as u32)
         }
     }
 }
 
-impl TryFrom<Varint> for u64 {
+impl TryFrom<VarInt> for u64 {
     type Error = &'static str;
 
-    fn try_from(value: Varint) -> Result<Self, Self::Error> {
+    fn try_from(value: VarInt) -> Result<Self, Self::Error> {
         if value.0 < 0 {
-            Err("cannot convert negative Varint to usize")
+            Err("cannot convert negative VarInt to usize")
         } else {
             Ok(value.0 as u64)
         }
     }
 }
 
-impl Varint {
+impl VarInt {
     /// Convert from i64 to u64 using ZigZag encoding (https://docs.rs/residua-zigzag/latest/zigzag/)
     #[inline]
     fn encode_zigzag(value: i64) -> u64 {
@@ -60,28 +74,26 @@ impl Varint {
     }
 }
 
-
-impl PartialOrd for Varint {
+impl PartialOrd for VarInt {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for Varint {
+impl Ord for VarInt {
     fn cmp(&self, other: &Self) -> Ordering {
         self.0.cmp(&other.0)
     }
 }
 
-impl fmt::Display for Varint {
+impl fmt::Display for VarInt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "VarInt: {}", self.0)?;
         Ok(())
     }
 }
 
-
-impl Varint {
+impl VarInt {
     /// Serializes a VarInt to a byte vector.
     pub fn to_bytes(self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(MAX_VARINT_LEN);
@@ -111,7 +123,7 @@ impl Varint {
             if i >= MAX_VARINT_LEN {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "Varint too long",
+                    "VarInt too long",
                 ));
             }
 
@@ -119,14 +131,14 @@ impl Varint {
             bytes_read += 1;
 
             if (b & 0x80) == 0 {
-                return Ok((Varint(Self::decode_zigzag(result)), bytes_read));
+                return Ok((VarInt(Self::decode_zigzag(result)), bytes_read));
             }
 
             shift += 7;
             if shift >= 64 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "Varint shift overflow",
+                    "VarInt shift overflow",
                 ));
             }
         }
@@ -138,20 +150,19 @@ impl Varint {
     }
 }
 
-
-impl From<Varint> for Vec<u8> {
-    fn from(v: Varint) -> Vec<u8> {
+impl From<VarInt> for Vec<u8> {
+    fn from(v: VarInt) -> Vec<u8> {
         v.to_bytes()
     }
 }
 
-impl TryFrom<&[u8]> for Varint {
+impl TryFrom<&[u8]> for VarInt {
     type Error = std::io::Error;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        let (varint, _) = Varint::from_bytes(bytes)?;
+        let (varint, _) = VarInt::from_bytes(bytes)?;
         Ok(varint)
     }
 }
 
-crate::impl_arithmetic_ops!(Varint);
+crate::impl_arithmetic_ops!(VarInt);

@@ -1,11 +1,9 @@
 //! Implementation of the date type was moved here to not put so much boilerplate code on the sized_types module.
 use crate::named_enum;
-use crate::types::UInt32;
 
-use std::cmp::{Ord,  PartialOrd};
+use std::cmp::{Ord, PartialOrd};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use std::time::{SystemTime, UNIX_EPOCH};
-
 
 const MONTH_DAYS: [u16; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 /// Check if this year is a leap year
@@ -36,15 +34,17 @@ pub(crate) const fn ymd_to_days(year: u32, month: u8, day: u8) -> u32 {
     (total_days - 719162) as u32
 }
 
+// Days since Unix epoch (1970-01-01)
+// This allows us to represent dates from approximately year -5877641 to year 5881580
+// Using u32 for storage efficiency (4 bytes)
+crate::scalar! {
+    pub struct Date(u32);
+}
 
-/// Days since Unix epoch (1970-01-01)
-/// This allows us to represent dates from approximately year -5877641 to year 5881580
-/// Using u32 for storage efficiency (4 bytes)
-pub type Date = UInt32;
-
-/// Duration in days
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Days(pub u32);
+// Duration in days
+crate::scalar! {
+    pub struct Days(u32);
+}
 
 impl Days {
     pub const fn new(days: u32) -> Self {
@@ -125,7 +125,6 @@ impl Date {
     /// Minimum representable date
     pub const MIN: Self = Self(u32::MIN);
 
-
     /// Maximum representable date
     pub const MAX: Self = Self(u32::MAX);
 
@@ -147,7 +146,6 @@ impl Date {
         );
 
         Self(ymd_to_days(year, month, day))
-
     }
 
     /// Create a Date from days since Unix epoch
@@ -167,7 +165,6 @@ impl Date {
             .expect("Time went backwards");
 
         Self(today.as_secs().div_ceil(3600).div_ceil(24) as u32)
-
     }
 
     /// Parse from ISO 8601 format (YYYY-MM-DD)
@@ -306,8 +303,6 @@ impl Date {
     }
 }
 
-
-
 // Arithmetic operations
 impl Add<Days> for Date {
     type Output = Date;
@@ -336,8 +331,6 @@ impl SubAssign<Days> for Date {
         *self = *self - days;
     }
 }
-
-
 
 // Conversions
 impl From<(u32, u8, u8)> for Date {

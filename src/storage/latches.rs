@@ -4,79 +4,88 @@ use parking_lot::{
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-/// I am using latches to control the multithreaded access to the index.
-/// A [Latch] is to a database what a [Lock] is to the OS.
-/// On the database world, you acquire locks on actual database objects.
-/// Therefore the naming `atches` is just to distinguish from that.
-///
-/// The latch implementation I am using is from [`ParkingLot`]
-/// I refer to this blogpost in case you are interested on it:
-/// https://webkit.org/blog/6161/locking-in-webkit/
-///
-/// My system allows to have either multiple readers or a single writer at a time.
-///
-/// Locks are acquired at a page level. I am using [ArcRwLock] instead of just RwLock since it
-/// has a static lifetime. As parking lot locks are low size, there should be no memory issues on that.
-pub(crate) struct ReadOnlyLatch<P>(pub ArcRwLockReadGuard<RawRwLock, P>);
-
-impl<P> ReadOnlyLatch<P> {
-    pub(crate) fn lock(lock: &Arc<RwLock<P>>) -> Self {
-        Self(lock.read_arc())
-    }
-}
-pub(crate) struct WriteLatch<P>(pub ArcRwLockWriteGuard<RawRwLock, P>);
-
-impl<P> WriteLatch<P> {
-    pub(crate) fn lock(lock: &Arc<RwLock<P>>) -> Self {
-        Self(lock.write_arc())
-    }
-    pub(crate) fn downgrade_to_upgradable(self) -> UpgradableLatch<P> {
-        UpgradableLatch(ArcRwLockWriteGuard::downgrade_to_upgradable(self.0))
-    }
-
-    pub(crate) fn downgrade(self) -> ReadOnlyLatch<P> {
-        ReadOnlyLatch(ArcRwLockWriteGuard::downgrade(self.0))
-    }
+#[derive(Debug)]
+pub(crate) enum Latch<P> {
+    Read(ArcRwLockReadGuard<RawRwLock, P>),
+    Upgradable(ArcRwLockUpgradableReadGuard<RawRwLock, P>),
+    Write(ArcRwLockWriteGuard<RawRwLock, P>),
 }
 
-impl<P> DerefMut for WriteLatch<P> {
+impl<P> Latch<P> {
+    /// Acquire a read-only latch
+    pub(crate) fn read(lock: &Arc<RwLock<P>>) -> Self {
+        Self::Read(lock.read_arc())
+    }
+
+    /// Acquire an upgradable latch
+    pub(crate) fn upgradable(lock: &Arc<RwLock<P>>) -> Self {
+        Self::Upgradable(RwLock::upgradable_read_arc(lock))
+    }
+
+    /// Acquire a write latch
+    pub(crate) fn write(lock: &Arc<RwLock<P>>) -> Self {
+        Self::Write(lock.write_arc())
+    }
+
+    /// Try to upgrade from Upgradable to Write
+    pub(crate) fn upgrade(self) -> Self {
+        match self {
+            Self::Upgradable(guard) => Self::Write(ArcRwLockUpgradableReadGuard::upgrade(guard)),
+            other => other, // No-op if not upgradable
+        }
+    }
+
+    /// Downgrade from Write to Upgradable
+    pub(crate) fn downgrade_to_upgradable(self) -> Self {
+        match self {
+            Self::Write(guard) => {
+                Self::Upgradable(ArcRwLockWriteGuard::downgrade_to_upgradable(guard))
+            }
+            other => other,
+        }
+    }
+
+    /// Downgrade from Write to Read
+    pub(crate) fn downgrade(self) -> Self {
+        match self {
+            Self::Write(guard) => Self::Read(ArcRwLockWriteGuard::downgrade(guard)),
+            other => other,
+        }
+    }
+
+    /// Returns true if latch is write
+    pub(crate) fn is_write(&self) -> bool {
+        matches!(self, Self::Write(_))
+    }
+
+    /// Returns true if latch is read
+    pub(crate) fn is_read(&self) -> bool {
+        matches!(self, Self::Read(_))
+    }
+
+    /// Returns true if latch is upgradable
+    pub(crate) fn is_upgradable(&self) -> bool {
+        matches!(self, Self::Upgradable(_))
+    }
+}
+
+impl<P> Deref for Latch<P> {
+    type Target = P;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Read(g) => g,
+            Self::Upgradable(g) => g,
+            Self::Write(g) => g,
+        }
+    }
+}
+
+impl<P> DerefMut for Latch<P> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-pub(crate) struct UpgradableLatch<P>(pub ArcRwLockUpgradableReadGuard<RawRwLock, P>);
-
-impl<P> UpgradableLatch<P> {
-    pub(crate) fn lock(lock: &Arc<RwLock<P>>) -> Self {
-        Self(RwLock::upgradable_read_arc(lock))
-    }
-
-    pub(crate) fn upgrade(self) -> WriteLatch<P> {
-        WriteLatch(ArcRwLockUpgradableReadGuard::upgrade(self.0))
-    }
-}
-
-impl<P> Deref for UpgradableLatch<P> {
-    type Target = P;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<P> Deref for WriteLatch<P> {
-    type Target = P;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<P> Deref for ReadOnlyLatch<P> {
-    type Target = P;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+        match self {
+            Self::Write(g) => &mut *g,
+            _ => panic!("Latch is not write-locked; cannot get mutable reference"),
+        }
     }
 }

@@ -42,6 +42,7 @@ fn open_direct(path: impl AsRef<Path>, mode: FOpenMode, create: bool) -> io::Res
 }
 
 /// Aligned file wrapper for O_DIRECT
+#[derive(Debug)]
 pub struct DirectIO {
     file: File,
 }

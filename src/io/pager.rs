@@ -22,10 +22,11 @@ use crate::{RQLiteConfig, DEFAULT_CACHE_SIZE, PAGE_ALIGNMENT};
 /// [PAGE 2             ] Offset 2 * Page size
 /// [PAGE 3             ] Offset 3 * Page size
 /// [....               ]
-fn page_offset(page_id: PageId, page_size: u32) -> u64 {
-    (u32::from(page_id) * page_size) as u64
+fn page_offset(page_id: &PageId, page_size: u32) -> u64 {
+    (u32::from(*page_id) * page_size) as u64
 }
 /// Implementation of SQLite pager. Reference: [https://sqlite.org/src/file/src/pager.c]
+#[derive(Debug)]
 pub struct Pager {
     file: DirectIO,
     cache: PageCache,
@@ -78,7 +79,7 @@ impl Pager {
     /// As the page size is always aligned to the BLOCK SIZE for Direct IO, it should be safe to write and read back this way.
     fn write_block_unchecked(
         &mut self,
-        start_page_number: PageId,
+        start_page_number: &PageId,
         content: &mut [u8],
     ) -> std::io::Result<()> {
         let offset = page_offset(start_page_number, self.page_zero.metadata().page_size);
@@ -104,7 +105,7 @@ impl Pager {
     /// Read a block back from the disk into an output buffer.
     fn read_block_unchecked(
         &mut self,
-        start_page_number: PageId,
+        start_page_number: &PageId,
         buffer: &mut [u8],
     ) -> std::io::Result<()> {
         let offset = page_offset(start_page_number, self.page_zero.metadata().page_size);
@@ -119,11 +120,11 @@ impl Pager {
         Ok(())
     }
 
-    fn page_size(&self) -> u32 {
+    pub fn page_size(&self) -> u32 {
         self.page_zero.metadata().page_size
     }
 
-    fn alloc_page<P: Page>(&mut self) -> std::io::Result<PageId>
+    pub fn alloc_page<P: Page>(&mut self) -> std::io::Result<PageId>
     where
         MemPage: From<P>,
     {
@@ -133,18 +134,18 @@ impl Pager {
         if let Some(evicted) = self.cache.insert(id, mem_page) {
             if evicted.is_dirty() {
                 let id = evicted.read().page_number();
-                self.write_block_unchecked(id, evicted.write().as_mut())?;
+                self.write_block_unchecked(&id, evicted.write().as_mut())?;
             }
         };
         Ok(id)
     }
 
-    fn read_page<P: Page>(&mut self, id: PageId) -> std::io::Result<MemFrame<MemPage>>
+    pub fn read_page<P: Page>(&mut self, id: &PageId) -> std::io::Result<MemFrame<MemPage>>
     where
         MemPage: From<P>,
     {
         // First we try to go to the cache.
-        if let Some(page) = self.cache.get(&id) {
+        if let Some(page) = self.cache.get(id) {
             return Ok(page);
         };
         // That was a cache miss.
@@ -167,7 +168,7 @@ impl Pager {
         Ok(MemFrame::new(MemPage::from(page)))
     }
 
-    fn dealloc_page<P: Page>(&mut self, id: PageId) -> std::io::Result<()>
+    pub fn dealloc_page<P: Page>(&mut self, id: PageId) -> std::io::Result<()>
     where
         MemPage: From<P>,
     {
@@ -181,9 +182,10 @@ impl Pager {
 
         if last_free_page != PAGE_ZERO {
             // Read the free page and set the next page.
-            let previous_page = self.read_page::<OverflowPage>(last_free_page)?;
+            let previous_page = self.read_page::<OverflowPage>(&last_free_page)?;
             // The previous page should be a free page.
             // SAFETY: It should be safe to unwrap the result as we have already read the page as a free page.
+
             previous_page
                 .try_with_variant_mut::<OverflowPage, _, _, _>(|free| {
                     free.metadata_mut().next = id;
@@ -191,7 +193,7 @@ impl Pager {
                 .unwrap(); // This should not panic as we have already read the page as a free page.
         };
 
-        let mem_page = self.read_page::<P>(id)?;
+        let mem_page = self.read_page::<P>(&id)?;
         // As the page should be currently empty, we can mark it as free.
         // We need to append it to the free list, and that would be everything.
         mem_page.write().dealloc();
@@ -200,8 +202,41 @@ impl Pager {
     }
 }
 
-type SharedPager = Arc<RefCell<Pager>>;
+pub type SharedPager = Arc<RefCell<Pager>>;
 
+pub fn access_pager<R>(
+    pager: &SharedPager,
+    f: impl FnOnce(&Pager) -> Result<R, std::io::Error>,
+) -> Result<R, std::io::Error> {
+    let guard = pager.try_borrow().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "failed to borrow Pager (immutable)",
+        )
+    })?;
+    f(&guard)
+}
+pub fn access_pager_mut<R>(
+    pager: &SharedPager,
+    f: impl FnOnce(&mut Pager) -> Result<R, std::io::Error>,
+) -> Result<R, std::io::Error> {
+    let mut guard = pager.try_borrow_mut().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "failed to borrow Pager (mutable)",
+        )
+    })?;
+    f(&mut guard)
+}
+pub fn access_pager_unchecked<R>(pager: &SharedPager, f: impl FnOnce(&Pager) -> R) -> R {
+    let guard = pager.borrow();
+    f(&guard)
+}
+
+pub fn access_pager_unchecked_mut<R>(pager: &SharedPager, f: impl FnOnce(&mut Pager) -> R) -> R {
+    let mut guard = pager.borrow_mut();
+    f(&mut guard)
+}
 #[cfg(test)]
 mod tests {
     use crate::storage::page::BtreePage;
@@ -247,10 +282,10 @@ mod tests {
         let mut page1 = BtreePage::alloc(page_size, AllocatorKind::GlobalAllocator);
         let page_id = page1.metadata().page_number;
         assert!(page_id != crate::types::PAGE_ZERO, "Invalid page number!");
-        let result = pager.write_block_unchecked(page_id, page1.as_mut());
+        let result = pager.write_block_unchecked(&page_id, page1.as_mut());
         assert!(result.is_ok(), "Page writing to disk failed!");
         let buf = DirectIO::alloc_aligned(pager.page_size() as usize)?;
-        pager.read_block_unchecked(page_id, buf)?;
+        pager.read_block_unchecked(&page_id, buf)?;
         assert_eq!(
             buf,
             page1.as_ref(),
@@ -296,13 +331,13 @@ mod tests {
             total_page_size, total_size as usize,
             "Total size was not as expected"
         );
-        pager.write_block_unchecked(pages[0].metadata().page_number, raw_buffer)?;
+        pager.write_block_unchecked(&pages[0].metadata().page_number, raw_buffer)?;
 
         for page in pages {
             // Try to read page 1 back.
             let buf = DirectIO::alloc_aligned(page.metadata().page_size as usize)?;
 
-            pager.read_block_unchecked(page.metadata().page_number, buf)?;
+            pager.read_block_unchecked(&page.metadata().page_number, buf)?;
             assert_eq!(
                 buf,
                 page.as_ref(),
@@ -358,7 +393,7 @@ mod tests {
 
         // Verify it has been written out to disk.
         let buf = DirectIO::alloc_aligned(pager.page_size() as usize)?;
-        pager.read_block_unchecked(id1, buf)?;
+        pager.read_block_unchecked(&id1, buf)?;
 
         unsafe { DirectIO::free_aligned(buf.as_mut_ptr()) };
         Ok(())
@@ -383,7 +418,7 @@ mod tests {
         pager.dealloc_page::<BtreePage>(id2)?;
 
         // Check that the free list was properly built.
-        let page1 = pager.read_page::<OverflowPage>(id1)?;
+        let page1 = pager.read_page::<OverflowPage>(&id1)?;
 
         let next_free = page1
             .try_with_variant::<OverflowPage, _, _, _>(|free| free.metadata().next)

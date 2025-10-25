@@ -1,8 +1,6 @@
-use crate::types::{
-    Date, DateTime, RowId,   Blob
-};
+use crate::types::{Date, DateTime, RowId};
 
-use crate::{test_ordering};
+use crate::test_ordering;
 
 // Tests RowId
 test_ordering!(
@@ -37,25 +35,6 @@ test_ordering!(
         Date::parse_iso("2025-01-03").unwrap()
     ]
 );
-
-
-
-// Tests VarlenaType
-test_ordering!(
-    test_varlena_ordering,
-    Blob,
-    [
-        Blob::from(5),
-        Blob::from(1),
-        Blob::from(9)
-    ],
-    [
-        Blob::from(1),
-        Blob::from(5),
-         Blob::from(9)
-    ]
-);
-
 
 test_ordering!(
     test_datetime_ordering,

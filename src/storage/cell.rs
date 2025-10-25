@@ -29,7 +29,7 @@ sized! {
         is_overflow: bool,
         padding: u8, // Padding is the padding added at the end to match alignment requirements.
         // Therefore one can get the usable size by substracting size - padding.
-        left_child: PageId,
+        pub left_child: PageId,
     };
     pub const CELL_HEADER_SIZE
 }

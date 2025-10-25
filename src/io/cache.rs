@@ -22,6 +22,7 @@ impl std::fmt::Display for MemoryStats {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct PageCache {
     capacity: usize,
     frames: HashMap<PageId, MemFrame<MemPage>>,

@@ -9,11 +9,42 @@ macro_rules! scalar {
         #[repr(transparent)]
         pub struct $name(pub $inner);
 
+
+        impl $name {
+            /// Fixed size of the type in bytes
+            pub const SIZE: usize = std::mem::size_of::<$inner>();
+        }
+
+        impl TryFrom<&[u8]> for $name {
+            type Error = std::io::Error;
+
+            fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+                use std::convert::TryInto;
+                use std::io::{Error, ErrorKind};
+
+                // Verify length
+                if value.len() < Self::SIZE {
+                    return Err(Error::new(ErrorKind::UnexpectedEof, "not enough bytes"));
+                }
+
+                // Copies to a fixed size array
+                let arr: [u8; Self::SIZE] = value[0..Self::SIZE]
+                    .try_into()
+                    .map_err(|_| Error::new(ErrorKind::InvalidData, "failed to copy bytes"))?;
+
+                // Converts from an inner type.
+                Ok(Self(<$inner>::from_be_bytes(arr)))
+            }
+        }
+
+
+
         impl std::fmt::Debug for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{}({})", stringify!($name), self.0)
             }
         }
+
 
         impl std::fmt::Display for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -102,9 +133,6 @@ macro_rules! scalar {
         $crate::impl_bitwise_ops!($name);
     };
 }
-
-
-
 
 #[macro_export]
 macro_rules! float_scalar {
