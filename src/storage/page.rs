@@ -174,19 +174,17 @@ impl Page for BtreePage {
 }
 
 impl BtreePage {
-    fn max_allowed_payload_size(&self) -> u16 {
+    pub fn max_allowed_payload_size(&self) -> u16 {
         max_payload_size_in(self.capacity()) as u16
     }
 
-
-     pub fn ideal_max_payload_size(page_size: usize, min_cells: usize) -> usize {
+    pub fn ideal_max_payload_size(page_size: usize, min_cells: usize) -> usize {
         debug_assert!(
             min_cells > 0,
             "if you're not gonna store any cells then why are you even calling this function?"
         );
 
-        let ideal_size =
-            max_payload_size_in(Self::usable_space(page_size) as usize / min_cells);
+        let ideal_size = max_payload_size_in(Self::usable_space(page_size) as usize / min_cells);
 
         debug_assert!(
             ideal_size > 0,
@@ -280,13 +278,13 @@ impl BtreePage {
 
     /// Returns `true` if this page is underflow
     pub fn has_underflown(&self) -> bool {
-        self.metadata().free_space > self.capacity() as u32 / 2
+        self.metadata().free_space > (self.capacity() as u32).div_ceil(3)
     }
 
     /// Returns `true` if this page has overflown.
     /// We need at least 2 bytes for the last cell slot and 4 extra bytes to store the pointer to an overflow page
     pub fn has_overflown(&self) -> bool {
-        self.metadata().free_space as usize <= (SLOT_SIZE + std::mem::size_of::<PageId>())
+        self.metadata().free_space as usize <= self.capacity().saturating_mul(2).div_ceil(3)
     }
 
     pub fn is_leaf(&self) -> bool {
@@ -312,10 +310,8 @@ impl BtreePage {
         self.insert(Slot(self.num_slots()), cell);
     }
 
-    /// Inserts the `cell` at `index`, possibly overflowing.
-    /// If we overflow, return the portion of the cell that did not fit.
-    /// The caller is responsible of creating an overflow chain in consequence.
-    pub fn insert(&mut self, index: Slot, cell: Cell) -> Option<Cell> {
+    /// Attempts to insert the given `cell` in this page.
+    pub fn insert(&mut self, index: Slot, cell: Cell) -> Slot {
         assert!(
             cell.data.len() <= self.max_allowed_payload_size() as usize,
             "attempt to store payload of size {} when max allowed payload size is {}",
@@ -329,50 +325,10 @@ impl BtreePage {
             self.num_slots()
         );
 
-        if let Err(mut cell) = self.try_insert(index, cell) {
-            // Align the max cell size downwards. We want the max cell size to not excede the page size so aligning upwards as we would do with [next_multiple_of] does not make much sense.
-            let usable_space = self.metadata().free_space as usize;
-            let mut max_cell_payload_size = max_payload_size_in(usable_space);
-            assert!(max_cell_payload_size > 0, "Attempted to create a cell without payload! Cells must have at least 1 byte for data.");
-            max_cell_payload_size -= std::mem::size_of::<PageId>();
-            let some_cell = cell.split_payload(max_cell_payload_size);
-            self.insert(index, cell);
-            return some_cell;
-        }
-        None
-    }
-
-    /// Attempts to replace the cell at `index` with `new_cell`.
-    /// Returns the old cell and possibly the content of the new cell that did not fit in the page if that is the case. See [`ìnsert`] for details.
-    pub fn replace(&mut self, index: Slot, new_cell: Cell) -> (Cell, Option<Cell>) {
-        debug_assert!(
-            !self.has_overflown(),
-            "overflow cells are not replaced so replace() should not run on overflow pages"
-        );
-
-        match self.try_replace(index, new_cell) {
-            Ok(old_cell) => (old_cell, None),
-
-            Err(mut new_cell) => {
-                let old_cell = self.remove(index);
-                // Align the max cell size downwards. We want the max cell size to not excede the page size so aligning upwards as we would do with [next_multiple_of] does not make much sense.
-                let usable_space = self.metadata().free_space as usize;
-                let mut max_cell_payload_size = max_payload_size_in(usable_space);
-                assert!(max_cell_payload_size > 0, "Attempted to create a cell without payload! Cells must have at least 1 byte for data.");
-                max_cell_payload_size -= std::mem::size_of::<PageId>();
-                let some_cell = new_cell.split_payload(max_cell_payload_size);
-                self.insert(index, new_cell);
-                (old_cell, some_cell)
-            }
-        }
-    }
-
-    /// Attempts to insert the given `cell` in this page.
-    fn try_insert(&mut self, index: Slot, cell: Cell) -> Result<Slot, Cell> {
         let cell_storage_size = cell.storage_size() as u32;
 
         if cell_storage_size > self.metadata().free_space {
-            return Err(cell);
+            panic!("Buffer overflow. Attempted to insert with overflow on a btreepage.")
         };
 
         // Space between the end of the slot array and the closest cell.
@@ -413,18 +369,18 @@ impl BtreePage {
         // Set offset.
         self.slot_array_mut()[usize::from(index)] = offset.try_into().unwrap();
 
-        Ok(index)
+        index
     }
 
     /// Tries to replace the cell pointed by the given slot `index` with the
     /// `new_cell`.
-    fn try_replace(&mut self, index: Slot, new_cell: Cell) -> Result<Cell, Cell> {
+    pub fn replace(&mut self, index: Slot, new_cell: Cell) -> Cell {
         let old_cell = self.cell(index);
 
         // There's no way we can fit the new cell in this page, even if we
         // remove the one that has to be replaced.
         if self.metadata().free_space as u16 + old_cell.total_size() < new_cell.total_size() {
-            return Err(new_cell);
+            panic!("Attempted to insert a cell on a page that was already full!");
         }
 
         // Case 1: The new cell is smaller than the old cell. This is the best
@@ -446,21 +402,20 @@ impl BtreePage {
             self.metadata_mut().free_space_ptr += free_bytes;
             self.metadata_mut().free_space += free_bytes;
 
-            return Ok(owned_cell);
+            return owned_cell;
         }
 
         // Case 2: The new cell fits in this page but we have to remove the old
         // one and potentially defragment the page. Worst case scenario.
         let old = self.remove(index);
 
-        self.try_insert(index, new_cell)
-            .expect("we made room for the new cell, it should fit in the page");
+        self.insert(index, new_cell);
 
-        Ok(old)
+        old
     }
 
     /// Removes the cell pointed by the given slot `index`.
-    fn remove(&mut self, index: Slot) -> Cell {
+    pub fn remove(&mut self, index: Slot) -> Cell {
         debug_assert!(
             !self.has_overflown(),
             "remove() does not handle overflow indexes"
@@ -917,7 +872,7 @@ mod btree_page_tests {
         // Also needs to set the new length to properly manage the padding.
         let smaller = Cell::new(b"new");
 
-        let (old, _) = page.replace(Slot(2), smaller);
+        let old = page.replace(Slot(2), smaller);
         assert_eq!(old.used(), b"original");
         assert_eq!(page.cell(Slot(2)).used(), b"new");
 
