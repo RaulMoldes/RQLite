@@ -241,7 +241,7 @@ impl BtreePage {
     }
 
     /// Mutable reference to a cell.
-    fn cell_mut(&mut self, index: Slot) -> &mut Cell {
+    pub fn cell_mut(&mut self, index: Slot) -> &mut Cell {
         let mut cell = self.get_cell_at(index);
         // SAFETY: Same as [`Self::cell_at_offset`].
         unsafe { cell.as_mut() }
@@ -306,7 +306,7 @@ impl BtreePage {
     }
 
     /// Adds `cell` to this page, possibly overflowing the page.
-    fn push(&mut self, cell: Cell) {
+    pub fn push(&mut self, cell: Cell) {
         self.insert(Slot(self.num_slots()), cell);
     }
 
@@ -479,7 +479,7 @@ impl BtreePage {
 
     /// Works like [`Vec::drain`] execept it doesn't remove elements unless
     /// consumed.
-    fn drain(&mut self, range: impl RangeBounds<usize>) -> impl Iterator<Item = Cell> + '_ {
+    pub fn drain(&mut self, range: impl RangeBounds<usize>) -> impl Iterator<Item = Cell> + '_ {
         let start = match range.start_bound() {
             Bound::Unbounded => 0,
             Bound::Excluded(i) => i + 1,

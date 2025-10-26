@@ -28,10 +28,9 @@ pub(crate) fn check_valid_size<BTreeCellType: Cell>(
             >= (min_payload_fraction as u16 * page_size).div_ceil(255))
 }
 
-pub(crate) fn split_cells_by_size<BTreeCellType: Cell>(
-    mut taken_cells: Vec<BTreeCellType>,
+pub(crate) fn split_cells(
+    mut taken_cells: Vec<Cell>,
 ) -> (Vec<BTreeCellType>, Vec<BTreeCellType>) {
-    taken_cells.sort_by_key(|cell| cell.key());
     let sizes: Vec<u16> = taken_cells.iter().map(|cell| cell.size()).collect();
     let total_size: u16 = sizes.iter().sum();
     let half_size = total_size.div_ceil(2);

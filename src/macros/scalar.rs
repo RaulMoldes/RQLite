@@ -13,6 +13,15 @@ macro_rules! scalar {
         impl $name {
             /// Fixed size of the type in bytes
             pub const SIZE: usize = std::mem::size_of::<$inner>();
+
+
+            pub fn saturating_sub(&self, value: $inner) -> Self {
+                Self(self.0.saturating_sub(value))
+            }
+
+            pub fn clamped_add(&self, value: $inner, max_val: $inner) -> Self {
+                Self(self.0.saturating_add(value).max(max_val))
+            }
         }
 
         impl TryFrom<&[u8]> for $name {
@@ -88,6 +97,21 @@ macro_rules! scalar {
             type Output = $name;
             fn sub(self, rhs: $inner) -> Self::Output {
                 $name(self.0 - rhs)
+            }
+        }
+
+
+        impl std::ops::Add<usize> for $name {
+            type Output = $name;
+            fn add(self, rhs: usize) -> Self::Output {
+                $name(self.0 + rhs as $inner)
+            }
+        }
+
+        impl std::ops::Sub<usize> for $name {
+            type Output = $name;
+            fn sub(self, rhs: usize) -> Self::Output {
+                $name(self.0 - rhs as $inner)
             }
         }
 
