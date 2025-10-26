@@ -336,17 +336,10 @@ where
                 };
 
                 let payload_key = K::try_from(content.as_ref())?;
-                match &payload_key.cmp(search_key) {
-                    Ordering::Less => {
-                        result = SearchResult::NotFound(cell.metadata().left_child());
-                        break;
-                    }
-                    Ordering::Equal => {
-                        result = SearchResult::Found((cell.metadata().left_child(), Slot(0)));
-                        break;
-                    }
-                    _ => {}
-                }
+                if payload_key.cmp(search_key) == Ordering::Less {
+                    result = SearchResult::NotFound(cell.metadata().left_child());
+                    break;
+                };
             }
 
             Ok(result)
@@ -689,34 +682,30 @@ where
             }
 
             access_pager_mut(&self.shared_pager, |p| {
-
                 let frame = p.read_page::<OverflowPage>(&overflow_page_number)?;
 
-                frame.try_with_variant_mut::<OverflowPage, _, _, _>(|overflow_page|{
-
-                overflow_page.data_mut()[..overflow_bytes]
-                    .copy_from_slice(&payload[stored_bytes..stored_bytes + overflow_bytes]);
-                overflow_page.metadata_mut().num_bytes = overflow_bytes as _;
-                stored_bytes += overflow_bytes;
-
-                }).unwrap();
+                frame
+                    .try_with_variant_mut::<OverflowPage, _, _, _>(|overflow_page| {
+                        overflow_page.data_mut()[..overflow_bytes]
+                            .copy_from_slice(&payload[stored_bytes..stored_bytes + overflow_bytes]);
+                        overflow_page.metadata_mut().num_bytes = overflow_bytes as _;
+                        stored_bytes += overflow_bytes;
+                    })
+                    .unwrap();
 
                 let next_overflow_page = p.alloc_page::<OverflowPage>()?;
 
-                frame.try_with_variant_mut::<OverflowPage, _, _, _>(|overflow_page|{
-                    overflow_page.metadata_mut().next = next_overflow_page;
-
-                }).unwrap();
+                frame
+                    .try_with_variant_mut::<OverflowPage, _, _, _>(|overflow_page| {
+                        overflow_page.metadata_mut().next = next_overflow_page;
+                    })
+                    .unwrap();
 
                 overflow_page_number = next_overflow_page;
                 Ok(())
             })?;
-
-
-        };
+        }
         Ok(cell)
-
-
     }
 
     fn balance_shallower(&mut self) -> std::io::Result<()> {
@@ -852,13 +841,10 @@ where
         ))?;
 
         // Internal/Leaf node Overflow/Underflow.
-        let needs_unfuck = self.balance_siblings(page_id, &parent_page)?;
+        self.balance_siblings(page_id, &parent_page)?;
 
         // No need to fuck anything else up.
         if matches!(self.check_node_status(page_id)?, NodeStatus::Balanced) {
-            if needs_unfuck {
-                self.unfuck_pointers(&parent_page)?;
-            }
             return Ok(());
         };
 
@@ -1045,7 +1031,41 @@ where
 
         match search_result {
             SearchResult::Found((_, slot)) => {
-                if slot == 0 || slot == last_child {
+                if num_siblings_per_side == 1 {
+                    if slot == 0 && slot == last_child {
+                        return Ok(vec![Child::new(*page, slot)]);
+                    };
+
+                    let mut children = Vec::new();
+
+                    if slot > Slot(0) {
+                        let left_page = self.with_latched_page(&page, |p| {
+                            let node: &BtreePage = p.try_into().unwrap();
+                            Ok(node.metadata().previous_sibling)
+                        })?;
+
+                        if let Some(child) = self.load_child(&left_page, slot - 1usize) {
+                            children.push(child);
+                        };
+                    };
+
+                    children.push(Child::new(*page, slot));
+
+                    if slot < last_child {
+                        let right_page = self.with_latched_page(&page, |p| {
+                            let node: &BtreePage = p.try_into().unwrap();
+                            Ok(node.metadata().next_sibling)
+                        })?;
+
+                        if let Some(child) = self.load_child(&right_page, slot + 1usize) {
+                            children.push(child);
+                        };
+                    };
+
+                    return Ok(children);
+                };
+
+                if (slot == 0 || slot == last_child) && num_siblings_per_side > 1 {
                     num_siblings_per_side *= 2;
                 };
 
@@ -1086,14 +1106,14 @@ where
     }
 
     // This should be only called on leaf nodes. on interior nodes it is a brainfuck to also be fixing pointers to right most children every time we borrow a single cell.
-    fn balance_siblings(&mut self, page_id: &PageId, parent: &PageId) -> std::io::Result<bool> {
+    fn balance_siblings(&mut self, page_id: &PageId, parent: &PageId) -> std::io::Result<()> {
         let is_leaf = self.with_latched_page(page_id, |p| {
             let node: &BtreePage = p.try_into().unwrap();
             Ok(node.is_leaf())
         })?;
 
         if !is_leaf {
-            return Ok(false);
+            return Ok(());
         };
 
         let status = self.check_node_status(page_id)?;
@@ -1101,17 +1121,15 @@ where
         let siblings = self.load_siblings(page_id, parent, 1)?; // One sibling per side
 
         if siblings.is_empty() || siblings.len() == 1 {
-            return Ok(false);
+            return Ok(());
         };
 
         let sibling_left = siblings.first().unwrap();
         let sibling_right = siblings.last().unwrap();
 
         match status {
-            NodeStatus::Balanced => Ok(false),
+            NodeStatus::Balanced => Ok(()),
             NodeStatus::Overflow => {
-                let mut needs_unfuck = false;
-
                 // Okey, we are on overflow state and our left sibling is valid. Then we can ask him if it has space for us.
                 if sibling_left.pointer != *page_id {
                     // The load siblings function can return invalid pointers. we need to check for the validity ourselves.
@@ -1145,10 +1163,17 @@ where
                             Ok(())
                         })?;
 
-                        needs_unfuck = true
+                        // Haha, but now our parent might have fucked up.
+                        // We need to unfuck him.
+                        // In order to unfuck the parent, we replace the entry that pointed to left with our new max key
+                        let separator_index = sibling_left.slot;
+                        self.fix_single_pointer(
+                            parent,
+                            &sibling_left.pointer,
+                            page_id,
+                            separator_index,
+                        )?;
                     };
-                    // Haha, but now our parent might have fucked up.
-                    // We need to unfuck him.
                 };
 
                 let status = self.check_node_status(page_id)?;
@@ -1186,15 +1211,19 @@ where
                             Ok(())
                         })?;
 
-                        needs_unfuck = true;
+                        // In this case is the same
+                        let separator_index = sibling_right.slot - 1usize;
+                        self.fix_single_pointer(
+                            parent,
+                            page_id,
+                            &sibling_right.pointer,
+                            separator_index,
+                        )?;
                     };
                 };
-
-                Ok(needs_unfuck)
+                Ok(())
             }
             NodeStatus::Underflow => {
-                let mut needs_unfuck = false;
-
                 // Okey, we are on underflow state and our right sibling is valid. Then we can ask him if it has cells for us.
                 if sibling_right.pointer != *page_id {
                     let can_borrow = self.with_latched_page(&sibling_right.pointer, |p| {
@@ -1219,7 +1248,14 @@ where
                             Ok(())
                         })?;
 
-                        needs_unfuck = true;
+                        // In this case is the same
+                        let separator_index = sibling_right.slot - 1usize;
+                        self.fix_single_pointer(
+                            parent,
+                            page_id,
+                            &sibling_right.pointer,
+                            separator_index,
+                        )?;
                     };
                 };
 
@@ -1248,11 +1284,17 @@ where
                             Ok(())
                         })?;
 
-                        needs_unfuck = true;
+                        let separator_index = sibling_left.slot;
+                        self.fix_single_pointer(
+                            parent,
+                            &sibling_left.pointer,
+                            page_id,
+                            separator_index,
+                        )?;
                     };
                 };
 
-                Ok(needs_unfuck)
+                Ok(())
             }
         }
 
@@ -1260,40 +1302,23 @@ where
         // We are responsible from unfucking them.
     }
 
-    fn unfuck_pointers(&self, page_id: &PageId) -> std::io::Result<()> {
-        let children = self.with_latched_page(page_id, |p| {
+    fn fix_single_pointer(
+        &mut self,
+        parent: &PageId,
+        left_child: &PageId,
+        right_child: &PageId,
+        separator_idx: Slot,
+    ) -> std::io::Result<()> {
+        let mut separator = self.with_latched_page(right_child, |p| {
             let node: &BtreePage = p.try_into().unwrap();
-            let children: Vec<PageId> = node.iter_children().collect();
-            Ok(children)
+            Ok(node.cell(Slot(0)).clone())
         })?;
+        separator.metadata_mut().left_child = *left_child;
 
-        if children.is_empty() {
-            return Ok(()); // SAFETY GUARD in case we call this function on a leaf node
-        };
-
-        let mut new_pointers: Vec<(K, PageId, Slot)> = Vec::with_capacity(children.len());
-        for (i, child) in children.iter().enumerate() {
-            let new_key = self.with_latched_page(child, |p| {
-                let node: &BtreePage = p.try_into().unwrap();
-                K::try_from(node.cell(node.max_slot_index()).used())
-            })?;
-
-            new_pointers.push((new_key, *child, Slot(i as u16)));
-        }
-
-        // Now we can unfuck this node.
-        self.with_latched_page_mut(page_id, |p| {
+        self.with_latched_page_mut(parent, |p| {
             let node: &mut BtreePage = p.try_into().unwrap();
-
-            for (key, pointer, slot) in new_pointers {
-                let old_cell_size = node.cell(slot).storage_size() as u32;
-                let remaining_space = node.metadata().free_space + old_cell_size;
-                let mut new_cell = self.build_cell(remaining_space as usize, key.as_ref())?;
-                new_cell.metadata_mut().left_child = pointer;
-                node.replace(slot, new_cell);
-            }
+            node.replace(separator_idx, separator);
             Ok(())
-        })?;
-        Ok(())
+        })
     }
 }
