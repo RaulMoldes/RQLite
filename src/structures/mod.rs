@@ -14,9 +14,9 @@ use crate::storage::{
     latches::Latch,
 };
 
-use crate::types::{ PageId, SizedType};
+use crate::types::{PageId, SizedType};
 use std::cell::RefCell;
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 type Position = (PageId, Slot);
@@ -42,7 +42,6 @@ enum Payload<'b> {
     Boxed(Box<[u8]>),
     Reference(&'b [u8]),
 }
-
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 struct Child {
@@ -146,8 +145,12 @@ impl LatchStackFrame {
         self.latches.get_mut(key)
     }
 
-    fn last(&mut self) -> Option<PageId> {
+    fn pop(&mut self) -> Option<PageId> {
         self.traversal.pop()
+    }
+
+    fn last(&mut self) -> Option<&PageId> {
+        self.traversal.last()
     }
 
     fn clear(&mut self) {
@@ -188,9 +191,29 @@ where
         self.root = new_root
     }
 
+    fn clear_stack(&self) {
+        LATCH_STACK.try_with(|l| l.borrow_mut().clear()).unwrap();
+    }
+
+    fn release_latch(&self, page_id: &PageId) {
+        LATCH_STACK
+            .try_with(|l| l.borrow_mut().release(page_id))
+            .unwrap();
+    }
+
     fn get_last_visited(&self) -> Option<PageId> {
         LATCH_STACK
-            .try_with(|l| l.try_borrow_mut().ok().and_then(|mut stack| stack.last()))
+            .try_with(|l| {
+                l.try_borrow_mut()
+                    .ok()
+                    .and_then(|mut stack| stack.last().copied())
+            })
+            .unwrap_or(None)
+    }
+
+    fn pop_last_visited(&self) -> Option<PageId> {
+        LATCH_STACK
+            .try_with(|l| l.try_borrow_mut().ok().and_then(|mut stack| stack.pop()))
             .unwrap_or(None)
     }
 
@@ -276,6 +299,12 @@ where
     ) -> std::io::Result<SearchResult> {
         self.visit_node(page_id, access_mode)?;
 
+        // As we are reading, we can safely release the latch on the parent.
+        if matches!(access_mode, NodeAccessMode::Read) {
+            let parent = self.pop_last_visited().unwrap();
+            self.release_latch(&parent);
+        };
+
         let is_leaf = self.with_latched_page(page_id, |p| {
             let btreepage: &BtreePage = p.try_into().unwrap();
             Ok(btreepage.is_leaf())
@@ -357,25 +386,25 @@ where
     fn reassemble_payload(&self, cell: &Cell) -> std::io::Result<Payload> {
         let mut overflow_page = cell.overflow_page();
         let mut payload = Vec::from(&cell.used()[..cell.len() - std::mem::size_of::<PageId>()]);
+        access_pager_mut(&self.shared_pager, |pager| {
+            while overflow_page.is_valid() {
+                let frame = pager.read_page::<OverflowPage>(&overflow_page)?;
 
-        while overflow_page.is_valid() {
-            self.visit_node(&overflow_page, NodeAccessMode::ReadWrite)?;
-
-            let next = self.with_latched_page(&overflow_page, |p2|{
-                            let ovfpage: &OverflowPage = p2.try_into().unwrap();
-                            payload.extend_from_slice(ovfpage.payload());
+                frame.try_with_variant::<OverflowPage, _, _, _>(|ovfpage|{
+                payload.extend_from_slice(ovfpage.payload());
                             let next = ovfpage.metadata().next;
                             debug_assert_ne!(
                                         next, overflow_page,
                                         "overflow page that points to itself causes infinite loop on reassemble_payload(): {:?}",
                             ovfpage.metadata(),
                             );
+                             overflow_page = next;
 
-                            Ok(next)
-                        })?;
+            }).unwrap();
+            }
 
-            overflow_page = next;
-        }
+            Ok(())
+        })?;
 
         Ok(Payload::Boxed(payload.into_boxed_slice()))
     }
@@ -477,7 +506,12 @@ where
                     _ => unreachable!(),
                 }
             }
-        }
+        }?;
+
+        self.balance(page_id)?;
+        // Cleanup traversal here.
+        self.clear_stack();
+        Ok(())
     }
 
     fn upsert(&mut self, page_id: &PageId, data: &[u8]) -> std::io::Result<()> {
@@ -532,7 +566,12 @@ where
                     _ => unreachable!(),
                 }
             }
-        }
+        }?;
+
+        self.balance(page_id)?;
+        // Cleanup traversal here.
+        self.clear_stack();
+        Ok(())
     }
 
     fn update(&mut self, page_id: &PageId, data: &[u8]) -> std::io::Result<()> {
@@ -559,7 +598,12 @@ where
                 self.free_cell(old_cell)
             }
             SearchResult::NotFound(page_id) => Ok(()), // No OP if not found.
-        }
+        }?;
+
+        self.balance(page_id)?;
+        // Cleanup traversal here.
+        self.clear_stack();
+        Ok(())
     }
 
     /// Removes the entry corresponding to the given key if it exists.
@@ -577,10 +621,14 @@ where
                     let cell = btreepage.remove(slot);
                     Ok(cell)
                 })?;
-
                 self.free_cell(cell)
             }
-        }
+        }?;
+
+        self.balance(page_id)?;
+        // Cleanup traversal here.
+        self.clear_stack();
+        Ok(())
     }
 
     fn free_cell(&self, cell: Cell) -> std::io::Result<()> {
@@ -636,35 +684,39 @@ where
                 payload[stored_bytes..].len(),
             );
 
-            self.visit_node(&overflow_page_number, NodeAccessMode::Write)?;
-
-            self.with_latched_page_mut(&overflow_page_number, |p| {
-                let overflow_page: &mut OverflowPage = p.try_into().unwrap();
-                overflow_page.data_mut()[..overflow_bytes]
-                    .copy_from_slice(&payload[stored_bytes..stored_bytes + overflow_bytes]);
-                overflow_page.metadata_mut().num_bytes = overflow_bytes as _;
-                stored_bytes += overflow_bytes;
-                Ok(())
-            })?;
-
             if stored_bytes >= payload.len() {
                 break;
             }
 
-            let next_overflow_page = access_pager_mut(&self.shared_pager, |pager| {
-                pager.alloc_page::<OverflowPage>()
-            })?;
+            access_pager_mut(&self.shared_pager, |p| {
 
-            self.with_latched_page_mut(&overflow_page_number, |p| {
-                let overflow_page: &mut OverflowPage = p.try_into().unwrap();
-                overflow_page.metadata_mut().next = next_overflow_page;
+                let frame = p.read_page::<OverflowPage>(&overflow_page_number)?;
+
+                frame.try_with_variant_mut::<OverflowPage, _, _, _>(|overflow_page|{
+
+                overflow_page.data_mut()[..overflow_bytes]
+                    .copy_from_slice(&payload[stored_bytes..stored_bytes + overflow_bytes]);
+                overflow_page.metadata_mut().num_bytes = overflow_bytes as _;
+                stored_bytes += overflow_bytes;
+
+                }).unwrap();
+
+                let next_overflow_page = p.alloc_page::<OverflowPage>()?;
+
+                frame.try_with_variant_mut::<OverflowPage, _, _, _>(|overflow_page|{
+                    overflow_page.metadata_mut().next = next_overflow_page;
+
+                }).unwrap();
+
+                overflow_page_number = next_overflow_page;
                 Ok(())
             })?;
 
-            overflow_page_number = next_overflow_page;
-        }
 
+        };
         Ok(cell)
+
+
     }
 
     fn balance_shallower(&mut self) -> std::io::Result<()> {
@@ -759,18 +811,14 @@ where
 
         self.with_latched_page_mut(&new_left, |p| {
             let node: &mut BtreePage = p.try_into().unwrap();
-            left_cells
-                .iter()
-                .for_each(|cell| node.push(cell.clone()));
+            left_cells.iter().for_each(|cell| node.push(cell.clone()));
             node.metadata_mut().next_sibling = new_right;
             Ok(())
         })?;
 
         self.with_latched_page_mut(&new_right, |p| {
             let node: &mut BtreePage = p.try_into().unwrap();
-            right_cells
-                .iter()
-                .for_each(|cell| node.push(cell.clone()));
+            right_cells.iter().for_each(|cell| node.push(cell.clone()));
             node.metadata_mut().previous_sibling = new_left;
             Ok(())
         })?;
