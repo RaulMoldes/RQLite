@@ -1,4 +1,3 @@
-use crate::types::SizedType;
 use crate::{types::VarInt, TextEncoding};
 use std::cmp::Ordering;
 use std::cmp::{Ord, PartialOrd};
@@ -43,6 +42,8 @@ pub(crate) fn decode_utf16be(bytes: &[u8]) -> String {
     String::from_utf16(&units).unwrap()
 }
 
+/// Zero-copy view over variable-length data with length prefix
+/// Optimized for use as database index keys
 #[derive(Debug)]
 pub struct VarlenType<'a> {
     /// The raw serialized data including length prefix
@@ -66,6 +67,7 @@ impl<'a> VarlenType<'a> {
     /// Creates a VarlenType from raw serialized data (length prefix + data)
     pub(crate) fn from_raw(raw_data: &'a [u8]) -> io::Result<Self> {
         let (varint, offset) = VarInt::from_bytes(raw_data)?;
+
         let length: usize = varint
             .try_into()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -75,6 +77,24 @@ impl<'a> VarlenType<'a> {
             data_offset: offset,
             cached_length: Some(length),
         })
+    }
+
+    pub(crate) fn from_raw_unchecked(
+        raw_data: &'a [u8],
+        offset: usize,
+        len: usize,
+    ) -> VarlenType<'a> {
+        assert!(offset <= raw_data.len(), "offset out of range");
+        assert!(
+            offset + len <= raw_data.len(),
+            "offset + len out of"
+        );
+
+        VarlenType {
+            raw_data,
+            data_offset: offset,
+            cached_length: Some(len),
+        }
     }
 
     /// Get the length of the data
@@ -88,6 +108,7 @@ impl<'a> VarlenType<'a> {
         }
     }
 
+    /// Helper to create a boxed slice with length prefix
     pub(crate) fn boxed(data: &[u8]) -> Box<[u8]> {
         let length_varint = VarInt(data.len() as i64);
         let length_bytes = length_varint.to_bytes();
@@ -137,6 +158,11 @@ impl<'a> VarlenType<'a> {
             TextEncoding::Utf16le => decode_utf16le(data),
             TextEncoding::Utf16be => decode_utf16be(data),
         }
+    }
+
+    /// Convert to owned Blob
+    pub fn to_blob(&self) -> Blob {
+        Blob(self.data().to_vec().into_boxed_slice())
     }
 }
 
@@ -240,9 +266,37 @@ impl<'a> PartialOrd for VarlenType<'a> {
     }
 }
 
-impl<'a> AsRef<[u8]> for VarlenType<'a> {
-    fn as_ref(&self) -> &[u8] {
-        self.data()
+impl<'a> TryFrom<&'a [u8]> for VarlenType<'a> {
+    type Error = std::io::Error;
+
+    /// Tries to create a `VarlenType` from a raw byte slice (length prefix + data).
+    fn try_from(value: &'a [u8]) -> Result<Self, Self::Error> {
+        Self::from_raw(value)
+    }
+}
+
+impl<'a> TryFrom<&'a str> for VarlenType<'a> {
+    type Error = std::io::Error;
+
+    /// Creates a UTF-8 encoded VarlenType from a &str.
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
+        let encoded = value.as_bytes();
+        let boxed = Self::boxed(encoded);
+        // Safety: Box<[u8]> lives for the duration of 'static here, we reborrow as &'a
+        let slice: &'a [u8] = unsafe { std::mem::transmute::<&[u8], &'a [u8]>(&boxed) };
+        Self::from_raw(slice)
+    }
+}
+
+impl TryFrom<String> for VarlenType<'static> {
+    type Error = std::io::Error;
+
+    /// Consumes a String and creates a VarlenType with owned bytes.
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let bytes = value.into_bytes();
+        let boxed = Self::boxed(&bytes);
+        let slice: &'static [u8] = Box::leak(boxed);
+        Self::from_raw(slice)
     }
 }
 
@@ -252,86 +306,66 @@ impl<'a> From<&VarlenType<'a>> for String {
     }
 }
 
-/// Owned version of VarlenType
-#[derive(Debug, Clone)]
-pub struct Blob {
-    /// Stores the complete serialized form (length prefix + data) as a boxed slice.
-    serialized: Box<[u8]>,
-    /// Cached offset where data starts
-    data_offset: usize,
-    /// Cached data length
-    cached_length: usize,
-}
+impl<'a> AsRef<[u8]> for VarlenType<'a> {
+       fn as_ref(&self) -> &[u8] {
 
-impl Blob {
-    /// Create a new Blob from raw data (will add length prefix)
-    pub fn new(data: &[u8]) -> Self {
-        let serialized = VarlenType::boxed(data);
-        let (varint, offset) = VarInt::from_bytes(&serialized).unwrap();
-        let length: usize = varint.try_into().unwrap_or(0);
+        let length_varint = VarInt(self.length() as i64);
+        let length_bytes = length_varint.to_bytes();
 
-        Self {
-            serialized,
-            data_offset: offset,
-            cached_length: length,
+        let expected_len = length_bytes.len() + self.length();
+        if self.raw_data.len() == expected_len && &self.raw_data[0..length_bytes.len()] == length_bytes.as_slice() {
+            self.raw_data
+        } else {
+
+            let mut buf = Vec::with_capacity(expected_len);
+            buf.extend_from_slice(&length_bytes);
+            buf.extend_from_slice(self.data());
+            buf.leak()
         }
     }
+}
+/// Owned wrapper for variable-length data
+/// Just holds the raw bytes (Excluding length prefix)
+#[derive(Debug, Clone)]
+pub struct Blob(Box<[u8]>);
 
-    /// Get the data (excluding length prefix)
-    pub fn data(&self) -> &[u8] {
-        let end = self.data_offset + self.cached_length;
-        if end > self.serialized.len() {
-            &self.serialized[self.data_offset..]
-        } else {
-            &self.serialized[self.data_offset..end]
-        }
+impl Blob {
+    /// Create a new Blob from raw data
+    pub fn new(data: &[u8]) -> Self {
+        Blob(VarlenType::boxed(data))
     }
 
     /// Get a VarlenType view of this Blob
     pub fn as_varlen(&self) -> VarlenType<'_> {
-        VarlenType::from_raw(&self.serialized[..]).unwrap()
+        VarlenType::from_raw(&self.0).unwrap()
     }
 
-    /// Get the serialized data (including length prefix)
-    pub fn serialized(&self) -> &[u8] {
-        &self.serialized
-    }
-
-    /// Get the length of the data (excluding prefix)
-    pub fn length(&self) -> usize {
-        self.cached_length
-    }
-
-    /// Get total size in memory (including length prefix)
-    pub fn total_size(&self) -> usize {
-        self.serialized.len()
-    }
-
-    /// Clone the data portion (without length prefix) into a Vec
-    pub fn data_to_vec(&self) -> Vec<u8> {
-        self.data().to_vec()
+    /// Get the raw serialized bytes (including length prefix)
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
     }
 
     /// Consume self and return the boxed slice
     pub fn into_boxed_slice(self) -> Box<[u8]> {
-        self.serialized
+        self.0
+    }
+
+    /// Get the length of the data (excluding prefix)
+    pub fn length(&self) -> usize {
+        self.as_varlen().length()
     }
 }
 
 impl AsRef<[u8]> for Blob {
     fn as_ref(&self) -> &[u8] {
-        self.data()
+        self.0.as_ref()
     }
 }
 
+// Comparisons delegate to VarlenType for optimized zero-copy comparison
 impl PartialEq for Blob {
     fn eq(&self, other: &Self) -> bool {
-        // If lengths differ, they're not equal
-        if self.cached_length != other.cached_length {
-            return false;
-        }
-        // Compare the actual data
-        self.data() == other.data()
+        self.as_varlen().eq(&other.as_varlen())
     }
 }
 
@@ -339,7 +373,6 @@ impl Eq for Blob {}
 
 impl Ord for Blob {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Use the optimized zero-copy comparison
         self.as_varlen().cmp(&other.as_varlen())
     }
 }
@@ -350,20 +383,20 @@ impl PartialOrd for Blob {
     }
 }
 
-// Borrow implementation <[u8]>
-impl std::borrow::Borrow<[u8]> for Blob {
-    fn borrow(&self) -> &[u8] {
-        self.data()
+// Conversion from VarlenType to Blob
+impl<'a> From<VarlenType<'a>> for Blob {
+    fn from(varlen: VarlenType<'a>) -> Self {
+        varlen.to_blob()
     }
 }
 
-// For testing and convenience
-impl From<u32> for Blob {
-    fn from(value: u32) -> Self {
-        Blob::new(&value.to_be_bytes())
+impl<'a> From<&VarlenType<'a>> for Blob {
+    fn from(varlen: &VarlenType<'a>) -> Self {
+        varlen.to_blob()
     }
 }
 
+// Convenience conversions
 impl From<&str> for Blob {
     fn from(value: &str) -> Self {
         Blob::new(value.as_bytes())
@@ -382,16 +415,26 @@ impl From<Vec<u8>> for Blob {
     }
 }
 
-impl TryFrom<&[u8]> for Blob {
-    type Error = std::io::Error;
+impl From<&[u8]> for Blob {
+    fn from(value: &[u8]) -> Self {
+        Blob::new(value)
+    }
+}
 
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        Ok(Blob::new(value))
+impl std::borrow::Borrow<[u8]> for Blob {
+    fn borrow(&self) -> &[u8] {
+        self.as_ref()
+    }
+}
+
+impl std::fmt::Display for Blob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Blob: {} bytes", self.length())
     }
 }
 
 #[cfg(test)]
-mod varlen_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -413,6 +456,16 @@ mod varlen_tests {
     }
 
     #[test]
+    fn test_varlen_serialization() {
+        let data = [1, 2, 3, 4, 5, 6, 7, 8];
+        let boxed = VarlenType::boxed(&data);
+        let vlen = VarlenType::from_raw(&boxed).unwrap();
+        let bytes: &[u8] = vlen.as_ref();
+        let vlen_deserialized = VarlenType::try_from(bytes).unwrap();
+        assert_eq!(vlen_deserialized, vlen)
+    }
+
+    #[test]
     fn test_varlen_cmp() {
         let box_a = VarlenType::boxed(b"abc");
         let a = VarlenType::from_raw(&box_a).unwrap();
@@ -425,44 +478,54 @@ mod varlen_tests {
     }
 
     #[test]
-    fn test_blob_new_and_data() {
-        let data = b"foobar";
+    fn test_blob_simple() {
+        let data = b"test data";
         let blob = Blob::new(data);
-        assert_eq!(blob.data(), data);
+
+        assert_eq!(blob.as_ref(), data);
         assert_eq!(blob.length(), data.len());
-        assert_eq!(blob.as_varlen().data(), data);
+
+        // Test VarlenType view
+        let varlen = blob.as_varlen();
+        assert_eq!(varlen.data(), data);
     }
 
     #[test]
-    fn test_blob_from_various() {
-        let b1 = Blob::from(42u32);
-        assert_eq!(b1.length(), 4);
-        assert_eq!(b1.data(), &42u32.to_be_bytes());
-
-        let b2 = Blob::from("hello");
-        assert_eq!(b2.length(), 5);
-        assert_eq!(b2.data(), b"hello");
-
-        let b3 = Blob::from(vec![1, 2, 3]);
-        assert_eq!(b3.length(), 3);
-        assert_eq!(b3.data(), &[1, 2, 3]);
-    }
-
-    #[test]
-    fn test_blob_ord() {
+    fn test_blob_comparisons() {
         let a = Blob::from("abc");
         let b = Blob::from("abd");
-        assert!(a < b);
         let c = Blob::from("abc");
+
+        assert!(a < b);
         assert_eq!(a, c);
+        assert_ne!(a, b);
     }
 
     #[test]
-    fn test_blob_serialization_roundtrip() {
-        let original = b"some random data";
-        let blob = Blob::new(original);
-        let serialized = blob.serialized();
-        let varlen = VarlenType::from_raw(serialized).unwrap();
-        assert_eq!(varlen.data(), original);
+    fn test_varlen_to_blob_conversion() {
+        let data = b"conversion test";
+        let boxed = VarlenType::boxed(data);
+        let varlen = VarlenType::from_raw(&boxed).unwrap();
+
+        let blob: Blob = varlen.to_blob();
+        assert_eq!(blob.as_ref(), data);
+
+        let blob2: Blob = (&varlen).into();
+        assert_eq!(blob2.as_ref(), data);
+    }
+
+    #[test]
+    fn test_blob_from_various_types() {
+        let b1 = Blob::from("string literal");
+        assert_eq!(b1.as_ref(), b"string literal");
+
+        let b2 = Blob::from(String::from("owned string"));
+        assert_eq!(b2.as_ref(), b"owned string");
+
+        let b3 = Blob::from(vec![1, 2, 3, 4]);
+        assert_eq!(b3.as_ref(), &[1, 2, 3, 4]);
+
+        let b4 = Blob::from(&[5, 6, 7][..]);
+        assert_eq!(b4.as_ref(), &[5, 6, 7]);
     }
 }

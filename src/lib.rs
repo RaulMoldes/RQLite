@@ -7,12 +7,10 @@
 #![allow(unused_variables)]
 #![feature(slice_ptr_get)]
 #![feature(concat_bytes)]
-
 mod configs;
 mod database;
 mod io;
 mod macros;
-mod serialization;
 mod storage;
 mod structures;
 mod types;
@@ -25,8 +23,10 @@ mod types;
 ///
 /// More on alignment guarantees: https://github.com/jemalloc/jemalloc/issues/1533
 /// We also provide an API with a custom [Direct-IO] allocator (see [io::disk::linux] for details), but Jemalloc has performed better in benchmarks.
+#[cfg(not(miri))]
 use jemallocator::Jemalloc;
 
+#[cfg(not(miri))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 pub(crate) use configs::*;

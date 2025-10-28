@@ -6,18 +6,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::io::disk::DirectIO;
-
-#[repr(u8)]
-#[derive(Copy, Clone)]
-pub enum AllocatorKind {
-    GlobalAllocator,
-    DirectIO,
-}
-
 pub(crate) struct BufferWithMetadata<M> {
-    /// Whether the buffer was allocated with DIRECT-IO allocator.
-    allocator: AllocatorKind,
     /// Alignment of the buffer
     alignment: u16,
     /// Length of the used content in the buffer
@@ -32,11 +21,13 @@ pub(crate) struct BufferWithMetadata<M> {
 
 impl<M> BufferWithMetadata<M> {
     // This function must be used to allocate 'owned' Buffers.
-    fn allocate_owned(
-        size: usize,
-        alignment: usize,
-        allocator: AllocatorKind,
-    ) -> Result<NonNull<[u8]>, AllocError> {
+    fn allocate_owned(size: usize, alignment: usize) -> Result<NonNull<[u8]>, AllocError> {
+        assert!(
+            alignment >= std::mem::align_of::<M>(),
+            "Alignment {alignment} is too small for type {} which requires {} bytes",
+            std::any::type_name::<M>(),
+            std::mem::align_of::<M>(),
+        );
         assert!(
             size >= mem::size_of::<M>(),
             "Attempted to allocate {} of insufficient size: size of {} is {} while allocation size is {}",
@@ -46,34 +37,20 @@ impl<M> BufferWithMetadata<M> {
             size,
         );
 
-        match allocator {
-            // Return the error to the client and probably perform rollback in the pager at this level.
-            AllocatorKind::GlobalAllocator => alloc::Global
-                .allocate_zeroed(alloc::Layout::from_size_align(size, alignment).unwrap()),
-            AllocatorKind::DirectIO => {
-                // Returns &mut [u8]
-                let buf = DirectIO::alloc_aligned(size).map_err(|_| AllocError)?;
-
-                let ptr = buf.as_mut_ptr();
-                let nn = NonNull::new(ptr).ok_or(AllocError)?;
-                // Cast to NonNull<[u8]>
-                let slice_nn = NonNull::slice_from_raw_parts(nn, buf.len());
-                Ok(slice_nn)
-            }
-        }
+        alloc::Global.allocate_zeroed(alloc::Layout::from_size_align(size, alignment).unwrap())
     }
 
     pub fn with_global_allocator(capacity: usize, alignment: usize) -> Self {
-        Self::new_unchecked(capacity, alignment, AllocatorKind::GlobalAllocator)
+        Self::new_unchecked(capacity, alignment)
     }
 
     pub fn with_direct_io_allocator(capacity: usize, alignment: usize) -> Self {
-        Self::new_unchecked(capacity, alignment, AllocatorKind::DirectIO)
+        Self::new_unchecked(capacity, alignment)
     }
 
     /// Allocate a zeroed buffer.
-    pub fn with_capacity(capacity: usize, alignment: usize, allocator: AllocatorKind) -> Self {
-        Self::new_unchecked(capacity, alignment, allocator)
+    pub fn with_capacity(capacity: usize, alignment: usize) -> Self {
+        Self::new_unchecked(capacity, alignment)
     }
 
     /// Returns how many bytes of the data section are in use.
@@ -133,18 +110,14 @@ impl<M> BufferWithMetadata<M> {
     ///
     /// If the fields of the header need values other than 0 for initialization
     /// then they should be written manually after this function call.
-    pub fn new_unchecked(size: usize, alignment: usize, allocator: AllocatorKind) -> Self {
-        let ptr = Self::allocate_owned(size, alignment, allocator)
+    pub fn new_unchecked(size: usize, alignment: usize) -> Self {
+        let ptr = Self::allocate_owned(size, alignment)
             .expect("Allocation error. Unable to allocate buffer");
-        unsafe { Self::from_non_null(ptr, alignment, allocator) }
+        unsafe { Self::from_non_null(ptr, alignment) }
     }
 
     /// Constructs a new buffer from the given [`NonNull`] pointer.
-    pub unsafe fn from_non_null(
-        pointer: NonNull<[u8]>,
-        alignment: usize,
-        allocator: AllocatorKind,
-    ) -> Self {
+    pub unsafe fn from_non_null(pointer: NonNull<[u8]>, alignment: usize) -> Self {
         assert!(
             pointer.len() >= mem::size_of::<M>(),
             "attempt to construct {} from invalid pointer of size {} when size of {} is {}",
@@ -172,7 +145,6 @@ impl<M> BufferWithMetadata<M> {
             size: pointer.len() as u32,
             alignment: alignment as u16,
             len: 0,
-            allocator,
         }
     }
 
@@ -184,7 +156,6 @@ impl<M> BufferWithMetadata<M> {
             size,
             alignment,
             len,
-            allocator,
         } = self;
 
         assert!(
@@ -214,8 +185,7 @@ impl<M> BufferWithMetadata<M> {
             data,
             size,
             alignment,
-            len,
-            allocator,
+            len: 0,
         }
     }
 
@@ -353,7 +323,7 @@ impl<M> BufferWithMetadata<M> {
     /// Creates a new buffer from a slice of data with exact sizing
     pub fn from_slice_exact(data: &[u8], metadata: M, alignment: usize) -> Self {
         let capacity = data.len() + mem::size_of::<M>();
-        let mut buffer = Self::with_capacity(capacity, alignment, AllocatorKind::GlobalAllocator);
+        let mut buffer = Self::with_capacity(capacity, alignment);
         *buffer.metadata_mut() = metadata;
         buffer.push_bytes(data);
         buffer
@@ -380,13 +350,14 @@ impl<M> PartialEq for BufferWithMetadata<M> {
 
 impl<M> Clone for BufferWithMetadata<M> {
     fn clone(&self) -> Self {
-        let mut cloned =
-            Self::new_unchecked(self.size as usize, self.alignment as usize, self.allocator);
+        let mut cloned = Self::new_unchecked(self.size as usize, self.alignment as usize);
         cloned.len = self.len;
         cloned.size = self.size;
         cloned.alignment = self.alignment;
-        cloned.allocator = self.allocator;
+
         cloned.as_slice_mut().copy_from_slice(self.as_slice());
+
+        assert_eq!(cloned.data(), self.data());
         cloned
     }
 }
@@ -408,17 +379,12 @@ impl<M: Debug> Debug for BufferWithMetadata<M> {
 /// Otherwise, dropping the buffer portion would invalidate the owned pointer.
 impl<M> Drop for BufferWithMetadata<M> {
     fn drop(&mut self) {
-        match self.allocator {
-            AllocatorKind::GlobalAllocator => unsafe {
-                alloc::Global.deallocate(
-                    self.metadata.cast(),
-                    alloc::Layout::from_size_align(self.size as usize, self.alignment as usize)
-                        .unwrap(),
-                )
-            },
-            AllocatorKind::DirectIO => unsafe {
-                DirectIO::free_aligned(self.metadata.as_ptr() as *mut u8);
-            },
+        unsafe {
+            alloc::Global.deallocate(
+                self.metadata.cast(),
+                alloc::Layout::from_size_align(self.size as usize, self.alignment as usize)
+                    .unwrap(),
+            )
         }
     }
 }
@@ -433,12 +399,10 @@ impl<M, T> AsBuffer<T> for BufferWithMetadata<M> {
     }
 }
 
-impl<M> TryFrom<(&[u8], usize, AllocatorKind)> for BufferWithMetadata<M> {
+impl<M> TryFrom<(&[u8], usize)> for BufferWithMetadata<M> {
     type Error = &'static str;
 
-    fn try_from(
-        (bytes, alignment, allocator): (&[u8], usize, AllocatorKind),
-    ) -> Result<Self, Self::Error> {
+    fn try_from((bytes, alignment): (&[u8], usize)) -> Result<Self, Self::Error> {
         let header_size = mem::size_of::<M>();
 
         if bytes.len() < header_size {
@@ -449,12 +413,12 @@ impl<M> TryFrom<(&[u8], usize, AllocatorKind)> for BufferWithMetadata<M> {
             return Err("buffer not aligned to the required boundary");
         }
 
-        let mut ptr = Self::allocate_owned(bytes.len(), alignment, allocator)
+        let mut ptr = Self::allocate_owned(bytes.len(), alignment)
             .map_err(|_| "failed to allocate buffer")?;
 
         unsafe {
             ptr.as_mut().copy_from_slice(bytes);
-            let mut buffer = Self::from_non_null(ptr, alignment, allocator);
+            let mut buffer = Self::from_non_null(ptr, alignment);
             buffer.len = (bytes.len() - header_size) as u32;
             Ok(buffer)
         }

@@ -12,6 +12,7 @@ mod libfiu;
 // TODO: FIND A WAY TO PROPERLY TEST THIS
 #[test]
 #[cfg(target_os = "linux")]
+#[cfg(not(miri))]
 #[ignore = "Ignored due to libfiu not working properly."]
 fn test_sync_all_with_fiu_injection() -> Result<()> {
     if !libfiu::init() {
@@ -51,6 +52,7 @@ fn test_sync_all_with_fiu_injection() -> Result<()> {
 }
 
 #[test]
+#[cfg(not(miri))]
 #[cfg(target_os = "linux")]
 fn test_direct_io() -> std::io::Result<()> {
     const BLOCK_SIZE: usize = 4096;

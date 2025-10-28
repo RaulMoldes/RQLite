@@ -6,7 +6,7 @@ pub mod date;
 pub mod datetime;
 pub mod id;
 pub mod sized_types;
-pub mod special_types;
+pub mod varint;
 pub mod varlen_types;
 
 pub use date::Date;
@@ -16,7 +16,7 @@ pub use sized_types::{
     Bool, Byte, Char, Float32, Float64, Int16, Int32, Int64, Int8, UInt16, UInt32, UInt64, UInt8,
 };
 
-pub use special_types::VarInt;
+pub use varint::VarInt;
 pub use varlen_types::Blob;
 
 #[cfg(test)]
@@ -24,7 +24,6 @@ mod tests;
 
 pub(crate) enum DataType {
     Null,
-    VarInt(VarInt),
     SmallInt(Int8),
     HalfInt(Int16),
     Int(Int32),
@@ -79,7 +78,6 @@ impl DataType {
         match self {
             // Nulls and variable integers
             DataType::Null => 0,
-            DataType::VarInt(v) => v.size(),
 
             // Signed integers
             DataType::SmallInt(_) => size_of::<i8>(),
@@ -122,8 +120,4 @@ pub(crate) trait Key:
     Clone + Copy + Eq + PartialEq + Ord + PartialOrd + std::hash::Hash
 {
     fn new_key() -> Self;
-}
-
-pub trait SizedType: Ord + Eq + PartialEq + PartialOrd {
-    fn size(&self) -> usize;
 }

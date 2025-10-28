@@ -5,8 +5,8 @@
       "type": "lldb",
       "request": "launch",
       "name": "Debug Rust test (rqlite)",
-      "program": "${workspaceFolder}/target/debug/deps/rqlite-6faf5282a4b5ecad",
-      "args": ["--nocapture", "test_insert_500_cells_medium"],
+      "program": "${workspaceFolder}/target/debug/deps/rqlite-16f2f4acaafb91b6",
+      "args": ["--nocapture", "test_balance_shallower"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {

@@ -5,10 +5,7 @@ use crate::{dynamic_buffer_tests, static_buffer_tests};
 
 use crate::configs::CELL_ALIGNMENT;
 use crate::{scalar, sized};
-use crate::{
-    storage::buffer::{AllocatorKind, BufferWithMetadata},
-    types::PageId,
-};
+use crate::{storage::buffer::BufferWithMetadata, types::PageId};
 
 // Slot offset of a cell
 scalar! {
@@ -25,11 +22,12 @@ sized! {
     #[derive(Debug, PartialEq, Clone, Copy)]
     #[repr(C)]
     pub(crate) struct CellHeader {
+        pub left_child: PageId,
         size: u16, //  Size is the totla size of the cell
         is_overflow: bool,
         padding: u8, // Padding is the padding added at the end to match alignment requirements.
         // Therefore one can get the usable size by substracting size - padding.
-        pub left_child: PageId,
+
     };
     pub const CELL_HEADER_SIZE
 }
@@ -41,10 +39,10 @@ impl CellHeader {
 
     pub fn new(size: usize, padding: usize, left_child: Option<PageId>) -> Self {
         Self {
+            left_child: left_child.unwrap_or(PageId::from(0)),
             size: size as u16,
             padding: padding as u8,
             is_overflow: false,
-            left_child: left_child.unwrap_or(PageId::from(0)),
         }
     }
 
@@ -71,14 +69,15 @@ pub type Cell = BufferWithMetadata<CellHeader>;
 
 impl Cell {
     pub fn new(payload: &[u8]) -> Self {
+        let cell_size =
+            (payload.len() + CELL_HEADER_SIZE).next_multiple_of(CELL_ALIGNMENT as usize);
         // Align payload size to CELL_ALIGNMENT
-        let payload_size = payload.len().next_multiple_of(CELL_ALIGNMENT as usize);
+        let payload_size = cell_size - CELL_HEADER_SIZE;
 
         // Create buffer with total size = header + aligned payload
         let mut buffer = BufferWithMetadata::<CellHeader>::with_capacity(
             payload_size, // usable space for data
             CELL_ALIGNMENT as usize,
-            AllocatorKind::GlobalAllocator,
         );
 
         // Initialize header
@@ -99,11 +98,7 @@ impl Cell {
     /// Creates a cell from a fragment of a page (zero-copy when possible)
     pub unsafe fn from_page_fragment(ptr: NonNull<[u8]>, alignment: usize) -> Self {
         // Create buffer from existing memory
-        let mut buffer = BufferWithMetadata::<CellHeader>::from_non_null(
-            ptr,
-            alignment,
-            AllocatorKind::GlobalAllocator,
-        );
+        let mut buffer = BufferWithMetadata::<CellHeader>::from_non_null(ptr, alignment);
 
         // The header should already be initialized in the page memory
         // Set the length based on the header's size field
@@ -223,7 +218,7 @@ mod cell_tests {
         // Check metadata
         assert_eq!(
             cell.metadata().size as usize,
-            payload.len().next_multiple_of(CELL_ALIGNMENT as usize)
+            payload.len() + cell.metadata().padding as usize
         );
         assert!(!cell.metadata().is_overflow);
 
@@ -231,7 +226,10 @@ mod cell_tests {
         assert_eq!(&cell.used()[..payload.len()], payload);
 
         // Check padding is correctly added
-        assert_eq!(cell.size() % CELL_ALIGNMENT as usize, 0);
+        assert_eq!(
+            (cell.size() + std::mem::size_of::<CellHeader>()) % CELL_ALIGNMENT as usize,
+            0
+        );
         assert_eq!(cell.len(), payload.len(), "Payload size mismatch.");
 
         let expected_total_size = CELL_HEADER_SIZE + cell.size();
@@ -271,18 +269,10 @@ mod cell_tests {
         let payload =
             b"hello world, I am a very big cell which is going to be splitted on this test!";
         let mut cell = Cell::new(payload);
-        // Check metadata
-        assert_eq!(
-            cell.metadata().size as usize,
-            payload.len().next_multiple_of(CELL_ALIGNMENT as usize)
-        );
         assert!(!cell.metadata().is_overflow);
 
         // Check data content
         assert_eq!(&cell.used()[..payload.len()], payload);
-
-        // Check padding is correctly added
-        assert_eq!(cell.size() % CELL_ALIGNMENT as usize, 0);
         assert_eq!(cell.len(), payload.len(), "Payload size mismatch.");
 
         let expected_total_size = CELL_HEADER_SIZE + cell.size();

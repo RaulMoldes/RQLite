@@ -59,6 +59,39 @@ macro_rules! id_type {
             }
         }
 
+        impl TryFrom<&[u8]> for $name {
+            type Error = std::io::Error;
+
+            fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+                use std::convert::TryInto;
+                use std::io::{Error, ErrorKind};
+
+                // Verify length
+                if value.len() < 4 {
+                    return Err(Error::new(ErrorKind::UnexpectedEof, "not enough bytes"));
+                }
+
+                // Copies to a fixed size array
+                let arr: [u8; 4] = value[0..4]
+                    .try_into()
+                    .map_err(|_| Error::new(ErrorKind::InvalidData, "failed to copy bytes"))?;
+
+                // Converts from an inner type.
+                Ok(Self(u32::from_ne_bytes(arr)))
+            }
+        }
+
+        impl AsRef<[u8]> for $name {
+            fn as_ref(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        &self.0 as *const u32 as *const u8,
+                        std::mem::size_of::<u32>(),
+                    )
+                }
+            }
+        }
+
         // Apply arithmetic operations macro
         $crate::impl_arithmetic_ops!($name);
     };

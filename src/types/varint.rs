@@ -1,4 +1,3 @@
-use crate::types::SizedType;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
@@ -23,9 +22,9 @@ impl TryFrom<VarInt> for usize {
     }
 }
 
-impl SizedType for VarInt {
+impl VarInt {
     /// Returns the number of bytes this varint will occupy when serialized.
-    fn size(&self) -> usize {
+    pub fn size(&self) -> usize {
         let mut value = Self::encode_zigzag(self.0);
         let mut size = 1;
         while value >= 0x80 {
@@ -150,9 +149,9 @@ impl VarInt {
     }
 }
 
-impl From<VarInt> for Vec<u8> {
-    fn from(v: VarInt) -> Vec<u8> {
-        v.to_bytes()
+impl From<VarInt> for VarIntBytes {
+    fn from(v: VarInt) -> VarIntBytes {
+        VarIntBytes(v.to_bytes())
     }
 }
 
@@ -162,6 +161,20 @@ impl TryFrom<&[u8]> for VarInt {
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         let (varint, _) = VarInt::from_bytes(bytes)?;
         Ok(varint)
+    }
+}
+
+pub struct VarIntBytes(Vec<u8>);
+
+impl AsRef<[u8]> for VarIntBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl From<&VarInt> for VarIntBytes {
+    fn from(v: &VarInt) -> Self {
+        VarIntBytes(v.to_bytes())
     }
 }
 

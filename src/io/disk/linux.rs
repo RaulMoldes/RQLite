@@ -1,8 +1,9 @@
 //! Module for file management operations.
 use libc::{
-    c_void, free, lseek, open as libc_open, posix_memalign, read as libc_read, write as libc_write,
-    O_CREAT, O_DIRECT, O_RDONLY, O_RDWR, O_WRONLY, SEEK_SET,
+    c_void, lseek, open as libc_open, read as libc_read, write as libc_write, O_CREAT, O_DIRECT,
+    O_RDONLY, O_RDWR, O_WRONLY, SEEK_SET,
 };
+
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
@@ -13,6 +14,9 @@ use std::{
     os::fd::RawFd,
     path::Path,
 };
+
+#[cfg(test)]
+use libc::{free, posix_memalign};
 
 use super::{FOpenMode, FileOperations};
 
@@ -56,6 +60,7 @@ impl DirectIO {
     }
 
     /// Allocates a new aligned buffer of at least [`size`] bytes.
+    #[cfg(test)]
     pub fn alloc_aligned(size: usize) -> io::Result<&'static mut [u8]> {
         // Rounds up to the first multiple of BLOCK SIZE
         let target_size = size.next_multiple_of(Self::BLOCK_SIZE);
@@ -74,6 +79,7 @@ impl DirectIO {
     }
 
     /// Free an aligned buffer
+    #[cfg(test)]
     pub unsafe fn free_aligned(ptr: *mut u8) {
         free(ptr as *mut c_void)
     }

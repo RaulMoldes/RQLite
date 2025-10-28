@@ -3,18 +3,11 @@ macro_rules! test_serializable {
  ($test_name:ident, $type:ty, [$($value:expr),+]) => {
      #[test]
     fn $test_name() {
-        use std::io::Cursor;
-        use $crate::serialization::Serializable;
         let test_values: Vec<$type> = vec![$($value),+];
 
         for (idx, original) in test_values.iter().enumerate() {
-                let mut buffer = Cursor::new(Vec::new());
-                    original.clone().write_to(&mut buffer).expect(&format!("Test case {}: Failed to serialize", idx));
-
-                buffer.set_position(0);
-
-                let deserialized = <$type>::read_from(&mut buffer).expect(&format!("Test case {}: Failed to deserialize", idx));
-
+                let serialized: &[u8] = original.as_ref();
+                let deserialized: $type = <$type>::try_from(serialized).unwrap();
 
                 assert_eq!(
                         *original, deserialized,

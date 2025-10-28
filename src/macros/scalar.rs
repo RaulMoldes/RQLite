@@ -42,9 +42,22 @@ macro_rules! scalar {
                     .map_err(|_| Error::new(ErrorKind::InvalidData, "failed to copy bytes"))?;
 
                 // Converts from an inner type.
-                Ok(Self(<$inner>::from_be_bytes(arr)))
+                Ok(Self(<$inner>::from_ne_bytes(arr)))
             }
         }
+
+
+        impl AsRef<[u8]> for $name {
+        fn as_ref(&self) -> &[u8] {
+            unsafe {
+                std::slice::from_raw_parts(
+                    &self.0 as *const $inner as *const u8,
+                    std::mem::size_of::<$inner>(),
+                )
+            }
+        }
+    }
+
 
 
 

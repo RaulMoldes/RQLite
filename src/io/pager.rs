@@ -1,11 +1,11 @@
-use std::cell::RefCell;
 use std::io::{Read, Seek, Write};
 use std::sync::Arc;
+
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::io::cache::PageCache;
 use crate::io::disk::{DirectIO, FileOperations};
 use crate::io::frames::MemFrame;
-use crate::storage::buffer::AllocatorKind;
 use crate::storage::page::{MemPage, OverflowPage, Page, PageZero};
 use crate::types::{PageId, PAGE_ZERO};
 use crate::{RQLiteConfig, DEFAULT_CACHE_SIZE, PAGE_ALIGNMENT};
@@ -50,8 +50,7 @@ impl Pager {
             DirectIO::BLOCK_SIZE
         );
 
-        let mut page_zero: PageZero =
-            PageZero::alloc(config.page_size, AllocatorKind::GlobalAllocator);
+        let mut page_zero: PageZero = PageZero::alloc(config.page_size);
         page_zero.metadata_mut().page_size = config.page_size;
         page_zero.metadata_mut().incremental_vacuum_mode = config.incremental_vacuum_mode;
         page_zero.metadata_mut().rw_version = config.read_write_version;
@@ -128,7 +127,7 @@ impl Pager {
     where
         MemPage: From<P>,
     {
-        let page = P::alloc(self.page_size(), AllocatorKind::GlobalAllocator);
+        let page = P::alloc(self.page_size());
         let id = page.page_number();
         let mem_page = MemFrame::new(MemPage::from(page));
         if let Some(evicted) = self.cache.insert(id, mem_page) {
@@ -153,12 +152,7 @@ impl Pager {
         let mut buffer = vec![0u8; self.page_size() as usize];
         self.read_block_unchecked(id, &mut buffer)?;
 
-        let page = P::try_from((
-            &buffer,
-            PAGE_ALIGNMENT as usize,
-            AllocatorKind::GlobalAllocator,
-        ))
-        .map_err(|msg| {
+        let page = P::try_from((&buffer, PAGE_ALIGNMENT as usize)).map_err(|msg| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Failed to convert page from bytes: {msg}"),
@@ -202,42 +196,47 @@ impl Pager {
     }
 }
 
-pub type SharedPager = Arc<RefCell<Pager>>;
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct SharedPager(Arc<RwLock<Pager>>);
 
-pub fn access_pager<R>(
-    pager: &SharedPager,
-    f: impl FnOnce(&Pager) -> Result<R, std::io::Error>,
-) -> Result<R, std::io::Error> {
-    let guard = pager.try_borrow().map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            "failed to borrow Pager (immutable)",
-        )
-    })?;
-    f(&guard)
-}
-pub fn access_pager_mut<R>(
-    pager: &SharedPager,
-    f: impl FnOnce(&mut Pager) -> Result<R, std::io::Error>,
-) -> Result<R, std::io::Error> {
-    let mut guard = pager.try_borrow_mut().map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            "failed to borrow Pager (mutable)",
-        )
-    })?;
-    f(&mut guard)
-}
-pub fn access_pager_unchecked<R>(pager: &SharedPager, f: impl FnOnce(&Pager) -> R) -> R {
-    let guard = pager.borrow();
-    f(&guard)
+impl From<Arc<RwLock<Pager>>> for SharedPager {
+    fn from(value: Arc<RwLock<Pager>>) -> Self {
+        Self(Arc::clone(&value))
+    }
 }
 
-pub fn access_pager_unchecked_mut<R>(pager: &SharedPager, f: impl FnOnce(&mut Pager) -> R) -> R {
-    let mut guard = pager.borrow_mut();
-    f(&mut guard)
+impl From<Pager> for SharedPager {
+    fn from(value: Pager) -> Self {
+        Self(Arc::new(RwLock::new(value)))
+    }
 }
+
+impl Clone for SharedPager {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl SharedPager {
+    pub fn read(&self) -> RwLockReadGuard<'_, Pager> {
+        self.0.read()
+    }
+
+    pub fn write(&self) -> RwLockWriteGuard<'_, Pager> {
+        self.0.write()
+    }
+
+    pub fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+}
+
+unsafe impl Send for Pager {}
+unsafe impl Sync for Pager {}
+
 #[cfg(test)]
+#[cfg(not(miri))]
 mod tests {
     use crate::storage::page::BtreePage;
 
@@ -279,7 +278,7 @@ mod tests {
     fn test_single_page_rw() -> std::io::Result<()> {
         let mut pager = create_test_pager()?;
         let page_size = pager.page_size();
-        let mut page1 = BtreePage::alloc(page_size, AllocatorKind::GlobalAllocator);
+        let mut page1 = BtreePage::alloc(page_size);
         let page_id = page1.metadata().page_number;
         assert!(page_id != crate::types::PAGE_ZERO, "Invalid page number!");
         let result = pager.write_block_unchecked(&page_id, page1.as_mut());
@@ -314,7 +313,7 @@ mod tests {
         let mut offset = 0;
         // Accumulate all pages in our buffers.
         for i in 0..num_pages {
-            let page = BtreePage::alloc(page_size, AllocatorKind::GlobalAllocator);
+            let page = BtreePage::alloc(page_size);
             let page_id = page.metadata().page_number;
             assert!(
                 page_id != crate::types::PAGE_ZERO,
@@ -377,6 +376,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg(not(miri))]
     fn test_dirty_page() -> std::io::Result<()> {
         let mut pager = create_test_pager()?;
         pager.cache = PageCache::with_capacity(1); // Cache pequeña
