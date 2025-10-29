@@ -5,7 +5,7 @@ use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
 
 pub(crate) struct MemFrame<P> {
     // Better [`RwLock`] than [`Mutex`] here, as we want to allow multiple readers to the page, but a single writer at a time to avoid race conditions.
-    inner: Arc<RwLock<P>>,
+    pub inner: Arc<RwLock<P>>,
     // dirty flag
     is_dirty: Arc<AtomicBool>,
 }
@@ -62,7 +62,8 @@ where
         Latch::upgradable(&self.inner)
     }
 
-    pub(crate) fn write(&self) -> Latch<P> {
+    pub(crate) fn write(&mut self) -> Latch<P> {
+        self.mark_dirty();
         Latch::write(&self.inner)
     }
 }
@@ -92,7 +93,7 @@ where
         Ok(f(variant))
     }
 
-    pub fn try_with_variant_mut<V, F, R, E>(&self, f: F) -> Result<R, E>
+    pub fn try_with_variant_mut<V, F, R, E>(&mut self, f: F) -> Result<R, E>
     where
         F: FnOnce(&mut V) -> R,
         for<'a> &'a mut Latch<P>: TryInto<&'a mut V, Error = E>,

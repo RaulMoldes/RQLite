@@ -179,6 +179,16 @@ impl BtreePage {
         max_payload_size_in(self.capacity()) as u16
     }
 
+
+    pub fn overflow_threshold(page_size: usize) -> usize {
+        Self::usable_space(page_size).saturating_mul(3).div_ceil(4) as usize
+    }
+
+
+    pub fn underflow_threshold(page_size: usize) -> usize {
+        Self::usable_space(page_size).div_ceil(4) as usize
+    }
+
     pub fn ideal_max_payload_size(page_size: usize, min_cells: usize) -> usize {
         debug_assert!(
             min_cells > 0,
@@ -281,15 +291,33 @@ impl BtreePage {
 
     /// Returns `true` if this page is underflow
     pub fn has_underflown(&self) -> bool {
-        self.metadata().free_space > (self.capacity() as u32).div_ceil(3)
+        self.metadata().free_space >= (self.capacity() as u32).saturating_mul(3).div_ceil(4)
     }
 
     /// Returns `true` if this page has overflown.
     /// We need at least 2 bytes for the last cell slot and 4 extra bytes to store the pointer to an overflow page
     pub fn has_overflown(&self) -> bool {
-        self.metadata().free_space as usize <= self.capacity().saturating_mul(2).div_ceil(3)
+        self.metadata().free_space as usize <= self.capacity().div_ceil(4)
     }
 
+    pub fn has_space_for(&self, additional_space: usize) -> bool {
+        let capacity = self.capacity();
+
+        let occupied_space =
+            capacity.saturating_sub(self.metadata().free_space as usize) + additional_space;
+
+        let max_allowed = capacity.saturating_mul(2).div_ceil(3);
+
+        occupied_space <= max_allowed
+    }
+
+    pub fn can_release_space(&self, removable_space: usize) -> bool {
+        let capacity = self.capacity();
+        let occupied_space =
+            capacity.saturating_sub(self.metadata().free_space as usize) - removable_space;
+        let max_allowed = capacity.saturating_mul(2).div_ceil(3);
+        occupied_space <= max_allowed
+    }
     pub fn is_leaf(&self) -> bool {
         !self.metadata().right_child.is_valid()
     }
@@ -351,7 +379,6 @@ impl BtreePage {
         );
         debug_assert!(offset + cell.total_size() as u32 <= self.capacity() as u32, "BUFFER OVERFLOW, might overwrite the header of the next page: capacity: {}, cell offset: {}, cell size: {}.!", self.capacity(), offset, cell.total_size());
 
-        dbg!(offset);
         debug_assert!(
             (offset as usize % CELL_ALIGNMENT as usize) == 0,
             "Offset is not aligned!"
@@ -432,11 +459,6 @@ impl BtreePage {
 
     /// Removes the cell pointed by the given slot `index`.
     pub fn remove(&mut self, index: Slot) -> Cell {
-        debug_assert!(
-            !self.has_overflown(),
-            "remove() does not handle overflow indexes"
-        );
-
         let len = self.num_slots();
 
         assert!(
@@ -615,7 +637,7 @@ impl MemPage {
     }
 
     /// Converts this page into another type.
-    fn reinit_as<T>(&mut self)
+    pub fn reinit_as<T>(&mut self)
     where
         BufferWithMetadata<T>: Into<MemPage>,
     {
@@ -875,16 +897,14 @@ mod btree_page_tests {
         assert_eq!(page.cell(Slot(0)).used(), b"first");
         assert_eq!(page.cell(Slot(1)).used(), b"second");
 
-        dbg!("TODOS LOS PUSH ESTAN ALINEADOS");
         // Test insert at specific position
         let cell3 = Cell::new(b"middle");
         page.insert(Slot(1), cell3.clone());
-        dbg!("PUSHEANDO LA CELDA EN EL MEDIO DE LA PAGINA SE MANTIENE ALINEADO");
+
         assert_eq!(page.num_slots(), 3);
         assert_eq!(page.cell(Slot(1)).used(), b"middle");
         assert_eq!(page.cell(Slot(2)).used(), b"second");
 
-        dbg!("ELIMINANDO CELDA");
         // Test remove
         let removed = page.remove(Slot(1));
         assert_eq!(removed.used(), b"middle");

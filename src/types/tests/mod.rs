@@ -179,7 +179,6 @@ test_serializable!(
         VarlenType::from_raw_unchecked(&[0, 0, 0, 1, 1], 1, 2),
         VarlenType::from_raw_unchecked("Hello".as_ref(), 1, 2),
         VarlenType::from_raw_unchecked("Goodnight".as_ref(), 1, 2)
-
     ]
 );
 

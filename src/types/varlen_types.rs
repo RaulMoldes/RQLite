@@ -85,10 +85,7 @@ impl<'a> VarlenType<'a> {
         len: usize,
     ) -> VarlenType<'a> {
         assert!(offset <= raw_data.len(), "offset out of range");
-        assert!(
-            offset + len <= raw_data.len(),
-            "offset + len out of"
-        );
+        assert!(offset + len <= raw_data.len(), "offset + len out of");
 
         VarlenType {
             raw_data,
@@ -307,16 +304,16 @@ impl<'a> From<&VarlenType<'a>> for String {
 }
 
 impl<'a> AsRef<[u8]> for VarlenType<'a> {
-       fn as_ref(&self) -> &[u8] {
-
+    fn as_ref(&self) -> &[u8] {
         let length_varint = VarInt(self.length() as i64);
         let length_bytes = length_varint.to_bytes();
 
         let expected_len = length_bytes.len() + self.length();
-        if self.raw_data.len() == expected_len && &self.raw_data[0..length_bytes.len()] == length_bytes.as_slice() {
+        if self.raw_data.len() == expected_len
+            && &self.raw_data[0..length_bytes.len()] == length_bytes.as_slice()
+        {
             self.raw_data
         } else {
-
             let mut buf = Vec::with_capacity(expected_len);
             buf.extend_from_slice(&length_bytes);
             buf.extend_from_slice(self.data());

@@ -104,10 +104,12 @@ impl PageCache {
             if let Some(frame) = self.frames.remove(&id) {
                 if frame.is_free() {
                     self.stats.frames_evicted += 1;
-
+                 
                     return Some(frame);
-                }
+                };
+
                 self.free_list.push_back(id);
+                self.frames.insert(id, frame);
             }
         }
         // }

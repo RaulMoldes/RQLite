@@ -45,7 +45,7 @@ enum Payload<'b> {
     Reference(&'b [u8]),
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 struct Child {
     pointer: PageId,
     slot: Slot,
@@ -122,7 +122,7 @@ impl LatchStackFrame {
     fn acquire_unchecked(
         &mut self,
         key: PageId,
-        value: MemFrame<MemPage>,
+        mut value: MemFrame<MemPage>,
         access_mode: NodeAccessMode,
     ) {
         match access_mode {
@@ -152,7 +152,7 @@ impl LatchStackFrame {
         self.traversal.pop()
     }
 
-    fn last(&mut self) -> Option<&PageId> {
+    fn last(&self) -> Option<&PageId> {
         self.traversal.last()
     }
 
@@ -202,11 +202,7 @@ where
 
     fn get_last_visited(&self) -> Option<PageId> {
         LATCH_STACK
-            .try_with(|l| {
-                l.try_borrow_mut()
-                    .ok()
-                    .and_then(|mut stack| stack.last().copied())
-            })
+            .try_with(|l| l.try_borrow().ok().and_then(|stack| stack.last().copied()))
             .unwrap_or(None)
     }
 
@@ -228,7 +224,31 @@ where
         }
     }
 
-    fn visit_node(&self, page_id: &PageId, access_mode: NodeAccessMode) -> std::io::Result<()> {
+    fn visit_node(&self, page_id: &PageId) -> std::io::Result<()> {
+        LATCH_STACK
+            .try_with(|l| {
+                if l.try_borrow_mut()
+                    .map(|mut stack| {
+                        stack.visit(*page_id);
+                    })
+                    .is_err()
+                {
+                    std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "Unable to access latch stack mutably",
+                    );
+                };
+            })
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Unable to access latch stack mutably",
+                )
+            })?;
+        Ok(())
+    }
+
+    fn acquire_latch(&self, page_id: &PageId, access_mode: NodeAccessMode) -> std::io::Result<()> {
         let latch_page = self.shared_pager.write().read_page::<BtreePage>(page_id)?;
 
         LATCH_STACK
@@ -236,7 +256,6 @@ where
                 if l.try_borrow_mut()
                     .map(|mut stack| {
                         stack.acquire(*page_id, latch_page, access_mode);
-                        stack.visit(*page_id);
                     })
                     .is_err()
                 {
@@ -308,12 +327,11 @@ where
         entry: &K,
         access_mode: NodeAccessMode,
     ) -> std::io::Result<SearchResult> {
-        let parent = self.get_last_visited();
-        self.visit_node(page_id, access_mode)?;
+        self.acquire_latch(page_id, access_mode)?;
 
         // As we are reading, we can safely release the latch on the parent.
-        if let Some(parent_node) = parent {
-            if matches!(access_mode, NodeAccessMode::Read) && parent.unwrap() != *page_id {
+        if let Some(parent_node) = self.get_last_visited() {
+            if matches!(access_mode, NodeAccessMode::Read) {
                 self.release_latch(&parent_node);
             };
         };
@@ -327,6 +345,8 @@ where
             return self.binary_search_key(page_id, entry);
         };
 
+        // We are on an interior node, therefore we have to visit it in order to keep track of ot in the traversal stack.
+        self.visit_node(page_id)?;
         let child = self.find_child(page_id, entry)?;
 
         match child {
@@ -427,6 +447,11 @@ where
         // Now get the btree page.
         self.with_latched_page(page_id, |p| {
             let btreepage: &BtreePage = p.try_into().unwrap();
+
+            if btreepage.metadata().right_child == *search_child {
+                return Ok(SearchResult::Found((*page_id, btreepage.max_slot_index())));
+            };
+
             let mut slot_count = Slot(btreepage.num_slots());
             let mut left = Slot(0);
             let mut right = slot_count;
@@ -521,18 +546,21 @@ where
                         })
                     }
 
-                    _ => unreachable!(),
-                }
+                    _ => Ok(()),
+                }?;
+
+                let status = self.check_node_status(&page_id)?;
+                if !matches!(status, NodeStatus::Balanced) {
+                    self.balance(&page_id)?;
+                };
+
+                Ok(())
             }
         }?;
 
-        let status = self.check_node_status(page_id)?;
-        if !matches!(status, NodeStatus::Balanced) {
-            self.balance(page_id)?;
-        };
-
         // Cleanup traversal here.
         self.clear_stack();
+
         Ok(())
     }
 
@@ -557,7 +585,13 @@ where
                     Ok(cell)
                 })?;
 
-                self.free_cell(old_cell)
+                self.free_cell(old_cell)?;
+
+                let status = self.check_node_status(&page_id)?;
+
+                if !matches!(status, NodeStatus::Balanced) {
+                    self.balance(&page_id)?;
+                };
             }
             SearchResult::NotFound(page_id) => {
                 let slot_result = self.find_slot(&page_id, &search_key)?;
@@ -574,6 +608,7 @@ where
                         let index = btreepage.max_slot_index();
 
                         btreepage.insert(index, cell);
+
                         Ok(())
                     }),
 
@@ -581,20 +616,22 @@ where
                         self.with_latched_page_mut(&page_id, |p| {
                             let btreepage: &mut BtreePage = p.try_into().unwrap();
                             btreepage.insert(index, cell);
+
                             Ok(())
                         })
                     }
 
-                    _ => unreachable!(),
-                }
+                    _ => Ok(()),
+                }?;
+
+                let status = self.check_node_status(&page_id)?;
+
+                if !matches!(status, NodeStatus::Balanced) {
+                    self.balance(&page_id)?;
+                };
             }
-        }?;
-
-        let status = self.check_node_status(page_id)?;
-
-        if !matches!(status, NodeStatus::Balanced) {
-            self.balance(page_id)?;
         };
+
         // Cleanup traversal here.
         self.clear_stack();
         Ok(())
@@ -621,16 +658,17 @@ where
                     Ok(cell)
                 })?;
 
-                self.free_cell(old_cell)
+                self.free_cell(old_cell)?;
+
+                let status = self.check_node_status(&page_id)?;
+
+                if !matches!(status, NodeStatus::Balanced) {
+                    self.balance(&page_id)?;
+                };
             }
-            SearchResult::NotFound(page_id) => Ok(()), // No OP if not found.
-        }?;
-
-        let status = self.check_node_status(page_id)?;
-
-        if !matches!(status, NodeStatus::Balanced) {
-            self.balance(page_id)?;
+            SearchResult::NotFound(page_id) => {} // No OP if not found.
         };
+
         // Cleanup traversal here.
         self.clear_stack();
         Ok(())
@@ -651,15 +689,17 @@ where
                     let cell = btreepage.remove(slot);
                     Ok(cell)
                 })?;
-                self.free_cell(cell)
+                self.free_cell(cell)?;
+
+                let status = self.check_node_status(&page_id)?;
+
+                if !matches!(status, NodeStatus::Balanced) {
+                    self.balance(&page_id)?;
+                };
+                Ok(())
             }
         }?;
 
-        let status = self.check_node_status(page_id)?;
-
-        if !matches!(status, NodeStatus::Balanced) {
-            self.balance(page_id)?;
-        };
         // Cleanup traversal here.
         self.clear_stack();
         Ok(())
@@ -673,7 +713,7 @@ where
         let mut overflow_page = cell.overflow_page();
 
         while overflow_page.is_valid() {
-            self.visit_node(&overflow_page, NodeAccessMode::Read)?;
+            self.acquire_latch(&overflow_page, NodeAccessMode::Read)?;
 
             let next = self.with_latched_page(&overflow_page, |p| {
                 let overflow: &OverflowPage = p.try_into().unwrap();
@@ -720,7 +760,7 @@ where
                 break;
             }
 
-            let frame = self
+            let mut frame = self
                 .shared_pager
                 .write()
                 .read_page::<OverflowPage>(&overflow_page_number)?;
@@ -811,15 +851,13 @@ where
 
     fn balance_deeper(&mut self) -> std::io::Result<()> {
         let new_left = self.shared_pager.write().alloc_page::<BtreePage>()?;
-        self.visit_node(&new_left, NodeAccessMode::Write)?;
+        self.acquire_latch(&new_left, NodeAccessMode::Write)?;
         let new_right = self.shared_pager.write().alloc_page::<BtreePage>()?;
-        self.visit_node(&new_right, NodeAccessMode::Write)?;
-        self.with_latched_page(&new_right, |p| {
-            let node: &BtreePage = p.try_into().unwrap();
-            assert!(node.is_empty());
-            assert!(node.num_slots() == 0);
+        self.acquire_latch(&new_right, NodeAccessMode::Write)?;
 
-            Ok(())
+        let old_right_child = self.with_latched_page(&self.root, |p| {
+            let node: &BtreePage = p.try_into().unwrap();
+            Ok(node.metadata().right_child)
         })?;
 
         // TODO: this could be optimized further if we found a way to only take as many cells as necessary instead of taking them all.
@@ -828,23 +866,7 @@ where
             Ok(node.drain(..).collect::<Vec<_>>())
         })?;
 
-        self.with_latched_page(&new_right, |p| {
-            let node: &BtreePage = p.try_into().unwrap();
-            assert!(node.is_empty());
-            assert!(node.num_slots() == 0);
-
-            Ok(())
-        })?;
-
         let (left_cells, right_cells) = self.split_cells(&mut cells)?;
-
-        self.with_latched_page(&new_right, |p| {
-            let node: &BtreePage = p.try_into().unwrap();
-            assert!(node.is_empty());
-            assert!(node.num_slots() == 0);
-
-            Ok(())
-        })?;
 
         let propagated_key = K::try_from(right_cells.first().unwrap().used())?;
 
@@ -853,24 +875,8 @@ where
             Ok(node.metadata().free_space as usize)
         })?;
 
-        self.with_latched_page(&new_right, |p| {
-            let node: &BtreePage = p.try_into().unwrap();
-            assert!(node.is_empty());
-            assert!(node.num_slots() == 0);
-
-            Ok(())
-        })?;
-
         let mut cell = self.build_cell(free_space, propagated_key.as_ref())?;
         cell.metadata_mut().left_child = new_left;
-
-        self.with_latched_page(&new_right, |p| {
-            let node: &BtreePage = p.try_into().unwrap();
-            assert!(node.is_empty());
-            assert!(node.num_slots() == 0);
-
-            Ok(())
-        })?;
 
         // Now we move part of the cells to one node and the other part to the other node.
         self.with_latched_page_mut(&self.root, |p| {
@@ -880,35 +886,26 @@ where
             Ok(())
         })?;
 
-        self.with_latched_page(&new_right, |p| {
-            let node: &BtreePage = p.try_into().unwrap();
-            assert!(node.is_empty());
-            assert!(node.num_slots() == 0);
-
-            Ok(())
-        })?;
-
         self.with_latched_page_mut(&new_left, |p| {
             let node: &mut BtreePage = p.try_into().unwrap();
             left_cells.iter().for_each(|cell| node.push(cell.clone()));
+
+            if let Some(first_cell) = right_cells.first() {
+                if old_right_child.is_valid() {
+
+                    let new_right_child = first_cell.metadata().left_child();
+                    node.metadata_mut().right_child = new_right_child;
+                };
+            };
 
             node.metadata_mut().next_sibling = new_right;
             Ok(())
         })?;
 
-        // Falla aqui.
-        self.with_latched_page(&new_right, |p| {
-            let node: &BtreePage = p.try_into().unwrap();
-            assert!(node.is_empty());
-            assert!(node.num_slots() == 0);
-            Ok(())
-        })?;
-
         self.with_latched_page_mut(&new_right, |p| {
             let node: &mut BtreePage = p.try_into().unwrap();
-            assert!(node.is_empty());
-            assert!(node.num_slots() == 0);
             right_cells.iter().for_each(|cell| node.push(cell.clone()));
+            node.metadata_mut().right_child = old_right_child;
             node.metadata_mut().previous_sibling = new_left;
             Ok(())
         })?;
@@ -936,7 +933,7 @@ where
             return self.balance_deeper();
         };
 
-        let parent_page = self.get_last_visited().ok_or(std::io::Error::new(
+        let parent_page = self.pop_last_visited().ok_or(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "Parent not found on traversal stack!",
         ))?;
@@ -952,10 +949,12 @@ where
         let mut siblings = self.load_siblings(page_id, &parent_page, self.num_siblings_per_side)?;
 
         let mut cells = std::collections::VecDeque::new();
-        let divider_idx = siblings[0].slot;
 
         // Make copies of cells in order.
         for (i, sibling) in siblings.iter().enumerate() {
+            if sibling.pointer != *page_id {
+                self.acquire_latch(&sibling.pointer, NodeAccessMode::Write)?;
+            };
             self.with_latched_page_mut(&sibling.pointer, |p| {
                 let node: &mut BtreePage = p.try_into().unwrap();
                 cells.extend(node.drain(..));
@@ -968,40 +967,54 @@ where
                     Ok(node.metadata().right_child)
                 })?;
 
-                self.with_latched_page_mut(&parent_page, |p| {
-                    let node: &mut BtreePage = p.try_into().unwrap();
-                    let mut divider = node.remove(divider_idx);
-                    divider.metadata_mut().left_child = right_child;
-                    cells.push_back(divider);
-                    Ok(())
-                })?;
+                if right_child.is_valid() {
+
+                    let divider_idx = siblings[i].slot;
+                    self.with_latched_page_mut(&parent_page, |p| {
+                        let node: &mut BtreePage = p.try_into().unwrap();
+
+                        if divider_idx.0 < node.num_slots() {
+                            let mut divider = node.remove(divider_idx);
+                            divider.metadata_mut().left_child = right_child;
+                            cells.push_back(divider);
+                        };
+                        Ok(())
+                    })?;
+                };
             }
         }
 
         let page_size = self.shared_pager.read().page_size() as usize;
-        let usable_space = BtreePage::usable_space(page_size) as u16;
+        let usable_space = BtreePage::overflow_threshold(page_size) as u16;
 
+        // These two arrays track the redistribution computation of the rebalancing algorithm.
         let mut total_size_in_each_page = vec![0];
         let mut number_of_cells_per_page = vec![0];
 
-        // Precompute left biased distribution.
         for cell in &cells {
-            let i = number_of_cells_per_page.len() - 1;
-            if total_size_in_each_page[i] + cell.storage_size() <= usable_space {
-                number_of_cells_per_page[i] += 1;
-                total_size_in_each_page[i] += cell.storage_size();
+            let bucket = number_of_cells_per_page.len() - 1;
+
+            // If we can add the cell, we push it to the current bucket.
+            if total_size_in_each_page[bucket] + cell.storage_size() <= usable_space {
+                number_of_cells_per_page[bucket] += 1;
+                total_size_in_each_page[bucket] += cell.storage_size();
             } else {
-                number_of_cells_per_page.push(0);
-                total_size_in_each_page.push(0);
-            }
+                // If not, we create a new bucket and append this cell to it.
+                number_of_cells_per_page.push(1);
+                total_size_in_each_page.push(cell.storage_size());
+            };
         }
 
         // Account for underflow towards the right.
+        // At least two pages are needed in order to be able to account for that underflow.
         if number_of_cells_per_page.len() >= 2 {
+            // The divider cell will be the first cell of the last page.
             let mut divider_cell = cells.len() - number_of_cells_per_page.last().unwrap() - 1;
 
+            // Iterate backwards, moving cells towards the right.
             for i in (1..=(total_size_in_each_page.len() - 1)).rev() {
-                while total_size_in_each_page[i] < usable_space / 2 {
+                while total_size_in_each_page[i] < BtreePage::underflow_threshold(page_size) as u16
+                {
                     number_of_cells_per_page[i] += 1;
                     total_size_in_each_page[i] += &cells[divider_cell].storage_size();
 
@@ -1013,12 +1026,14 @@ where
 
             // Second page has more data than the first one, make a little
             // adjustment to keep it left biased.
-            if total_size_in_each_page[0] < usable_space / 2 {
+            if total_size_in_each_page[0] < BtreePage::underflow_threshold(page_size) as u16 {
                 number_of_cells_per_page[0] += 1;
                 number_of_cells_per_page[1] -= 1;
-            }
-        }
+            };
+        };
 
+        // Take the last right child of the siblings chain.
+        // For interior pages this is required in order to unfuck the last pointer.
         let old_right_child = self.with_latched_page(&siblings.last().unwrap().pointer, |p| {
             let node: &BtreePage = p.try_into().unwrap();
             Ok(node.metadata().right_child)
@@ -1027,17 +1042,17 @@ where
         // Allocate missing pages.
         while siblings.len() < number_of_cells_per_page.len() {
             let new_page = self.shared_pager.write().alloc_page::<BtreePage>()?;
-
             let parent_index = siblings.last().unwrap().slot + 1usize;
+            self.acquire_latch(&new_page, NodeAccessMode::Write)?;
             siblings.push(Child::new(new_page, parent_index));
-        }
+        };
 
         // Free unused pages.
         while number_of_cells_per_page.len() < siblings.len() {
-            self.shared_pager
-                .write()
-                .dealloc_page::<BtreePage>(siblings.pop().unwrap().pointer)?;
-        }
+            let page = siblings.pop().unwrap().pointer;
+            self.release_latch(&page);
+            self.shared_pager.write().dealloc_page::<BtreePage>(page)?;
+        };
 
         // Put pages in ascending order to favor sequential IO where possible.
         std::collections::BinaryHeap::from_iter(
@@ -1047,7 +1062,7 @@ where
         .enumerate()
         .for_each(|(i, std::cmp::Reverse(page))| siblings[i].pointer = *page);
 
-        // Fix children pointers.
+        // Fix the last child pointer.
         let last_sibling = siblings[siblings.len() - 1];
 
         self.with_latched_page_mut(&last_sibling.pointer, |p| {
@@ -1056,19 +1071,17 @@ where
             Ok(())
         })?;
 
+        // Fix pointers in the parent in case we have allocated new pages.
         self.with_latched_page_mut(&parent_page, |p| {
             let node: &mut BtreePage = p.try_into().unwrap();
-            if divider_idx == node.num_slots() {
-                node.metadata_mut().right_child = last_sibling.pointer;
-            } else {
-                node.cell_mut(divider_idx).metadata_mut().left_child = last_sibling.pointer;
-            };
+            node.metadata_mut().right_child = last_sibling.pointer;
             Ok(())
         })?;
 
         // Begin redistribution.
         for (i, n) in number_of_cells_per_page.iter().enumerate() {
             let propagated = self.with_latched_page_mut(&siblings[i].pointer, |p| {
+                // Push all the cells to the child.
                 let node: &mut BtreePage = p.try_into().unwrap();
                 for _ in 0..*n {
                     node.push(cells.pop_front().unwrap());
@@ -1079,16 +1092,21 @@ where
                     node.metadata_mut().right_child = divider.metadata().left_child;
                     divider.metadata_mut().left_child = siblings[i].pointer;
                     return Ok(Some(divider));
-                }
+                };
 
                 Ok(None)
             })?;
 
+            // Fix the pointer in the parent and propagate.
             if let Some(divider) = propagated {
                 self.with_latched_page_mut(&parent_page, |p| {
                     let node: &mut BtreePage = p.try_into().unwrap();
-                    node.insert(siblings[i].slot, divider);
 
+                    if node.num_slots() > siblings[i].slot.0 {
+                        node.replace(siblings[i].slot, divider);
+                    } else {
+                        node.insert(siblings[i].slot, divider);
+                    };
                     Ok(())
                 })?;
             };
@@ -1104,10 +1122,7 @@ where
             let node: &BtreePage = p.try_into().unwrap();
             let last_slot = node.max_slot_index();
             if slot >= Slot(0) && slot <= last_slot {
-                Ok(Some(Child::new(
-                    node.cell(slot).metadata().left_child(),
-                    slot,
-                )))
+                Ok(Some(Child::new(node.child(slot), slot)))
             } else {
                 Ok(None)
             }
@@ -1119,7 +1134,7 @@ where
         &mut self,
         page: &PageId,
         parent: &PageId,
-        mut num_siblings_per_side: usize,
+        num_siblings_per_side: usize,
     ) -> std::io::Result<Vec<Child>> {
         let search_result = self.binary_search_child(parent, page)?;
 
@@ -1143,7 +1158,7 @@ where
                             Ok(node.metadata().previous_sibling)
                         })?;
 
-                        if let Some(child) = self.load_child(&left_page, slot - 1usize) {
+                        if let Some(child) = self.load_child(parent, slot - 1usize) {
                             children.push(child);
                         };
                     };
@@ -1156,7 +1171,7 @@ where
                             Ok(node.metadata().next_sibling)
                         })?;
 
-                        if let Some(child) = self.load_child(&right_page, slot + 1usize) {
+                        if let Some(child) = self.load_child(parent, slot + 1usize) {
                             children.push(child);
                         };
                     };
@@ -1164,23 +1179,32 @@ where
                     return Ok(children);
                 };
 
-                if (slot == 0 || slot == last_child) && num_siblings_per_side > 1 {
-                    num_siblings_per_side *= 2;
+                // Precompute the child distribution.
+                let (siblings_left, siblings_right) = if num_siblings_per_side as u16 > slot.0 {
+                    let total = num_siblings_per_side * 2;
+                    let num_left = slot.0 as usize;
+                    let num_right = total - slot.0 as usize;
+                    (num_left, num_right)
+                } else if (num_siblings_per_side as u16 + slot.0) > last_child.0 {
+                    let total = num_siblings_per_side * 2;
+                    let num_right = (last_child.0 - slot.0) as usize;
+                    let num_left = total - num_right;
+                    (num_left, num_right)
+                } else {
+                    (num_siblings_per_side, num_siblings_per_side)
                 };
 
-                let left = (1..=num_siblings_per_side)
-                    .map(|i| slot.saturating_sub(i as u16))
-                    .take_while(|&s| s > Slot(0))
-                    .filter_map(|slot_child| self.load_child(page, slot_child));
+                let first_slot = slot.saturating_sub(num_siblings_per_side as u16).0;
+                let last_slot = min(slot.0 + num_siblings_per_side as u16, last_child.into());
 
-                let center = std::iter::once(Child::new(*page, slot));
+                let mut siblings = Vec::with_capacity((last_slot - first_slot + 1) as usize);
 
-                let right = (1..=num_siblings_per_side)
-                    .map(|i| slot.clamped_add(i as u16, last_child.into()))
-                    .take_while(|&slot_child| slot_child <= last_child)
-                    .filter_map(|slot_child| self.load_child(page, slot_child));
+                for s in first_slot..=last_slot {
+                    if let Some(child) = self.load_child(parent, Slot(s)) {
+                        siblings.push(child);
+                    }
+                }
 
-                let siblings = left.chain(center).chain(right).collect();
                 Ok(siblings)
             }
             _ => Err(std::io::Error::new(
@@ -1192,6 +1216,7 @@ where
 
     fn check_node_status(&self, page_id: &PageId) -> std::io::Result<NodeStatus> {
         let is_root = self.is_root(page_id);
+
         let (is_underflow, is_overflow) = self.with_latched_page(page_id, |p| {
             let node: &BtreePage = p.try_into().unwrap();
             Ok((
@@ -1228,6 +1253,7 @@ where
         };
 
         let sibling_left = siblings.first().unwrap();
+
         let sibling_right = siblings.last().unwrap();
 
         match status {
@@ -1235,6 +1261,7 @@ where
             NodeStatus::Overflow => {
                 // Okey, we are on overflow state and our left sibling is valid. Then we can ask him if it has space for us.
                 if sibling_left.pointer != *page_id {
+                    self.acquire_latch(&sibling_left.pointer, NodeAccessMode::Write)?;
                     // The load siblings function can return invalid pointers. we need to check for the validity ourselves.
                     let first_cell_size = self.with_latched_page(page_id, |p| {
                         let node: &BtreePage = p.try_into().unwrap();
@@ -1244,12 +1271,7 @@ where
                     // Check if we can fit the cell there
                     let has_space = self.with_latched_page(&sibling_left.pointer, |p| {
                         let node: &BtreePage = p.try_into().unwrap();
-                        let capacity = node
-                            .capacity()
-                            .saturating_mul(2)
-                            .div_ceil(3)
-                            .saturating_sub(node.metadata().free_space as usize);
-                        Ok(first_cell_size as usize <= capacity)
+                        Ok(node.has_space_for(first_cell_size as usize))
                     })?;
 
                     // Fantastic! our friend has space for us.
@@ -1281,6 +1303,7 @@ where
 
                 let status = self.check_node_status(page_id)?;
                 if sibling_right.pointer != *page_id && matches!(status, NodeStatus::Overflow) {
+                    self.acquire_latch(&sibling_right.pointer, NodeAccessMode::Write)?;
                     let last_cell_size = self.with_latched_page(page_id, |p| {
                         let node: &BtreePage = p.try_into().unwrap();
                         let last_index = node.max_slot_index();
@@ -1290,13 +1313,7 @@ where
                     // Check if we can fit the cell there
                     let has_space = self.with_latched_page(&sibling_right.pointer, |p| {
                         let node: &BtreePage = p.try_into().unwrap();
-                        let capacity = node
-                            .capacity()
-                            .saturating_mul(2)
-                            .div_ceil(3)
-                            .saturating_sub(node.metadata().free_space as usize);
-
-                        Ok(last_cell_size as usize <= capacity)
+                        Ok(node.has_space_for(last_cell_size as usize))
                     })?;
 
                     // Fantastic! our friend has space for us.
@@ -1329,11 +1346,11 @@ where
             NodeStatus::Underflow => {
                 // Okey, we are on underflow state and our right sibling is valid. Then we can ask him if it has cells for us.
                 if sibling_right.pointer != *page_id {
+                    self.acquire_latch(&sibling_right.pointer, NodeAccessMode::Write)?;
                     let can_borrow = self.with_latched_page(&sibling_right.pointer, |p| {
                         let node: &BtreePage = p.try_into().unwrap();
                         let first_cell_size = node.cell(Slot(0)).storage_size() as usize;
-                        Ok((node.metadata().free_space as usize + first_cell_size)
-                            >= node.capacity().saturating_mul(1).div_ceil(3))
+                        Ok(node.can_release_space(first_cell_size))
                     })?;
 
                     // Fantastic! our friend has data for us.
@@ -1364,12 +1381,12 @@ where
 
                 let status = self.check_node_status(page_id)?;
                 if sibling_left.pointer != *page_id && matches!(status, NodeStatus::Overflow) {
+                    self.acquire_latch(&sibling_left.pointer, NodeAccessMode::Write)?;
                     let can_borrow = self.with_latched_page(&sibling_left.pointer, |p| {
                         let node: &BtreePage = p.try_into().unwrap();
                         let last_cell_size =
                             node.cell(node.max_slot_index()).storage_size() as usize;
-                        Ok((node.metadata().free_space as usize + last_cell_size)
-                            >= node.capacity().saturating_mul(1).div_ceil(3))
+                        Ok(node.can_release_space(last_cell_size))
                     })?;
 
                     // Fantastic! our friend has data for us.
@@ -1430,6 +1447,7 @@ where
         root: PageId,
         buf: &mut Vec<(PageId, BtreePage)>,
     ) -> std::io::Result<()> {
+
         let root_frame = self.shared_pager.write().read_page::<BtreePage>(&root)?;
 
         let children = root_frame
@@ -1496,219 +1514,7 @@ where
     }
 }
 
-struct BTreeValidator<'a, K>
-where
-    K: Ord + for<'b> TryFrom<&'b [u8], Error = std::io::Error> + AsRef<[u8]>,
-{
-    tree: &'a BPlusTree<K>,
-    visited_pages: std::collections::HashSet<PageId>,
-    dangling_pointers: Vec<PageId>,
-    violations: Vec<String>,
-}
-
-impl<'a, K> BTreeValidator<'a, K>
-where
-    K: Ord + std::fmt::Display + for<'b> TryFrom<&'b [u8], Error = std::io::Error> + AsRef<[u8]>,
-{
-    fn new(tree: &'a BPlusTree<K>) -> Self {
-        Self {
-            tree,
-            visited_pages: std::collections::HashSet::new(),
-            dangling_pointers: Vec::new(),
-            violations: Vec::new(),
-        }
-    }
-
-    /// Validates that there are no dangling pointers in the tree.
-    /// Returns true if any dangling pointer is found.
-    fn validate_no_dangling_pointers(&mut self, page_id: PageId) -> std::io::Result<bool> {
-        if !page_id.is_valid() {
-            return Ok(true);
-        }
-
-        if self.visited_pages.contains(&page_id) {
-            return Ok(true);
-        }
-
-        self.visited_pages.insert(page_id);
-
-        // The current approach to validate pointers relies on reading the page and testing if we can access it.
-        // If the read fails, a dangling pointer is found.
-        let page_result = self
-            .tree
-            .shared_pager
-            .write()
-            .read_page::<BtreePage>(&page_id);
-
-        match page_result {
-            Ok(frame) => {
-                // Validate its child recursively
-                frame
-                    .try_with_variant::<BtreePage, _, _, _>(|node| {
-                        if node.is_interior() {
-                            // If we are a leaf skip this part.
-                            // Validate right child.
-                            if node.metadata().right_child.is_valid()
-                                && self
-                                    .validate_no_dangling_pointers(node.metadata().right_child)
-                                    .is_err()
-                            {
-                                self.dangling_pointers.push(node.metadata().right_child);
-                            }
-
-                            // Validates all its left childs.
-                            for slot in 0..node.num_slots() {
-                                let cell = node.cell(Slot(slot));
-                                let left_child = cell.metadata().left_child;
-                                if left_child.is_valid()
-                                    && self.validate_no_dangling_pointers(left_child).is_err()
-                                {
-                                    self.dangling_pointers.push(left_child);
-                                }
-                            }
-                        };
-                    })
-                    .map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "Invalid pointer found. Will track it",
-                        )
-                    })?;
-
-                Ok(true)
-            }
-            Err(e) => {
-                self.dangling_pointers.push(page_id);
-                self.violations.push(format!(
-                    "Dangling pointer detected: PageId {page_id} - Error: {e}"
-                ));
-                Err(e)
-            }
-        }
-    }
-
-    /// Validates the invariant of key sorting
-    fn validate_key_ordering(&mut self, page_id: PageId) -> std::io::Result<bool> {
-        if !page_id.is_valid() {
-            return Ok(true);
-        }
-
-        let frame = self
-            .tree
-            .shared_pager
-            .write()
-            .read_page::<BtreePage>(&page_id)?;
-
-        frame
-            .try_with_variant::<BtreePage, _, _, _>(|node| {
-                let mut prev_key: Option<Vec<u8>> = None;
-
-                for slot in 0..node.num_slots() {
-                    let cell = node.cell(Slot(slot));
-                    let curr_key = cell.used().to_vec();
-
-                    if let Some(ref prev) = prev_key {
-                        if prev >= &curr_key {
-                            self.violations.push(format!(
-                                "Key ordering violation in page {page_id}: {prev:?} >= {curr_key:?} at slot {slot}"
-                            ));
-                            return Ok(false);
-                        }
-                    }
-                    prev_key = Some(curr_key);
-
-                    // Validate all the children recursively
-                    let left_child = cell.metadata().left_child;
-                    if left_child.is_valid() {
-                        self.validate_key_ordering(left_child)?;
-                    }
-                }
-
-                // Validate the right_child
-                if node.metadata().right_child.is_valid() {
-                    self.validate_key_ordering(node.metadata().right_child)?;
-                }
-
-                Ok(true)
-            })
-            .unwrap()
-    }
-
-    /// Valida que el número de keys esté dentro de los límites
-    fn validate_node_sizes(&mut self, page_id: PageId, is_root: bool) -> std::io::Result<bool> {
-        if !page_id.is_valid() {
-            return Ok(true);
-        }
-
-        let frame = self
-            .tree
-            .shared_pager
-            .write()
-            .read_page::<BtreePage>(&page_id)?;
-
-        frame
-            .try_with_variant::<BtreePage, _, _, _>(|node| {
-                let num_keys = node.num_slots();
-
-                // Root can have less children.
-                if !is_root && num_keys < self.tree.min_keys as u16 {
-                    self.violations.push(format!(
-                        "Node {} has {} keys, minimum is {} (underflow)",
-                        page_id, num_keys, self.tree.min_keys
-                    ));
-                }
-
-                // Recursively validate the children
-                for slot in 0..num_keys {
-                    let cell = node.cell(Slot(slot));
-                    let left_child = cell.metadata().left_child;
-                    if left_child.is_valid() {
-                        self.validate_node_sizes(left_child, false)?;
-                    }
-                }
-
-                if node.metadata().right_child.is_valid() {
-                    self.validate_node_sizes(node.metadata().right_child, false)?;
-                }
-
-                Ok(true)
-            })
-            .unwrap()
-    }
-
-    /// Executes all validations
-    fn validate_all(&mut self) -> std::io::Result<bool> {
-        let root = self.tree.get_root();
-
-        // Reset
-        self.visited_pages.clear();
-        self.dangling_pointers.clear();
-        self.violations.clear();
-
-        // Ejecutar validaciones
-        let no_dangling = self.validate_no_dangling_pointers(root).unwrap_or(false);
-        self.visited_pages.clear(); // Reset for next validation
-
-        let ordered = self.validate_key_ordering(root).unwrap_or(false);
-        let sized = self.validate_node_sizes(root, true).unwrap_or(false);
-
-        // Print violations if found
-        if !self.violations.is_empty() {
-            eprintln!("B+Tree Validation Failures:");
-            for violation in &self.violations {
-                eprintln!("  - {violation}");
-            }
-            if !self.dangling_pointers.is_empty() {
-                eprintln!("  Dangling pointers found: {:?}", self.dangling_pointers);
-            }
-        }
-
-        Ok(no_dangling && ordered && sized)
-    }
-}
-
 #[cfg(test)]
-#[cfg(not(miri))]
 mod bplus_tree_tests {
     use super::*;
     use crate::io::pager::Pager;
@@ -1765,13 +1571,13 @@ mod bplus_tree_tests {
         }
     }
 
-    fn create_test_btree(page_size: u32, min_keys: usize) -> io::Result<BPlusTree<TestKey>> {
+    fn create_test_btree(page_size: u32, capacity: usize, min_keys: usize) -> io::Result<BPlusTree<TestKey>> {
         let dir = tempdir()?;
         let path = dir.path().join("test_btree.db");
 
         let config = RQLiteConfig {
             page_size,
-            cache_size: Some(100),
+            cache_size: Some(capacity as u16),
             incremental_vacuum_mode: IncrementalVaccum::Disabled,
             read_write_version: ReadWriteVersion::Legacy,
             text_encoding: TextEncoding::Utf8,
@@ -1810,7 +1616,7 @@ mod bplus_tree_tests {
     #[test]
     #[serial]
     fn test_search_empty_tree() -> io::Result<()> {
-        let mut tree = create_test_btree(4096, 2)?;
+        let mut tree = create_test_btree(4096, 1, 2)?;
         let root = tree.get_root();
         let key = TestKey(42);
 
@@ -1825,7 +1631,7 @@ mod bplus_tree_tests {
     #[test]
     #[serial]
     fn test_single_key() -> io::Result<()> {
-        let mut btree = create_test_btree(4096, 2)?;
+        let mut btree = create_test_btree(4096, 1, 2)?;
 
         let root = btree.get_root();
 
@@ -1847,18 +1653,17 @@ mod bplus_tree_tests {
     #[test]
     #[serial]
     fn test_split_root() -> io::Result<()> {
-        let mut tree = create_test_btree(4096, 2)?;
+        let mut tree = create_test_btree(4096, 3, 2)?;
         let root = tree.get_root();
 
         // Insert enough keys to force root to split
-        for i in 0..30 {
+        for i in 0..50 {
             let key = TestKey(i * 10);
-
             tree.insert(&root, key.as_ref())?;
         }
         println!("{}", tree.json()?);
 
-        for i in 0..30 {
+        for i in 0..50 {
             let key = TestKey(i * 10);
 
             let retrieved = tree.search(&root, &key, NodeAccessMode::Read)?;
@@ -1875,35 +1680,25 @@ mod bplus_tree_tests {
 
     #[test]
     #[serial]
-    fn test_balance_shallower() -> io::Result<()> {
-        let mut tree = create_test_btree(4096, 2)?;
+    fn test_balance_multiple_inserts() -> io::Result<()> {
+        let mut tree = create_test_btree(4096, 10000, 3)?;
         let root = tree.get_root();
-
-        // Insert enough keys to force root to split
-        for i in 0..30 {
-            let key = TestKey(i * 10);
-
+        const N: i32 = 900000;
+        // Insert enough keys to force [balance_siblings] to be called
+        for i in 0..N {
+            let key = TestKey(i);
             tree.insert(&root, key.as_ref())?;
-        }
-        println!("{}", tree.json()?);
+        };
 
-        for i in 0..30 {
-            let key = TestKey(i * 10);
-
+        for i in 0..N {
+            let key = TestKey(i);
             let retrieved = tree.search(&root, &key, NodeAccessMode::Read)?;
             // Search does not release the latch on the node so we have to do it ourselves.
             let cell = tree.get_cell_from_result(retrieved);
             tree.clear_stack();
             assert!(cell.is_some());
             assert_eq!(cell.unwrap().used(), key.as_ref());
-        }
-
-        println!("{}", tree.json()?);
-
-        for i in 0..10 {
-            let key = TestKey(i * 10);
-            tree.remove(&root, &key)?;
-        }
+        };
 
         Ok(())
     }

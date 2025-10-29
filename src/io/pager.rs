@@ -127,14 +127,28 @@ impl Pager {
     where
         MemPage: From<P>,
     {
+        let free_page = self.page_zero.metadata().first_free_page;
+        if free_page.is_valid() {
+            let mut page = self.read_page::<OverflowPage>(&free_page)?;
+            let next = page
+                .try_with_variant::<OverflowPage, _, _, _>(|op| op.metadata().next)
+                .unwrap();
+            self.page_zero.metadata_mut().first_free_page = next;
+
+            page.write()
+                .reinit_as::<crate::storage::page::BtreePageHeader>();
+            return Ok(free_page);
+        };
+
         let page = P::alloc(self.page_size());
         let id = page.page_number();
-        let mem_page = MemFrame::new(MemPage::from(page));
-        if let Some(evicted) = self.cache.insert(id, mem_page) {
+        let mut mem_page = MemFrame::new(MemPage::from(page));
+        mem_page.mark_dirty();
+        if let Some(mut evicted) = self.cache.insert(id, mem_page) {
             if evicted.is_dirty() {
                 let id = evicted.read().page_number();
                 self.write_block_unchecked(&id, evicted.write().as_mut())?;
-            }
+            };
         };
         Ok(id)
     }
@@ -176,7 +190,7 @@ impl Pager {
 
         if last_free_page != PAGE_ZERO {
             // Read the free page and set the next page.
-            let previous_page = self.read_page::<OverflowPage>(&last_free_page)?;
+            let mut previous_page = self.read_page::<OverflowPage>(&last_free_page)?;
             // The previous page should be a free page.
             // SAFETY: It should be safe to unwrap the result as we have already read the page as a free page.
 
@@ -187,7 +201,7 @@ impl Pager {
                 .unwrap(); // This should not panic as we have already read the page as a free page.
         };
 
-        let mem_page = self.read_page::<P>(&id)?;
+        let mut mem_page = self.read_page::<P>(&id)?;
         // As the page should be currently empty, we can mark it as free.
         // We need to append it to the free list, and that would be everything.
         mem_page.write().dealloc();
@@ -236,7 +250,6 @@ unsafe impl Send for Pager {}
 unsafe impl Sync for Pager {}
 
 #[cfg(test)]
-#[cfg(not(miri))]
 mod tests {
     use crate::storage::page::BtreePage;
 
@@ -363,14 +376,35 @@ mod tests {
 
         // Assigns more pages than those that would fit in the cache
         let mut page_ids = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..2 {
             let id = pager.alloc_page::<BtreePage>()?;
+
             page_ids.push(id);
         }
+        {
+            // Write some content on page 1.
+            let mut page1 = pager.read_page::<BtreePage>(&page_ids[0])?;
+       
+            page1
+                .try_with_variant_mut::<BtreePage, _, _, _>(|p| {
+                    p.metadata_mut().right_child = PageId::from(311);
+                })
+                .unwrap();
+        };
+
+        // Allocate a new page.
+        let id = pager.alloc_page::<BtreePage>()?;
+        page_ids.push(id);
 
         // First page should have been expelled.
         assert!(pager.cache.get(&page_ids[0]).is_none());
+        let read_page = pager.read_page::<BtreePage>(&page_ids[0])?;
 
+        read_page
+            .try_with_variant::<BtreePage, _, _, _>(|p| {
+                assert_eq!(p.metadata().right_child, PageId::from(311));
+            })
+            .unwrap();
         Ok(())
     }
 
