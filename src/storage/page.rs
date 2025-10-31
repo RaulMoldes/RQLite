@@ -179,11 +179,9 @@ impl BtreePage {
         max_payload_size_in(self.capacity()) as u16
     }
 
-
     pub fn overflow_threshold(page_size: usize) -> usize {
         Self::usable_space(page_size).saturating_mul(3).div_ceil(4) as usize
     }
-
 
     pub fn underflow_threshold(page_size: usize) -> usize {
         Self::usable_space(page_size).div_ceil(4) as usize
@@ -291,32 +289,31 @@ impl BtreePage {
 
     /// Returns `true` if this page is underflow
     pub fn has_underflown(&self) -> bool {
-        self.metadata().free_space >= (self.capacity() as u32).saturating_mul(3).div_ceil(4)
+        !self.can_release_space(SLOT_SIZE)
     }
 
     /// Returns `true` if this page has overflown.
     /// We need at least 2 bytes for the last cell slot and 4 extra bytes to store the pointer to an overflow page
     pub fn has_overflown(&self) -> bool {
-        self.metadata().free_space as usize <= self.capacity().div_ceil(4)
+        !self.has_space_for(SLOT_SIZE + CELL_HEADER_SIZE + std::mem::size_of::<PageId>())
     }
 
     pub fn has_space_for(&self, additional_space: usize) -> bool {
-        let capacity = self.capacity();
-
-        let occupied_space =
-            capacity.saturating_sub(self.metadata().free_space as usize) + additional_space;
-
-        let max_allowed = capacity.saturating_mul(2).div_ceil(3);
-
+        let occupied_space = self
+            .size()
+            .saturating_sub(self.metadata().free_space as usize)
+            + additional_space;
+        let max_allowed = Self::overflow_threshold(self.size());
         occupied_space <= max_allowed
     }
 
     pub fn can_release_space(&self, removable_space: usize) -> bool {
-        let capacity = self.capacity();
-        let occupied_space =
-            capacity.saturating_sub(self.metadata().free_space as usize) - removable_space;
-        let max_allowed = capacity.saturating_mul(2).div_ceil(3);
-        occupied_space <= max_allowed
+        let occupied_space = self
+            .size()
+            .saturating_sub(self.metadata().free_space as usize)
+            - removable_space;
+        let min_allowed = Self::underflow_threshold(self.size());
+        occupied_space >= min_allowed
     }
     pub fn is_leaf(&self) -> bool {
         !self.metadata().right_child.is_valid()
@@ -766,7 +763,7 @@ impl<'p> TryFrom<&'p Latch<MemPage>> for &'p OverflowPage {
     fn try_from(latch: &'p Latch<MemPage>) -> Result<Self, Self::Error> {
         match latch.deref() {
             MemPage::Overflow(page) => Ok(page),
-            other => Err(format!("attempt to convert {other:?} into BtreePage")),
+            other => Err("attempt to convert  into BtreePage".to_string()),
         }
     }
 }
@@ -777,7 +774,7 @@ impl<'p> TryFrom<&'p mut Latch<MemPage>> for &'p mut OverflowPage {
     fn try_from(latch: &'p mut Latch<MemPage>) -> Result<Self, Self::Error> {
         match latch.deref_mut() {
             MemPage::Overflow(page) => Ok(page),
-            other => Err(format!("attempt to convert {other:?} into BtreePage")),
+            other => Err("attempt to convert into BtreePage".to_string()),
         }
     }
 }

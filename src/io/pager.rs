@@ -128,12 +128,18 @@ impl Pager {
         MemPage: From<P>,
     {
         let free_page = self.page_zero.metadata().first_free_page;
+        let last_free = self.page_zero.metadata().last_free_page;
         if free_page.is_valid() {
             let mut page = self.read_page::<OverflowPage>(&free_page)?;
             let next = page
                 .try_with_variant::<OverflowPage, _, _, _>(|op| op.metadata().next)
                 .unwrap();
+
             self.page_zero.metadata_mut().first_free_page = next;
+
+            if last_free == free_page {
+                self.page_zero.metadata_mut().last_free_page = PAGE_ZERO;
+            };
 
             page.write()
                 .reinit_as::<crate::storage::page::BtreePageHeader>();
@@ -172,8 +178,15 @@ impl Pager {
                 format!("Failed to convert page from bytes: {msg}"),
             )
         })?;
+        let mem_page = MemFrame::new(MemPage::from(page));
+        if let Some(mut evicted) = self.cache.insert(*id, mem_page) {
+            if evicted.is_dirty() {
+                let id = evicted.read().page_number();
+                self.write_block_unchecked(&id, evicted.write().as_mut())?;
+            };
+        };
 
-        Ok(MemFrame::new(MemPage::from(page)))
+        Ok(self.cache.get(id).unwrap())
     }
 
     pub fn dealloc_page<P: Page>(&mut self, id: PageId) -> std::io::Result<()>
@@ -184,11 +197,11 @@ impl Pager {
         let first_free_page = self.page_zero.metadata().first_free_page;
 
         // Set the first free page in the header
-        if first_free_page == PAGE_ZERO {
+        if !first_free_page.is_valid() {
             self.page_zero.metadata_mut().first_free_page = id;
         };
 
-        if last_free_page != PAGE_ZERO {
+        if last_free_page.is_valid() {
             // Read the free page and set the next page.
             let mut previous_page = self.read_page::<OverflowPage>(&last_free_page)?;
             // The previous page should be a free page.
@@ -384,7 +397,7 @@ mod tests {
         {
             // Write some content on page 1.
             let mut page1 = pager.read_page::<BtreePage>(&page_ids[0])?;
-       
+
             page1
                 .try_with_variant_mut::<BtreePage, _, _, _>(|p| {
                     p.metadata_mut().right_child = PageId::from(311);
