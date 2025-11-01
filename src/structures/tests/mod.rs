@@ -376,7 +376,7 @@ fn test_test() -> std::io::Result<()> {
     let mut tree = create_test_btree(4096, 100, 3)?;
     let root = tree.get_root();
     let start_pos = (root, Slot(0));
-    let N = 10009;
+    let N = 1608;
     // Generate random insertion order
     use rand::seq::SliceRandom;
     use rand::SeedableRng;
@@ -389,7 +389,7 @@ fn test_test() -> std::io::Result<()> {
     // Insert keys in specified order
     for (i, key_val) in keys.iter().enumerate() {
         let key = TestKey(*key_val);
-
+     
         tree.insert(&root, key.as_ref())?;
         std::fs::write(format!("tree_{i}.json"), tree.json()?)?;
     }

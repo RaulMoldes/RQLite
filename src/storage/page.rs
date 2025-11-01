@@ -48,7 +48,7 @@ sized! {
         pub previous_sibling: PageId,
         reserved: [u8; 24]
     };
-    const BTREE_PAGE_HEADER_SIZE
+    pub const BTREE_PAGE_HEADER_SIZE
 }
 
 sized! {
@@ -63,7 +63,7 @@ sized! {
     pub const OVERFLOW_HEADER_SIZE
 }
 
-impl OverflowPageHeader {
+impl Header for OverflowPageHeader {
     fn init(size: u32) -> Self {
         let effective_size = size.next_multiple_of(PAGE_ALIGNMENT);
 
@@ -120,7 +120,7 @@ impl DatabaseHeader {
     }
 }
 
-impl BtreePageHeader {
+impl Header for BtreePageHeader {
     fn init(size: u32) -> Self {
         let aligned_size = size.next_multiple_of(PAGE_ALIGNMENT);
 
@@ -139,6 +139,8 @@ impl BtreePageHeader {
         }
     }
 
+}
+impl BtreePageHeader {
     /// Setter for the page_lsn
     pub(crate) fn set_lsn(&mut self, new_lsn: LogId) {
         self.page_lsn = new_lsn
@@ -624,6 +626,12 @@ where
     fn page_number(&self) -> PageId;
 }
 
+pub trait Header {
+    fn init(size: u32) -> Self;
+}
+
+
+
 impl MemPage {
     pub(crate) fn page_number(&self) -> PageId {
         match self {
@@ -636,6 +644,7 @@ impl MemPage {
     /// Converts this page into another type.
     pub fn reinit_as<T>(&mut self)
     where
+        T: Header,
         BufferWithMetadata<T>: Into<MemPage>,
     {
         // SAFETY: We basically move out of self temporarily to create the new
@@ -645,12 +654,17 @@ impl MemPage {
         unsafe {
             let mem_page = ptr::from_mut(self);
 
-            let converted: BufferWithMetadata<_> = match mem_page.read() {
+            let mut converted: BufferWithMetadata<_> = match mem_page.read() {
                 Self::Zero(zero) => panic!("Attempted to reinitialize page zero. This is not valid. Page Zero is a reserved page to store the database header!"),
                 Self::Overflow(overflow) => overflow.cast(),
                 Self::Btree(page) => page.cast()
             };
 
+            let size = converted.size();
+            let header = T::init(size as u32);
+            *converted.metadata_mut() = header;
+            converted.set_len(size);
+            converted.data_mut().fill(0);
             mem_page.write(converted.into())
         }
     }
@@ -660,6 +674,8 @@ impl MemPage {
     // It is the responsability of the database header to distinguish between pages that are used for the free list and pages that are actual overflow pages.
     pub fn dealloc(&mut self) {
         self.reinit_as::<OverflowPageHeader>();
+
+
     }
 
     pub fn is_free_page(&self) -> bool {

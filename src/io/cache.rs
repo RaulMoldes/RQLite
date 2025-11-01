@@ -89,7 +89,7 @@ impl PageCache {
         evicted
     }
 
-    fn evict(&mut self, frame: Option<PageId>) -> Option<MemFrame<MemPage>> {
+    pub fn evict(&mut self, frame: Option<PageId>) -> Option<MemFrame<MemPage>> {
         if let Some(frame_id) = frame {
             if let Some(frame_data) = self.frames.remove(&frame_id) {
                 self.stats.frames_evicted += 1;

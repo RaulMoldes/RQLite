@@ -1,10 +1,12 @@
 use crate::io::frames::MemFrame;
 use crate::io::pager::SharedPager;
-use crate::storage::page::{BtreePage, MemPage, OverflowPage};
+use crate::storage::page::{BtreePage, BtreePageHeader, BTREE_PAGE_HEADER_SIZE,  MemPage, OverflowPage, OverflowPageHeader};
 use crate::storage::{
     cell::{Cell, Slot},
     latches::Latch,
 };
+
+
 use std::cmp::min;
 use std::cmp::Ordering;
 
@@ -172,7 +174,7 @@ where
     K: Ord + std::fmt::Display + for<'a> TryFrom<&'a [u8], Error = std::io::Error> + AsRef<[u8]>,
 {
     pub(crate) fn new(pager: SharedPager, min_keys: usize, num_siblings_per_side: usize) -> Self {
-        let root = pager.write().alloc_page::<BtreePage>().unwrap();
+        let root = pager.write().alloc_page::<BtreePage, BtreePageHeader>().unwrap();
 
         Self {
             shared_pager: pager,
@@ -736,7 +738,7 @@ where
 
         // Store payload in chunks, link overflow pages and return the cell.
         let first_cell_payload_size = max_payload_size - std::mem::size_of::<PageId>();
-        let mut overflow_page_number = self.shared_pager.write().alloc_page::<OverflowPage>()?;
+        let mut overflow_page_number = self.shared_pager.write().alloc_page::<OverflowPage, OverflowPageHeader>()?;
 
         let cell = Cell::new_overflow(&payload[..first_cell_payload_size], overflow_page_number);
 
@@ -766,7 +768,7 @@ where
                 })
                 .unwrap();
 
-            let next_overflow_page = self.shared_pager.write().alloc_page::<OverflowPage>()?;
+            let next_overflow_page = self.shared_pager.write().alloc_page::<OverflowPage, OverflowPageHeader>()?;
 
             frame
                 .try_with_variant_mut::<OverflowPage, _, _, _>(|overflow_page| {
@@ -843,9 +845,9 @@ where
     }
 
     fn balance_deeper(&mut self) -> std::io::Result<()> {
-        let new_left = self.shared_pager.write().alloc_page::<BtreePage>()?;
+        let new_left = self.shared_pager.write().alloc_page::<BtreePage, BtreePageHeader>()?;
         self.acquire_latch(&new_left, NodeAccessMode::Write)?;
-        let new_right = self.shared_pager.write().alloc_page::<BtreePage>()?;
+        let new_right = self.shared_pager.write().alloc_page::<BtreePage, BtreePageHeader>()?;
         self.acquire_latch(&new_right, NodeAccessMode::Write)?;
 
         let old_right_child = self.with_latched_page(&self.root, |p| {
@@ -948,10 +950,6 @@ where
         let mut siblings =
             self.load_siblings(&page_id, &parent_position, self.num_siblings_per_side)?;
 
-        dbg!(&siblings);
-        if siblings.len() == 3 {
-            dbg!(&siblings);
-        };
 
         // Load the frontiers in case it is necessary.
         let last_non_allocated_sibling_slot = siblings.iter().last().unwrap().slot;
@@ -964,7 +962,7 @@ where
             None
         };
 
-        dbg!(left_frontier.is_some());
+
 
         let right_frontier = if last_non_allocated_sibling_slot < last_parent_slot {
             let child_slot = last_non_allocated_sibling_slot + 1usize;
@@ -973,8 +971,7 @@ where
             None
         };
 
-        dbg!(right_frontier.is_some());
-
+        let page_size = self.shared_pager.read().page_size();
         let mut cells = std::collections::VecDeque::new();
         let slot_to_remove = siblings[0].slot;
         // Make copies of cells in order.
@@ -983,6 +980,7 @@ where
             self.with_latched_page_mut(&sibling.pointer, |p| {
                 let node: &mut BtreePage = p.try_into().unwrap();
                 cells.extend(node.drain(..));
+                node.metadata_mut().free_space_ptr = page_size.saturating_sub(BTREE_PAGE_HEADER_SIZE as u32);
                 Ok(())
             })?;
 
@@ -996,8 +994,8 @@ where
             })?;
         }
 
-        let page_size = self.shared_pager.read().page_size() as usize;
-        let usable_space = BtreePage::overflow_threshold(page_size) as u16;
+
+        let usable_space = BtreePage::overflow_threshold(page_size as usize) as u16;
 
         // These two arrays track the redistribution computation of the rebalancing algorithm.
         let mut total_size_in_each_page = vec![0];
@@ -1025,7 +1023,7 @@ where
 
             // Iterate backwards, moving cells towards the right.
             for i in (1..=(total_size_in_each_page.len() - 1)).rev() {
-                while total_size_in_each_page[i] < BtreePage::underflow_threshold(page_size) as u16
+                while total_size_in_each_page[i] < BtreePage::underflow_threshold(page_size as usize) as u16
                 {
                     number_of_cells_per_page[i] += 1;
                     total_size_in_each_page[i] += &cells[divider_cell].storage_size();
@@ -1038,7 +1036,7 @@ where
 
             // Second page has more data than the first one, make a little
             // adjustment to keep it left biased.
-            if total_size_in_each_page[0] < BtreePage::underflow_threshold(page_size) as u16 {
+            if total_size_in_each_page[0] < BtreePage::underflow_threshold(page_size as usize) as u16 {
                 number_of_cells_per_page[0] += 1;
                 number_of_cells_per_page[1] -= 1;
             };
@@ -1055,19 +1053,38 @@ where
         // Allocate missing pages.
         while siblings.len() < number_of_cells_per_page.len() {
             let parent_index = siblings.iter().last().unwrap().slot + 1usize;
-            let new_page = self.shared_pager.write().alloc_page::<BtreePage>()?;
+            let new_page = self.shared_pager.write().alloc_page::<BtreePage, BtreePageHeader>()?;
             self.acquire_latch(&new_page, NodeAccessMode::Write)?;
+            self.with_latched_page(&new_page, |p| {
+                let node: &BtreePage = p.try_into().unwrap();
+                debug_assert!(node.metadata().num_slots == 0, "Recently allocated page: {new_page} is not empty");
+
+                dbg!(node.data());
+                Ok(())
+            })?;
             siblings.push_back(Child::new(new_page, parent_index));
-        }
+        };
 
         // Free unused pages.
         while number_of_cells_per_page.len() < siblings.len() {
             let sibling = siblings.pop_back().unwrap();
             let slot = sibling.slot;
             let page = sibling.pointer;
+
+            self.with_latched_page(&page, |p| {
+                let node: &BtreePage = p.try_into().unwrap();
+                debug_assert!(node.metadata().num_slots == 0, "About to deallocated page: {page} is not empty");
+                Ok(())
+            })?;
+
+
+            dbg!("DEALOCANDO PAGINA ");
+            dbg!(page);
+
             self.release_latch(&page);
             self.shared_pager.write().dealloc_page::<BtreePage>(page)?;
-        }
+
+        };
 
         // Put pages in ascending order to favor sequential IO where possible.
         std::collections::BinaryHeap::from_iter(
@@ -1099,6 +1116,7 @@ where
         // Begin redistribution.
         for (i, n) in number_of_cells_per_page.iter().enumerate() {
             let propagated = self.with_latched_page_mut(&siblings[i].pointer, |p| {
+
                 // Push all the cells to the child.
                 let node: &mut BtreePage = p.try_into().unwrap();
                 for _ in 0..*n {
