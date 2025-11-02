@@ -167,8 +167,6 @@ impl<M> BufferWithMetadata<M> {
             mem::size_of::<T>(),
         );
 
-
-
         // std::mem::forget does not actually run the destructor of [`BufferWIthMetadata`].
         // Instead, it will create (intentionally) a memory leak that will allow us to create a page of a new type.
         mem::forget(self);
@@ -181,7 +179,6 @@ impl<M> BufferWithMetadata<M> {
                 BufferWithMetadata::<T>::usable_space(size as usize) as usize,
             )
         };
-
 
         BufferWithMetadata {
             metadata,

@@ -6,6 +6,8 @@ use crate::structures::bplustree::{BPlusTree, NodeAccessMode, SearchResult};
 use crate::{
     delete_test, insert_tests, IncrementalVaccum, RQLiteConfig, ReadWriteVersion, TextEncoding,
 };
+use rand::{RngCore, SeedableRng};
+use rand_chacha::ChaCha20Rng;
 use serial_test::serial;
 use std::io;
 use tempfile::tempdir;
@@ -130,6 +132,44 @@ fn create_test_btree(
     Ok(BPlusTree::new(SharedPager::from(pager), min_keys, 2))
 }
 
+pub fn gen_random_bytes(size: usize, seed: u64) -> Vec<u8> {
+    let mut v = vec![0u8; size];
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    rng.fill_bytes(&mut v);
+    v
+}
+
+pub fn gen_repeating_pattern(pattern: &[u8], size: usize) -> Vec<u8> {
+    let mut v = Vec::with_capacity(size);
+    while v.len() < size {
+        let take = std::cmp::min(pattern.len(), size - v.len());
+        v.extend_from_slice(&pattern[..take]);
+    }
+    v
+}
+
+pub fn gen_ovf_blob(page_size: usize, pages: usize, seed: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(page_size * pages);
+    let header = format!(r#"{{"type":"overflow_test","pages":{pages},"page_size":{page_size}}}\n"#);
+    out.extend_from_slice(header.as_bytes());
+
+    let pattern = b"In the quiet field of night,\nDreams walk slow beneath the light.\n";
+    let chunk_repeat = gen_repeating_pattern(pattern, page_size / 2);
+
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    for i in 0..pages {
+        out.extend_from_slice(&chunk_repeat);
+
+        let mut rnd = vec![0u8; page_size / 2];
+        rng.fill_bytes(&mut rnd);
+        out.extend_from_slice(&rnd);
+
+        let meta = format!("\n--SEG {i}--\n");
+        out.extend_from_slice(meta.as_bytes());
+    }
+    out
+}
+
 #[test]
 fn validate_test_key() {
     let key = TestKey(9);
@@ -182,20 +222,20 @@ fn test_insert_remove_single_key() -> io::Result<()> {
     // Insert a key-value pair
     let key = TestKey(42);
 
-    btree.insert(&root, key.as_ref())?;
+    btree.insert(root, key.as_ref())?;
 
     // Retrieve it back
     let retrieved = btree.search(&start_pos, &key, NodeAccessMode::Read)?;
     assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
-    let cell = btree.get_cell_from_result(retrieved);
+    let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_some());
-    assert_eq!(cell.unwrap().used(), key.as_ref());
+    assert_eq!(cell.unwrap(), key.as_ref());
     btree.clear_stack();
-    btree.remove(&root, &key)?;
+    btree.remove(root, &key)?;
 
     let retrieved = btree.search(&start_pos, &key, NodeAccessMode::Read)?;
     assert!(matches!(retrieved, SearchResult::NotFound(_)));
-    let cell = btree.get_cell_from_result(retrieved);
+    let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_none());
 
     Ok(())
@@ -208,8 +248,8 @@ fn test_insert_duplicates() -> io::Result<()> {
     let root = btree.get_root();
     // Insert a key-value pair
     let key = TestKey(42);
-    btree.insert(&root, key.as_ref())?;
-    let result = btree.insert(&root, key.as_ref());
+    btree.insert(root, key.as_ref())?;
+    let result = btree.insert(root, key.as_ref());
     assert!(result.is_err()); // Should fail
     Ok(())
 }
@@ -228,24 +268,24 @@ fn test_update_single_key() -> io::Result<()> {
 
     let root = btree.get_root();
     let start_pos = (root, Slot(0));
-    btree.insert(&root, kv.as_ref())?;
+    btree.insert(root, kv.as_ref())?;
 
     let retrieved = btree.search(&start_pos, &key, NodeAccessMode::Read)?;
 
     assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
-    let cell = btree.get_cell_from_result(retrieved);
+    let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_some());
-    assert_eq!(cell.unwrap().used(), kv.as_ref());
+    assert_eq!(cell.unwrap(), kv.as_ref());
     btree.clear_stack();
 
-    btree.update(&root, kv2.as_ref())?;
+    btree.update(root, kv2.as_ref())?;
 
     let retrieved = btree.search(&start_pos, &key, NodeAccessMode::Read)?;
 
     assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
-    let cell = btree.get_cell_from_result(retrieved);
+    let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_some());
-    assert_eq!(cell.unwrap().used(), kv2.as_ref());
+    assert_eq!(cell.unwrap(), kv2.as_ref());
     btree.clear_stack();
 
     Ok(())
@@ -270,36 +310,95 @@ fn test_upsert_single_key() -> io::Result<()> {
 
     let root = btree.get_root();
     let start_pos = (root, Slot(0));
-    btree.insert(&root, kv.as_ref())?;
+    btree.insert(root, kv.as_ref())?;
 
     let retrieved = btree.search(&start_pos, &key, NodeAccessMode::Read)?;
 
     assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
-    let cell = btree.get_cell_from_result(retrieved);
+    let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_some());
-    assert_eq!(cell.unwrap().used(), kv.as_ref());
+    assert_eq!(cell.unwrap(), kv.as_ref());
     btree.clear_stack();
 
-    btree.upsert(&root, kv2.as_ref())?;
+    btree.upsert(root, kv2.as_ref())?;
 
     let retrieved = btree.search(&start_pos, &key, NodeAccessMode::Read)?;
 
     assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
-    let cell = btree.get_cell_from_result(retrieved);
+    let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_some());
-    assert_eq!(cell.unwrap().used(), kv2.as_ref());
+    assert_eq!(cell.unwrap(), kv2.as_ref());
     btree.clear_stack();
 
-    btree.upsert(&root, kv3.as_ref())?;
+    btree.upsert(root, kv3.as_ref())?;
 
     let retrieved = btree.search(&start_pos, &key2, NodeAccessMode::Read)?;
 
     assert!(matches!(retrieved, SearchResult::Found((root, Slot(1)))));
-    let cell = btree.get_cell_from_result(retrieved);
+    let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_some());
-    assert_eq!(cell.unwrap().used(), kv3.as_ref());
+    assert_eq!(cell.unwrap(), kv3.as_ref());
     btree.clear_stack();
 
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn test_variable_length_keys() -> io::Result<()> {
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn test_overflow_chain() -> io::Result<()> {
+    let mut tree = create_test_btree(4096, 3, 2)?;
+    let root = tree.get_root();
+    let start_pos = (root, Slot(0));
+    let key = TestKey(1);
+    let data = gen_ovf_blob(4096, 20, 42);
+    let kv = TestKeyValuePair::new(&key, &data);
+
+    tree.insert(root, kv.as_ref())?;
+    let retrieved = tree.search(&start_pos, &key, NodeAccessMode::Read)?;
+
+    assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
+    let cell = tree.get_content_from_result(retrieved);
+    assert!(cell.is_some());
+    let cell = cell.unwrap();
+    assert_eq!(cell.len(), kv.as_ref().len());
+    assert_eq!(cell, kv.as_ref());
+    tree.clear_stack();
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn test_multiple_overflow_chain() -> io::Result<()> {
+    let mut tree = create_test_btree(4096, 3, 2)?;
+    let root = tree.get_root();
+    let start_pos = (root, Slot(0));
+
+    // Insert some data first:
+    for i in 0..40 {
+        let small_data = TestKey(i);
+        tree.insert(root, small_data.as_ref())?;
+    }
+
+    let key = TestKey(40);
+    let data = gen_ovf_blob(4096, 20, 42);
+    let kv = TestKeyValuePair::new(&key, &data);
+
+    tree.insert(root, kv.as_ref())?;
+    let retrieved = tree.search(&start_pos, &key, NodeAccessMode::Read)?;
+
+    assert!(matches!(retrieved, SearchResult::Found(_)));
+    let cell = tree.get_content_from_result(retrieved);
+    assert!(cell.is_some());
+    let cell = cell.unwrap();
+    assert_eq!(cell.len(), kv.as_ref().len());
+    assert_eq!(cell, kv.as_ref());
+    tree.clear_stack();
     Ok(())
 }
 
@@ -313,7 +412,7 @@ fn test_split_root() -> io::Result<()> {
     // Insert enough keys to force root to split
     for i in 0..50 {
         let key = TestKey(i * 10);
-        tree.insert(&root, key.as_ref())?;
+        tree.insert(root, key.as_ref())?;
     }
     println!("{}", tree.json()?);
 
@@ -322,10 +421,10 @@ fn test_split_root() -> io::Result<()> {
 
         let retrieved = tree.search(&start_pos, &key, NodeAccessMode::Read)?;
         // Search does not release the latch on the node so we have to do it ourselves.
-        let cell = tree.get_cell_from_result(retrieved);
+        let cell = tree.get_content_from_result(retrieved);
         tree.clear_stack();
         assert!(cell.is_some());
-        assert_eq!(cell.unwrap().used(), key.as_ref());
+        assert_eq!(cell.unwrap(), key.as_ref());
     }
 
     println!("{}", tree.json()?);
@@ -359,7 +458,7 @@ insert_tests! {
     test_insert_random_medium => {
         page_size: 4096,
         capacity: 100,
-        num_inserts: 240,
+        num_inserts: 20000,
         random: true
     },
     test_insert_random_large => {
@@ -368,47 +467,4 @@ insert_tests! {
         num_inserts: 50000,
         random: true
     },
-}
-
-#[test]
-#[serial]
-fn test_test() -> std::io::Result<()> {
-    let mut tree = create_test_btree(4096, 100, 3)?;
-    let root = tree.get_root();
-    let start_pos = (root, Slot(0));
-    let N = 1608;
-    // Generate random insertion order
-    use rand::seq::SliceRandom;
-    use rand::SeedableRng;
-    let mut keys: Vec<i32> = (0..N).collect();
-    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-    keys.shuffle(&mut rng);
-
-    let last = keys.pop().unwrap();
-
-    // Insert keys in specified order
-    for (i, key_val) in keys.iter().enumerate() {
-        let key = TestKey(*key_val);
-     
-        tree.insert(&root, key.as_ref())?;
-        std::fs::write(format!("tree_{i}.json"), tree.json()?)?;
-    }
-    std::fs::write("tree_ok.json", tree.json()?)?;
-    let key = TestKey(last);
-    tree.insert(&root, key.as_ref())?;
-    std::fs::write("tree_bad.json", tree.json()?)?;
-
-    // Verify all keys exist (in sequential order)
-    for i in 0..(N - 1) {
-        let key = TestKey(i);
-        dbg!(i);
-        let retrieved = tree.search(&start_pos, &key, NodeAccessMode::Read)?;
-        assert!(matches!(retrieved, SearchResult::Found(_)));
-        let cell = tree.get_cell_from_result(retrieved);
-        tree.clear_stack();
-        assert!(cell.is_some());
-        assert_eq!(cell.unwrap().used(), key.as_ref());
-    }
-
-    Ok(())
 }

@@ -76,10 +76,10 @@ impl Cell {
 
         // Create buffer with total size = header + aligned payload
         let mut buffer = BufferWithMetadata::<CellHeader>::with_capacity(
-            payload_size, // usable space for data
+            cell_size, // usable space for data
             CELL_ALIGNMENT as usize,
         );
-
+        
         // Initialize header
         let header = CellHeader {
             size: payload_size as u16,
@@ -143,7 +143,7 @@ impl Cell {
 
     /// Total size of the cell including the header.
     pub fn total_size(&self) -> u16 {
-        (CELL_HEADER_SIZE + self.size()) as u16
+        self.size() as u16
     }
 
     /// Total size of the cell including the header and the slot array pointer

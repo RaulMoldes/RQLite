@@ -1,15 +1,15 @@
 use std::io::{Read, Seek, Write};
 use std::sync::Arc;
 
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use crate::storage::buffer::BufferWithMetadata;
 use crate::io::cache::PageCache;
 use crate::io::disk::{DirectIO, FileOperations};
 use crate::io::frames::MemFrame;
+use crate::storage::buffer::BufferWithMetadata;
 use crate::storage::cell::Cell;
 use crate::storage::page::{BtreePageHeader, Header, MemPage, OverflowPage, Page, PageZero};
 use crate::types::{PageId, PAGE_ZERO};
 use crate::{RQLiteConfig, DEFAULT_CACHE_SIZE, PAGE_ALIGNMENT};
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Compute the offset at which a page is placed given the database header size and the page id.
 /// [`PAGEZERO`] contains the header.
@@ -23,8 +23,8 @@ use crate::{RQLiteConfig, DEFAULT_CACHE_SIZE, PAGE_ALIGNMENT};
 /// [PAGE 2             ] Offset 2 * Page size
 /// [PAGE 3             ] Offset 3 * Page size
 /// [....               ]
-fn page_offset(page_id: &PageId, page_size: u32) -> u64 {
-    (u32::from(*page_id) * page_size) as u64
+fn page_offset(page_id: PageId, page_size: u32) -> u64 {
+    (u32::from(page_id) * page_size) as u64
 }
 /// Implementation of SQLite pager. Reference: [https://sqlite.org/src/file/src/pager.c]
 #[derive(Debug)]
@@ -79,10 +79,11 @@ impl Pager {
     /// As the page size is always aligned to the BLOCK SIZE for Direct IO, it should be safe to write and read back this way.
     fn write_block_unchecked(
         &mut self,
-        start_page_number: &PageId,
+        start_page_number: PageId,
         content: &mut [u8],
     ) -> std::io::Result<()> {
         let offset = page_offset(start_page_number, self.page_zero.metadata().page_size);
+
         self.file.seek(std::io::SeekFrom::Start(offset))?;
 
         assert!(
@@ -105,10 +106,11 @@ impl Pager {
     /// Read a block back from the disk into an output buffer.
     fn read_block_unchecked(
         &mut self,
-        start_page_number: &PageId,
+        start_page_number: PageId,
         buffer: &mut [u8],
     ) -> std::io::Result<()> {
         let offset = page_offset(start_page_number, self.page_zero.metadata().page_size);
+
         assert!(
             DirectIO::validate_alignment(buffer.len()),
             "Buffer size: {} must be aligned to BLOCK SIZE {} for Direct IO.",
@@ -132,7 +134,12 @@ impl Pager {
         let free_page = self.page_zero.metadata().first_free_page;
         let last_free = self.page_zero.metadata().last_free_page;
         let (id, mut mem_page) = if free_page.is_valid() {
-            let mut page = self.read_page::<OverflowPage>(&free_page)?;
+            let mut page = self.read_page::<OverflowPage>(free_page)?;
+            debug_assert_eq!(
+                free_page,
+                page.read().page_number(),
+                "MEMORY CORRUPTION. FREE PAGE ID SHOULD MATCH READ PAGE ID."
+            );
             let next = page
                 .try_with_variant::<OverflowPage, _, _, _>(|op| op.metadata().next)
                 .unwrap();
@@ -143,37 +150,45 @@ impl Pager {
                 self.page_zero.metadata_mut().last_free_page = PAGE_ZERO;
             };
 
-            page.write()
-                .reinit_as::<H>();
-
-            
+            page.write().reinit_as::<H>();
+            debug_assert_eq!(
+                free_page,
+                page.read().page_number(),
+                "ERROR. EL NUMERO DE LA PAGINA LIBRE NO COINCIDE"
+            );
 
             (free_page, page)
         } else {
-
             let page = P::alloc(self.page_size());
             let id = page.page_number();
             (id, MemFrame::new(MemPage::from(page)))
         };
         mem_page.mark_dirty();
 
-       if let Some(mut evicted) = self.cache.insert(id, mem_page) {
+        debug_assert_eq!(
+            id,
+            mem_page.read().page_number(),
+            "ERROR. PAGE NUMBER DOES NOT MATCH THE PHYSICAL ID IN MEMORY"
+        );
+        if let Some(mut evicted) = self.cache.insert(id, mem_page) {
+            let evicted_id = evicted.read().page_number();
+
             if evicted.is_dirty() {
-                let id = evicted.read().page_number();
-                self.write_block_unchecked(&id, evicted.write().as_mut())?;
+                self.write_block_unchecked(evicted_id, evicted.write().as_mut())?;
             };
         };
         Ok(id)
     }
 
-    pub fn read_page<P: Page>(&mut self, id: &PageId) -> std::io::Result<MemFrame<MemPage>>
+    pub fn read_page<P: Page>(&mut self, id: PageId) -> std::io::Result<MemFrame<MemPage>>
     where
         MemPage: From<P>,
     {
         // First we try to go to the cache.
-        if let Some(page) = self.cache.get(id) {
+        if let Some(page) = self.cache.get(&id) {
             return Ok(page);
         };
+
         // That was a cache miss.
         // we need to go to the disk to find the page.
         let mut buffer = vec![0u8; self.page_size() as usize];
@@ -185,15 +200,23 @@ impl Pager {
                 format!("Failed to convert page from bytes: {msg}"),
             )
         })?;
+
+        debug_assert_eq!(page.page_number(), id, "PAGE NUMBER READ FROM DISK SHOULD MATCH THE ASKED PAGE NUMBER. OTHERWISE INDICATES MEMORY CORRUPTION");
+
         let mem_page = MemFrame::new(MemPage::from(page));
-        if let Some(mut evicted) = self.cache.insert(*id, mem_page) {
+        if let Some(mut evicted) = self.cache.insert(id, mem_page) {
             if evicted.is_dirty() {
-                let id = evicted.read().page_number();
-                self.write_block_unchecked(&id, evicted.write().as_mut())?;
+                let evicted_id = evicted.read().page_number();
+                debug_assert!(
+                    self.cache.get(&evicted_id).is_none(),
+                    "MEMORY CORRUPTION DETECTED. EVICTED PAGE SHOULD NOT BE KEPT ON CACHE"
+                );
+                debug_assert_eq!(evicted.read().page_number(), evicted_id, "PAGE NUMBER READ FROM DISK SHOULD MATCH THE ASKED PAGE NUMBER. OTHERWISE INDICATES MEMORY CORRUPTION");
+                self.write_block_unchecked(evicted_id, evicted.write().as_mut())?;
             };
         };
 
-        Ok(self.cache.get(id).unwrap())
+        Ok(self.cache.get(&id).unwrap())
     }
 
     pub fn dealloc_page<P: Page>(&mut self, id: PageId) -> std::io::Result<()>
@@ -210,7 +233,7 @@ impl Pager {
 
         if last_free_page.is_valid() {
             // Read the free page and set the next page.
-            let mut previous_page = self.read_page::<OverflowPage>(&last_free_page)?;
+            let mut previous_page = self.read_page::<OverflowPage>(last_free_page)?;
             // The previous page should be a free page.
             // SAFETY: It should be safe to unwrap the result as we have already read the page as a free page.
 
@@ -220,12 +243,15 @@ impl Pager {
                 })
                 .unwrap(); // This should not panic as we have already read the page as a free page.
         };
-
-
-        let mut mem_page = self.read_page::<P>(&id)?;
+        let mut mem_page = self.read_page::<P>(id)?;
+        debug_assert!(
+            mem_page.read().page_number() == id,
+            "MEMORY CORRUPTION. ID IN CACHE DOES NOT MATCH PHYSICAL ID"
+        );
         self.page_zero.metadata_mut().last_free_page = id;
         mem_page.write().dealloc();
-        self.write_block_unchecked(&id, mem_page.write().as_mut())?;
+        self.write_block_unchecked(id, mem_page.write().as_mut())?;
+
         Ok(())
     }
 }
@@ -272,7 +298,7 @@ unsafe impl Sync for Pager {}
 #[cfg(test)]
 mod tests {
     use crate::storage::cell::Slot;
-    use crate::storage::page::{BTREE_PAGE_HEADER_SIZE, BtreePage};
+    use crate::storage::page::{BtreePage, BTREE_PAGE_HEADER_SIZE};
 
     use super::*;
     use serial_test::serial;
@@ -316,10 +342,10 @@ mod tests {
         let mut page1 = BtreePage::alloc(page_size);
         let page_id = page1.metadata().page_number;
         assert!(page_id != crate::types::PAGE_ZERO, "Invalid page number!");
-        let result = pager.write_block_unchecked(&page_id, page1.as_mut());
+        let result = pager.write_block_unchecked(page_id, page1.as_mut());
         assert!(result.is_ok(), "Page writing to disk failed!");
         let buf = DirectIO::alloc_aligned(pager.page_size() as usize)?;
-        pager.read_block_unchecked(&page_id, buf)?;
+        pager.read_block_unchecked(page_id, buf)?;
         assert_eq!(
             buf,
             page1.as_ref(),
@@ -365,13 +391,13 @@ mod tests {
             total_page_size, total_size as usize,
             "Total size was not as expected"
         );
-        pager.write_block_unchecked(&pages[0].metadata().page_number, raw_buffer)?;
+        pager.write_block_unchecked(pages[0].metadata().page_number, raw_buffer)?;
 
         for page in pages {
             // Try to read page 1 back.
             let buf = DirectIO::alloc_aligned(page.metadata().page_size as usize)?;
 
-            pager.read_block_unchecked(&page.metadata().page_number, buf)?;
+            pager.read_block_unchecked(page.metadata().page_number, buf)?;
             assert_eq!(
                 buf,
                 page.as_ref(),
@@ -405,7 +431,7 @@ mod tests {
         }
         {
             // Write some content on page 1.
-            let mut page1 = pager.read_page::<BtreePage>(&page_ids[0])?;
+            let mut page1 = pager.read_page::<BtreePage>(page_ids[0])?;
 
             page1
                 .try_with_variant_mut::<BtreePage, _, _, _>(|p| {
@@ -420,7 +446,7 @@ mod tests {
 
         // First page should have been expelled.
         assert!(pager.cache.get(&page_ids[0]).is_none());
-        let read_page = pager.read_page::<BtreePage>(&page_ids[0])?;
+        let read_page = pager.read_page::<BtreePage>(page_ids[0])?;
 
         read_page
             .try_with_variant::<BtreePage, _, _, _>(|p| {
@@ -449,7 +475,7 @@ mod tests {
 
         // Verify it has been written out to disk.
         let buf = DirectIO::alloc_aligned(pager.page_size() as usize)?;
-        pager.read_block_unchecked(&id1, buf)?;
+        pager.read_block_unchecked(id1, buf)?;
 
         unsafe { DirectIO::free_aligned(buf.as_mut_ptr()) };
         Ok(())
@@ -474,7 +500,7 @@ mod tests {
         pager.dealloc_page::<BtreePage>(id2)?;
 
         // Check that the free list was properly built.
-        let page1 = pager.read_page::<OverflowPage>(&id1)?;
+        let page1 = pager.read_page::<OverflowPage>(id1)?;
 
         let next_free = page1
             .try_with_variant::<OverflowPage, _, _, _>(|free| free.metadata().next)
@@ -486,100 +512,59 @@ mod tests {
         Ok(())
     }
 
-
     #[test]
     #[serial]
-    fn test_deallocated_page_reusability() -> std::io::Result<()> {
+    fn test_page_reusability() -> std::io::Result<()> {
         let mut pager = create_test_pager(2)?;
-         // Allocate and deallocate pages
-        let id1 = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
-        let id2 = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
+        let num_pages = 350;
+        let num_cells = 15;
+        let mut ids: std::collections::HashSet<PageId> =
+            std::collections::HashSet::with_capacity(num_pages as usize);
 
-        {
+        for _ in 0..num_pages {
+            let id = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
+            ids.insert(id);
+        }
 
-        let mut page1 = pager.read_page::<BtreePage>(&id1)?;
-        let mut page2 = pager.read_page::<BtreePage>(&id2)?;
-        for i in 0..10 {
-            let cell = crate::storage::cell::Cell::new(b"Hello");
-            page1
-            .try_with_variant_mut::<BtreePage, _, _, _>(|page|{
-                page.push(cell.clone());
+        // Allocate and deallocate pages
+        for i in ids.iter() {
+            let mut page = pager.read_page::<BtreePage>(*i)?;
+            for i in 0..num_cells {
+                let cell = crate::storage::cell::Cell::new(b"Hello");
+                page.try_with_variant_mut::<BtreePage, _, _, _>(|p| {
+                    p.push(cell.clone());
+                })
+                .unwrap();
             }
-            )
+
+            let mut removed = Vec::new();
+
+            page.try_with_variant_mut::<BtreePage, _, _, _>(|p| {
+                removed.extend(p.drain(..));
+                p.metadata_mut().free_space_ptr = 4096 - BTREE_PAGE_HEADER_SIZE as u32;
+            })
             .unwrap();
 
-         page2
-            .try_with_variant_mut::<BtreePage, _, _, _>(|page|{
-                page.push(cell);
-            }
-            )
-            .unwrap();
-        };
-        let mut removed = Vec::new();
+            pager.dealloc_page::<BtreePage>(*i)?;
+        }
 
-        page1
-            .try_with_variant_mut::<BtreePage, _, _, _>(|page|{
-                dbg!(page.metadata());
-                removed.extend(page.drain(..));
-                page.metadata_mut().free_space_ptr = 4096 - BTREE_PAGE_HEADER_SIZE as u32;
-            }
-            )
-            .unwrap();
-
-        page2
-            .try_with_variant_mut::<BtreePage, _, _, _>(|page|{
-                dbg!(page.metadata());
-                removed.extend(page.drain(..));
-                page.metadata_mut().free_space_ptr = 4096 - BTREE_PAGE_HEADER_SIZE as u32;
-            }
-            )
-            .unwrap();
-
-        page1
-            .try_with_variant::<BtreePage, _, _, _>(|page|{
-                dbg!(page.metadata());
-
-            }
-            )
-            .unwrap();
-
-        page2
-            .try_with_variant::<BtreePage, _, _, _>(|page|{
-                dbg!(page.metadata());
-
-            }
-            )
-            .unwrap();
-
-        pager.dealloc_page::<BtreePage>(id1)?;
-        pager.dealloc_page::<BtreePage>(id2)?;
-        };
-
-        let id3 = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
-        let id4 = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
-
-        assert_eq!(id3, id1, "Should reuse page 1 after freeing it");
-        assert_eq!(id4, id2, "Should reuse page 1 after freeing it");
-
-        let read_page = pager.read_page::<BtreePage>(&id3)?;
-        read_page
-            .try_with_variant::<BtreePage, _, _, _>(|page|{
-                //assert!(page.is_empty());
-                dbg!(page.metadata());
-            }
-            )
-            .unwrap();
-
-        let read_page = pager.read_page::<BtreePage>(&id4)?;
-        read_page
-            .try_with_variant::<BtreePage, _, _, _>(|page|{
-                assert!(page.is_empty());
-            }
-            )
-            .unwrap();
-
+        // Allocate and deallocate pages
+        for _ in 0..num_pages {
+            let id = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
+            assert!(ids.contains(&id), "SHOULD REUSE A DEALLOCATED PAGE");
+            let read_page = pager.read_page::<BtreePage>(id)?;
+            read_page
+                .try_with_variant::<BtreePage, _, _, _>(|page| {
+                    assert!(
+                        page.page_number() == id,
+                        "MEMORY CORRUPTION. ASKED FOR PAGE {id} BUT GOT {}",
+                        page.page_number()
+                    );
+                    assert!(page.is_empty(), "PAGE SHOULD BE EMPTY AFTER REALLOCATING");
+                })
+                .unwrap();
+        }
 
         Ok(())
-
     }
 }

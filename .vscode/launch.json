@@ -5,8 +5,8 @@
       "type": "lldb",
       "request": "launch",
       "name": "Debug Rust test (rqlite)",
-      "program": "${workspaceFolder}/target/debug/deps/rqlite-0e501dd6c0adb07a",
-      "args": ["--nocapture", "test_test"],
+      "program": "${workspaceFolder}/target/debug/deps/rqlite-820b7b56180ece4c",
+      "args": ["--nocapture", "test_multiple_overflow_chain"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {

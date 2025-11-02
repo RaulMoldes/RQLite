@@ -21,7 +21,7 @@ macro_rules! insert_tests {
                     // Generate random insertion order
                     use rand::{seq::SliceRandom};
                     let mut keys: Vec<i32> = (0..$num_inserts).collect();
-                    keys.shuffle(&mut rand::rng());
+                    keys.shuffle(&mut rand_chacha::ChaCha20Rng::seed_from_u64(100));
                     keys
                 } else {
                     // Sequential order
@@ -31,7 +31,7 @@ macro_rules! insert_tests {
                 // Insert keys in specified order
                 for key_val in &keys {
                     let key = TestKey(*key_val);
-                    tree.insert(&root, key.as_ref())?;
+                    tree.insert(root, key.as_ref())?;
                 }
 
                 std::fs::write("tree.json", tree.json()?)?;
@@ -41,10 +41,10 @@ macro_rules! insert_tests {
                     let key = TestKey(i);
                     let retrieved = tree.search(&start, &key, NodeAccessMode::Read)?;
                     assert!(matches!(retrieved, SearchResult::Found(_)));
-                    let cell = tree.get_cell_from_result(retrieved);
+                    let cell = tree.get_content_from_result(retrieved);
                     tree.clear_stack();
                     assert!(cell.is_some());
-                    assert_eq!(cell.unwrap().used(), key.as_ref());
+                    assert_eq!(cell.unwrap(), key.as_ref());
                 }
 
                 Ok(())
@@ -65,7 +65,7 @@ macro_rules! delete_test {
             // Insert all keys
             for i in 0..$num_keys {
                 let key = TestKey(i as i32);
-                tree.insert(&root, key.as_ref())?;
+                tree.insert(root, key.as_ref())?;
             }
 
             // Check all keys exist
@@ -73,9 +73,9 @@ macro_rules! delete_test {
                 let key = TestKey(i as i32);
                 let retrieved = tree.search(&start, &key, NodeAccessMode::Read)?;
                 assert!(matches!(retrieved, SearchResult::Found(_)));
-                let cell = tree.get_cell_from_result(retrieved);
+                let cell = tree.get_content_from_result(retrieved);
                 assert!(cell.is_some());
-                assert_eq!(cell.unwrap().used(), key.as_ref());
+                assert_eq!(cell.unwrap(), key.as_ref());
                 tree.clear_stack();
             }
 
@@ -86,7 +86,7 @@ macro_rules! delete_test {
             for seq in $delete_sequences.iter() {
                 for i in seq.clone().rev() {
                     let key = TestKey(i as i32);
-                    tree.remove(&root, &key)?;
+                    tree.remove(root, &key)?;
                     deleted_keys.push(i);
                 }
             }
@@ -102,9 +102,9 @@ macro_rules! delete_test {
                     // Key should still exist
                     let retrieved = tree.search(&start, &key, NodeAccessMode::Read)?;
                     assert!(matches!(retrieved, SearchResult::Found(_)));
-                    let cell = tree.get_cell_from_result(retrieved);
+                    let cell = tree.get_content_from_result(retrieved);
                     assert!(cell.is_some());
-                    assert_eq!(cell.unwrap().used(), key.as_ref());
+                    assert_eq!(cell.unwrap(), key.as_ref());
                 }
                 tree.clear_stack();
             }

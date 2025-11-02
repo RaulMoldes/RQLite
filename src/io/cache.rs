@@ -79,7 +79,7 @@ impl PageCache {
         }
 
         let evicted = if self.capacity <= self.frames.len() {
-            self.evict(None)
+            self.evict()
         } else {
             None
         };
@@ -89,14 +89,7 @@ impl PageCache {
         evicted
     }
 
-    pub fn evict(&mut self, frame: Option<PageId>) -> Option<MemFrame<MemPage>> {
-        if let Some(frame_id) = frame {
-            if let Some(frame_data) = self.frames.remove(&frame_id) {
-                self.stats.frames_evicted += 1;
-                return Some(frame_data);
-            }
-        }
-
+    pub fn evict(&mut self) -> Option<MemFrame<MemPage>> {
         // TODO: I NEED I WAY TO CHECK FOR OOM ERRORS HERE.
         //if self.frames.len() >= self.capacity {
         // Pop from the queue until there is one page that we can evict.

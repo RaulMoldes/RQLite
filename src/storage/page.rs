@@ -59,19 +59,33 @@ sized! {
         pub next: PageId,
         pub num_bytes: u32,
         pub padding: u32,
+        pub reserved: [u8; 48]
     };
     pub const OVERFLOW_HEADER_SIZE
 }
 
 impl Header for OverflowPageHeader {
-    fn init(size: u32) -> Self {
+    fn alloc(size: u32) -> Self {
         let effective_size = size.next_multiple_of(PAGE_ALIGNMENT);
 
         Self {
             page_number: PageId::new_key(),
             next: PAGE_ZERO,
+            num_bytes: effective_size.saturating_sub(OVERFLOW_HEADER_SIZE as u32),
+            padding: effective_size.saturating_sub(size),
+            reserved: [0u8; 48],
+        }
+    }
+
+    fn init(size: u32, page_number: PageId) -> Self {
+        let effective_size = size.next_multiple_of(PAGE_ALIGNMENT);
+
+        Self {
+            page_number,
+            next: PAGE_ZERO,
             num_bytes: effective_size,
             padding: effective_size.saturating_sub(size),
+            reserved: [0u8; 48],
         }
     }
 }
@@ -121,7 +135,7 @@ impl DatabaseHeader {
 }
 
 impl Header for BtreePageHeader {
-    fn init(size: u32) -> Self {
+    fn alloc(size: u32) -> Self {
         let aligned_size = size.next_multiple_of(PAGE_ALIGNMENT);
 
         Self {
@@ -138,7 +152,23 @@ impl Header for BtreePageHeader {
             reserved: [0u8; 24], // Necessary padding so that cell writes are aligned.
         }
     }
+    fn init(size: u32, page_number: PageId) -> Self {
+        let aligned_size = size.next_multiple_of(PAGE_ALIGNMENT);
 
+        Self {
+            page_number,
+            num_slots: 0,
+            page_size: aligned_size,
+            free_space: size.saturating_sub(BTREE_PAGE_HEADER_SIZE as u32),
+            free_space_ptr: size.saturating_sub(BTREE_PAGE_HEADER_SIZE as u32),
+            right_child: PAGE_ZERO,
+            page_lsn: LogId::from(0),
+            padding: aligned_size.saturating_sub(size),
+            next_sibling: PAGE_ZERO,
+            previous_sibling: PAGE_ZERO,
+            reserved: [0u8; 24], // Necessary padding so that cell writes are aligned.
+        }
+    }
 }
 impl BtreePageHeader {
     /// Setter for the page_lsn
@@ -166,7 +196,7 @@ impl Page for BtreePage {
         );
 
         buffer.set_len(size as usize);
-        *buffer.metadata_mut() = BtreePageHeader::init(size);
+        *buffer.metadata_mut() = BtreePageHeader::alloc(size);
 
         buffer
     }
@@ -575,7 +605,7 @@ impl Page for OverflowPage {
         // Pages cannot grow like cells do. Therefore we automatically set the length at the beginning and leave it as is.
         buf.set_len(size as usize);
 
-        *buf.metadata_mut() = OverflowPageHeader::init(size);
+        *buf.metadata_mut() = OverflowPageHeader::alloc(size);
 
         buf
     }
@@ -627,10 +657,9 @@ where
 }
 
 pub trait Header {
-    fn init(size: u32) -> Self;
+    fn init(size: u32, page_number: PageId) -> Self;
+    fn alloc(size: u32) -> Self;
 }
-
-
 
 impl MemPage {
     pub(crate) fn page_number(&self) -> PageId {
@@ -647,6 +676,7 @@ impl MemPage {
         T: Header,
         BufferWithMetadata<T>: Into<MemPage>,
     {
+        let number = self.page_number();
         // SAFETY: We basically move out of self temporarily to create the new
         // type and then write the new variant back. If we already have mutable
         // access to self this should be "safe". At this point I already hate
@@ -661,7 +691,8 @@ impl MemPage {
             };
 
             let size = converted.size();
-            let header = T::init(size as u32);
+
+            let header = T::init(size as u32, number);
             *converted.metadata_mut() = header;
             converted.set_len(size);
             converted.data_mut().fill(0);
@@ -674,8 +705,6 @@ impl MemPage {
     // It is the responsability of the database header to distinguish between pages that are used for the free list and pages that are actual overflow pages.
     pub fn dealloc(&mut self) {
         self.reinit_as::<OverflowPageHeader>();
-
-
     }
 
     pub fn is_free_page(&self) -> bool {
