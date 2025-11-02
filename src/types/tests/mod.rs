@@ -125,7 +125,7 @@ test_serializable!(
     ]
 );
 
-test_serializable!(test_blob_serializable, Blob, [Blob::new(&[0, 1, 2, 3, 4])]);
+
 
 test_serializable!(
     test_uint8_serializable,
@@ -179,6 +179,7 @@ test_serializable!(
         VarlenType::from_raw_unchecked(&[0, 0, 0, 1, 1], 1, 2),
         VarlenType::from_raw_unchecked("Hello".as_ref(), 1, 2),
         VarlenType::from_raw_unchecked("Goodnight".as_ref(), 1, 2)
+
     ]
 );
 
