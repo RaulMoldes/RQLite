@@ -1,7 +1,5 @@
 use crate::{types::VarInt, TextEncoding};
 
-
-
 pub(crate) fn decode_utf16le(bytes: &[u8]) -> String {
     let units: Vec<u16> = bytes
         .chunks_exact(2)
@@ -18,73 +16,68 @@ pub(crate) fn decode_utf16be(bytes: &[u8]) -> String {
     String::from_utf16(&units).unwrap()
 }
 
-/// Owned wrapper for variable-length data
-/// Just holds the raw bytes (Excluding length prefix)
-#[derive(Debug, Clone)]
-pub struct Blob(Box<[u8]>);
+/// Borrowed wrapper for variable-length data
+/// Holds a reference to the raw bytes (including length prefix)
+#[derive(Debug, Clone, Copy)]
+pub struct BlobRef<'a>(&'a [u8]);
 
-impl AsRef<[u8]> for Blob {
+impl<'a> AsRef<[u8]> for BlobRef<'a> {
     fn as_ref(&self) -> &[u8] {
-        self.0.as_ref()
+        self.0
     }
 }
 
-impl Blob {
-    /// Create a new Blob from raw data
-    pub fn new(data: &[u8]) -> Self {
-        let len_bytes = VarInt::from(data.len()).to_bytes();
-        let mut buffer = Vec::with_capacity(len_bytes.len() + data.len());
-        buffer.extend_from_slice(&len_bytes);
-        buffer.extend_from_slice(data);
-        Self(buffer.into_boxed_slice())
+impl<'a> BlobRef<'a> {
+    /// Create a new Blob from bytes that already include the length prefix
+    pub fn from_encoded_bytes(bytes: &'a [u8]) -> Self {
+        Self(bytes)
     }
 
+    /// Parse a Blob from a byte slice, returning the Blob and bytes consumed
+    pub fn parse(bytes: &'a [u8]) -> (Self, usize) {
+        let (len_varint, len_bytes) = VarInt::from_encoded_bytes(bytes);
+        let data_len: usize = len_varint.try_into().unwrap();
+        let total_size = len_bytes + data_len;
+        (Self(&bytes[..total_size]), total_size)
+    }
+
+    /// Get just the data portion (excluding length prefix)
     pub fn data(&self) -> &[u8] {
-        let (len, offset) = VarInt::from_bytes(self.0.as_ref());
-        let len_usize: usize = len.try_into().unwrap();
-        &self.as_ref()[offset..offset + len_usize]
+        let (len_varint, offset) = VarInt::from_encoded_bytes(self.0);
+        let len: usize = len_varint.try_into().unwrap();
+        &self.0[offset..offset + len]
     }
 
     /// Get the length of the data (excluding prefix)
     pub fn length(&self) -> usize {
-        let (len, offset) = VarInt::from_bytes(self.0.as_ref());
-        len.try_into().unwrap()
+        let (len_varint, _) = VarInt::from_encoded_bytes(self.0);
+        len_varint.try_into().unwrap()
     }
 
     pub fn data_offset(&self) -> usize {
-        let (len, offset) = VarInt::from_bytes(self.0.as_ref());
+        let (_, offset) = VarInt::from_encoded_bytes(self.0);
         offset
     }
 
-    pub fn to_string(&self, encoding: TextEncoding) -> String {
+    pub fn to_string(self, encoding: TextEncoding) -> String {
         match encoding {
             TextEncoding::Utf8 => {
                 String::from_utf8(self.data().to_vec()).unwrap()
             }
             TextEncoding::Utf16be => {
-                assert!(self.length().is_power_of_two(), "UTF-16BE blob length must be multiple of 2");
-                let u16_iter = self
-                    .data()
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
-                String::from_utf16(&u16_iter.collect::<Vec<_>>()).unwrap()
+                assert!(self.length() % 2 == 0, "UTF-16BE blob length must be multiple of 2");
+                decode_utf16be(self.data())
             }
             TextEncoding::Utf16le => {
-                assert!(self.length().is_power_of_two(), "UTF-16LE blob length must be multiple of 2");
-                let u16_iter = self
-                    .data()
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
-                String::from_utf16(&u16_iter.collect::<Vec<_>>()).unwrap()
+                assert!(self.length() % 2 == 0, "UTF-16LE blob length must be multiple of 2");
+                decode_utf16le(self.data())
             }
         }
     }
 
-
     pub fn as_utf8(&self) -> &[u8] {
         self.data()
     }
-
 
     pub fn as_str(&self, encoding: TextEncoding) -> &str {
         match encoding {
@@ -93,50 +86,8 @@ impl Blob {
         }
     }
 
-    pub fn as_utf16(&self, encoding: TextEncoding) -> &[u16] {
-        match encoding {
-        TextEncoding::Utf16be => {
-            assert!(self.length() % 2 == 0);
-             unsafe {
-                std::slice::from_raw_parts(self.data().as_ptr() as *const u16, self.length()/2)
-            }
-        }
-        TextEncoding::Utf16le => {
-            assert!(self.length() % 2 == 0);
-            unsafe {
-                std::slice::from_raw_parts(self.data().as_ptr() as *const u16, self.length()/2)
-            }
-        }
-        TextEncoding::Utf8 => panic!("Use [as_utf8()] for UTF-8"),
-    }
-
-    }
-}
-
-impl From<(String, TextEncoding)> for Blob {
-    fn from(value: (String, TextEncoding)) -> Self {
-        match value.1 {
-            TextEncoding::Utf8 => Self::new(value.0.as_bytes()),
-            TextEncoding::Utf16be => {
-                let buf: Box<[u8]> = value
-                    .0
-                    .encode_utf16()
-                    .flat_map(|ch| ch.to_be_bytes())
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice();
-
-                Self(buf)
-            }
-            TextEncoding::Utf16le =>  {
-                let buf: Box<[u8]> = value
-                    .0
-                    .encode_utf16()
-                    .flat_map(|ch| ch.to_le_bytes())
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice();
-
-                Self(buf)
-            },
-        }
+    /// Total size including the length prefix
+    pub fn total_size(&self) -> usize {
+        self.0.len()
     }
 }

@@ -2,65 +2,58 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
 
-const MAX_VARINT_LEN: usize = 9;
+pub const MAX_VARINT_LEN: usize = 9;
 
 // VarInt stands for variable-length integer.
 //
 // It is a special type that is encoded using 8 bytes, and depending on the value, will occupy more or less space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VarInt(pub i64);
+pub struct VarInt<'a>(&'a [u8]);
 
-impl TryFrom<VarInt> for usize {
-    type Error = &'static str;
 
-    fn try_from(value: VarInt) -> Result<Self, Self::Error> {
-        if value.0 < 0 {
-            Err("cannot convert negative VarInt to usize")
-        } else {
-            Ok(value.0 as usize)
+impl<'a> VarInt<'a> {
+    /// Create a VarInt from encoded bytes (borrows the bytes)
+    pub fn from_encoded_bytes(bytes: &'a [u8]) -> (Self, usize) {
+        // Validate and find the end of the varint
+        let mut bytes_read = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            if i >= MAX_VARINT_LEN {
+                panic!("VarInt too long");
+            }
+            bytes_read += 1;
+            if (b & 0x80) == 0 {
+                return (VarInt(&bytes[..bytes_read]), bytes_read);
+            }
         }
+        panic!("Incomplete varint")
     }
-}
 
-impl VarInt {
-    /// Returns the number of bytes this varint will occupy when serialized.
+    /// Decode the value from the stored bytes
+    pub fn value(&self) -> i64 {
+        let mut result: u64 = 0;
+        let mut shift = 0;
+
+        for &b in self.0.iter() {
+            result |= ((b & 0x7F) as u64) << shift;
+            if (b & 0x80) == 0 {
+                return Self::decode_zigzag(result);
+            }
+            shift += 7;
+        }
+        unreachable!("Invalid varint bytes")
+    }
+
+    /// Returns the number of bytes this varint occupies
     pub fn size(&self) -> usize {
-        let mut value = Self::encode_zigzag(self.0);
-        let mut size = 1;
-        while value >= 0x80 {
-            value >>= 7;
-            size += 1;
-        }
-        size
+        self.0.len()
     }
-}
 
-impl TryFrom<VarInt> for u32 {
-    type Error = &'static str;
-
-    fn try_from(value: VarInt) -> Result<Self, Self::Error> {
-        if value.0 < 0 {
-            Err("cannot convert negative VarInt to usize")
-        } else {
-            Ok(value.0 as u32)
-        }
+    /// Get the raw encoded bytes
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0
     }
-}
 
-impl TryFrom<VarInt> for u64 {
-    type Error = &'static str;
-
-    fn try_from(value: VarInt) -> Result<Self, Self::Error> {
-        if value.0 < 0 {
-            Err("cannot convert negative VarInt to usize")
-        } else {
-            Ok(value.0 as u64)
-        }
-    }
-}
-
-impl VarInt {
-    /// Convert from i64 to u64 using ZigZag encoding (https://docs.rs/residua-zigzag/latest/zigzag/)
+    /// Convert from i64 to u64 using ZigZag encoding
     #[inline]
     fn encode_zigzag(value: i64) -> u64 {
         ((value << 1) ^ (value >> 63)) as u64
@@ -71,112 +64,83 @@ impl VarInt {
     fn decode_zigzag(value: u64) -> i64 {
         ((value >> 1) as i64) ^ (-((value & 1) as i64))
     }
+
+    /// Encode an i64 value to bytes
+     pub fn encode(value: i64, buffer: &mut [u8; MAX_VARINT_LEN]) -> &[u8] {
+        let mut encoded = Self::encode_zigzag(value);
+        let mut idx = 0;
+
+        loop {
+            let mut byte = (encoded & 0x7F) as u8;
+            encoded >>= 7;
+            if encoded != 0 {
+                byte |= 0x80;
+            }
+            buffer[idx] = byte;
+            idx += 1;
+            if encoded == 0 {
+                break;
+            }
+        }
+
+       &buffer[..idx]
+    }
 }
 
-impl PartialOrd for VarInt {
+impl<'a> TryFrom<VarInt<'a>> for usize {
+    type Error = &'static str;
+
+    fn try_from(varint: VarInt<'a>) -> Result<Self, Self::Error> {
+        let value = varint.value();
+        if value < 0 {
+            Err("cannot convert negative VarInt to usize")
+        } else {
+            Ok(value as usize)
+        }
+    }
+}
+
+impl<'a> TryFrom<VarInt<'a>> for u32 {
+    type Error = &'static str;
+
+    fn try_from(varint: VarInt<'a>) -> Result<Self, Self::Error> {
+        let value = varint.value();
+        if value < 0 {
+            Err("cannot convert negative VarInt to u32")
+        } else {
+            Ok(value as u32)
+        }
+    }
+}
+
+impl<'a> TryFrom<VarInt<'a>> for u64 {
+    type Error = &'static str;
+
+    fn try_from(varint: VarInt<'a>) -> Result<Self, Self::Error> {
+        let value = varint.value();
+        if value < 0 {
+            Err("cannot convert negative VarInt to u64")
+        } else {
+            Ok(value as u64)
+        }
+    }
+}
+
+impl<'a> PartialOrd for VarInt<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for VarInt {
+impl<'a> Ord for VarInt<'a> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.cmp(&other.0)
+        // Compare by decoded values, not by bytes
+        self.value().cmp(&other.value())
     }
 }
 
-impl fmt::Display for VarInt {
+impl<'a> fmt::Display for VarInt<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "VarInt: {}", self.0)?;
-        Ok(())
+        write!(f, "VarInt: {}", self.value())
     }
 }
-
-impl VarInt {
-    /// Serializes a VarInt to a byte vector.
-    pub fn to_bytes(self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(MAX_VARINT_LEN);
-        let mut value = Self::encode_zigzag(self.0);
-
-        loop {
-            let mut byte = (value & 0x7F) as u8;
-            value >>= 7;
-            if value != 0 {
-                byte |= 0x80; // Set continuation bit
-            }
-            bytes.push(byte);
-            if value == 0 {
-                break;
-            }
-        }
-        bytes
-    }
-
-    /// Deserializes a [VarInt] from an slice of bytes
-    pub fn from_bytes(bytes: &[u8]) -> (Self, usize) {
-        let mut result: u64 = 0;
-        let mut shift = 0;
-        let mut bytes_read = 0;
-
-        for (i, &b) in bytes.iter().enumerate() {
-            if i >= MAX_VARINT_LEN {
-                panic!("VarInt too long");
-            }
-
-            result |= ((b & 0x7F) as u64) << shift;
-            bytes_read += 1;
-
-            if (b & 0x80) == 0 {
-                return (VarInt(Self::decode_zigzag(result)), bytes_read);
-            }
-
-            shift += 7;
-            if shift >= 64 {
-                panic!("VarInt shift overflow");
-            }
-        }
-
-        unreachable!("Incomplete varint")
-    }
-}
-
-impl TryFrom<&[u8]> for VarInt {
-    type Error = std::io::Error;
-
-    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        let (varint, _) = VarInt::from_bytes(bytes);
-        Ok(varint)
-    }
-}
-
-impl From<usize> for VarInt {
-    fn from(value: usize) -> Self {
-        Self(value as i64)
-    }
-}
-
-impl From<u32> for VarInt {
-    fn from(value: u32) -> Self {
-        Self(value as i64)
-    }
-}
-
-impl From<u64> for VarInt {
-    fn from(value: u64) -> Self {
-        Self(value as i64)
-    }
-}
-
-impl From<i32> for VarInt {
-    fn from(value: i32) -> Self {
-        Self(value as i64)
-    }
-}
-
-impl From<i64> for VarInt {
-    fn from(value: i64) -> Self {
-        Self(value)
-    }
-}
-
-crate::impl_arithmetic_ops!(VarInt);

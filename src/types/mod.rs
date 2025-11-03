@@ -17,7 +17,7 @@ pub use sized_types::{
 };
 
 pub use varint::VarInt;
-pub use varlen_types::Blob;
+pub use varlen_types::BlobRef;
 
 #[cfg(test)]
 mod tests;
@@ -35,9 +35,9 @@ pub(crate) enum DataType {
     Float(Float32),
     Double(Float64),
     Byte(Byte),
-    Blob(Blob),
-    Varchar(Blob),
-    Text(Blob),
+    Blob(BlobRef<'static>),
+    Varchar(BlobRef<'static>),
+    Text(BlobRef<'static>),
     Date(Date),
     Char(Char),
     Boolean(Bool),

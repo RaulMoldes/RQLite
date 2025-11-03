@@ -3,7 +3,7 @@ mod macros;
 use crate::io::pager::{Pager, SharedPager};
 use crate::storage::cell::Slot;
 use crate::structures::bplustree::{
-    BPlusTree, Comparator, FixedSizeComparator, NodeAccessMode, SearchResult, VarlenComparator,
+    BPlusTree, Comparator, FixedSizeComparator, IterDirection, NodeAccessMode, SearchResult, VarlenComparator
 };
 use crate::structures::kvp::KeyValuePair;
 use crate::types::VarInt;
@@ -39,8 +39,11 @@ impl TestVarLengthKey {
     pub fn from_string(s: &str) -> Self {
         Self(s.as_bytes().to_vec())
     }
+
     fn as_bytes(&self) -> Vec<u8> {
-        let mut bytes_data = VarInt::from(self.0.len()).to_bytes();
+
+        let mut buffer = [0u8; crate::types::varint::MAX_VARINT_LEN];
+        let mut bytes_data = VarInt::encode(self.0.len() as i64, &mut buffer).to_vec();
         bytes_data.extend_from_slice(self.0.as_ref());
         bytes_data
     }
@@ -526,6 +529,159 @@ fn test_overflow_keys() -> io::Result<()> {
 
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), &combined_data);
+
+    Ok(())
+}
+
+
+
+#[test]
+#[serial]
+fn test_btree_iterator() -> io::Result<()> {
+    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let mut tree = create_test_btree(4096, 10, 4, comparator)?;
+    let root = tree.get_root();
+
+    // Insert test data
+    let test_data: Vec<(TestKey, Vec<u8>)> = (0..100)
+        .map(|i| {
+            let key = TestKey(i);
+            let value = format!("value_{i}").into_bytes();
+            (key, value)
+        })
+        .collect();
+
+    // Insert key value pairs
+    for (key, value) in &test_data {
+        let kv = KeyValuePair::new(key, value);
+        tree.insert(root, kv.as_ref())?;
+    }
+
+
+
+    let mut collected = Vec::new();
+    for item in tree.iter()? {
+        dbg!(item.is_ok());
+        match item {
+            Ok(payload) => {
+                collected.push(payload);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    assert_eq!(collected.len(), 100, "Should iterate over all 100 elements");
+
+    // Verify keys are sorted
+    for i in 0..99 {
+        dbg!(i);
+        let key_i = &collected[i].as_ref()[..4];
+        let key_next = &collected[i + 1].as_ref()[..4];
+        assert!(key_i < key_next, "Keys should be in ascending order");
+    }
+
+    Ok(())
+}
+
+
+
+
+
+#[test]
+#[serial]
+fn test_btree_iterator_iter_from() -> io::Result<()> {
+    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let mut tree = create_test_btree(4096, 10, 4, comparator)?;
+    let root = tree.get_root();
+    let mut collected = Vec::new();
+
+    // Insert test data
+    let test_data: Vec<(TestKey, Vec<u8>)> = (0..100)
+        .map(|i| {
+            let key = TestKey(i);
+            let value = format!("value_{i}").into_bytes();
+            (key, value)
+        })
+        .collect();
+
+    // Insert key value pairs
+    for (key, value) in &test_data {
+        let kv = KeyValuePair::new(key, value);
+        tree.insert(root, kv.as_ref())?;
+    }
+
+
+    let start_key = TestKey(50);
+
+    for item in tree.iter_from(start_key.as_ref(), IterDirection::Forward)? {
+        match item {
+            Ok(payload) => {
+                collected.push(payload);
+                if collected.len() >= 10 {
+                    break;
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    assert_eq!(collected.len(), 10);
+    // Verificar que empiece desde 50
+    let first_key = i32::from_ne_bytes(collected[0].as_ref()[..4].try_into().unwrap());
+    assert_eq!(first_key, 50);
+    collected.clear();
+    Ok(())
+}
+
+
+
+#[test]
+#[serial]
+fn test_btree_iterator_iter_rev() -> io::Result<()>{
+
+    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let mut tree = create_test_btree(4096, 10, 4, comparator)?;
+    let root = tree.get_root();
+    let mut collected = Vec::new();
+ 
+    let test_data: Vec<(TestKey, Vec<u8>)> = (0..100)
+        .map(|i| {
+            let key = TestKey(i);
+            let value = format!("value_{i}").into_bytes();
+            (key, value)
+        })
+        .collect();
+
+    for (key, value) in &test_data {
+        let kv = KeyValuePair::new(key, value);
+        tree.insert(root, kv.as_ref())?;
+    }
+
+
+    std::fs::write("tree.json", tree.json()?)?;
+
+    for item in tree.iter_rev()? {
+        match item {
+            Ok(payload) => {
+                collected.push(payload);
+                if collected.len() >= 10 {
+                    break;
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    assert_eq!(collected.len(), 10);
+
+    let first_key = i32::from_ne_bytes(collected[0].as_ref()[..4].try_into().unwrap());
+    assert_eq!(first_key, 99);
+
+    for i in 0..9 {
+        let key_i = i32::from_ne_bytes(collected[i].as_ref()[..4].try_into().unwrap());
+        let key_next = i32::from_ne_bytes(collected[i + 1].as_ref()[..4].try_into().unwrap());
+        assert!(key_i > key_next, "Keys should be in descending order in reverse iteration");
+    }
 
     Ok(())
 }

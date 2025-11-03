@@ -12,6 +12,7 @@ use crate::CELL_ALIGNMENT;
 
 use std::cmp::min;
 use std::cmp::Ordering;
+use std::marker::PhantomData;
 
 use crate::types::{PageId, VarInt, PAGE_ZERO};
 use std::cell::RefCell;
@@ -62,11 +63,11 @@ impl Comparator for VarlenComparator {
         }
 
         // Deserialize VarInt lengths
-        let (left_length, left_offset) = VarInt::from_bytes(lhs);
+        let (left_length, left_offset) = VarInt::from_encoded_bytes(lhs);
         let lhs_len: usize = left_length.try_into().unwrap();
         let left_data = &lhs[left_offset..left_offset + lhs_len];
 
-        let (right_length, right_offset) = VarInt::from_bytes(rhs);
+        let (right_length, right_offset) = VarInt::from_encoded_bytes(rhs);
         let rhs_len: usize = right_length.try_into().unwrap();
         let right_data = &rhs[right_offset..right_offset + rhs_len];
 
@@ -110,7 +111,7 @@ impl Comparator for VarlenComparator {
     }
 
     fn key_size(&self, data: &[u8]) -> usize {
-        let (len, offset) = VarInt::from_bytes(data);
+        let (len, offset) = VarInt::from_encoded_bytes(data);
         let len_usize: usize = len.try_into().unwrap();
         offset + len_usize
     }
@@ -1415,7 +1416,7 @@ where
                 // CASE B: We are the right most of the parent,
                 // Then there is no cell to propagate upwards. We simply set our right child
                 } else if !is_leaf {
-                    node.metadata_mut().right_child = cells.pop_front().unwrap().metadata().left_child;
+                    node.push(cells.pop_front().unwrap());
                 };
 
                 Ok(None)
@@ -1856,5 +1857,247 @@ where
         string.push('}');
 
         Ok(string)
+    }
+
+
+
+      fn load_cells(&self, page_id: PageId) -> std::io::Result<Vec<Cell>> {
+
+
+        let cells = self.with_latched_page(page_id, |p| {
+            let btree_page: &BtreePage = p.try_into().unwrap();
+            Ok(btree_page.iter_cells().cloned().collect())
+        })?;
+
+        Ok(cells)
+    }
+
+
+    pub fn iter_from(&mut self, key: &[u8], direction: IterDirection) -> std::io::Result<BPlusTreeIterator<Cmp>> {
+        let position = self.search(&(self.root, Slot(0)), key, NodeAccessMode::Read)?;
+        let pos = match position {
+            SearchResult::Found(pos) | SearchResult::NotFound(pos) => pos,
+        };
+
+        BPlusTreeIterator::from_position(self, pos, direction)
+    }
+
+
+
+
+
+    pub fn iter(&self) -> std::io::Result<BPlusTreeIterator<Cmp>> {
+        let mut current = self.root;
+
+        loop {
+            self.acquire_latch(current, NodeAccessMode::Read)?;
+
+            let (is_leaf, first_child) = self.with_latched_page(current, |p| {
+                let btree_page: &BtreePage = p.try_into().unwrap();
+                Ok((btree_page.is_leaf(), btree_page.cell(Slot(0)).metadata().left_child()))
+            })?;
+
+            self.release_latch(current);
+
+            if is_leaf {
+                return BPlusTreeIterator::from_position(self, (current, Slot(0)), IterDirection::Forward)
+            }
+
+            current = first_child;
+        }
+    }
+
+
+
+
+    pub fn iter_rev(&self) -> std::io::Result<BPlusTreeIterator<Cmp>> {
+        let mut current = self.root;
+
+        loop {
+            self.acquire_latch(current, NodeAccessMode::Read)?;
+
+            let (last_child, last_slot) = self.with_latched_page(current, |p| {
+                let btree_page: &BtreePage = p.try_into().unwrap();
+                Ok((btree_page.metadata().right_child, (btree_page.max_slot_index() -1usize)))
+            })?;
+
+            self.release_latch(current);
+
+            if !last_child.is_valid() {
+                return BPlusTreeIterator::from_position(self, (current, last_slot), IterDirection::Backward)
+            }
+
+            current = last_child;
+        }
+    }
+
+
+
+
+
+}
+
+
+
+
+#[derive(Debug, Clone, Copy)]
+pub enum IterDirection {
+    Forward,
+    Backward,
+}
+
+
+pub struct BPlusTreeIterator<'a, Cmp>
+where
+    Cmp: Comparator
+{
+    tree: &'a BPlusTree<Cmp>,
+    current_page: Option<PageId>,
+    current_slot: Slot,
+    cells_in_page: Vec<Cell>,
+    direction: IterDirection,
+    _phantom: PhantomData<Cmp>,
+}
+
+
+impl<'a, Cmp> BPlusTreeIterator<'a, Cmp>
+where
+    Cmp: Comparator,
+{
+
+    pub fn from_position(
+        tree: &'a BPlusTree<Cmp>,
+        position: Position,
+        direction: IterDirection,
+    ) -> std::io::Result<Self> {
+        tree.acquire_latch(position.0, NodeAccessMode::Read)?;
+        let cells = tree.load_cells(position.0)?;
+
+
+        Ok(Self {
+            tree,
+            current_page: Some(position.0),
+            current_slot: position.1,
+            cells_in_page: cells,
+            direction,
+            _phantom: PhantomData,
+        })
+    }
+
+    fn adv(&mut self) -> std::io::Result<bool> {
+        if let Some(current) = self.current_page {
+
+            let next_page = self.tree.with_latched_page(current, |p| {
+                let btree_page: &BtreePage = p.try_into().unwrap();
+                Ok(btree_page.metadata().next_sibling)
+            })?;
+
+            if next_page.is_valid() {
+
+                self.current_page = Some(next_page);
+                self.tree.acquire_latch(next_page, NodeAccessMode::Read)?;
+                self.tree.release_latch(current);
+                self.cells_in_page = self.tree.load_cells(next_page)?;
+                self.current_slot = Slot(0);
+                return Ok(true);
+            };
+
+            self.tree.release_latch(current);
+        };
+
+        self.current_page = None;
+        Ok(false)
+    }
+
+
+    fn rev(&mut self) -> std::io::Result<bool> {
+        if let Some(current) = self.current_page {
+            let prev_page = self.tree.with_latched_page(current, |p| {
+                let btree_page: &BtreePage = p.try_into().unwrap();
+                Ok(btree_page.metadata().previous_sibling)
+            })?;
+
+            if prev_page.is_valid() {
+                self.current_page = Some(prev_page);
+                self.tree.acquire_latch(prev_page, NodeAccessMode::Read)?;
+                self.tree.release_latch(current);
+                self.cells_in_page = self.tree.load_cells(prev_page)?;
+                self.current_slot = Slot((self.cells_in_page.len() - 1) as u16);
+                return Ok(true);
+            }
+            self.tree.release_latch(current);
+        }
+
+        self.current_page = None;
+        Ok(false)
+    }
+}
+
+
+
+impl<'a, Cmp> Iterator for BPlusTreeIterator<'a, Cmp>
+where
+    Cmp: Comparator,
+{
+    type Item = std::io::Result<Payload<'a>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.current_page?;
+
+        match self.direction {
+            IterDirection::Forward => {
+
+                if (self.current_slot.0 as usize) < self.cells_in_page.len() {
+                    let cell = &self.cells_in_page[self.current_slot.0 as usize];
+                    let payload = if cell.metadata().is_overflow() {
+                        match self.tree.reassemble_payload(cell, usize::MAX) {
+                            Ok(p) => p,
+                            Err(e) => return Some(Err(e)),
+                        }
+                    } else {
+                        Payload::Boxed(cell.used().to_vec().into_boxed_slice())
+                    };
+
+                    self.current_slot = self.current_slot + 1usize;
+                    Some(Ok(payload))
+                } else {
+
+                    match self.adv() {
+                        Ok(true) => self.next(),
+                        Ok(false) => None,
+                        Err(e) => Some(Err(e)),
+                    }
+                }
+            }
+            IterDirection::Backward => {
+
+                if self.current_slot.0 < self.cells_in_page.len() as u16 {
+                    let cell = &self.cells_in_page[self.current_slot.0 as usize];
+                    let payload = if cell.metadata().is_overflow() {
+                        match self.tree.reassemble_payload(cell, usize::MAX) {
+                            Ok(p) => p,
+                            Err(e) => return Some(Err(e)),
+                        }
+                    } else {
+                        Payload::Boxed(cell.used().to_vec().into_boxed_slice())
+                    };
+
+                    if self.current_slot.0 > 0 {
+                        self.current_slot = self.current_slot - 1usize;
+                    } else {
+
+                        match self.rev() {
+                            Ok(false) => self.current_page = None, // No hay más páginas
+                            Err(e) => return Some(Err(e)),
+                            _ => {}
+                        }
+                    }
+
+                    Some(Ok(payload))
+                } else {
+                    None
+                }
+            }
+        }
     }
 }
