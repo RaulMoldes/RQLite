@@ -2,13 +2,18 @@ mod macros;
 
 use crate::io::pager::{Pager, SharedPager};
 use crate::storage::cell::Slot;
-use crate::structures::bplustree::{BPlusTree, NodeAccessMode, SearchResult};
+use crate::structures::bplustree::{
+    BPlusTree, Comparator, FixedSizeComparator, NodeAccessMode, SearchResult, VarlenComparator,
+};
+use crate::structures::kvp::KeyValuePair;
+use crate::types::VarInt;
 use crate::{
     delete_test, insert_tests, IncrementalVaccum, RQLiteConfig, ReadWriteVersion, TextEncoding,
 };
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use serial_test::serial;
+use std::cmp::Ordering;
 use std::io;
 use tempfile::tempdir;
 
@@ -27,96 +32,26 @@ impl AsRef<[u8]> for TestKey {
     }
 }
 
-impl std::fmt::Display for TestKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TestKey: {}", self.0)
+
+struct TestVarLengthKey(Vec<u8>);
+
+impl TestVarLengthKey {
+    pub fn from_string(s: &str) -> Self {
+        Self(s.as_bytes().to_vec())
+    }
+    fn as_bytes(&self) -> Vec<u8> {
+        let mut bytes_data = VarInt::from(self.0.len()).to_bytes();
+        bytes_data.extend_from_slice(self.0.as_ref());
+        bytes_data
     }
 }
 
-impl AsMut<[u8]> for TestKey {
-    fn as_mut(&mut self) -> &mut [u8] {
-        unsafe {
-            std::slice::from_raw_parts_mut(
-                &mut self.0 as *mut i32 as *mut u8,
-                std::mem::size_of::<i32>(),
-            )
-        }
-    }
-}
-
-impl TryFrom<&[u8]> for TestKey {
-    type Error = std::io::Error;
-
-    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        if bytes.len() < 4 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid length for TestKey: expected 4 bytes",
-            ));
-        }
-        let mut arr = [0u8; 4];
-        arr.copy_from_slice(&bytes[..4]);
-        Ok(TestKey(i32::from_ne_bytes(arr)))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct TestKeyValuePair {
-    data: Vec<u8>,
-}
-
-impl TestKeyValuePair {
-    fn new<K: AsRef<[u8]>, V: AsRef<[u8]>>(key: &K, value: &V) -> Self {
-        let mut data = Vec::with_capacity(key.as_ref().len() + value.as_ref().len());
-        data.extend_from_slice(key.as_ref());
-        data.extend_from_slice(value.as_ref());
-        Self { data }
-    }
-
-    fn as_ref(&self) -> &[u8] {
-        &self.data
-    }
-
-    fn key(&self) -> &[u8] {
-        &self.data[..4]
-    }
-
-    fn value(&self) -> &[u8] {
-        &self.data[4..]
-    }
-}
-
-impl AsRef<[u8]> for TestKeyValuePair {
-    fn as_ref(&self) -> &[u8] {
-        &self.data
-    }
-}
-
-impl TryFrom<&[u8]> for TestKeyValuePair {
-    type Error = std::io::Error;
-
-    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        if bytes.len() < 4 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "Invalid data length: expected at least 4 bytes, got {}",
-                    bytes.len()
-                ),
-            ));
-        }
-
-        Ok(Self {
-            data: bytes.to_vec(),
-        })
-    }
-}
-
-fn create_test_btree(
+fn create_test_btree<Cmp: Comparator>(
     page_size: u32,
     capacity: usize,
     min_keys: usize,
-) -> io::Result<BPlusTree<TestKey>> {
+    comparator: Cmp,
+) -> io::Result<BPlusTree<Cmp>> {
     let dir = tempdir()?;
     let path = dir.path().join("test_btree.db");
 
@@ -129,7 +64,12 @@ fn create_test_btree(
     };
 
     let pager = Pager::from_config(config, &path)?;
-    Ok(BPlusTree::new(SharedPager::from(pager), min_keys, 2))
+    Ok(BPlusTree::new(
+        SharedPager::from(pager),
+        min_keys,
+        2,
+        comparator,
+    ))
 }
 
 pub fn gen_random_bytes(size: usize, seed: u64) -> Vec<u8> {
@@ -171,27 +111,60 @@ pub fn gen_ovf_blob(page_size: usize, pages: usize, seed: u64) -> Vec<u8> {
 }
 
 #[test]
-fn validate_test_key() {
-    let key = TestKey(9);
-    let bytes = key.as_ref();
-    let key_result = TestKey::try_from(bytes);
-    assert!(key_result.is_ok());
+fn test_comparators() {
+    let lhs = TestKey(1);
+    let bytes_lhs = lhs.as_ref();
+
+    let rhs = TestKey(1);
+    let bytes_rhs = rhs.as_ref();
+
+    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    assert_eq!(comparator.compare(bytes_lhs, bytes_rhs), Ordering::Equal);
+
+    let lhs = TestKey(1);
+    let bytes_lhs = lhs.as_ref();
+
+    let rhs = TestKey(2);
+    let bytes_rhs = rhs.as_ref();
+
+    assert_eq!(comparator.compare(bytes_lhs, bytes_rhs), Ordering::Less);
+
+    let lhs = TestKey(3);
+    let bytes_lhs = lhs.as_ref();
+
+    let rhs = TestKey(2);
+    let bytes_rhs = rhs.as_ref();
+
+    assert_eq!(comparator.compare(bytes_lhs, bytes_rhs), Ordering::Greater);
+
+    let lhs = TestVarLengthKey::from_string("Hello how are you 2");
+    let bytes_lhs = lhs.as_bytes();
+
+    let rhs = TestVarLengthKey::from_string("Hello how are you 1");
+    let bytes_rhs = rhs.as_bytes();
+
+    let comparator = VarlenComparator;
     assert_eq!(
-        key_result.unwrap(),
-        key,
-        "Deserialization failed without padding"
+        comparator.compare(&bytes_lhs, &bytes_rhs),
+        Ordering::Greater
     );
 
-    let mut padded = Vec::from(bytes);
-    padded.extend_from_slice(&[0x00, 0xFF, 0xAA]); // Extra bytes
+    let lhs = TestVarLengthKey::from_string("Hello how are you 1");
+    let bytes_lhs = lhs.as_bytes();
 
-    // Validate that with padding we can compare the results effectibvely too.
-    let padded_result = TestKey::try_from(padded.as_ref());
-    assert!(
-        padded_result.is_ok(),
-        "Deserialization failed when adding padding"
-    );
-    assert_eq!(padded_result.unwrap(), key);
+    let rhs = TestVarLengthKey::from_string("Hello how are you 2");
+    let bytes_rhs = rhs.as_bytes();
+
+    assert_eq!(comparator.compare(&bytes_lhs, &bytes_rhs), Ordering::Less);
+
+    let lhs = TestVarLengthKey::from_string("Hello how are you");
+    let bytes_lhs = lhs.as_bytes();
+
+    let rhs = TestVarLengthKey::from_string("Hello how are you");
+    let bytes_rhs = rhs.as_bytes();
+
+    let comparator = VarlenComparator;
+    assert_eq!(comparator.compare(&bytes_lhs, &bytes_rhs), Ordering::Equal);
 }
 
 /// Searches on an empty bplustree.
@@ -199,12 +172,13 @@ fn validate_test_key() {
 #[test]
 #[serial]
 fn test_search_empty_tree() -> io::Result<()> {
-    let mut tree = create_test_btree(4096, 1, 2)?;
+    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let mut tree = create_test_btree(4096, 1, 4, comparator)?;
     let root = tree.get_root();
     let start_pos = (root, Slot(0));
     let key = TestKey(42);
 
-    let result = tree.search(&start_pos, &key, NodeAccessMode::Read)?;
+    let result = tree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
     assert!(matches!(result, SearchResult::NotFound(_)));
 
     Ok(())
@@ -215,25 +189,26 @@ fn test_search_empty_tree() -> io::Result<()> {
 #[test]
 #[serial]
 fn test_insert_remove_single_key() -> io::Result<()> {
-    let mut btree = create_test_btree(4096, 1, 2)?;
+    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let mut btree = create_test_btree(4096, 1, 4,  comparator)?;
 
     let root = btree.get_root();
     let start_pos = (root, Slot(0));
     // Insert a key-value pair
     let key = TestKey(42);
-
-    btree.insert(root, key.as_ref())?;
+    let bytes = key.as_ref();
+    btree.insert(root, bytes)?;
 
     // Retrieve it back
-    let retrieved = btree.search(&start_pos, &key, NodeAccessMode::Read)?;
+    let retrieved = btree.search(&start_pos, bytes, NodeAccessMode::Read)?;
     assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
     let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_some());
-    assert_eq!(cell.unwrap(), key.as_ref());
+    assert_eq!(cell.unwrap().as_ref(), bytes);
     btree.clear_stack();
-    btree.remove(root, &key)?;
+    btree.remove(root, bytes)?;
 
-    let retrieved = btree.search(&start_pos, &key, NodeAccessMode::Read)?;
+    let retrieved = btree.search(&start_pos, bytes, NodeAccessMode::Read)?;
     assert!(matches!(retrieved, SearchResult::NotFound(_)));
     let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_none());
@@ -244,12 +219,14 @@ fn test_insert_remove_single_key() -> io::Result<()> {
 #[test]
 #[serial]
 fn test_insert_duplicates() -> io::Result<()> {
-    let mut btree = create_test_btree(4096, 1, 2)?;
+    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let mut btree = create_test_btree(4096, 1, 4,  comparator)?;
     let root = btree.get_root();
     // Insert a key-value pair
     let key = TestKey(42);
-    btree.insert(root, key.as_ref())?;
-    let result = btree.insert(root, key.as_ref());
+    let bytes = key.as_ref();
+    btree.insert(root, bytes)?;
+    let result = btree.insert(root, bytes);
     assert!(result.is_err()); // Should fail
     Ok(())
 }
@@ -259,33 +236,33 @@ fn test_insert_duplicates() -> io::Result<()> {
 fn test_update_single_key() -> io::Result<()> {
     let key = TestKey(1);
     let data = b"Original";
-    let kv = TestKeyValuePair::new(&key, data);
+    let kv = KeyValuePair::new(&key, data);
 
     let data2 = b"Updated";
-    let kv2 = TestKeyValuePair::new(&key, data2);
-
-    let mut btree = create_test_btree(4096, 1, 2)?;
+    let kv2 = KeyValuePair::new(&key, data2);
+    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let mut btree = create_test_btree(4096, 1, 4,comparator)?;
 
     let root = btree.get_root();
     let start_pos = (root, Slot(0));
     btree.insert(root, kv.as_ref())?;
 
-    let retrieved = btree.search(&start_pos, &key, NodeAccessMode::Read)?;
+    let retrieved = btree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
 
     assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
     let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_some());
-    assert_eq!(cell.unwrap(), kv.as_ref());
+    assert_eq!(cell.unwrap().as_ref(), kv.as_ref());
     btree.clear_stack();
 
     btree.update(root, kv2.as_ref())?;
 
-    let retrieved = btree.search(&start_pos, &key, NodeAccessMode::Read)?;
+    let retrieved = btree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
 
     assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
     let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_some());
-    assert_eq!(cell.unwrap(), kv2.as_ref());
+    assert_eq!(cell.unwrap().as_ref(), kv2.as_ref());
     btree.clear_stack();
 
     Ok(())
@@ -298,46 +275,46 @@ fn test_upsert_single_key() -> io::Result<()> {
     let key2 = TestKey(2);
 
     let data = b"Original";
-    let kv = TestKeyValuePair::new(&key, data);
+    let kv = KeyValuePair::new(&key, data);
 
     let data2 = b"Updated";
-    let kv2 = TestKeyValuePair::new(&key, data2);
+    let kv2 = KeyValuePair::new(&key, data2);
 
     let data3 = b"Created";
-    let kv3 = TestKeyValuePair::new(&key2, data3);
-
-    let mut btree = create_test_btree(4096, 1, 2)?;
+    let kv3 = KeyValuePair::new(&key2, data3);
+    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let mut btree = create_test_btree(4096, 1, 4,  comparator)?;
 
     let root = btree.get_root();
     let start_pos = (root, Slot(0));
     btree.insert(root, kv.as_ref())?;
 
-    let retrieved = btree.search(&start_pos, &key, NodeAccessMode::Read)?;
+    let retrieved = btree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
 
     assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
     let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_some());
-    assert_eq!(cell.unwrap(), kv.as_ref());
+    assert_eq!(cell.unwrap().as_ref(), kv.as_ref());
     btree.clear_stack();
 
     btree.upsert(root, kv2.as_ref())?;
 
-    let retrieved = btree.search(&start_pos, &key, NodeAccessMode::Read)?;
+    let retrieved = btree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
 
     assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
     let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_some());
-    assert_eq!(cell.unwrap(), kv2.as_ref());
+    assert_eq!(cell.unwrap().as_ref(), kv2.as_ref());
     btree.clear_stack();
 
     btree.upsert(root, kv3.as_ref())?;
 
-    let retrieved = btree.search(&start_pos, &key2, NodeAccessMode::Read)?;
+    let retrieved = btree.search(&start_pos, key2.as_ref(), NodeAccessMode::Read)?;
 
     assert!(matches!(retrieved, SearchResult::Found((root, Slot(1)))));
     let cell = btree.get_content_from_result(retrieved);
     assert!(cell.is_some());
-    assert_eq!(cell.unwrap(), kv3.as_ref());
+    assert_eq!(cell.unwrap().as_ref(), kv3.as_ref());
     btree.clear_stack();
 
     Ok(())
@@ -346,28 +323,54 @@ fn test_upsert_single_key() -> io::Result<()> {
 #[test]
 #[serial]
 fn test_variable_length_keys() -> io::Result<()> {
+    let comparator = VarlenComparator;
+    let mut tree = create_test_btree(4096, 3, 2, comparator)?;
+    let root = tree.get_root();
+    let start_pos = (root, Slot(0));
+
+    // Insert enough keys to force root to split
+    for i in 0..50 {
+        let key = TestVarLengthKey::from_string(&format!("Hello_{i}"));
+
+        tree.insert(root, &key.as_bytes())?;
+    }
+    println!("{}", tree.json()?);
+
+    for i in 0..50 {
+        let key = TestVarLengthKey::from_string(&format!("Hello_{i}"));
+
+        let retrieved = tree.search(&start_pos, &key.as_bytes(), NodeAccessMode::Read)?;
+        // Search does not release the latch on the node so we have to do it ourselves.
+        let cell = tree.get_content_from_result(retrieved);
+        tree.clear_stack();
+        assert!(cell.is_some());
+        assert_eq!(cell.unwrap().as_ref(), key.as_bytes());
+    }
+
+    println!("{}", tree.json()?);
     Ok(())
 }
 
 #[test]
 #[serial]
 fn test_overflow_chain() -> io::Result<()> {
-    let mut tree = create_test_btree(4096, 3, 2)?;
+    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let mut tree = create_test_btree(4096, 3, 2, comparator)?;
     let root = tree.get_root();
     let start_pos = (root, Slot(0));
     let key = TestKey(1);
     let data = gen_ovf_blob(4096, 20, 42);
-    let kv = TestKeyValuePair::new(&key, &data);
+    let kv = KeyValuePair::new(&key, &data);
 
     tree.insert(root, kv.as_ref())?;
-    let retrieved = tree.search(&start_pos, &key, NodeAccessMode::Read)?;
+    let retrieved = tree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
 
     assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
     let cell = tree.get_content_from_result(retrieved);
     assert!(cell.is_some());
     let cell = cell.unwrap();
-    assert_eq!(cell.len(), kv.as_ref().len());
-    assert_eq!(cell, kv.as_ref());
+    assert_eq!(cell.as_ref().len(), kv.as_ref().len());
+    assert_eq!(cell.as_ref(), kv.as_ref());
     tree.clear_stack();
     Ok(())
 }
@@ -375,7 +378,8 @@ fn test_overflow_chain() -> io::Result<()> {
 #[test]
 #[serial]
 fn test_multiple_overflow_chain() -> io::Result<()> {
-    let mut tree = create_test_btree(4096, 3, 2)?;
+    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let mut tree = create_test_btree(4096, 3, 2, comparator)?;
     let root = tree.get_root();
     let start_pos = (root, Slot(0));
 
@@ -387,17 +391,17 @@ fn test_multiple_overflow_chain() -> io::Result<()> {
 
     let key = TestKey(40);
     let data = gen_ovf_blob(4096, 20, 42);
-    let kv = TestKeyValuePair::new(&key, &data);
+    let kv = KeyValuePair::new(&key, &data);
 
     tree.insert(root, kv.as_ref())?;
-    let retrieved = tree.search(&start_pos, &key, NodeAccessMode::Read)?;
+    let retrieved = tree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
 
     assert!(matches!(retrieved, SearchResult::Found(_)));
     let cell = tree.get_content_from_result(retrieved);
     assert!(cell.is_some());
     let cell = cell.unwrap();
-    assert_eq!(cell.len(), kv.as_ref().len());
-    assert_eq!(cell, kv.as_ref());
+    assert_eq!(cell.as_ref().len(), kv.as_ref().len());
+    assert_eq!(cell.as_ref(), kv.as_ref());
     tree.clear_stack();
     Ok(())
 }
@@ -405,7 +409,8 @@ fn test_multiple_overflow_chain() -> io::Result<()> {
 #[test]
 #[serial]
 fn test_split_root() -> io::Result<()> {
-    let mut tree = create_test_btree(4096, 3, 2)?;
+    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let mut tree = create_test_btree(4096, 3, 2, comparator)?;
     let root = tree.get_root();
     let start_pos = (root, Slot(0));
 
@@ -419,12 +424,12 @@ fn test_split_root() -> io::Result<()> {
     for i in 0..50 {
         let key = TestKey(i * 10);
 
-        let retrieved = tree.search(&start_pos, &key, NodeAccessMode::Read)?;
+        let retrieved = tree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
         // Search does not release the latch on the node so we have to do it ourselves.
         let cell = tree.get_content_from_result(retrieved);
         tree.clear_stack();
         assert!(cell.is_some());
-        assert_eq!(cell.unwrap(), key.as_ref());
+        assert_eq!(cell.unwrap().as_ref(), key.as_ref());
     }
 
     println!("{}", tree.json()?);
@@ -467,4 +472,60 @@ insert_tests! {
         num_inserts: 50000,
         random: true
     },
+}
+
+#[test]
+#[serial]
+fn test_overflow_keys() -> io::Result<()> {
+    let comparator = VarlenComparator;
+    let mut tree = create_test_btree(4096, 30, 4, comparator)?;
+    let root = tree.get_root();
+    let start_pos = (root, Slot(0));
+
+
+    let large_key_size = 5000;
+
+    for i in 0..10 {
+
+        let key_content = format!("KEY_{i:04}_")
+            + &"X".repeat(large_key_size - 10);
+        let key = TestVarLengthKey::from_string(&key_content);
+        dbg!(i);
+        tree.insert(root, &key.as_bytes())?;
+    }
+
+
+    for i in 0..10 {
+        let key_content = format!("KEY_{i:04}_")
+            + &"X".repeat(large_key_size - 10);
+        let key = TestVarLengthKey::from_string(&key_content);
+
+        let retrieved = tree.search(&start_pos, &key.as_bytes(), NodeAccessMode::Read)?;
+        let cell = tree.get_content_from_result(retrieved);
+        tree.clear_stack();
+
+        assert!(cell.is_some());
+        assert_eq!(cell.unwrap().as_ref(), key.as_bytes());
+    }
+
+    let huge_key = TestVarLengthKey::from_string(
+        &("HUGE_KEY_".to_string() + &"Y".repeat(8000))
+    );
+    let huge_value = gen_ovf_blob(4096, 5, 99);
+
+
+    let mut combined_data = huge_key.as_bytes();
+    combined_data.extend_from_slice(&huge_value);
+
+    tree.insert(root, &combined_data)?;
+
+
+    let retrieved = tree.search(&start_pos, &huge_key.as_bytes(), NodeAccessMode::Read)?;
+    let cell = tree.get_content_from_result(retrieved);
+    tree.clear_stack();
+
+    assert!(cell.is_some());
+    assert_eq!(cell.unwrap().as_ref(), &combined_data);
+
+    Ok(())
 }

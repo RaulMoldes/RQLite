@@ -93,6 +93,7 @@ impl PageCache {
         // TODO: I NEED I WAY TO CHECK FOR OOM ERRORS HERE.
         //if self.frames.len() >= self.capacity {
         // Pop from the queue until there is one page that we can evict.
+        let mut visited: std::collections::HashSet<PageId> = std::collections::HashSet::new();
         while let Some(id) = self.free_list.pop_front() {
             if let Some(frame) = self.frames.remove(&id) {
                 if frame.is_free() {
@@ -101,6 +102,13 @@ impl PageCache {
                     return Some(frame);
                 };
 
+                if visited.contains(&id) {
+                    self.free_list.push_back(id);
+                    self.frames.insert(id, frame);
+                    panic!("OUT OF MEMORY");
+                };
+
+                visited.insert(id);
                 self.free_list.push_back(id);
                 self.frames.insert(id, frame);
             }

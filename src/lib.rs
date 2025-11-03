@@ -7,6 +7,7 @@
 #![allow(unused_variables)]
 #![feature(slice_ptr_get)]
 #![feature(concat_bytes)]
+#![feature(str_from_raw_parts)]
 mod configs;
 mod database;
 mod io;

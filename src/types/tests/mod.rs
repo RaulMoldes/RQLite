@@ -1,8 +1,8 @@
 mod macros;
 
 use crate::types::{
-    varlen_types::VarlenType, Blob, Bool, Char, Date, DateTime, Int16, Int32, Int64, Int8, PageId,
-    RowId, UInt16, UInt32, UInt64, UInt8,
+    Bool, Char, Date, DateTime, Int16, Int32, Int64, Int8, PageId, RowId,
+    UInt16, UInt32, UInt64, UInt8,
 };
 
 use crate::{test_ordering, test_serializable};
@@ -125,8 +125,6 @@ test_serializable!(
     ]
 );
 
-
-
 test_serializable!(
     test_uint8_serializable,
     UInt8,
@@ -172,16 +170,7 @@ test_serializable!(
     ]
 );
 
-test_serializable!(
-    test_varlen_serializable,
-    VarlenType,
-    [
-        VarlenType::from_raw_unchecked(&[0, 0, 0, 1, 1], 1, 2),
-        VarlenType::from_raw_unchecked("Hello".as_ref(), 1, 2),
-        VarlenType::from_raw_unchecked("Goodnight".as_ref(), 1, 2)
 
-    ]
-);
 
 // Tests Date
 test_ordering!(

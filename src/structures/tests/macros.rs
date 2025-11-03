@@ -14,7 +14,8 @@ macro_rules! insert_tests {
             #[test]
             #[serial]
             fn $name() -> std::io::Result<()> {
-                let mut tree = create_test_btree($page_size, $capacity, 3)?;
+                let comparator = FixedSizeComparator::with_type::<TestKey>();
+                let mut tree = create_test_btree($page_size, $capacity, 3, comparator)?;
                 let root = tree.get_root();
                 let start = (root, Slot(0));
                 let keys: Vec<i32> = if $random {
@@ -29,22 +30,25 @@ macro_rules! insert_tests {
                 };
 
                 // Insert keys in specified order
-                for key_val in &keys {
+                for (i, key_val) in keys.iter().enumerate() {
+
                     let key = TestKey(*key_val);
                     tree.insert(root, key.as_ref())?;
+              
                 }
 
                 std::fs::write("tree.json", tree.json()?)?;
 
                 // Verify all keys exist (in sequential order)
-                for i in 0..$num_inserts {
-                    let key = TestKey(i);
-                    let retrieved = tree.search(&start, &key, NodeAccessMode::Read)?;
+                for (i, k) in keys.iter().enumerate() {
+                    dbg!(k);
+                    let key = TestKey(*k);
+                    let retrieved = tree.search(&start, key.as_ref(), NodeAccessMode::Read)?;
                     assert!(matches!(retrieved, SearchResult::Found(_)));
                     let cell = tree.get_content_from_result(retrieved);
                     tree.clear_stack();
                     assert!(cell.is_some());
-                    assert_eq!(cell.unwrap(), key.as_ref());
+                    assert_eq!(cell.unwrap().as_ref(), key.as_ref());
                 }
 
                 Ok(())
@@ -59,7 +63,8 @@ macro_rules! delete_test {
         #[test]
         #[serial]
         fn $name() -> std::io::Result<()> {
-            let mut tree = create_test_btree($page_size, $cache_size, $min_keys)?;
+            let comparator = FixedSizeComparator::with_type::<TestKey>();
+            let mut tree = create_test_btree($page_size, $cache_size, $min_keys, comparator)?;
             let root = tree.get_root();
             let start = (root, Slot(0));
             // Insert all keys
@@ -71,11 +76,11 @@ macro_rules! delete_test {
             // Check all keys exist
             for i in 0..$num_keys {
                 let key = TestKey(i as i32);
-                let retrieved = tree.search(&start, &key, NodeAccessMode::Read)?;
+                let retrieved = tree.search(&start, key.as_ref(), NodeAccessMode::Read)?;
                 assert!(matches!(retrieved, SearchResult::Found(_)));
                 let cell = tree.get_content_from_result(retrieved);
                 assert!(cell.is_some());
-                assert_eq!(cell.unwrap(), key.as_ref());
+                assert_eq!(cell.unwrap().as_ref(), key.as_ref());
                 tree.clear_stack();
             }
 
@@ -86,7 +91,7 @@ macro_rules! delete_test {
             for seq in $delete_sequences.iter() {
                 for i in seq.clone().rev() {
                     let key = TestKey(i as i32);
-                    tree.remove(root, &key)?;
+                    tree.remove(root, key.as_ref())?;
                     deleted_keys.push(i);
                 }
             }
@@ -96,15 +101,15 @@ macro_rules! delete_test {
                 let key = TestKey(i as i32);
                 if deleted_keys.contains(&i) {
                     // Key should be deleted
-                    let retrieved = tree.search(&start, &key, NodeAccessMode::Read)?;
+                    let retrieved = tree.search(&start, key.as_ref(), NodeAccessMode::Read)?;
                     assert!(matches!(retrieved, SearchResult::NotFound(_)));
                 } else {
                     // Key should still exist
-                    let retrieved = tree.search(&start, &key, NodeAccessMode::Read)?;
+                    let retrieved = tree.search(&start, key.as_ref(), NodeAccessMode::Read)?;
                     assert!(matches!(retrieved, SearchResult::Found(_)));
                     let cell = tree.get_content_from_result(retrieved);
                     assert!(cell.is_some());
-                    assert_eq!(cell.unwrap(), key.as_ref());
+                    assert_eq!(cell.unwrap().as_ref(), key.as_ref());
                 }
                 tree.clear_stack();
             }

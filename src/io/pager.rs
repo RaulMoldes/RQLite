@@ -5,8 +5,7 @@ use crate::io::cache::PageCache;
 use crate::io::disk::{DirectIO, FileOperations};
 use crate::io::frames::MemFrame;
 use crate::storage::buffer::BufferWithMetadata;
-use crate::storage::cell::Cell;
-use crate::storage::page::{BtreePageHeader, Header, MemPage, OverflowPage, Page, PageZero};
+use crate::storage::page::{MemPage, OverflowPage, Page, PageZero};
 use crate::types::{PageId, PAGE_ZERO};
 use crate::{RQLiteConfig, DEFAULT_CACHE_SIZE, PAGE_ALIGNMENT};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -126,10 +125,10 @@ impl Pager {
         self.page_zero.metadata().page_size
     }
 
-    pub fn alloc_page<P: Page, H: Header>(&mut self) -> std::io::Result<PageId>
+    pub fn alloc_page<P: Page>(&mut self) -> std::io::Result<PageId>
     where
         MemPage: From<P>,
-        BufferWithMetadata<H>: Into<MemPage>,
+        BufferWithMetadata<P::Header>: Into<MemPage>,
     {
         let free_page = self.page_zero.metadata().first_free_page;
         let last_free = self.page_zero.metadata().last_free_page;
@@ -150,7 +149,7 @@ impl Pager {
                 self.page_zero.metadata_mut().last_free_page = PAGE_ZERO;
             };
 
-            page.write().reinit_as::<H>();
+            page.write().reinit_as::<P>();
             debug_assert_eq!(
                 free_page,
                 page.read().page_number(),
@@ -297,12 +296,10 @@ unsafe impl Sync for Pager {}
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::cell::Slot;
-    use crate::storage::page::{BtreePage, BTREE_PAGE_HEADER_SIZE};
 
+    use crate::storage::page::{BtreePage, BTREE_PAGE_HEADER_SIZE};
     use super::*;
     use serial_test::serial;
-    use std::cell::Cell;
     use std::io::{Read, Seek, SeekFrom};
     use tempfile::tempdir;
 
@@ -425,7 +422,7 @@ mod tests {
         // Assigns more pages than those that would fit in the cache
         let mut page_ids = Vec::new();
         for _ in 0..2 {
-            let id = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
+            let id = pager.alloc_page::<BtreePage>()?;
 
             page_ids.push(id);
         }
@@ -441,7 +438,7 @@ mod tests {
         };
 
         // Allocate a new page.
-        let id = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
+        let id = pager.alloc_page::<BtreePage>()?;
         page_ids.push(id);
 
         // First page should have been expelled.
@@ -464,14 +461,14 @@ mod tests {
         pager.cache = PageCache::with_capacity(1); // Cache pequeña
 
         // Create a dirty page
-        let id1 = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
+        let id1 = pager.alloc_page::<BtreePage>()?;
         {
             let mut frame = pager.cache.get(&id1).unwrap();
             frame.mark_dirty();
         }
 
         // Force eviction with a dirty page
-        let _id2 = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
+        let _id2 = pager.alloc_page::<BtreePage>()?;
 
         // Verify it has been written out to disk.
         let buf = DirectIO::alloc_aligned(pager.page_size() as usize)?;
@@ -487,8 +484,8 @@ mod tests {
         let mut pager = create_test_pager(16)?;
 
         // Allocate and deallocate pages
-        let id1 = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
-        let id2 = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
+        let id1 = pager.alloc_page::<BtreePage>()?;
+        let id2 = pager.alloc_page::<BtreePage>()?;
 
         pager.dealloc_page::<BtreePage>(id1)?;
 
@@ -522,7 +519,7 @@ mod tests {
             std::collections::HashSet::with_capacity(num_pages as usize);
 
         for _ in 0..num_pages {
-            let id = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
+            let id = pager.alloc_page::<BtreePage>()?;
             ids.insert(id);
         }
 
@@ -550,7 +547,7 @@ mod tests {
 
         // Allocate and deallocate pages
         for _ in 0..num_pages {
-            let id = pager.alloc_page::<BtreePage, BtreePageHeader>()?;
+            let id = pager.alloc_page::<BtreePage>()?;
             assert!(ids.contains(&id), "SHOULD REUSE A DEALLOCATED PAGE");
             let read_page = pager.read_page::<BtreePage>(id)?;
             read_page

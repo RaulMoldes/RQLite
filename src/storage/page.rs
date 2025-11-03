@@ -111,8 +111,13 @@ sized! {
 
 }
 
-impl DatabaseHeader {
-    fn init() -> Self {
+impl Header for DatabaseHeader {
+
+    fn alloc(size: u32) -> Self {
+        Self::init(size, PAGE_ZERO)
+    }
+
+    fn init(__size: u32, __page_number: PageId) -> Self {
         Self {
             axmo: AXMO,
             page_size: DEFAULT_PAGE_SIZE,
@@ -128,6 +133,10 @@ impl DatabaseHeader {
             reserved: [0; 20],
         }
     }
+
+}
+
+impl DatabaseHeader {
 
     fn from_config(config: RQLiteConfig) -> Self {
         todo!()
@@ -184,6 +193,7 @@ impl BtreePageHeader {
 pub type BtreePage = BufferWithMetadata<BtreePageHeader>;
 
 impl Page for BtreePage {
+    type Header = BtreePageHeader;
     fn alloc(size: u32) -> Self {
         assert!(
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
@@ -592,6 +602,7 @@ pub(crate) type OverflowPage = BufferWithMetadata<OverflowPageHeader>;
 pub(crate) type PageZero = BufferWithMetadata<DatabaseHeader>;
 
 impl Page for OverflowPage {
+    type Header = OverflowPageHeader;
     fn alloc(size: u32) -> Self {
         assert!(
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
@@ -623,6 +634,8 @@ impl OverflowPage {
 }
 
 impl Page for PageZero {
+
+    type Header = DatabaseHeader;
     /// Creates a new page in memory.
     fn alloc(size: u32) -> Self {
         let mut buf = BufferWithMetadata::<DatabaseHeader>::new_unchecked(
@@ -630,7 +643,7 @@ impl Page for PageZero {
             PAGE_ALIGNMENT as usize,
         );
         buf.set_len(DB_HEADER_SIZE);
-        *buf.metadata_mut() = DatabaseHeader::init();
+        *buf.metadata_mut() = DatabaseHeader::alloc(size);
 
         buf
     }
@@ -652,6 +665,8 @@ pub trait Page: Into<MemPage> + AsRef<[u8]> + AsMut<[u8]>
 where
     Self: for<'a> TryFrom<(&'a [u8], usize), Error = &'static str>,
 {
+    type Header : Header;
+
     fn alloc(size: u32) -> Self;
     fn page_number(&self) -> PageId;
 }
@@ -671,10 +686,10 @@ impl MemPage {
     }
 
     /// Converts this page into another type.
-    pub fn reinit_as<T>(&mut self)
+    pub fn reinit_as<P>(&mut self)
     where
-        T: Header,
-        BufferWithMetadata<T>: Into<MemPage>,
+        P: Page,
+        BufferWithMetadata<P::Header>: Into<MemPage>,
     {
         let number = self.page_number();
         // SAFETY: We basically move out of self temporarily to create the new
@@ -692,7 +707,7 @@ impl MemPage {
 
             let size = converted.size();
 
-            let header = T::init(size as u32, number);
+            let header = P::Header::init(size as u32, number);
             *converted.metadata_mut() = header;
             converted.set_len(size);
             converted.data_mut().fill(0);
@@ -704,7 +719,7 @@ impl MemPage {
     // We are reusing the same header type to reduce the boiler plate.
     // It is the responsability of the database header to distinguish between pages that are used for the free list and pages that are actual overflow pages.
     pub fn dealloc(&mut self) {
-        self.reinit_as::<OverflowPageHeader>();
+        self.reinit_as::<OverflowPage>();
     }
 
     pub fn is_free_page(&self) -> bool {
@@ -1033,13 +1048,13 @@ mod btree_page_tests {
         Btree,
         BtreePage,
         Overflow,
-        OverflowPageHeader
+        OverflowPage
     );
     crate::test_page_casting!(
         test_overflow_btree,
         Overflow,
         OverflowPage,
         Btree,
-        BtreePageHeader
+        BtreePage
     );
 }

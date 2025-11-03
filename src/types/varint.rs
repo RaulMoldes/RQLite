@@ -113,45 +113,30 @@ impl VarInt {
     }
 
     /// Deserializes a [VarInt] from an slice of bytes
-    pub fn from_bytes(bytes: &[u8]) -> std::io::Result<(Self, usize)> {
+    pub fn from_bytes(bytes: &[u8]) -> (Self, usize) {
         let mut result: u64 = 0;
         let mut shift = 0;
         let mut bytes_read = 0;
 
         for (i, &b) in bytes.iter().enumerate() {
             if i >= MAX_VARINT_LEN {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "VarInt too long",
-                ));
+                panic!("VarInt too long");
             }
 
             result |= ((b & 0x7F) as u64) << shift;
             bytes_read += 1;
 
             if (b & 0x80) == 0 {
-                return Ok((VarInt(Self::decode_zigzag(result)), bytes_read));
+                return (VarInt(Self::decode_zigzag(result)), bytes_read);
             }
 
             shift += 7;
             if shift >= 64 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "VarInt shift overflow",
-                ));
+                panic!("VarInt shift overflow");
             }
         }
 
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Incomplete varint",
-        ))
-    }
-}
-
-impl From<VarInt> for VarIntBytes {
-    fn from(v: VarInt) -> VarIntBytes {
-        VarIntBytes(v.to_bytes())
+        unreachable!("Incomplete varint")
     }
 }
 
@@ -159,22 +144,38 @@ impl TryFrom<&[u8]> for VarInt {
     type Error = std::io::Error;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        let (varint, _) = VarInt::from_bytes(bytes)?;
+        let (varint, _) = VarInt::from_bytes(bytes);
         Ok(varint)
     }
 }
 
-pub struct VarIntBytes(Vec<u8>);
-
-impl AsRef<[u8]> for VarIntBytes {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_ref()
+impl From<usize> for VarInt {
+    fn from(value: usize) -> Self {
+        Self(value as i64)
     }
 }
 
-impl From<&VarInt> for VarIntBytes {
-    fn from(v: &VarInt) -> Self {
-        VarIntBytes(v.to_bytes())
+impl From<u32> for VarInt {
+    fn from(value: u32) -> Self {
+        Self(value as i64)
+    }
+}
+
+impl From<u64> for VarInt {
+    fn from(value: u64) -> Self {
+        Self(value as i64)
+    }
+}
+
+impl From<i32> for VarInt {
+    fn from(value: i32) -> Self {
+        Self(value as i64)
+    }
+}
+
+impl From<i64> for VarInt {
+    fn from(value: i64) -> Self {
+        Self(value)
     }
 }
 

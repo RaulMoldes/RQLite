@@ -79,7 +79,7 @@ impl Cell {
             cell_size, // usable space for data
             CELL_ALIGNMENT as usize,
         );
-        
+
         // Initialize header
         let header = CellHeader {
             size: payload_size as u16,
