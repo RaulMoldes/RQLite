@@ -10,7 +10,6 @@ pub const MAX_VARINT_LEN: usize = 9;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VarInt<'a>(&'a [u8]);
 
-
 impl<'a> VarInt<'a> {
     /// Create a VarInt from encoded bytes (borrows the bytes)
     pub fn from_encoded_bytes(bytes: &'a [u8]) -> (Self, usize) {
@@ -66,7 +65,7 @@ impl<'a> VarInt<'a> {
     }
 
     /// Encode an i64 value to bytes
-     pub fn encode(value: i64, buffer: &mut [u8; MAX_VARINT_LEN]) -> &[u8] {
+    pub fn encode(value: i64, buffer: &mut [u8; MAX_VARINT_LEN]) -> &[u8] {
         let mut encoded = Self::encode_zigzag(value);
         let mut idx = 0;
 
@@ -83,7 +82,7 @@ impl<'a> VarInt<'a> {
             }
         }
 
-       &buffer[..idx]
+        &buffer[..idx]
     }
 }
 

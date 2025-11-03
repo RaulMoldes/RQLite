@@ -1,8 +1,7 @@
-
 #[derive(Debug, Clone)]
 pub struct KeyValuePair {
     data: Box<[u8]>,
-    key_size: usize
+    key_size: usize,
 }
 
 impl KeyValuePair {
@@ -10,7 +9,10 @@ impl KeyValuePair {
         let mut data = Vec::with_capacity(key.as_ref().len() + value.as_ref().len());
         data.extend_from_slice(key.as_ref());
         data.extend_from_slice(value.as_ref());
-        Self { data: data.into_boxed_slice(), key_size: key.as_ref().len() }
+        Self {
+            data: data.into_boxed_slice(),
+            key_size: key.as_ref().len(),
+        }
     }
 
     pub fn as_ref(&self) -> &[u8] {
@@ -31,5 +33,3 @@ impl AsRef<[u8]> for KeyValuePair {
         &self.data
     }
 }
-
-

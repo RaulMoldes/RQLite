@@ -112,7 +112,6 @@ sized! {
 }
 
 impl Header for DatabaseHeader {
-
     fn alloc(size: u32) -> Self {
         Self::init(size, PAGE_ZERO)
     }
@@ -133,11 +132,9 @@ impl Header for DatabaseHeader {
             reserved: [0; 20],
         }
     }
-
 }
 
 impl DatabaseHeader {
-
     fn from_config(config: RQLiteConfig) -> Self {
         todo!()
     }
@@ -634,7 +631,6 @@ impl OverflowPage {
 }
 
 impl Page for PageZero {
-
     type Header = DatabaseHeader;
     /// Creates a new page in memory.
     fn alloc(size: u32) -> Self {
@@ -665,7 +661,7 @@ pub trait Page: Into<MemPage> + AsRef<[u8]> + AsMut<[u8]>
 where
     Self: for<'a> TryFrom<(&'a [u8], usize), Error = &'static str>,
 {
-    type Header : Header;
+    type Header: Header;
 
     fn alloc(size: u32) -> Self;
     fn page_number(&self) -> PageId;

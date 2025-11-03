@@ -3,7 +3,8 @@ mod macros;
 use crate::io::pager::{Pager, SharedPager};
 use crate::storage::cell::Slot;
 use crate::structures::bplustree::{
-    BPlusTree, Comparator, FixedSizeComparator, IterDirection, NodeAccessMode, SearchResult, VarlenComparator
+    BPlusTree, Comparator, FixedSizeComparator, IterDirection, NodeAccessMode, SearchResult,
+    VarlenComparator,
 };
 use crate::structures::kvp::KeyValuePair;
 use crate::types::VarInt;
@@ -32,7 +33,6 @@ impl AsRef<[u8]> for TestKey {
     }
 }
 
-
 struct TestVarLengthKey(Vec<u8>);
 
 impl TestVarLengthKey {
@@ -41,7 +41,6 @@ impl TestVarLengthKey {
     }
 
     fn as_bytes(&self) -> Vec<u8> {
-
         let mut buffer = [0u8; crate::types::varint::MAX_VARINT_LEN];
         let mut bytes_data = VarInt::encode(self.0.len() as i64, &mut buffer).to_vec();
         bytes_data.extend_from_slice(self.0.as_ref());
@@ -193,7 +192,7 @@ fn test_search_empty_tree() -> io::Result<()> {
 #[serial]
 fn test_insert_remove_single_key() -> io::Result<()> {
     let comparator = FixedSizeComparator::with_type::<TestKey>();
-    let mut btree = create_test_btree(4096, 1, 4,  comparator)?;
+    let mut btree = create_test_btree(4096, 1, 4, comparator)?;
 
     let root = btree.get_root();
     let start_pos = (root, Slot(0));
@@ -223,7 +222,7 @@ fn test_insert_remove_single_key() -> io::Result<()> {
 #[serial]
 fn test_insert_duplicates() -> io::Result<()> {
     let comparator = FixedSizeComparator::with_type::<TestKey>();
-    let mut btree = create_test_btree(4096, 1, 4,  comparator)?;
+    let mut btree = create_test_btree(4096, 1, 4, comparator)?;
     let root = btree.get_root();
     // Insert a key-value pair
     let key = TestKey(42);
@@ -244,7 +243,7 @@ fn test_update_single_key() -> io::Result<()> {
     let data2 = b"Updated";
     let kv2 = KeyValuePair::new(&key, data2);
     let comparator = FixedSizeComparator::with_type::<TestKey>();
-    let mut btree = create_test_btree(4096, 1, 4,comparator)?;
+    let mut btree = create_test_btree(4096, 1, 4, comparator)?;
 
     let root = btree.get_root();
     let start_pos = (root, Slot(0));
@@ -286,7 +285,7 @@ fn test_upsert_single_key() -> io::Result<()> {
     let data3 = b"Created";
     let kv3 = KeyValuePair::new(&key2, data3);
     let comparator = FixedSizeComparator::with_type::<TestKey>();
-    let mut btree = create_test_btree(4096, 1, 4,  comparator)?;
+    let mut btree = create_test_btree(4096, 1, 4, comparator)?;
 
     let root = btree.get_root();
     let start_pos = (root, Slot(0));
@@ -485,22 +484,17 @@ fn test_overflow_keys() -> io::Result<()> {
     let root = tree.get_root();
     let start_pos = (root, Slot(0));
 
-
     let large_key_size = 5000;
 
     for i in 0..10 {
-
-        let key_content = format!("KEY_{i:04}_")
-            + &"X".repeat(large_key_size - 10);
+        let key_content = format!("KEY_{i:04}_") + &"X".repeat(large_key_size - 10);
         let key = TestVarLengthKey::from_string(&key_content);
         dbg!(i);
         tree.insert(root, &key.as_bytes())?;
     }
 
-
     for i in 0..10 {
-        let key_content = format!("KEY_{i:04}_")
-            + &"X".repeat(large_key_size - 10);
+        let key_content = format!("KEY_{i:04}_") + &"X".repeat(large_key_size - 10);
         let key = TestVarLengthKey::from_string(&key_content);
 
         let retrieved = tree.search(&start_pos, &key.as_bytes(), NodeAccessMode::Read)?;
@@ -511,17 +505,13 @@ fn test_overflow_keys() -> io::Result<()> {
         assert_eq!(cell.unwrap().as_ref(), key.as_bytes());
     }
 
-    let huge_key = TestVarLengthKey::from_string(
-        &("HUGE_KEY_".to_string() + &"Y".repeat(8000))
-    );
+    let huge_key = TestVarLengthKey::from_string(&("HUGE_KEY_".to_string() + &"Y".repeat(8000)));
     let huge_value = gen_ovf_blob(4096, 5, 99);
-
 
     let mut combined_data = huge_key.as_bytes();
     combined_data.extend_from_slice(&huge_value);
 
     tree.insert(root, &combined_data)?;
-
 
     let retrieved = tree.search(&start_pos, &huge_key.as_bytes(), NodeAccessMode::Read)?;
     let cell = tree.get_content_from_result(retrieved);
@@ -532,8 +522,6 @@ fn test_overflow_keys() -> io::Result<()> {
 
     Ok(())
 }
-
-
 
 #[test]
 #[serial]
@@ -556,8 +544,6 @@ fn test_btree_iterator() -> io::Result<()> {
         let kv = KeyValuePair::new(key, value);
         tree.insert(root, kv.as_ref())?;
     }
-
-
 
     let mut collected = Vec::new();
     for item in tree.iter()? {
@@ -583,10 +569,6 @@ fn test_btree_iterator() -> io::Result<()> {
     Ok(())
 }
 
-
-
-
-
 #[test]
 #[serial]
 fn test_btree_iterator_iter_from() -> io::Result<()> {
@@ -610,7 +592,6 @@ fn test_btree_iterator_iter_from() -> io::Result<()> {
         tree.insert(root, kv.as_ref())?;
     }
 
-
     let start_key = TestKey(50);
 
     for item in tree.iter_from(start_key.as_ref(), IterDirection::Forward)? {
@@ -633,17 +614,14 @@ fn test_btree_iterator_iter_from() -> io::Result<()> {
     Ok(())
 }
 
-
-
 #[test]
 #[serial]
-fn test_btree_iterator_iter_rev() -> io::Result<()>{
-
+fn test_btree_iterator_iter_rev() -> io::Result<()> {
     let comparator = FixedSizeComparator::with_type::<TestKey>();
     let mut tree = create_test_btree(4096, 10, 4, comparator)?;
     let root = tree.get_root();
     let mut collected = Vec::new();
- 
+
     let test_data: Vec<(TestKey, Vec<u8>)> = (0..100)
         .map(|i| {
             let key = TestKey(i);
@@ -656,7 +634,6 @@ fn test_btree_iterator_iter_rev() -> io::Result<()>{
         let kv = KeyValuePair::new(key, value);
         tree.insert(root, kv.as_ref())?;
     }
-
 
     std::fs::write("tree.json", tree.json()?)?;
 
@@ -680,7 +657,10 @@ fn test_btree_iterator_iter_rev() -> io::Result<()>{
     for i in 0..9 {
         let key_i = i32::from_ne_bytes(collected[i].as_ref()[..4].try_into().unwrap());
         let key_next = i32::from_ne_bytes(collected[i + 1].as_ref()[..4].try_into().unwrap());
-        assert!(key_i > key_next, "Keys should be in descending order in reverse iteration");
+        assert!(
+            key_i > key_next,
+            "Keys should be in descending order in reverse iteration"
+        );
     }
 
     Ok(())

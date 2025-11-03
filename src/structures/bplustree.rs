@@ -1,9 +1,7 @@
 use crate::io::frames::MemFrame;
 use crate::io::pager::SharedPager;
 use crate::storage::cell::{CELL_HEADER_SIZE, SLOT_SIZE};
-use crate::storage::page::{
-    BtreePage, MemPage, OverflowPage, BTREE_PAGE_HEADER_SIZE,
-};
+use crate::storage::page::{BtreePage, MemPage, OverflowPage, BTREE_PAGE_HEADER_SIZE};
 use crate::storage::{
     cell::{Cell, Slot},
     latches::Latch,
@@ -123,8 +121,6 @@ impl FixedSizeComparator {
     pub fn with_type<T>() -> Self {
         Self(std::mem::size_of::<T>())
     }
-
-
 }
 
 impl Comparator for FixedSizeComparator {
@@ -278,12 +274,8 @@ where
         num_siblings_per_side: usize,
         comparator: Cmp,
     ) -> Self {
-
         debug_assert!(min_keys > 2, "Invalid argument. Minimum allowed keys is 2");
-        let root = pager
-            .write()
-            .alloc_page::<BtreePage>()
-            .unwrap();
+        let root = pager.write().alloc_page::<BtreePage>().unwrap();
 
         Self {
             shared_pager: pager,
@@ -512,9 +504,11 @@ where
 
             for (i, cell) in btreepage.iter_cells().enumerate() {
                 let content: Payload = if cell.metadata().is_overflow() {
-                    let required_size = if (cell.used().len() -std::mem::size_of::<PageId>()) >= std::mem::size_of::<VarInt>() || self.comparator.is_fixed_size()  {
+                    let required_size = if (cell.used().len() - std::mem::size_of::<PageId>())
+                        >= std::mem::size_of::<VarInt>()
+                        || self.comparator.is_fixed_size()
+                    {
                         self.comparator.key_size(cell.used())
-
                     } else {
                         usize::MAX
                     };
@@ -544,9 +538,11 @@ where
             let mut result = SlotSearchResult::NotFound;
             for (i, cell) in btreepage.iter_cells().enumerate() {
                 let content: Payload = if cell.metadata().is_overflow() {
-                    let required_size = if (cell.used().len() -std::mem::size_of::<PageId>()) >= std::mem::size_of::<VarInt>() || self.comparator.is_fixed_size()  {
+                    let required_size = if (cell.used().len() - std::mem::size_of::<PageId>())
+                        >= std::mem::size_of::<VarInt>()
+                        || self.comparator.is_fixed_size()
+                    {
                         self.comparator.key_size(cell.used())
-
                     } else {
                         usize::MAX
                     };
@@ -572,17 +568,11 @@ where
         })
     }
 
-
-
-
-
-
     fn reassemble_payload(&self, cell: &Cell, required_size: usize) -> std::io::Result<Payload> {
         let mut overflow_page = cell.overflow_page();
         let mut payload = Vec::from(&cell.used()[..cell.len() - std::mem::size_of::<PageId>()]);
 
-        while overflow_page.is_valid()  {
-
+        while overflow_page.is_valid() {
             if payload.len() >= required_size {
                 break;
             };
@@ -625,15 +615,15 @@ where
                 let cell = btreepage.cell(mid);
 
                 let content: Payload = if cell.metadata().is_overflow() {
-
-                    let required_size = if (cell.used().len() -std::mem::size_of::<PageId>()) >= std::mem::size_of::<VarInt>() || self.comparator.is_fixed_size()  {
+                    let required_size = if (cell.used().len() - std::mem::size_of::<PageId>())
+                        >= std::mem::size_of::<VarInt>()
+                        || self.comparator.is_fixed_size()
+                    {
                         self.comparator.key_size(cell.used())
-
                     } else {
                         usize::MAX
                     };
                     self.reassemble_payload(cell, required_size)?
-
                 } else {
                     Payload::Reference(cell.used())
                 };
@@ -903,10 +893,7 @@ where
             return Ok(Cell::new(payload));
         }
 
-        let mut overflow_page_number = self
-            .shared_pager
-            .write()
-            .alloc_page::<OverflowPage>()?;
+        let mut overflow_page_number = self.shared_pager.write().alloc_page::<OverflowPage>()?;
 
         let cell = Cell::new_overflow(&payload[..max_payload_size], overflow_page_number);
 
@@ -936,10 +923,7 @@ where
                 break;
             }
 
-            let next_overflow_page = self
-                .shared_pager
-                .write()
-                .alloc_page::<OverflowPage>()?;
+            let next_overflow_page = self.shared_pager.write().alloc_page::<OverflowPage>()?;
 
             frame
                 .try_with_variant_mut::<OverflowPage, _, _, _>(|overflow_page| {
@@ -1016,15 +1000,9 @@ where
     }
 
     fn balance_deeper(&mut self) -> std::io::Result<()> {
-        let new_left = self
-            .shared_pager
-            .write()
-            .alloc_page::<BtreePage>()?;
+        let new_left = self.shared_pager.write().alloc_page::<BtreePage>()?;
         self.acquire_latch(new_left, NodeAccessMode::Write)?;
-        let new_right = self
-            .shared_pager
-            .write()
-            .alloc_page::<BtreePage>()?;
+        let new_right = self.shared_pager.write().alloc_page::<BtreePage>()?;
         self.acquire_latch(new_right, NodeAccessMode::Write)?;
 
         let old_right_child = self.with_latched_page(self.root, |p| {
@@ -1138,7 +1116,6 @@ where
         let last_non_allocated_sibling_slot = siblings.iter().last().unwrap().slot;
         let first_non_allocated_sibling_slot = siblings.front().unwrap().slot;
 
-
         // Load the left frontier
         let left_frontier = if first_non_allocated_sibling_slot > Slot(0) {
             let child_slot = first_non_allocated_sibling_slot - 1usize;
@@ -1146,7 +1123,6 @@ where
         } else {
             None
         };
-
 
         // Load the right frontier.
         let right_frontier = if last_non_allocated_sibling_slot < last_parent_slot {
@@ -1156,7 +1132,6 @@ where
             None
         };
 
-
         // Read the page size from the pager.
         let page_size = self.shared_pager.read().page_size();
         let mut cells = std::collections::VecDeque::new();
@@ -1165,11 +1140,8 @@ where
         // Therefore we need to always remove the first slot in order to clean up the parent node.
         let slot_to_remove = siblings[0].slot;
 
-
-
         // Make copies of cells in order.
         for (i, sibling) in siblings.iter().enumerate() {
-
             // As always, when visiting sibling nodes we need to remember to acquire their corresponding latches, as they might have not been visited before.
             self.acquire_latch(sibling.pointer, NodeAccessMode::Write)?;
 
@@ -1188,7 +1160,7 @@ where
             // If we are not the last sibling we can safely link with the next in the chain.
             // If we are the last sibling we use the right frontier.
             // If there is no right frontier we are the parent's right most and there is no [next].
-            let next_sibling = if i < siblings.len() -1 {
+            let next_sibling = if i < siblings.len() - 1 {
                 siblings[i + 1].pointer
             } else if let Some(frontier) = right_frontier {
                 frontier.pointer
@@ -1196,13 +1168,11 @@ where
                 PAGE_ZERO
             };
 
-
             // If the right child is different from [ZERO] and the netx sibling too,
             // extract the first cell of the first child on our next sibling and allocate a new cell.
             // This always happens on interior nodes rebalancing, as right_child is not set on leaf nodes.
             if right_child.is_valid() && next_sibling.is_valid() {
                 self.acquire_latch(next_sibling, NodeAccessMode::Write)?;
-
 
                 // Obtain the first child
                 let first_child_next = self.with_latched_page(next_sibling, |p| {
@@ -1212,19 +1182,16 @@ where
 
                 self.acquire_latch(first_child_next, NodeAccessMode::Write)?;
 
-
                 // Obtain the first cell of the first child of our sibling.
                 let mut first_cell_child = self.with_latched_page(first_child_next, |p| {
                     let node: &BtreePage = p.try_into().unwrap();
                     Ok(node.cell(Slot(0)).clone())
                 })?;
 
-
                 // Make the copied cell point to our right child and push it to the chain.
                 first_cell_child.metadata_mut().left_child = right_child;
                 cells.push_back(first_cell_child);
             };
-
 
             // Remove our entry from the parent node.
             self.with_latched_page_mut(parent_page, |p| {
@@ -1236,7 +1203,6 @@ where
                 Ok(())
             })?;
         }
-
 
         // Obtain the maximum data that we can fit on this page.
         let usable_space = BtreePage::overflow_threshold(page_size as usize) as u16;
@@ -1300,10 +1266,7 @@ where
         // Allocate missing pages.
         while siblings.len() < number_of_cells_per_page.len() {
             let parent_index = siblings.iter().last().unwrap().slot + 1usize;
-            let new_page = self
-                .shared_pager
-                .write()
-                .alloc_page::<BtreePage>()?;
+            let new_page = self.shared_pager.write().alloc_page::<BtreePage>()?;
 
             self.acquire_latch(new_page, NodeAccessMode::Write)?;
             self.with_latched_page(new_page, |p| {
@@ -1345,15 +1308,13 @@ where
         .enumerate()
         .for_each(|(i, std::cmp::Reverse(page))| siblings[i].pointer = *page);
 
-
         // Fix the last child pointer.
-        let last_sibling = siblings[siblings.len() -1];
+        let last_sibling = siblings[siblings.len() - 1];
         self.with_latched_page_mut(last_sibling.pointer, |p| {
             let node: &mut BtreePage = p.try_into().unwrap();
             node.metadata_mut().right_child = old_right_child;
             Ok(())
         })?;
-
 
         // If there is no right frontier, it means the last sibling in the chain is also the parent's right most.
         if right_frontier.is_none() {
@@ -1383,7 +1344,6 @@ where
                     node.push(cells.pop_front().unwrap());
                 }
 
-
                 // Maintain the linked list of nodes in the same level.
                 if i > 0 {
                     node.metadata_mut().previous_sibling = siblings[i - 1].pointer;
@@ -1398,7 +1358,7 @@ where
                 };
 
                 // For leaf nodes, we always propagate the first cell of the next node.
-                if i < siblings.len() -1 && is_leaf {
+                if i < siblings.len() - 1 && is_leaf {
                     let mut divider = cells.front().unwrap().clone();
                     node.metadata_mut().right_child = divider.metadata().left_child;
                     divider.metadata_mut().left_child = siblings[i].pointer;
@@ -1407,7 +1367,7 @@ where
                 // For interior nodes there are two possible cases.
                 // CASE A: We are not the right most of the parent.
                 // On that case we simply propagate our last cell and also use it as our right most.
-                } else if !is_leaf && (i < siblings.len() -1 || right_frontier.is_some()) {
+                } else if !is_leaf && (i < siblings.len() - 1 || right_frontier.is_some()) {
                     let mut divider = cells.pop_front().unwrap();
                     node.metadata_mut().right_child = divider.metadata().left_child;
                     divider.metadata_mut().left_child = siblings[i].pointer;
@@ -1463,8 +1423,6 @@ where
                 Ok(())
             })?;
         };
-
-
 
         //  Push the right frontier divider to the parent.
         if let Some(mut divider) = frontier_divider {
@@ -1859,11 +1817,7 @@ where
         Ok(string)
     }
 
-
-
-      fn load_cells(&self, page_id: PageId) -> std::io::Result<Vec<Cell>> {
-
-
+    fn load_cells(&self, page_id: PageId) -> std::io::Result<Vec<Cell>> {
         let cells = self.with_latched_page(page_id, |p| {
             let btree_page: &BtreePage = p.try_into().unwrap();
             Ok(btree_page.iter_cells().cloned().collect())
@@ -1872,8 +1826,11 @@ where
         Ok(cells)
     }
 
-
-    pub fn iter_from(&mut self, key: &[u8], direction: IterDirection) -> std::io::Result<BPlusTreeIterator<Cmp>> {
+    pub fn iter_from(
+        &mut self,
+        key: &[u8],
+        direction: IterDirection,
+    ) -> std::io::Result<BPlusTreeIterator<Cmp>> {
         let position = self.search(&(self.root, Slot(0)), key, NodeAccessMode::Read)?;
         let pos = match position {
             SearchResult::Found(pos) | SearchResult::NotFound(pos) => pos,
@@ -1881,10 +1838,6 @@ where
 
         BPlusTreeIterator::from_position(self, pos, direction)
     }
-
-
-
-
 
     pub fn iter(&self) -> std::io::Result<BPlusTreeIterator<Cmp>> {
         let mut current = self.root;
@@ -1894,21 +1847,25 @@ where
 
             let (is_leaf, first_child) = self.with_latched_page(current, |p| {
                 let btree_page: &BtreePage = p.try_into().unwrap();
-                Ok((btree_page.is_leaf(), btree_page.cell(Slot(0)).metadata().left_child()))
+                Ok((
+                    btree_page.is_leaf(),
+                    btree_page.cell(Slot(0)).metadata().left_child(),
+                ))
             })?;
 
             self.release_latch(current);
 
             if is_leaf {
-                return BPlusTreeIterator::from_position(self, (current, Slot(0)), IterDirection::Forward)
+                return BPlusTreeIterator::from_position(
+                    self,
+                    (current, Slot(0)),
+                    IterDirection::Forward,
+                );
             }
 
             current = first_child;
         }
     }
-
-
-
 
     pub fn iter_rev(&self) -> std::io::Result<BPlusTreeIterator<Cmp>> {
         let mut current = self.root;
@@ -1918,27 +1875,26 @@ where
 
             let (last_child, last_slot) = self.with_latched_page(current, |p| {
                 let btree_page: &BtreePage = p.try_into().unwrap();
-                Ok((btree_page.metadata().right_child, (btree_page.max_slot_index() -1usize)))
+                Ok((
+                    btree_page.metadata().right_child,
+                    (btree_page.max_slot_index() - 1usize),
+                ))
             })?;
 
             self.release_latch(current);
 
             if !last_child.is_valid() {
-                return BPlusTreeIterator::from_position(self, (current, last_slot), IterDirection::Backward)
+                return BPlusTreeIterator::from_position(
+                    self,
+                    (current, last_slot),
+                    IterDirection::Backward,
+                );
             }
 
             current = last_child;
         }
     }
-
-
-
-
-
 }
-
-
-
 
 #[derive(Debug, Clone, Copy)]
 pub enum IterDirection {
@@ -1946,10 +1902,9 @@ pub enum IterDirection {
     Backward,
 }
 
-
 pub struct BPlusTreeIterator<'a, Cmp>
 where
-    Cmp: Comparator
+    Cmp: Comparator,
 {
     tree: &'a BPlusTree<Cmp>,
     current_page: Option<PageId>,
@@ -1959,12 +1914,10 @@ where
     _phantom: PhantomData<Cmp>,
 }
 
-
 impl<'a, Cmp> BPlusTreeIterator<'a, Cmp>
 where
     Cmp: Comparator,
 {
-
     pub fn from_position(
         tree: &'a BPlusTree<Cmp>,
         position: Position,
@@ -1972,7 +1925,6 @@ where
     ) -> std::io::Result<Self> {
         tree.acquire_latch(position.0, NodeAccessMode::Read)?;
         let cells = tree.load_cells(position.0)?;
-
 
         Ok(Self {
             tree,
@@ -1986,14 +1938,12 @@ where
 
     fn adv(&mut self) -> std::io::Result<bool> {
         if let Some(current) = self.current_page {
-
             let next_page = self.tree.with_latched_page(current, |p| {
                 let btree_page: &BtreePage = p.try_into().unwrap();
                 Ok(btree_page.metadata().next_sibling)
             })?;
 
             if next_page.is_valid() {
-
                 self.current_page = Some(next_page);
                 self.tree.acquire_latch(next_page, NodeAccessMode::Read)?;
                 self.tree.release_latch(current);
@@ -2008,7 +1958,6 @@ where
         self.current_page = None;
         Ok(false)
     }
-
 
     fn rev(&mut self) -> std::io::Result<bool> {
         if let Some(current) = self.current_page {
@@ -2033,8 +1982,6 @@ where
     }
 }
 
-
-
 impl<'a, Cmp> Iterator for BPlusTreeIterator<'a, Cmp>
 where
     Cmp: Comparator,
@@ -2046,7 +1993,6 @@ where
 
         match self.direction {
             IterDirection::Forward => {
-
                 if (self.current_slot.0 as usize) < self.cells_in_page.len() {
                     let cell = &self.cells_in_page[self.current_slot.0 as usize];
                     let payload = if cell.metadata().is_overflow() {
@@ -2061,7 +2007,6 @@ where
                     self.current_slot = self.current_slot + 1usize;
                     Some(Ok(payload))
                 } else {
-
                     match self.adv() {
                         Ok(true) => self.next(),
                         Ok(false) => None,
@@ -2070,7 +2015,6 @@ where
                 }
             }
             IterDirection::Backward => {
-
                 if self.current_slot.0 < self.cells_in_page.len() as u16 {
                     let cell = &self.cells_in_page[self.current_slot.0 as usize];
                     let payload = if cell.metadata().is_overflow() {
@@ -2085,7 +2029,6 @@ where
                     if self.current_slot.0 > 0 {
                         self.current_slot = self.current_slot - 1usize;
                     } else {
-
                         match self.rev() {
                             Ok(false) => self.current_page = None, // No hay más páginas
                             Err(e) => return Some(Err(e)),

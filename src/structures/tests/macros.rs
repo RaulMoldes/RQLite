@@ -34,7 +34,7 @@ macro_rules! insert_tests {
 
                     let key = TestKey(*key_val);
                     tree.insert(root, key.as_ref())?;
-              
+
                 }
 
                 std::fs::write("tree.json", tree.json()?)?;

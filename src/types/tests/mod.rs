@@ -1,8 +1,8 @@
 mod macros;
 
 use crate::types::{
-    Bool, Char, Date, DateTime, Int16, Int32, Int64, Int8, PageId, RowId,
-    UInt16, UInt32, UInt64, UInt8,
+    Bool, Char, Date, DateTime, Int16, Int32, Int64, Int8, PageId, RowId, UInt16, UInt32, UInt64,
+    UInt8,
 };
 
 use crate::{test_ordering, test_serializable};
@@ -169,8 +169,6 @@ test_serializable!(
         DateTime::parse_iso("2025-01-01T00:00:00").unwrap()
     ]
 );
-
-
 
 // Tests Date
 test_ordering!(

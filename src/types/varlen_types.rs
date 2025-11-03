@@ -61,15 +61,19 @@ impl<'a> BlobRef<'a> {
 
     pub fn to_string(self, encoding: TextEncoding) -> String {
         match encoding {
-            TextEncoding::Utf8 => {
-                String::from_utf8(self.data().to_vec()).unwrap()
-            }
+            TextEncoding::Utf8 => String::from_utf8(self.data().to_vec()).unwrap(),
             TextEncoding::Utf16be => {
-                assert!(self.length() % 2 == 0, "UTF-16BE blob length must be multiple of 2");
+                assert!(
+                    self.length() % 2 == 0,
+                    "UTF-16BE blob length must be multiple of 2"
+                );
                 decode_utf16be(self.data())
             }
             TextEncoding::Utf16le => {
-                assert!(self.length() % 2 == 0, "UTF-16LE blob length must be multiple of 2");
+                assert!(
+                    self.length() % 2 == 0,
+                    "UTF-16LE blob length must be multiple of 2"
+                );
                 decode_utf16le(self.data())
             }
         }
@@ -82,7 +86,7 @@ impl<'a> BlobRef<'a> {
     pub fn as_str(&self, encoding: TextEncoding) -> &str {
         match encoding {
             TextEncoding::Utf8 => std::str::from_utf8(self.as_utf8()).unwrap(),
-            _ => panic!("Can only convert to string directly using utf8 encoding")
+            _ => panic!("Can only convert to string directly using utf8 encoding"),
         }
     }
 

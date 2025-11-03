@@ -297,8 +297,8 @@ unsafe impl Sync for Pager {}
 #[cfg(test)]
 mod tests {
 
-    use crate::storage::page::{BtreePage, BTREE_PAGE_HEADER_SIZE};
     use super::*;
+    use crate::storage::page::{BtreePage, BTREE_PAGE_HEADER_SIZE};
     use serial_test::serial;
     use std::io::{Read, Seek, SeekFrom};
     use tempfile::tempdir;
