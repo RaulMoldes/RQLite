@@ -113,7 +113,7 @@ pub fn gen_ovf_blob(page_size: usize, pages: usize, seed: u64) -> Vec<u8> {
 }
 
 #[test]
-fn test_comparators() {
+fn test_comparators() -> std::io::Result<()> {
     let lhs = TestKey(1);
     let bytes_lhs = lhs.as_ref();
 
@@ -121,7 +121,7 @@ fn test_comparators() {
     let bytes_rhs = rhs.as_ref();
 
     let comparator = FixedSizeComparator::with_type::<TestKey>();
-    assert_eq!(comparator.compare(bytes_lhs, bytes_rhs), Ordering::Equal);
+    assert_eq!(comparator.compare(bytes_lhs, bytes_rhs)?, Ordering::Equal);
 
     let lhs = TestKey(1);
     let bytes_lhs = lhs.as_ref();
@@ -129,7 +129,7 @@ fn test_comparators() {
     let rhs = TestKey(2);
     let bytes_rhs = rhs.as_ref();
 
-    assert_eq!(comparator.compare(bytes_lhs, bytes_rhs), Ordering::Less);
+    assert_eq!(comparator.compare(bytes_lhs, bytes_rhs)?, Ordering::Less);
 
     let lhs = TestKey(3);
     let bytes_lhs = lhs.as_ref();
@@ -137,7 +137,7 @@ fn test_comparators() {
     let rhs = TestKey(2);
     let bytes_rhs = rhs.as_ref();
 
-    assert_eq!(comparator.compare(bytes_lhs, bytes_rhs), Ordering::Greater);
+    assert_eq!(comparator.compare(bytes_lhs, bytes_rhs)?, Ordering::Greater);
 
     let lhs = TestVarLengthKey::from_string("Hello how are you 2");
     let bytes_lhs = lhs.as_bytes();
@@ -147,7 +147,7 @@ fn test_comparators() {
 
     let comparator = VarlenComparator;
     assert_eq!(
-        comparator.compare(&bytes_lhs, &bytes_rhs),
+        comparator.compare(&bytes_lhs, &bytes_rhs)?,
         Ordering::Greater
     );
 
@@ -157,7 +157,7 @@ fn test_comparators() {
     let rhs = TestVarLengthKey::from_string("Hello how are you 2");
     let bytes_rhs = rhs.as_bytes();
 
-    assert_eq!(comparator.compare(&bytes_lhs, &bytes_rhs), Ordering::Less);
+    assert_eq!(comparator.compare(&bytes_lhs, &bytes_rhs)?, Ordering::Less);
 
     let lhs = TestVarLengthKey::from_string("Hello how are you");
     let bytes_lhs = lhs.as_bytes();
@@ -166,7 +166,9 @@ fn test_comparators() {
     let bytes_rhs = rhs.as_bytes();
 
     let comparator = VarlenComparator;
-    assert_eq!(comparator.compare(&bytes_lhs, &bytes_rhs), Ordering::Equal);
+    assert_eq!(comparator.compare(&bytes_lhs, &bytes_rhs)?, Ordering::Equal);
+
+    Ok(())
 }
 
 /// Searches on an empty bplustree.

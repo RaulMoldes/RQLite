@@ -45,8 +45,8 @@ pub enum Payload<'b> {
 }
 
 pub(crate) trait Comparator {
-    fn compare(&self, lhs: &[u8], rhs: &[u8]) -> Ordering;
-    fn key_size(&self, data: &[u8]) -> usize;
+    fn compare(&self, lhs: &[u8], rhs: &[u8]) -> std::io::Result<Ordering>;
+    fn key_size(&self, data: &[u8]) -> std::io::Result<usize>;
     fn is_fixed_size(&self) -> bool {
         false
     }
@@ -55,18 +55,18 @@ pub(crate) trait Comparator {
 pub(crate) struct VarlenComparator;
 
 impl Comparator for VarlenComparator {
-    fn compare(&self, lhs: &[u8], rhs: &[u8]) -> Ordering {
+    fn compare(&self, lhs: &[u8], rhs: &[u8]) -> std::io::Result<Ordering> {
         if lhs.as_ptr() == rhs.as_ptr() && lhs.len() == rhs.len() {
-            return Ordering::Equal;
+            return Ok(Ordering::Equal);
         }
 
         // Deserialize VarInt lengths
-        let (left_length, left_offset) = VarInt::from_encoded_bytes(lhs);
-        let lhs_len: usize = left_length.try_into().unwrap();
+        let (left_length, left_offset) = VarInt::from_encoded_bytes(lhs)?;
+        let lhs_len: usize = left_length.try_into()?;
         let left_data = &lhs[left_offset..left_offset + lhs_len];
 
-        let (right_length, right_offset) = VarInt::from_encoded_bytes(rhs);
-        let rhs_len: usize = right_length.try_into().unwrap();
+        let (right_length, right_offset) = VarInt::from_encoded_bytes(rhs)?;
+        let rhs_len: usize = right_length.try_into()?;
         let right_data = &rhs[right_offset..right_offset + rhs_len];
 
         let min_len = lhs_len.min(rhs_len);
@@ -83,7 +83,7 @@ impl Comparator for VarlenComparator {
 
                 match lhs_u64.cmp(&rhs_u64) {
                     Ordering::Equal => continue,
-                    other => return other,
+                    other => return Ok(other),
                 }
             }
 
@@ -91,7 +91,7 @@ impl Comparator for VarlenComparator {
             for i in (chunk_count * 8)..min_len {
                 match left_data[i].cmp(&right_data[i]) {
                     Ordering::Equal => continue,
-                    other => return other,
+                    other => return Ok(other),
                 }
             }
         } else {
@@ -99,19 +99,19 @@ impl Comparator for VarlenComparator {
             for i in 0..min_len {
                 match left_data[i].cmp(&right_data[i]) {
                     Ordering::Equal => continue,
-                    other => return other,
+                    other => return Ok(other),
                 }
             }
         }
 
         // If all compared bytes are equal, decide by total length
-        lhs_len.cmp(&rhs_len)
+        Ok(lhs_len.cmp(&rhs_len))
     }
 
-    fn key_size(&self, data: &[u8]) -> usize {
-        let (len, offset) = VarInt::from_encoded_bytes(data);
+    fn key_size(&self, data: &[u8]) -> std::io::Result<usize> {
+        let (len, offset) = VarInt::from_encoded_bytes(data)?;
         let len_usize: usize = len.try_into().unwrap();
-        offset + len_usize
+        Ok(offset + len_usize)
     }
 }
 
@@ -124,12 +124,12 @@ impl FixedSizeComparator {
 }
 
 impl Comparator for FixedSizeComparator {
-    fn compare(&self, lhs: &[u8], rhs: &[u8]) -> Ordering {
-        lhs[..self.0].cmp(&rhs[..self.0])
+    fn compare(&self, lhs: &[u8], rhs: &[u8]) -> std::io::Result<Ordering> {
+        Ok(lhs[..self.0].cmp(&rhs[..self.0]))
     }
 
-    fn key_size(&self, __data: &[u8]) -> usize {
-        self.0
+    fn key_size(&self, __data: &[u8]) -> std::io::Result<usize> {
+        Ok(self.0)
     }
 
     fn is_fixed_size(&self) -> bool {
@@ -508,7 +508,7 @@ where
                         >= std::mem::size_of::<VarInt>()
                         || self.comparator.is_fixed_size()
                     {
-                        self.comparator.key_size(cell.used())
+                        self.comparator.key_size(cell.used())?
                     } else {
                         usize::MAX
                     };
@@ -517,7 +517,7 @@ where
                     Payload::Reference(cell.used())
                 };
 
-                if self.comparator.compare(search_key, content.as_ref()) == Ordering::Less {
+                if self.comparator.compare(search_key, content.as_ref())? == Ordering::Less {
                     result = SearchResult::Found((cell.metadata().left_child(), Slot(i as u16)));
                     break;
                 };
@@ -542,7 +542,7 @@ where
                         >= std::mem::size_of::<VarInt>()
                         || self.comparator.is_fixed_size()
                     {
-                        self.comparator.key_size(cell.used())
+                        self.comparator.key_size(cell.used())?
                     } else {
                         usize::MAX
                     };
@@ -551,7 +551,7 @@ where
                     Payload::Reference(cell.used())
                 };
 
-                match self.comparator.compare(search_key, content.as_ref()) {
+                match self.comparator.compare(search_key, content.as_ref())? {
                     Ordering::Less => {
                         result = SlotSearchResult::FoundBetween((page_id, Slot(i as u16)));
                         break;
@@ -619,7 +619,7 @@ where
                         >= std::mem::size_of::<VarInt>()
                         || self.comparator.is_fixed_size()
                     {
-                        self.comparator.key_size(cell.used())
+                        self.comparator.key_size(cell.used())?
                     } else {
                         usize::MAX
                     };
@@ -630,7 +630,7 @@ where
 
                 // The key content is always the first bytes of the cell
 
-                match self.comparator.compare(search_key, content.as_ref()) {
+                match self.comparator.compare(search_key, content.as_ref())? {
                     Ordering::Equal => return Ok(SearchResult::Found((page_id, mid))),
                     Ordering::Greater => left = mid + 1usize,
                     Ordering::Less => right = mid,
@@ -1485,12 +1485,12 @@ where
             } else {
                 break;
             };
-            next += 1;
+            next += 1usize;
             added_count += 1;
         }
 
         added_count = 0;
-        next = slot.saturating_sub(1);
+        next = Slot(slot.0.saturating_sub(1));
 
         while next >= Slot(0) && added_count < num_siblings_per_side {
             if let Some(child) = self.load_child(parent, next) {
@@ -1503,7 +1503,7 @@ where
             } else {
                 break;
             };
-            next = next.saturating_sub(1);
+            next = Slot(next.0.saturating_sub(1));
             added_count += 1;
         }
 

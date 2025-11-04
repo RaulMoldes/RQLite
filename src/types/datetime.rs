@@ -1,11 +1,11 @@
-use crate::types::Date;
+use crate::types::date::Date;
 use std::cmp::{Ord, PartialOrd};
 use std::fmt::{self, Display};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Represents a date and time (UTC-based)
-crate::scalar! {
+crate::integer! {
     pub struct DateTime(u64);
 }
 

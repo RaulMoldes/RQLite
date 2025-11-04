@@ -1,5 +1,6 @@
-use std::{alloc::Layout, fmt::Debug, mem, ptr::NonNull};
+use std::{alloc::Layout, fmt::Debug};
 
+use crate::types::UInt16;
 #[cfg(test)]
 use crate::{dynamic_buffer_tests, static_buffer_tests};
 
@@ -12,8 +13,16 @@ scalar! {
     pub struct Slot(u16);
 }
 
-scalar! {
-    pub struct PageOffset(u16);
+impl From<UInt16> for Slot {
+    fn from(value: UInt16) -> Self {
+        Self(value.0)
+    }
+}
+
+impl From<Slot> for UInt16 {
+    fn from(value: Slot) -> UInt16 {
+        UInt16(value.0)
+    }
 }
 
 pub const SLOT_SIZE: usize = std::mem::size_of::<Slot>();
@@ -95,18 +104,6 @@ impl Cell {
         buffer
     }
 
-    /// Creates a cell from a fragment of a page (zero-copy when possible)
-    pub unsafe fn from_page_fragment(ptr: NonNull<[u8]>, alignment: usize) -> Self {
-        // Create buffer from existing memory
-        let mut buffer = BufferWithMetadata::<CellHeader>::from_non_null(ptr, alignment);
-
-        // The header should already be initialized in the page memory
-        // Set the length based on the header's size field
-        let size = buffer.metadata().size;
-        buffer.set_len(size as usize);
-        buffer
-    }
-
     /// Creates a new overflow cell by extending the `payload` buffer with the
     /// `overflow_page` number.
     pub fn new_overflow(payload: &[u8], overflow_page: PageId) -> Self {
@@ -135,7 +132,7 @@ impl Cell {
 
         // If the cell constains an overflow page we can extract it from the last four bytes of its content data.
         PageId::from_be_bytes(
-            self.used()[self.len() - mem::size_of::<PageId>()..]
+            self.used()[self.len() - std::mem::size_of::<PageId>()..]
                 .try_into()
                 .expect("failed deserializing overflow page number"),
         )
@@ -158,34 +155,6 @@ impl Cell {
             .unwrap()
             .pad_to_align()
             .size() as u16
-    }
-
-    /// Split the cell so that the payload
-    pub fn split_payload(&mut self, max_size: usize) -> Option<Cell> {
-        // Ensure we have data to split
-        if self.len() <= max_size {
-            // Why the fuck are you calling this method even if you are not big enough to be splitted??
-            return None;
-        };
-
-        let new_size = self.size().saturating_sub(max_size);
-        let new_aligned = new_size.next_multiple_of(CELL_ALIGNMENT as usize);
-        let padding = new_aligned.saturating_sub(new_size);
-
-        let overflow_metadata = CellHeader::new_overflow(new_size, padding, None);
-
-        // Get the overflow portion
-        let overflow = Cell::from_slice_exact(
-            &self.used()[max_size..],
-            overflow_metadata,
-            CELL_ALIGNMENT as usize,
-        );
-
-        // Similar to [`Vec::shrink_to_fit()`] but this way it obliges me to explicitly specify the new length and capacity which is better for myself.
-        self.set_len(max_size);
-        // Truncate the current cell to the split point
-        self.shrink_to(max_size);
-        Some(overflow)
     }
 }
 
@@ -248,7 +217,7 @@ mod cell_tests {
         assert!(cell.metadata().is_overflow);
         assert_eq!(cell.overflow_page(), overflow_page);
 
-        let data_len = cell.len() - mem::size_of::<PageId>();
+        let data_len = cell.len() - std::mem::size_of::<PageId>();
         assert_eq!(&cell.used()[..data_len], payload);
 
         let expected_total_size = CELL_HEADER_SIZE + cell.size();
@@ -256,49 +225,5 @@ mod cell_tests {
 
         assert_eq!(cell.total_size() as usize, expected_total_size);
         assert_eq!(cell.storage_size() as usize, expected_storage_size);
-    }
-
-    #[test]
-    fn test_from_page_fragment() {
-        // TODO. Will add this test once [`Page`] is completely implemented.
-    }
-
-    #[test]
-    fn test_cell_split() {
-        // Validates normal cell creation from payload.
-        let payload =
-            b"hello world, I am a very big cell which is going to be splitted on this test!";
-        let mut cell = Cell::new(payload);
-        assert!(!cell.metadata().is_overflow);
-
-        // Check data content
-        assert_eq!(&cell.used()[..payload.len()], payload);
-        assert_eq!(cell.len(), payload.len(), "Payload size mismatch.");
-
-        let expected_total_size = CELL_HEADER_SIZE + cell.size();
-        let expected_storage_size = expected_total_size + SLOT_SIZE;
-
-        let original_capacity = cell.capacity();
-        let original_size = cell.size();
-
-        assert_eq!(cell.total_size() as usize, expected_total_size);
-        assert_eq!(cell.storage_size() as usize, expected_storage_size);
-        let current_size = cell.len();
-        let max_size = 12; // Randomly chosen number.
-        let remaining = cell.split_payload(max_size);
-        // Cell must have shrunk to [max_size]
-        assert_eq!(cell.capacity(), max_size);
-        assert_eq!(cell.data().len(), max_size);
-        assert_eq!(cell.size(), max_size + std::mem::size_of::<CellHeader>());
-        assert!(remaining.is_some());
-        // We need to get the cell back to original capacity
-        cell.grow(original_capacity);
-        // Let's see if we can reconstruct the cell.
-        cell.push_bytes(remaining.unwrap().used());
-        // Cell capacity and size should have been set back.
-        assert_eq!(cell.capacity(), original_capacity);
-        assert_eq!(cell.size(), original_size);
-        // The result should be that we have exactly the same data as at the beginning.
-        assert_eq!(cell.used().len(), payload.len());
     }
 }

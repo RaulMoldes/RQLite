@@ -4,6 +4,7 @@
 #![feature(debug_closure_helpers)]
 #![feature(trait_alias)]
 #![allow(dead_code)]
+#![allow(unused_assignments)]
 #![allow(unused_variables)]
 #![feature(slice_ptr_get)]
 #![feature(concat_bytes)]

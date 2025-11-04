@@ -2,122 +2,144 @@
 use std::cmp::Ord;
 use std::mem::size_of;
 
+pub mod blob;
 pub mod date;
 pub mod datetime;
 pub mod id;
 pub mod sized_types;
 pub mod varint;
-pub mod varlen_types;
 
-pub use date::Date;
-pub use datetime::DateTime;
+pub use date::{Date, DateRef, DateRefMut};
+pub use datetime::{DateTime, DateTimeRef, DateTimeRefMut};
 pub use id::*;
 pub use sized_types::{
-    Bool, Byte, Char, Float32, Float64, Int16, Int32, Int64, Int8, UInt16, UInt32, UInt64, UInt8,
+    Float32, Float32Ref, Float32RefMut, Float64, Float64Ref, Float64RefMut, Int16, Int16Ref,
+    Int16RefMut, Int32, Int32Ref, Int32RefMut, Int64, Int64Ref, Int64RefMut, Int8, Int8Ref,
+    Int8RefMut, UInt16, UInt16Ref, UInt16RefMut, UInt32, UInt32Ref, UInt32RefMut, UInt64,
+    UInt64Ref, UInt64RefMut, UInt8, UInt8Ref, UInt8RefMut,
 };
 
+pub use blob::{Blob, BlobRef, BlobRefMut};
 pub use varint::VarInt;
-pub use varlen_types::BlobRef;
 
+use crate::def_data_type;
 #[cfg(test)]
 mod tests;
 
-pub(crate) enum DataType {
-    Null,
-    SmallInt(Int8),
-    HalfInt(Int16),
-    Int(Int32),
-    BigInt(Int64),
-    SmallUInt(UInt8),
-    HalfUInt(UInt16),
-    UInt(UInt32),
-    BigUInt(UInt64),
-    Float(Float32),
-    Double(Float64),
-    Byte(Byte),
-    Blob(BlobRef<'static>),
-    Varchar(BlobRef<'static>),
-    Text(BlobRef<'static>),
-    Date(Date),
-    Char(Char),
-    Boolean(Bool),
-    DateTime(DateTime),
-    RowId(RowId),
-    PageId(PageId),
-    TxId(TxId),
-    LogId(LogId),
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DataTypeKind {
+    SmallInt,
+    HalfInt,
+    Int,
+    BigInt,
+    SmallUInt,
+    HalfUInt,
+    UInt,
+    BigUInt,
+    Float,
+    Double,
+    Byte,
+    Char,
+    Boolean,
+    Date,
+    DateTime,
+    Blob,
+    Text,
 }
 
-impl DataType {
-    fn is_fixed_size(&self) -> bool {
-        matches!(
-            self,
-            DataType::BigUInt(_)
-                | DataType::BigInt(_)
-                | DataType::SmallInt(_)
-                | DataType::SmallUInt(_)
-                | DataType::UInt(_)
-                | DataType::Int(_)
-                | DataType::HalfInt(_)
-                | DataType::HalfUInt(_)
-                | DataType::Float(_)
-                | DataType::Double(_)
-                | DataType::Char(_)
-                | DataType::Boolean(_)
-                | DataType::Byte(_)
-                | DataType::DateTime(_)
-                | DataType::Date(_)
-                | DataType::LogId(_)
-                | DataType::PageId(_)
-                | DataType::RowId(_)
-                | DataType::TxId(_)
-        )
+impl DataTypeKind {
+    pub fn is_fixed_size(&self) -> bool {
+        !matches!(self, DataTypeKind::Blob | DataTypeKind::Text)
     }
 
-    fn size(&self) -> usize {
+    pub fn size(&self) -> Option<usize> {
         match self {
-            // Nulls and variable integers
-            DataType::Null => 0,
-
-            // Signed integers
-            DataType::SmallInt(_) => size_of::<i8>(),
-            DataType::HalfInt(_) => size_of::<i16>(),
-            DataType::Int(_) => size_of::<i32>(),
-            DataType::BigInt(_) => size_of::<i64>(),
-
-            // Unsigned integers
-            DataType::SmallUInt(_) => size_of::<u8>(),
-            DataType::HalfUInt(_) => size_of::<u16>(),
-            DataType::UInt(_) => size_of::<u32>(),
-            DataType::BigUInt(_) => size_of::<u64>(),
-
-            // Floating point
-            DataType::Float(_) => size_of::<f32>(),
-            DataType::Double(_) => size_of::<f64>(),
-
-            // Id types (4bytes)
-            DataType::RowId(_) | DataType::PageId(_) | DataType::LogId(_) | DataType::TxId(_) => {
-                size_of::<u32>()
-            }
-
-            // Scalar 1-byte values
-            DataType::Byte(_) | DataType::Char(_) | DataType::Boolean(_) => size_of::<u8>(),
-
-            // Date/time values
-            DataType::Date(_) => size_of::<u32>(),
-            DataType::DateTime(_) => size_of::<u64>(),
-
-            // Variable-length types (no prefix)
-            DataType::Blob(b) | DataType::Varchar(b) | DataType::Text(b) => b.as_ref().len(),
+            DataTypeKind::SmallInt => Some(size_of::<i8>()),
+            DataTypeKind::HalfInt => Some(size_of::<i16>()),
+            DataTypeKind::Int => Some(size_of::<i32>()),
+            DataTypeKind::BigInt => Some(size_of::<i64>()),
+            DataTypeKind::SmallUInt
+            | DataTypeKind::Byte
+            | DataTypeKind::Char
+            | DataTypeKind::Boolean => Some(size_of::<u8>()),
+            DataTypeKind::HalfUInt => Some(size_of::<u16>()),
+            DataTypeKind::UInt | DataTypeKind::Date => Some(size_of::<u32>()),
+            DataTypeKind::BigUInt | DataTypeKind::DateTime => Some(size_of::<u64>()),
+            DataTypeKind::Float => Some(size_of::<f32>()),
+            DataTypeKind::Double => Some(size_of::<f64>()),
+            DataTypeKind::Blob | DataTypeKind::Text => None,
         }
     }
-
-    fn is_null(&self) -> bool {
-        matches!(self, DataType::Null)
-    }
 }
+
 pub(crate) trait Key:
     Clone + Copy + Eq + PartialEq + Ord + PartialOrd + std::hash::Hash
 {
     fn new_key() -> Self;
+}
+
+def_data_type!(DataTypeRef, Ref);
+def_data_type!(DataTypeRefMut, RefMut);
+def_data_type!(DataType, Owned);
+
+impl AsRef<[u8]> for DataType {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Null => &[],
+            Self::SmallInt(p) => p.as_ref(),
+            Self::HalfInt(p) => p.as_ref(),
+            Self::Int(p) => p.as_ref(),
+            Self::BigInt(p) => p.as_ref(),
+            Self::SmallUInt(p) => p.as_ref(),
+            Self::HalfUInt(p) => p.as_ref(),
+            Self::UInt(p) => p.as_ref(),
+            Self::BigUInt(p) => p.as_ref(),
+            Self::Float(p) => p.as_ref(),
+            Self::Double(p) => p.as_ref(),
+            Self::Byte(p) | Self::Char(p) | Self::Boolean(p) => p.as_ref(),
+            Self::Date(p) => p.as_ref(),
+            Self::DateTime(p) => p.as_ref(),
+            Self::Blob(b) | Self::Text(b) => b.as_ref(),
+        }
+    }
+}
+
+impl<'a> AsRef<[u8]> for DataTypeRef<'a> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Null => &[],
+            Self::SmallInt(p) => p.as_ref(),
+            Self::HalfInt(p) => p.as_ref(),
+            Self::Int(p) => p.as_ref(),
+            Self::BigInt(p) => p.as_ref(),
+            Self::SmallUInt(p) => p.as_ref(),
+            Self::HalfUInt(p) => p.as_ref(),
+            Self::UInt(p) => p.as_ref(),
+            Self::BigUInt(p) => p.as_ref(),
+            Self::Float(p) => p.as_ref(),
+            Self::Double(p) => p.as_ref(),
+            Self::Byte(p) | Self::Char(p) | Self::Boolean(p) => p.as_ref(),
+            Self::Date(p) => p.as_ref(),
+            Self::DateTime(p) => p.as_ref(),
+            Self::Blob(b) | Self::Text(b) => b.as_ref(),
+        }
+    }
+}
+
+impl DataTypeKind {
+    pub fn alignment(&self) -> usize {
+        match self {
+            DataTypeKind::BigInt | DataTypeKind::BigUInt | DataTypeKind::DateTime => 8,
+            DataTypeKind::Int | DataTypeKind::UInt | DataTypeKind::Float | DataTypeKind::Date => 4,
+            DataTypeKind::HalfInt | DataTypeKind::HalfUInt => 2,
+            DataTypeKind::SmallInt
+            | DataTypeKind::SmallUInt
+            | DataTypeKind::Byte
+            | DataTypeKind::Char
+            | DataTypeKind::Boolean => 1,
+            DataTypeKind::Double => 8,
+            DataTypeKind::Blob | DataTypeKind::Text => 1,
+        }
+    }
 }

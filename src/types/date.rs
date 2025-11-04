@@ -37,7 +37,7 @@ pub(crate) const fn ymd_to_days(year: u32, month: u8, day: u8) -> u32 {
 // Days since Unix epoch (1970-01-01)
 // This allows us to represent dates from approximately year -5877641 to year 5881580
 // Using u32 for storage efficiency (4 bytes)
-crate::scalar! {
+crate::integer! {
     pub struct Date(u32);
 }
 

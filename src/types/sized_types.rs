@@ -1,50 +1,49 @@
-use crate::{float_scalar, scalar};
+use crate::{float, integer};
 
-scalar! {
+integer! {
     pub struct Int8(i8);
 }
 
-scalar! {
+integer! {
     pub struct Int16(i16);
 }
 
-scalar! {
+integer! {
     pub struct Int32(i32);
 }
 
-scalar! {
+integer! {
     pub struct Int64(i64);
 }
 
-scalar! {
+integer! {
     pub struct UInt8(u8);
 }
 
-scalar! {
+integer! {
     pub struct UInt16(u16);
 }
 
-scalar! {
+integer! {
     pub struct UInt32(u32);
 }
 
-scalar! {
+integer! {
     pub struct UInt64(u64);
 }
 
-float_scalar! {
+float! {
     pub struct Float32(f32);
 }
 
-float_scalar! {
+float! {
     pub struct Float64(f64);
 }
 
-pub type Byte = UInt8;
-pub type Char = UInt8;
-pub type Bool = UInt8;
+impl UInt8 {
+    pub const TRUE: Self = Self(1);
+    pub const FALSE: Self = Self(0);
 
-impl Char {
     pub const NULL: Self = Self(b'\0');
     pub const MAX: Self = Self(0xFF);
     pub const REPLACEMENT: Self = Self(0x1A);
@@ -59,6 +58,14 @@ impl Char {
 
     pub const fn is_ascii(self) -> bool {
         self.0 <= 127
+    }
+
+    pub const fn is_true(self) -> bool {
+        self.0 == Self::TRUE.0
+    }
+
+    pub const fn is_false(self) -> bool {
+        !self.is_true()
     }
 
     pub const fn to_ascii(self) -> Option<u8> {
@@ -110,6 +117,14 @@ impl Char {
         1
     }
 
+    pub const fn as_byte(self) -> u8 {
+        self.0
+    }
+
+    pub fn to_char(self) -> char {
+        self.0 as char
+    }
+
     pub const fn is_alphabetic(self) -> bool {
         self.0.is_ascii_alphabetic()
     }
@@ -124,95 +139,5 @@ impl Char {
 
     pub const fn is_hex_digit(self) -> bool {
         self.0.is_ascii_hexdigit()
-    }
-
-    pub const fn as_byte(self) -> u8 {
-        self.0
-    }
-
-    pub fn to_char(self) -> char {
-        self.0 as char
-    }
-}
-
-impl Bool {
-    pub const TRUE: Self = Self(1);
-    pub const FALSE: Self = Self(0);
-
-    pub const fn new(value: bool) -> Self {
-        if value {
-            Self::TRUE
-        } else {
-            Self::FALSE
-        }
-    }
-
-    pub const fn value(self) -> bool {
-        self.0 != 0
-    }
-
-    pub const fn is_true(self) -> bool {
-        self.0 != 0
-    }
-
-    pub const fn is_false(self) -> bool {
-        self.0 == 0
-    }
-
-    pub fn then<T>(self, f: impl FnOnce() -> T) -> Option<T> {
-        if self.is_true() {
-            Some(f())
-        } else {
-            None
-        }
-    }
-
-    pub fn then_some<T>(self, value: T) -> Option<T> {
-        if self.is_true() {
-            Some(value)
-        } else {
-            None
-        }
-    }
-    pub const fn from_bool(value: bool) -> Self {
-        Self::new(value)
-    }
-
-    pub const fn to_bool(self) -> bool {
-        self.value()
-    }
-
-    pub const fn from_u8(value: u8) -> Self {
-        Self(if value != 0 { 1 } else { 0 })
-    }
-
-    pub const fn to_u8(self) -> u8 {
-        self.0
-    }
-}
-
-// Implementaciones de traits útiles
-impl From<bool> for Bool {
-    fn from(value: bool) -> Self {
-        Bool::new(value)
-    }
-}
-
-impl From<Bool> for bool {
-    fn from(value: Bool) -> bool {
-        value.value()
-    }
-}
-
-impl From<char> for Char {
-    fn from(c: char) -> Self {
-        // Solo toma el byte menos significativo
-        Self(c as u8)
-    }
-}
-
-impl From<Char> for char {
-    fn from(c: Char) -> char {
-        c.0 as char
     }
 }

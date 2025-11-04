@@ -12,19 +12,25 @@ pub struct VarInt<'a>(&'a [u8]);
 
 impl<'a> VarInt<'a> {
     /// Create a VarInt from encoded bytes (borrows the bytes)
-    pub fn from_encoded_bytes(bytes: &'a [u8]) -> (Self, usize) {
+    pub fn from_encoded_bytes(bytes: &'a [u8]) -> std::io::Result<(Self, usize)> {
         // Validate and find the end of the varint
         let mut bytes_read = 0;
         for (i, &b) in bytes.iter().enumerate() {
             if i >= MAX_VARINT_LEN {
-                panic!("VarInt too long");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "VarInt too long",
+                ));
             }
             bytes_read += 1;
             if (b & 0x80) == 0 {
-                return (VarInt(&bytes[..bytes_read]), bytes_read);
+                return Ok((VarInt(&bytes[..bytes_read]), bytes_read));
             }
         }
-        panic!("Incomplete varint")
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Incomplete varint",
+        ))
     }
 
     /// Decode the value from the stored bytes
@@ -87,12 +93,15 @@ impl<'a> VarInt<'a> {
 }
 
 impl<'a> TryFrom<VarInt<'a>> for usize {
-    type Error = &'static str;
+    type Error = std::io::Error;
 
     fn try_from(varint: VarInt<'a>) -> Result<Self, Self::Error> {
         let value = varint.value();
         if value < 0 {
-            Err("cannot convert negative VarInt to usize")
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "cannot convert negative VarInt to usize",
+            ))
         } else {
             Ok(value as usize)
         }
@@ -100,12 +109,15 @@ impl<'a> TryFrom<VarInt<'a>> for usize {
 }
 
 impl<'a> TryFrom<VarInt<'a>> for u32 {
-    type Error = &'static str;
+    type Error = std::io::Error;
 
     fn try_from(varint: VarInt<'a>) -> Result<Self, Self::Error> {
         let value = varint.value();
         if value < 0 {
-            Err("cannot convert negative VarInt to u32")
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "cannot convert negative VarInt to u32",
+            ))
         } else {
             Ok(value as u32)
         }
@@ -113,12 +125,15 @@ impl<'a> TryFrom<VarInt<'a>> for u32 {
 }
 
 impl<'a> TryFrom<VarInt<'a>> for u64 {
-    type Error = &'static str;
+    type Error = std::io::Error;
 
     fn try_from(varint: VarInt<'a>) -> Result<Self, Self::Error> {
         let value = varint.value();
         if value < 0 {
-            Err("cannot convert negative VarInt to u64")
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "cannot convert negative VarInt to u64",
+            ))
         } else {
             Ok(value as u64)
         }

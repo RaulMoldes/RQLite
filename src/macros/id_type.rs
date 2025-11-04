@@ -35,6 +35,18 @@ macro_rules! id_type {
             }
         }
 
+        impl From<$crate::types::UInt32> for $name {
+            fn from(value: $crate::types::UInt32) -> Self {
+                Self(value.0)
+            }
+        }
+
+        impl From<$name> for $crate::types::UInt32 {
+            fn from(value: $name) -> $crate::types::UInt32 {
+                $crate::types::UInt32(value.0)
+            }
+        }
+
         impl From<$name> for u32 {
             fn from(value: $name) -> Self {
                 value.0
