@@ -1,6 +1,6 @@
 use crate::io::frames::MemFrame;
 use crate::io::pager::SharedPager;
-use crate::storage::cell::{CELL_HEADER_SIZE, SLOT_SIZE};
+use crate::storage::cell::CELL_HEADER_SIZE;
 use crate::storage::page::{BtreePage, MemPage, OverflowPage, BTREE_PAGE_HEADER_SIZE};
 use crate::storage::{
     cell::{Cell, Slot},
@@ -871,7 +871,7 @@ where
     fn build_cell(&self, remaining_space: usize, payload: &[u8]) -> std::io::Result<Cell> {
         let page_size = self.shared_pager.read().page_size() as usize;
 
-        let v = remaining_space.saturating_sub(SLOT_SIZE);
+        let v = remaining_space.saturating_sub(Slot::SIZE);
 
         // Store payload in chunks, link overflow pages and return the cell.
         let mut max_payload_size_in_page: usize = if v <= CELL_ALIGNMENT as usize {

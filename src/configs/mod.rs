@@ -15,17 +15,17 @@ pub(crate) const CELL_ALIGNMENT: u8 = 64;
 /// TODO: There should be a way to query this value to the system dynamically.
 /// Must read: https://stackoverflow.com/questions/53902811/why-direct-i-o-requires-alignments
 pub(crate) const PAGE_ALIGNMENT: u32 = MIN_PAGE_SIZE;
-crate::byte_enum!(pub(crate) enum ReadWriteVersion: u8 {
+crate::repr_enum!(pub(crate) enum ReadWriteVersion: u8 {
     Legacy = 1,
     Wal = 2,
 });
 
-crate::byte_enum!(pub(crate) enum TextEncoding: u32 {
+crate::repr_enum!(pub enum TextEncoding: u32 {
     Utf8 = 1,
     Utf16le = 2,
     Utf16be = 3,
 });
-crate::byte_enum!(pub(crate) enum IncrementalVaccum: u32 {
+crate::repr_enum!(pub(crate) enum IncrementalVaccum: u32 {
     Enabled = 1,
     Disabled = 0,
 });

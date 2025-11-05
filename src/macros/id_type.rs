@@ -103,8 +103,6 @@ macro_rules! id_type {
                 }
             }
         }
-
-        // Apply arithmetic operations macro
-        $crate::impl_arithmetic_ops!($name);
+        $crate::arith!($name, u32);
     };
 }

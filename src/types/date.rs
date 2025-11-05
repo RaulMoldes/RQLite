@@ -1,5 +1,5 @@
 //! Implementation of the date type was moved here to not put so much boilerplate code on the sized_types module.
-use crate::named_enum;
+use crate::repr_enum;
 
 use std::cmp::{Ord, PartialOrd};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
@@ -56,7 +56,7 @@ impl Days {
     }
 }
 
-named_enum! {
+repr_enum! {
     /// Month of the year
     pub enum Month {
         January = 1 => ("January", "Jan"),
@@ -99,7 +99,7 @@ impl Month {
     }
 }
 
-named_enum! {
+repr_enum! {
     /// Month of the year
     pub enum Weekday {
         Monday = 1 => ("Monday", "Mon"),
@@ -112,7 +112,26 @@ named_enum! {
     }
 }
 
+impl Month {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        Month::from_repr(value).ok()
+    }
+
+    pub const fn as_u8(self) -> u8 {
+        self.as_repr()
+    }
+}
+
 impl Weekday {
+
+    pub fn from_u8(value: u8) -> Option<Self> {
+        Weekday::from_repr(value).ok()
+    }
+
+    pub const fn as_u8(self) -> u8 {
+        self.as_repr()
+    }
+
     fn is_weekend(&self) -> bool {
         matches!(self, Weekday::Saturday) || matches!(self, Weekday::Sunday)
     }

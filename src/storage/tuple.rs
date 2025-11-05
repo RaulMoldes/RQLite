@@ -1,13 +1,12 @@
 use crate::types::{
     BlobRef, BlobRefMut, DataType, DataTypeKind, DataTypeRef, DataTypeRefMut, DateRef, DateRefMut,
-    DateTimeRef, DateTimeRefMut, Float32Ref, Float32RefMut, Float64Ref, Float64RefMut, Int16Ref,
-    Int16RefMut, Int32, Float64, Int32Ref, Int32RefMut, Int64Ref, Int64RefMut, Int8Ref, Int8RefMut,
-    UInt16Ref, UInt16RefMut, UInt32Ref, UInt32RefMut, UInt64Ref, UInt64RefMut, UInt8, UInt8Ref,
-    UInt8RefMut, VarInt,
+    DateTimeRef, DateTimeRefMut, Float32Ref, Float32RefMut,  Float64Ref, Float64RefMut,
+    Int16Ref, Int16RefMut,  Int32Ref, Int32RefMut, Int64Ref, Int64RefMut, Int8Ref,
+    Int8RefMut, UInt16Ref, UInt16RefMut, UInt32Ref, UInt32RefMut, UInt64Ref, UInt64RefMut,
+    UInt8Ref, UInt8RefMut, VarInt,
 };
 use crate::TextEncoding;
-use std::convert::AsRef;
-use std::ptr::null;
+
 
 #[derive(Debug, Clone)]
 pub struct Schema {
@@ -370,6 +369,120 @@ impl<'a> Tuple<'a> {
         let bitmap_len = schema.columns.len();
         &mut self.data[0..bitmap_len]
     }
+
+    /// Update a value in place
+    pub fn update_value<F>(&mut self, schema: &Schema, index: usize, updater: F) -> std::io::Result<()>
+    where
+        F: FnOnce(DataTypeRefMut<'_>),
+    {
+        let value = self.value_mut(schema, index)?;
+        updater(value);
+        Ok(())
+    }
+
+     pub fn set_value(&mut self, schema: &Schema, index: usize, value: DataType) -> std::io::Result<()> {
+        let dtype = schema.columns[index].dtype;
+        let offset = self.offsets[index];
+
+        match (dtype, value) {
+            (DataTypeKind::SmallInt, DataType::SmallInt(v)) => {
+                let mut ref_mut = Int8RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::HalfInt, DataType::HalfInt(v)) => {
+                let mut ref_mut = Int16RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::Int, DataType::Int(v)) => {
+                let mut ref_mut = Int32RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::BigInt, DataType::BigInt(v)) => {
+                let mut ref_mut = Int64RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::SmallUInt, DataType::SmallUInt(v)) => {
+                let mut ref_mut = UInt8RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::Byte, DataType::Byte(v)) => {
+                let mut ref_mut = UInt8RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::Char, DataType::Char(v)) => {
+                let mut ref_mut = UInt8RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::Boolean, DataType::Boolean(v)) => {
+                let mut ref_mut = UInt8RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::HalfUInt, DataType::HalfUInt(v)) => {
+                let mut ref_mut = UInt16RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::UInt, DataType::UInt(v)) => {
+                let mut ref_mut = UInt32RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::Date, DataType::Date(v)) => {
+                let mut ref_mut = UInt32RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::DateTime, DataType::DateTime(v)) => {
+                let mut ref_mut = UInt64RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::BigUInt, DataType::BigUInt(v)) => {
+                let mut ref_mut = UInt64RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::Float, DataType::Float(v)) => {
+                let mut ref_mut = Float32RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::Double, DataType::Double(v)) => {
+                let mut ref_mut = Float64RefMut::from_bytes(&mut self.data[offset..])?;
+                ref_mut.set(v.0);
+            }
+            (DataTypeKind::Text, DataType::Text(v)) => {
+                let mut ref_mut = BlobRefMut::from_bytes(&mut self.data[offset..]);
+                debug_assert_eq!(ref_mut.len(), v.len(), "Cannot set blobs of different length");
+                ref_mut.data_mut().copy_from_slice(v.data());
+            }
+            (DataTypeKind::Blob, DataType::Blob(v)) => {
+                let mut ref_mut = BlobRefMut::from_bytes(&mut self.data[offset..]);
+                debug_assert_eq!(ref_mut.len(), v.len(), "Cannot set blobs of different length");
+                ref_mut.data_mut().copy_from_slice(v.data());
+            }
+
+            _ => return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Type mismatch"
+            )),
+        }
+        Ok(())
+    }
+
+
+    pub fn set_null(&mut self, schema: &Schema, index: usize) {
+        assert!(schema.columns[index].nullable, "Column is not nullable");
+        let byte_idx = index / 8;
+        let bit_idx = index % 8;
+        let null_bitmap_size = schema.columns.len().div_ceil(8);
+        let bitmap = &mut self.data[0..null_bitmap_size];
+        bitmap[byte_idx] |= 1 << bit_idx;
+    }
+
+
+    pub fn clear_null(&mut self, schema: &Schema, index: usize) {
+        assert!(schema.columns[index].nullable, "Column is not nullable");
+        let byte_idx = index / 8;
+        let bit_idx = index % 8;
+        let null_bitmap_size = schema.columns.len().div_ceil(8);
+        let bitmap = &mut self.data[0..null_bitmap_size];
+        bitmap[byte_idx] &= !(1 << bit_idx);
+    }
 }
 
 pub struct TupleDisplay<'t, 's, 'a> {
@@ -430,15 +543,17 @@ impl<'t, 'b, 'a> std::fmt::Display for TupleDisplay<'t, 'b, 'a> {
     }
 }
 
+
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::mem::size_of;
+    use crate::types::{Float64, Blob};
 
-    #[test]
-    fn test_tuple_serialization() {
-        // Create an schema with columns
-        let schema = Schema {
+    use super::*;
+
+    // Helper: build schema
+    fn create_schema() -> Schema {
+        Schema {
             columns: vec![
                 ColumnDef {
                     name: "id".into(),
@@ -454,7 +569,7 @@ mod tests {
                     name: "letter".into(),
                     dtype: DataTypeKind::Char,
                     nullable: true,
-                }, // make it nullable
+                },
                 ColumnDef {
                     name: "balance".into(),
                     dtype: DataTypeKind::Double,
@@ -463,7 +578,7 @@ mod tests {
                 ColumnDef {
                     name: "bonus".into(),
                     dtype: DataTypeKind::Double,
-                    nullable: false,
+                    nullable: true,
                 },
                 ColumnDef {
                     name: "name".into(),
@@ -471,16 +586,20 @@ mod tests {
                     nullable: false,
                 },
             ],
-        };
+        }
+    }
 
-        // Example data
-        let id: i32 = 42;
-        let age: u8 = 33;
-        let letter: u8 = 65;
-        let balance: f64 = 1234.5678;
-        let bonus: f64 = 99.9;
-        let name : &str = "Test tuple";
-        let null_bitmap: [u8; 1] = [0b00000100];
+
+    fn build_tuple_buffer(
+        id: i32,
+        age: u8,
+        letter: Option<u8>,
+        balance: f64,
+        bonus: f64,
+        name: &str,
+    ) -> Vec<u8> {
+        // null_bitmap: bit set if NULL; here letter is nullable (bit 2)
+        let null_bitmap = if letter.is_none() { [0b00000100] } else { [0b00000000] };
 
         let mut buffer = Vec::new();
         buffer.extend_from_slice(&null_bitmap);
@@ -490,42 +609,101 @@ mod tests {
         buffer.extend_from_slice(&balance.to_le_bytes());
         buffer.extend_from_slice(&bonus.to_le_bytes());
 
-        // Test text serialization using varint to store the prefix.
+        // Serialize text using VarInt prefix
         let mut length_buffer = [0u8; 9];
-        let length_bytes = VarInt::encode(name.len() as i64, &mut  length_buffer);
-
-        let len: usize = VarInt::from_encoded_bytes(length_bytes).unwrap().0.try_into().unwrap();
-
-        debug_assert!(len == name.len());
-
-
+        let length_bytes = VarInt::encode(name.len() as i64, &mut length_buffer);
 
         buffer.extend_from_slice(length_bytes);
         buffer.extend_from_slice(name.as_bytes());
 
-        dbg!(buffer.len());
+        buffer
+    }
 
 
+    fn create_blob(content: &str) -> Vec<u8> {
+
+        let mut len_buf = [0u8; 9];
+        let mut blob = VarInt::encode(content.len() as i64, &mut len_buf).to_vec();
+        blob.extend_from_slice(content.as_bytes());
+        blob
+    }
+
+
+    #[test]
+    fn test_serialization() {
+        let schema = create_schema();
+
+        let id: i32 = 42;
+        let age: u8 = 33;
+        let balance: f64 = 1234.5678;
+        let bonus: f64 = 99.9;
+        let name: &str = "Test tuple";
+        let mut buffer = build_tuple_buffer(id, age, None, balance, bonus, name);
 
         let tuple = Tuple::read(&mut buffer, &schema).unwrap();
         println!("{}", tuple.display(&schema));
 
-
         let id_ref = tuple.value(&schema, 0).unwrap();
-        assert_eq!(id_ref.to_owned(), DataType::Int(Int32(id)));
+        assert_eq!(id_ref.as_ref(), &id.to_le_bytes());
 
         let age_ref = tuple.value(&schema, 1).unwrap();
-        assert_eq!(age_ref.to_owned(), DataType::SmallUInt(UInt8(age)));
+        assert_eq!(age_ref.as_ref(), &age.to_le_bytes());
 
         let letter_ref = tuple.value(&schema, 2).unwrap();
         assert!(matches!(letter_ref, DataTypeRef::Null));
 
         let balance_ref = tuple.value(&schema, 3).unwrap();
-        assert_eq!(balance_ref.to_owned(), DataType::Double(Float64(balance)));
+        assert_eq!(balance_ref.as_ref(), &balance.to_le_bytes());
 
         let bonus_ref = tuple.value(&schema, 4).unwrap();
-        assert_eq!(bonus_ref.to_owned(), DataType::Double(Float64(bonus)));
+        assert_eq!(bonus_ref.as_ref(), &bonus.to_le_bytes());
 
         println!("{}", tuple.display(&schema));
+    }
+
+    #[test]
+    fn test_updates() {
+        let schema = create_schema();
+
+        let id: i32 = 42;
+        let age: u8 = 33;
+        let balance: f64 = 1234.5678;
+        let bonus: f64 = 99.9;
+        let name: &str = "Test tuple";
+        let mut buffer = build_tuple_buffer(id, age, None, balance, bonus, name);
+
+        dbg!(buffer.len());
+        let new_bonus = 100.0;
+
+
+        let new_name: &str = "Tess tupla";
+        let mut blob = create_blob(new_name);
+
+
+        let mut tuple = Tuple::read(&mut buffer, &schema).unwrap();
+        println!("{}", tuple.display(&schema));
+
+        let bonus_ref = tuple.value(&schema, 4).unwrap();
+        assert_eq!(bonus_ref.as_ref(), &bonus.to_le_bytes());
+
+        tuple.set_value(&schema, 4, DataType::Double(Float64(new_bonus))).unwrap();
+        tuple.set_value(&schema, 5, DataType::Text(Blob::from_bytes(blob.as_mut()))).unwrap();
+
+        let bonus_ref = tuple.value(&schema, 4).unwrap();
+        assert_eq!(bonus_ref.as_ref(), &new_bonus.to_le_bytes());
+
+        tuple.set_null(&schema, 4);
+        let bonus_ref = tuple.value(&schema, 4).unwrap();
+        assert_eq!(bonus_ref, DataTypeRef::Null);
+
+        println!("{}", tuple.display(&schema));
+
+        tuple.clear_null(&schema, 4);
+
+        let bonus_ref = tuple.value(&schema, 4).unwrap();
+        assert_eq!(bonus_ref.as_ref(), &new_bonus.to_le_bytes());
+
+        println!("{}", tuple.display(&schema));
+
     }
 }

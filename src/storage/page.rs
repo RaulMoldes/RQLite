@@ -11,10 +11,9 @@ use crate::{
         IncrementalVaccum, RQLiteConfig, ReadWriteVersion, TextEncoding, AXMO, CELL_ALIGNMENT,
         DEFAULT_CACHE_SIZE, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MIN_PAGE_SIZE, PAGE_ALIGNMENT,
     },
-    sized,
     storage::{
         buffer::BufferWithMetadata,
-        cell::{Cell, Slot, CELL_HEADER_SIZE, SLOT_SIZE},
+        cell::{Cell, Slot, CELL_HEADER_SIZE},
         latches::Latch,
     },
     types::{Key, LogId, PageId, PAGE_ZERO},
@@ -22,7 +21,7 @@ use crate::{
 use std::ops::{Deref, DerefMut};
 
 fn max_payload_size_in(usable_space: usize) -> usize {
-    (usable_space - CELL_HEADER_SIZE - SLOT_SIZE) & !(CELL_ALIGNMENT as usize - 1)
+    (usable_space - CELL_HEADER_SIZE - Slot::SIZE) & !(CELL_ALIGNMENT as usize - 1)
 }
 
 #[inline]
@@ -31,38 +30,34 @@ fn align_down(value: usize, align: usize) -> usize {
     value & !(align - 1)
 }
 
-sized! {
-    /// Slotted page header.
-    #[derive(Debug)]
-    #[repr(C)]
-    pub struct BtreePageHeader {
-        pub page_number: PageId,
-        pub num_slots: u16,
-        pub free_space_ptr: u32,
-        pub page_size: u32,
-        pub free_space: u32,
-        pub page_lsn: LogId,
-        pub padding: u32,
-        pub right_child: PageId,
-        pub next_sibling: PageId,
-        pub previous_sibling: PageId,
-        reserved: [u8; 24]
-    };
-    pub const BTREE_PAGE_HEADER_SIZE
+/// Slotted page header.
+#[derive(Debug)]
+#[repr(C)]
+pub struct BtreePageHeader {
+    pub page_number: PageId,
+    pub num_slots: u16,
+    pub free_space_ptr: u32,
+    pub page_size: u32,
+    pub free_space: u32,
+    pub page_lsn: LogId,
+    pub padding: u32,
+    pub right_child: PageId,
+    pub next_sibling: PageId,
+    pub previous_sibling: PageId,
+    reserved: [u8; 24],
 }
+pub const BTREE_PAGE_HEADER_SIZE: usize = std::mem::size_of::<BtreePageHeader>();
 
-sized! {
-    #[derive(Debug, PartialEq, Clone, Copy)]
-    #[repr(C)]
-    pub(crate) struct OverflowPageHeader {
-        pub page_number: PageId,
-        pub next: PageId,
-        pub num_bytes: u32,
-        pub padding: u32,
-        pub reserved: [u8; 48]
-    };
-    pub const OVERFLOW_HEADER_SIZE
+#[derive(Debug, PartialEq, Clone, Copy)]
+#[repr(C)]
+pub(crate) struct OverflowPageHeader {
+    pub page_number: PageId,
+    pub next: PageId,
+    pub num_bytes: u32,
+    pub padding: u32,
+    pub reserved: [u8; 48],
 }
+pub const OVERFLOW_HEADER_SIZE: usize = std::mem::size_of::<OverflowPageHeader>();
 
 impl Header for OverflowPageHeader {
     fn alloc(size: u32) -> Self {
@@ -90,26 +85,23 @@ impl Header for OverflowPageHeader {
     }
 }
 
-sized! {
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    #[repr(C, align(8))]
-    pub(crate) struct DatabaseHeader {
-        pub axmo: u32,
-        pub page_size: u32,
-        pub total_pages: u32,
-        pub free_pages: u32,
-        pub first_free_page: PageId,
-        pub last_free_page: PageId,
-        pub rw_version: crate::ReadWriteVersion,
-        pub text_encoding: crate::TextEncoding,
-        pub incremental_vacuum_mode: crate::IncrementalVaccum,
-        pub flushed_lsn: LogId,
-        pub cache_size: u16,
-        reserved: [u8; 20],
-    };
-    pub const DB_HEADER_SIZE
-
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C, align(8))]
+pub(crate) struct DatabaseHeader {
+    pub axmo: u32,
+    pub page_size: u32,
+    pub total_pages: u32,
+    pub free_pages: u32,
+    pub first_free_page: PageId,
+    pub last_free_page: PageId,
+    pub rw_version: crate::ReadWriteVersion,
+    pub text_encoding: crate::TextEncoding,
+    pub incremental_vacuum_mode: crate::IncrementalVaccum,
+    pub flushed_lsn: LogId,
+    pub cache_size: u16,
+    reserved: [u8; 20],
 }
+pub const DB_HEADER_SIZE: usize = std::mem::size_of::<DatabaseHeader>();
 
 impl Header for DatabaseHeader {
     fn alloc(size: u32) -> Self {
@@ -183,7 +175,7 @@ impl BtreePageHeader {
     }
 
     pub(crate) fn content_start_ptr(&self) -> u16 {
-        (self.num_slots as usize * SLOT_SIZE + BTREE_PAGE_HEADER_SIZE) as u16
+        (self.num_slots as usize * Slot::SIZE + BTREE_PAGE_HEADER_SIZE) as u16
     }
 }
 
@@ -328,13 +320,13 @@ impl BtreePage {
 
     /// Returns `true` if this page is underflow
     pub fn has_underflown(&self) -> bool {
-        !self.can_release_space(SLOT_SIZE)
+        !self.can_release_space(Slot::SIZE)
     }
 
     /// Returns `true` if this page has overflown.
     /// We need at least 2 bytes for the last cell slot and 4 extra bytes to store the pointer to an overflow page
     pub fn has_overflown(&self) -> bool {
-        !self.has_space_for(SLOT_SIZE + CELL_HEADER_SIZE + std::mem::size_of::<PageId>())
+        !self.has_space_for(Slot::SIZE + CELL_HEADER_SIZE + std::mem::size_of::<PageId>())
     }
 
     pub fn has_space_for(&self, additional_space: usize) -> bool {

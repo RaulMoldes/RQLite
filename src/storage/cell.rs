@@ -5,7 +5,7 @@ use crate::types::UInt16;
 use crate::{dynamic_buffer_tests, static_buffer_tests};
 
 use crate::configs::CELL_ALIGNMENT;
-use crate::{scalar, sized};
+use crate::scalar;
 use crate::{storage::buffer::BufferWithMetadata, types::PageId};
 
 // Slot offset of a cell
@@ -25,21 +25,16 @@ impl From<Slot> for UInt16 {
     }
 }
 
-pub const SLOT_SIZE: usize = std::mem::size_of::<Slot>();
-
-sized! {
-    #[derive(Debug, PartialEq, Clone, Copy)]
-    #[repr(C)]
-    pub(crate) struct CellHeader {
-        pub left_child: PageId,
-        size: u16, //  Size is the totla size of the cell
-        is_overflow: bool,
-        padding: u8, // Padding is the padding added at the end to match alignment requirements.
-        // Therefore one can get the usable size by substracting size - padding.
-
-    };
-    pub const CELL_HEADER_SIZE
+#[derive(Debug, PartialEq, Clone, Copy)]
+#[repr(C)]
+pub(crate) struct CellHeader {
+    pub left_child: PageId,
+    size: u16, //  Size is the totla size of the cell
+    is_overflow: bool,
+    padding: u8, // Padding is the padding added at the end to match alignment requirements.
+                 // Therefore one can get the usable size by substracting size - padding.
 }
+pub const CELL_HEADER_SIZE: usize = std::mem::size_of::<CellHeader>();
 
 impl CellHeader {
     pub fn is_overflow(&self) -> bool {
@@ -146,7 +141,7 @@ impl Cell {
     /// Total size of the cell including the header and the slot array pointer
     /// needed to store the offset.
     pub fn storage_size(&self) -> u16 {
-        (self.total_size() as usize + SLOT_SIZE) as u16
+        (self.total_size() as usize + Slot::SIZE) as u16
     }
 
     /// See [`BtreePage`] for details.
@@ -202,7 +197,7 @@ mod cell_tests {
         assert_eq!(cell.len(), payload.len(), "Payload size mismatch.");
 
         let expected_total_size = CELL_HEADER_SIZE + cell.size();
-        let expected_storage_size = expected_total_size + SLOT_SIZE;
+        let expected_storage_size = expected_total_size + Slot::SIZE;
 
         assert_eq!(cell.total_size() as usize, expected_total_size);
         assert_eq!(cell.storage_size() as usize, expected_storage_size);
@@ -221,7 +216,7 @@ mod cell_tests {
         assert_eq!(&cell.used()[..data_len], payload);
 
         let expected_total_size = CELL_HEADER_SIZE + cell.size();
-        let expected_storage_size = expected_total_size + SLOT_SIZE;
+        let expected_storage_size = expected_total_size + Slot::SIZE;
 
         assert_eq!(cell.total_size() as usize, expected_total_size);
         assert_eq!(cell.storage_size() as usize, expected_storage_size);
