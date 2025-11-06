@@ -1,3 +1,4 @@
+use crate::types::varint::MAX_VARINT_LEN;
 use crate::{types::VarInt, TextEncoding};
 use std::cmp::PartialEq;
 
@@ -36,14 +37,6 @@ impl Blob {
     /// Create a new Blob from bytes that already include the length prefix
     pub fn from_bytes(bytes: &[u8]) -> Self {
         Self(bytes.to_vec().into_boxed_slice())
-    }
-
-    /// Parse a Blob from a byte slice, returning the Blob and bytes consumed
-    pub fn parse(bytes: &[u8]) -> std::io::Result<(Self, usize)> {
-        let (len_varint, len_bytes) = VarInt::from_encoded_bytes(bytes)?;
-        let data_len: usize = len_varint.try_into().unwrap();
-        let total_size = len_bytes + data_len;
-        Ok((Self::from_bytes(&bytes[len_bytes..total_size]), total_size))
     }
 
     /// Get just the data portion
@@ -90,6 +83,18 @@ impl Blob {
             _ => panic!("Can only convert to string directly using utf8 encoding"),
         }
     }
+
+    pub fn content(&self) -> &[u8] {
+        let data = self.data();
+        let (_, offset) = VarInt::from_encoded_bytes(data).unwrap();
+        &self.data()[offset..]
+    }
+
+    pub fn content_mut(&mut self) -> &mut [u8] {
+        let data = self.data();
+        let (_, offset) = VarInt::from_encoded_bytes(data).unwrap();
+        &mut self.data_mut()[offset..]
+    }
 }
 
 #[derive(Debug)]
@@ -107,17 +112,15 @@ impl<'a> BlobRef<'a> {
         Self(bytes)
     }
 
-    /// Parse a Blob from a byte slice, returning the Blob and bytes consumed
-    pub fn parse(bytes: &'a [u8]) -> std::io::Result<(Self, usize)> {
-        let (len_varint, len_bytes) = VarInt::from_encoded_bytes(bytes)?;
-        let data_len: usize = len_varint.try_into().unwrap();
-        let total_size = len_bytes + data_len;
-        Ok((Self(&bytes[len_bytes..total_size]), total_size))
-    }
-
     /// Get just the data portion (excluding length prefix)
     pub fn data(&self) -> &[u8] {
         self.0
+    }
+
+    pub fn content(&self) -> &[u8] {
+        let data = self.data();
+        let (_, offset) = VarInt::from_encoded_bytes(data).unwrap();
+        &self.data()[offset..]
     }
 
     /// Get the length of the data (excluding prefix)
@@ -196,14 +199,6 @@ impl<'a> BlobRefMut<'a> {
         Self(bytes)
     }
 
-    /// Parse a Blob from a byte slice, returning the Blob and bytes consumed
-    pub fn parse(bytes: &'a mut [u8]) -> std::io::Result<(Self, usize)> {
-        let (len_varint, len_bytes) = VarInt::from_encoded_bytes(bytes)?;
-        let data_len: usize = len_varint.try_into().unwrap();
-        let total_size = len_bytes + data_len;
-        Ok((Self(&mut bytes[len_bytes..total_size]), total_size))
-    }
-
     /// Get just the data portion (excluding length prefix)
     pub fn data_mut(&mut self) -> &mut [u8] {
         self.0
@@ -252,6 +247,42 @@ impl<'a> BlobRefMut<'a> {
 
     pub fn to_blob(&self) -> Blob {
         Blob(self.0.to_vec().into_boxed_slice())
+    }
+
+    pub fn content(&self) -> &[u8] {
+        let data = self.data();
+        let (_, offset) = VarInt::from_encoded_bytes(data).unwrap();
+        &self.data()[offset..]
+    }
+
+    pub fn content_mut(&mut self) -> &mut [u8] {
+        let data = self.data();
+        let (_, offset) = VarInt::from_encoded_bytes(data).unwrap();
+        &mut self.data_mut()[offset..]
+    }
+}
+
+impl From<&str> for Blob {
+    fn from(value: &str) -> Self {
+        let bytes = value.as_bytes();
+        let mut buffer = [0u8; MAX_VARINT_LEN];
+        let vlen = VarInt::encode(bytes.len() as i64, &mut buffer);
+        let mut blob_buffer = vlen.to_vec();
+        blob_buffer.extend_from_slice(bytes);
+        Blob(blob_buffer.into_boxed_slice())
+    }
+}
+
+impl From<&[u8]> for Blob {
+    fn from(value: &[u8]) -> Self {
+
+        let mut buffer = [0u8; MAX_VARINT_LEN];
+        let vlen = VarInt::encode(value.len() as i64, &mut buffer);
+        let mut blob_buffer = vlen.to_vec();
+        blob_buffer.extend_from_slice(value);
+
+        
+        Blob(blob_buffer.into_boxed_slice())
     }
 }
 

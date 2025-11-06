@@ -23,7 +23,7 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 /// [PAGE 3             ] Offset 3 * Page size
 /// [....               ]
 fn page_offset(page_id: PageId, page_size: u32) -> u64 {
-    (u32::from(page_id) * page_size) as u64
+    u64::from(page_id) * page_size as u64
 }
 /// Implementation of SQLite pager. Reference: [https://sqlite.org/src/file/src/pager.c]
 #[derive(Debug)]

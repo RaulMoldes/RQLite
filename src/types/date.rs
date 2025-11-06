@@ -123,7 +123,6 @@ impl Month {
 }
 
 impl Weekday {
-
     pub fn from_u8(value: u8) -> Option<Self> {
         Weekday::from_repr(value).ok()
     }

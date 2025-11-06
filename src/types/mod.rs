@@ -22,31 +22,32 @@ pub use sized_types::{
 pub use blob::{Blob, BlobRef, BlobRefMut};
 pub use varint::VarInt;
 
-use crate::def_data_type;
+use crate::{def_data_type, repr_enum};
 #[cfg(test)]
 mod tests;
 
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum DataTypeKind {
-    SmallInt,
-    HalfInt,
-    Int,
-    BigInt,
-    SmallUInt,
-    HalfUInt,
-    UInt,
-    BigUInt,
-    Float,
-    Double,
-    Byte,
-    Char,
-    Boolean,
-    Date,
-    DateTime,
-    Blob,
-    Text,
+repr_enum!(
+pub enum DataTypeKind: u8 {
+    SmallInt = 0,
+    HalfInt = 1,
+    Int = 2,
+    BigInt = 3,
+    SmallUInt = 4,
+    HalfUInt = 5,
+    UInt = 6,
+    BigUInt = 7,
+    Float = 8,
+    Double = 9,
+    Byte = 10,
+    Char = 11,
+    Boolean = 12,
+    Date = 13,
+    DateTime = 14,
+    Blob = 15,
+    Text = 16,
 }
+
+);
 
 impl DataTypeKind {
     pub fn is_fixed_size(&self) -> bool {
@@ -82,6 +83,32 @@ pub(crate) trait Key:
 def_data_type!(DataTypeRef, Ref);
 def_data_type!(DataTypeRefMut, RefMut);
 def_data_type!(DataType, Owned);
+
+impl DataType {
+    pub fn matches(&self, other: DataTypeKind) -> bool {
+        match (self, other) {
+            (DataType::SmallInt(_), DataTypeKind::SmallInt) => true,
+            (DataType::HalfInt(_), DataTypeKind::HalfInt) => true,
+            (DataType::Int(_), DataTypeKind::Int) => true,
+            (DataType::BigInt(_), DataTypeKind::BigInt) => true,
+            (DataType::SmallUInt(_), DataTypeKind::SmallUInt) => true,
+            (DataType::HalfUInt(_), DataTypeKind::HalfUInt) => true,
+            (DataType::UInt(_), DataTypeKind::UInt) => true,
+            (DataType::BigUInt(_), DataTypeKind::BigUInt) => true,
+            (DataType::Float(_), DataTypeKind::Float) => true,
+            (DataType::Double(_), DataTypeKind::Double) => true,
+            (DataType::Byte(_), DataTypeKind::Byte) => true,
+            (DataType::Char(_), DataTypeKind::Char) => true,
+            (DataType::Boolean(_), DataTypeKind::Boolean) => true,
+            (DataType::Date(_), DataTypeKind::Date) => true,
+            (DataType::DateTime(_), DataTypeKind::DateTime) => true,
+            (DataType::Text(_), DataTypeKind::Text) => true,
+            (DataType::Blob(_), DataTypeKind::Blob) => true,
+            (DataType::Null, _) => true, // NULL matches any type
+            _ => false,
+        }
+    }
+}
 
 impl AsRef<[u8]> for DataType {
     fn as_ref(&self) -> &[u8] {

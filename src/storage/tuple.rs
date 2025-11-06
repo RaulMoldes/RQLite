@@ -1,23 +1,99 @@
+use std::ptr::null;
+
+use crate::types::varint::MAX_VARINT_LEN;
 use crate::types::{
     BlobRef, BlobRefMut, DataType, DataTypeKind, DataTypeRef, DataTypeRefMut, DateRef, DateRefMut,
-    DateTimeRef, DateTimeRefMut, Float32Ref, Float32RefMut,  Float64Ref, Float64RefMut,
-    Int16Ref, Int16RefMut,  Int32Ref, Int32RefMut, Int64Ref, Int64RefMut, Int8Ref,
-    Int8RefMut, UInt16Ref, UInt16RefMut, UInt32Ref, UInt32RefMut, UInt64Ref, UInt64RefMut,
-    UInt8Ref, UInt8RefMut, VarInt,
+    DateTimeRef, DateTimeRefMut, Float32Ref, Float32RefMut, Float64Ref, Float64RefMut, Int16Ref,
+    Int16RefMut, Int32, Int32Ref, Int32RefMut, Int64Ref, Int64RefMut, Int8Ref, Int8RefMut,
+    UInt16Ref, UInt16RefMut, UInt32Ref, UInt32RefMut, UInt64Ref, UInt64RefMut, UInt8Ref,
+    UInt8RefMut, VarInt,
 };
 use crate::TextEncoding;
 
-
-#[derive(Debug, Clone)]
-pub struct Schema {
-    columns: Vec<ColumnDef>,
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Schema {
+    pub(crate) columns: Vec<ColumnDef>,
 }
+
+
+impl Schema {
+    pub fn write_to(self) -> std::io::Result<Vec<u8>> {
+        let mut out_buffer = Vec::with_capacity(self.columns.len() * std::mem::size_of::<ColumnDef>());
+
+        let mut varint_buf = [0u8; MAX_VARINT_LEN];
+        let buffer = VarInt::encode(self.columns.len() as i64, &mut varint_buf);
+        out_buffer.extend_from_slice(buffer);
+        for column in self.columns {
+            out_buffer.extend_from_slice(&[column.dtype as u8]);
+            let mut varint_buf = [0u8; MAX_VARINT_LEN];
+            let buffer = VarInt::encode(column.name.len() as i64, &mut varint_buf);
+            out_buffer.extend_from_slice(buffer);
+            out_buffer.extend_from_slice(&column.name.as_bytes());
+        }
+        Ok(out_buffer)
+
+    }
+
+
+    pub fn read_from(bytes: &[u8]) -> std::io::Result<Self> {
+        let (column_count, offset) = VarInt::from_encoded_bytes(bytes)?;
+        let column_count_usize = column_count.try_into()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        let mut cursor = offset;
+        let mut columns = Vec::with_capacity(column_count_usize);
+
+        while columns.len() < column_count_usize {
+            // Verificar que tenemos bytes suficientes
+            if cursor >= bytes.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Insufficient bytes for schema"
+                ));
+            }
+
+            // Leer dtype
+            let dtype_byte = bytes[cursor];
+            let dtype = DataTypeKind::from_repr(dtype_byte)?;
+            cursor += 1;
+
+
+            let (name_len, name_len_offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
+            let name_len_usize: usize = name_len.try_into()?;
+            cursor += name_len_offset;
+
+            if cursor + name_len_usize > bytes.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Insufficient bytes for column name"
+                ));
+            }
+
+
+            let name_bytes = &bytes[cursor..cursor + name_len_usize];
+            let name = String::from_utf8(name_bytes.to_vec())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            cursor += name_len_usize;
+
+            columns.push(ColumnDef {
+                dtype,
+                name,
+            });
+        }
+
+        Ok(Schema { columns })
+    }
+}
+
 
 fn align_cursor(cursor: usize, align: usize) -> usize {
     cursor.next_multiple_of(align)
 }
 
-impl Schema {
+
+
+
+impl Schema{
     fn alignment(&self) -> usize {
         self.columns
             .iter()
@@ -25,13 +101,32 @@ impl Schema {
             .max()
             .unwrap_or(1)
     }
+
+
+}
+
+impl From<&[ColumnDef]> for Schema {
+    fn from(value: &[ColumnDef]) -> Self {
+        Self {
+            columns: value.to_vec(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ColumnDef {
-    pub(crate) name: String,
     pub(crate) dtype: DataTypeKind,
-    pub(crate) nullable: bool,
+    pub(crate) name: String,
+}
+
+impl ColumnDef {
+    pub fn new(dtype: DataTypeKind, name: &str) -> Self {
+        Self {
+            dtype,
+            name: name.to_string(),
+        }
+    }
+
 }
 
 fn reinterpret_cast<'a>(
@@ -278,26 +373,38 @@ fn reinterpret_cast_mut<'a>(
     }
 }
 
-struct Tuple<'a> {
+pub struct Tuple<'a> {
     data: &'a mut [u8],
     offsets: Vec<usize>,
+    key_len: usize,
 }
 
 impl<'a> Tuple<'a> {
-    fn read(buffer: &'a mut [u8], schema: &Schema) -> std::io::Result<Tuple<'a>> {
+    pub fn read(buffer: &'a mut [u8], schema: &Schema) -> std::io::Result<Tuple<'a>> {
         let mut tuple = Tuple {
             data: buffer,
             offsets: Vec::with_capacity(schema.columns.len()),
+            key_len: 0,
         };
-        let null_bitmap_size = schema.columns.len().div_ceil(8);
-        let mut cursor = null_bitmap_size;
-        for (i, col) in schema.columns.iter().enumerate() {
+
+        // Prepend always the key.
+        if let Some(key) = schema.columns.first() {
+            tuple.offsets.push(0);
+            let (value, read_bytes) = reinterpret_cast(key.dtype, &tuple.data[0..])?;
+            tuple.key_len = read_bytes;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Cannot construct tuple from empty data",
+            ));
+        };
+
+        let null_bitmap_size = (schema.columns.len() - 1).div_ceil(8);
+        let mut cursor = tuple.key_len + null_bitmap_size;
+        for (i, col) in schema.columns.iter().skip(1).enumerate() {
             tuple.offsets.push(cursor);
-            let is_null = if col.nullable {
-                tuple.is_null(i, schema)
-            } else {
-                false
-            };
+            // i+1 because we skipped the first column (key) but is_null expects the actual column index
+            let is_null = tuple.is_null(i + 1, schema);
 
             if !is_null {
                 let (value, read_bytes) = reinterpret_cast(col.dtype, &tuple.data[cursor..])?;
@@ -308,21 +415,28 @@ impl<'a> Tuple<'a> {
         Ok(tuple)
     }
 
-    fn is_null(&self, col_idx: usize, schema: &Schema) -> bool {
+    pub fn num_fields(&self) -> usize {
+        self.offsets.len()
+    }
+
+    fn is_null(&self, mut col_idx: usize, schema: &Schema) -> bool {
+        if col_idx == 0 {
+            return false;
+        } else {
+            col_idx -= 1;
+        };
+
         let byte_idx = col_idx / 8;
         let bit_idx = col_idx % 8;
-        let null_bitmap_size = schema.columns.len().div_ceil(8);
-        let bitmap = &self.data[0..null_bitmap_size];
+        let null_bitmap_size = (schema.columns.len() - 1).div_ceil(8);
+        let bitmap = &self.data[self.key_len..self.key_len + null_bitmap_size];
         (bitmap[byte_idx] & (1 << bit_idx)) != 0
     }
 
-    fn value(&self, schema: &Schema, index: usize) -> std::io::Result<DataTypeRef<'_>> {
+    pub fn value(&self, schema: &Schema, index: usize) -> std::io::Result<DataTypeRef<'_>> {
         let dtype = schema.columns[index].dtype;
-        let is_null = if schema.columns[index].nullable {
-            self.is_null(index, schema)
-        } else {
-            false
-        };
+
+        let is_null = self.is_null(index, schema);
 
         if !is_null {
             let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[index]..])?;
@@ -334,11 +448,7 @@ impl<'a> Tuple<'a> {
 
     fn value_mut(&mut self, schema: &Schema, index: usize) -> std::io::Result<DataTypeRefMut<'_>> {
         let dtype = schema.columns[index].dtype;
-        let is_null = if schema.columns[index].nullable {
-            self.is_null(index, schema)
-        } else {
-            false
-        };
+        let is_null = self.is_null(index, schema);
 
         if !is_null {
             let (value, _) = reinterpret_cast_mut(dtype, &mut self.data[self.offsets[index]..])?;
@@ -362,16 +472,21 @@ impl<'a> Tuple<'a> {
 
     fn bitmap(&self, schema: &Schema) -> &[u8] {
         let bitmap_len = schema.columns.len();
-        &self.data[0..bitmap_len]
+        &self.data[self.key_len..self.key_len + bitmap_len]
     }
 
     fn bitmap_mut(&mut self, schema: &Schema) -> &mut [u8] {
         let bitmap_len = schema.columns.len();
-        &mut self.data[0..bitmap_len]
+        &mut self.data[self.key_len..self.key_len + bitmap_len]
     }
 
     /// Update a value in place
-    pub fn update_value<F>(&mut self, schema: &Schema, index: usize, updater: F) -> std::io::Result<()>
+    pub fn update_value<F>(
+        &mut self,
+        schema: &Schema,
+        index: usize,
+        updater: F,
+    ) -> std::io::Result<()>
     where
         F: FnOnce(DataTypeRefMut<'_>),
     {
@@ -380,7 +495,12 @@ impl<'a> Tuple<'a> {
         Ok(())
     }
 
-     pub fn set_value(&mut self, schema: &Schema, index: usize, value: DataType) -> std::io::Result<()> {
+    pub fn set_value(
+        &mut self,
+        schema: &Schema,
+        index: usize,
+        value: DataType,
+    ) -> std::io::Result<()> {
         let dtype = schema.columns[index].dtype;
         let offset = self.offsets[index];
 
@@ -446,42 +566,173 @@ impl<'a> Tuple<'a> {
                 ref_mut.set(v.0);
             }
             (DataTypeKind::Text, DataType::Text(v)) => {
-                let mut ref_mut = BlobRefMut::from_bytes(&mut self.data[offset..]);
-                debug_assert_eq!(ref_mut.len(), v.len(), "Cannot set blobs of different length");
-                ref_mut.data_mut().copy_from_slice(v.data());
+                let (len_varint, varint_size) = VarInt::from_encoded_bytes(&self.data[offset..])?;
+                let existing_len: usize = len_varint.try_into()?;
+
+                let (len_new_varint, new_varint_size) =
+                    VarInt::from_encoded_bytes(&self.data[offset..])?;
+                let new_len: usize = len_new_varint.try_into()?;
+
+                if (new_len + new_varint_size) <= (existing_len + varint_size) {
+                    // New value fits
+                    self.data[offset..offset + v.len()].copy_from_slice(v.data());
+                    // Pad the remaining space with zeros
+                    if v.len() < existing_len {
+                        self.data[offset + v.len()..offset + (existing_len + varint_size)].fill(0);
+                    }
+                } else {
+                    // New value is too large for the allocated space
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "New text value ({} bytes) exceeds allocated space ({} bytes)",
+                            v.len(),
+                            existing_len
+                        ),
+                    ));
+                }
             }
             (DataTypeKind::Blob, DataType::Blob(v)) => {
-                let mut ref_mut = BlobRefMut::from_bytes(&mut self.data[offset..]);
-                debug_assert_eq!(ref_mut.len(), v.len(), "Cannot set blobs of different length");
-                ref_mut.data_mut().copy_from_slice(v.data());
+                let (len_varint, varint_size) = VarInt::from_encoded_bytes(&self.data[offset..])?;
+                let existing_len: usize = len_varint.try_into()?;
+
+                let (len_new_varint, new_varint_size) =
+                    VarInt::from_encoded_bytes(&self.data[offset..])?;
+                let new_len: usize = len_new_varint.try_into()?;
+
+                if (new_len + new_varint_size) <= (existing_len + varint_size) {
+                    // New value fits
+                    self.data[offset..offset + v.len()].copy_from_slice(v.data());
+                    // Pad the remaining space with zeros
+                    if v.len() < existing_len {
+                        self.data[offset + v.len()..offset + (existing_len + varint_size)].fill(0);
+                    }
+                } else {
+                    // New value is too large for the allocated space
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "New text value ({} bytes) exceeds allocated space ({} bytes)",
+                            v.len(),
+                            existing_len
+                        ),
+                    ));
+                }
             }
 
-            _ => return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Type mismatch"
-            )),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Type mismatch",
+                ))
+            }
         }
         Ok(())
     }
 
-
     pub fn set_null(&mut self, schema: &Schema, index: usize) {
-        assert!(schema.columns[index].nullable, "Column is not nullable");
-        let byte_idx = index / 8;
-        let bit_idx = index % 8;
-        let null_bitmap_size = schema.columns.len().div_ceil(8);
-        let bitmap = &mut self.data[0..null_bitmap_size];
+        assert!(index > 0, "Cannot set the key to NULL");
+
+        // Fix: adjust index for the bitmap (subtract 1 since key is not in bitmap)
+        let byte_idx = (index - 1) / 8;
+        let bit_idx = (index - 1) % 8;
+        let null_bitmap_size = (schema.columns.len() - 1).div_ceil(8);
+        let bitmap = &mut self.data[self.key_len..self.key_len + null_bitmap_size];
         bitmap[byte_idx] |= 1 << bit_idx;
     }
 
-
     pub fn clear_null(&mut self, schema: &Schema, index: usize) {
-        assert!(schema.columns[index].nullable, "Column is not nullable");
-        let byte_idx = index / 8;
-        let bit_idx = index % 8;
-        let null_bitmap_size = schema.columns.len().div_ceil(8);
-        let bitmap = &mut self.data[0..null_bitmap_size];
+        // Fix: adjust index for the bitmap (subtract 1 since key is not in bitmap)
+        let byte_idx = (index - 1) / 8;
+        let bit_idx = (index - 1) % 8;
+        let null_bitmap_size = (schema.columns.len() - 1).div_ceil(8);
+        let bitmap = &mut self.data[self.key_len..self.key_len + null_bitmap_size];
         bitmap[byte_idx] &= !(1 << bit_idx);
+    }
+}
+
+pub struct TupleRef<'a> {
+    data: &'a [u8],
+    offsets: Vec<usize>,
+    key_len: usize,
+}
+
+impl<'a> TupleRef<'a> {
+    pub fn read(buffer: &'a [u8], schema: &Schema) -> std::io::Result<TupleRef<'a>> {
+        let mut tuple = TupleRef {
+            data: buffer,
+            offsets: Vec::with_capacity(schema.columns.len()),
+            key_len: 0,
+        };
+
+        // Prepend always the key.
+        if let Some(key) = schema.columns.first() {
+            tuple.offsets.push(0);
+            let (value, read_bytes) = reinterpret_cast(key.dtype, &tuple.data[0..])?;
+            tuple.key_len = read_bytes;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Cannot construct tuple from empty data",
+            ));
+        };
+
+        let null_bitmap_size = (schema.columns.len() - 1).div_ceil(8);
+        let mut cursor = tuple.key_len + null_bitmap_size;
+        for (i, col) in schema.columns.iter().skip(1).enumerate() {
+            tuple.offsets.push(cursor);
+            // i+1 because we skipped the first column (key) but is_null expects the actual column index
+            let is_null = tuple.is_null(i + 1, schema);
+
+            if !is_null {
+                let (value, read_bytes) = reinterpret_cast(col.dtype, &tuple.data[cursor..])?;
+                cursor += read_bytes;
+            };
+        }
+
+        Ok(tuple)
+    }
+
+    pub fn num_fields(&self) -> usize {
+        self.offsets.len()
+    }
+
+    fn is_null(&self, mut col_idx: usize, schema: &Schema) -> bool {
+        if col_idx == 0 {
+            return false;
+        } else {
+            col_idx -= 1;
+        };
+
+        let byte_idx = col_idx / 8;
+        let bit_idx = col_idx % 8;
+        let null_bitmap_size = (schema.columns.len() - 1).div_ceil(8);
+        let bitmap = &self.data[self.key_len..self.key_len + null_bitmap_size];
+        (bitmap[byte_idx] & (1 << bit_idx)) != 0
+    }
+
+    pub fn value(&self, schema: &Schema, index: usize) -> std::io::Result<DataTypeRef<'_>> {
+        let dtype = schema.columns[index].dtype;
+        // Fix: use index directly, not index - 1
+        let is_null = self.is_null(index, schema);
+
+        if !is_null {
+            let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[index]..])?;
+            Ok(value)
+        } else {
+            Ok(DataTypeRef::Null)
+        }
+    }
+
+    fn key(&self, schema: &Schema) -> std::io::Result<DataTypeRef<'_>> {
+        let dtype = schema.columns[0].dtype;
+        let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[0]..])?;
+        Ok(value)
+    }
+
+    fn bitmap(&self, schema: &Schema) -> &[u8] {
+        let bitmap_len = schema.columns.len();
+        &self.data[self.key_len..self.key_len + bitmap_len]
     }
 }
 
@@ -543,167 +794,237 @@ impl<'t, 'b, 'a> std::fmt::Display for TupleDisplay<'t, 'b, 'a> {
     }
 }
 
+pub(crate) fn tuple(values: &[DataType], schema: &Schema) -> std::io::Result<Box<[u8]>> {
+    if values.len() > schema.columns.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "Too many values: {} values for {} columns",
+                values.len(),
+                schema.columns.len()
+            ),
+        ));
+    }
 
-
-#[cfg(test)]
-mod tests {
-    use crate::types::{Float64, Blob};
-
-    use super::*;
-
-    // Helper: build schema
-    fn create_schema() -> Schema {
-        Schema {
-            columns: vec![
-                ColumnDef {
-                    name: "id".into(),
-                    dtype: DataTypeKind::Int,
-                    nullable: false,
-                },
-                ColumnDef {
-                    name: "age".into(),
-                    dtype: DataTypeKind::SmallUInt,
-                    nullable: false,
-                },
-                ColumnDef {
-                    name: "letter".into(),
-                    dtype: DataTypeKind::Char,
-                    nullable: true,
-                },
-                ColumnDef {
-                    name: "balance".into(),
-                    dtype: DataTypeKind::Double,
-                    nullable: false,
-                },
-                ColumnDef {
-                    name: "bonus".into(),
-                    dtype: DataTypeKind::Double,
-                    nullable: true,
-                },
-                ColumnDef {
-                    name: "name".into(),
-                    dtype: DataTypeKind::Text,
-                    nullable: false,
-                },
-            ],
+    for (i, (value, col_def)) in values.iter().zip(schema.columns.iter()).enumerate() {
+        if !value.matches(col_def.dtype) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Type mismatch at column {}: expected {:?}, got {:?}",
+                    i, col_def.dtype, value
+                ),
+            ));
         }
     }
 
+    let key_size = values.first().map(|v| v.size()).unwrap_or(0);
+    let null_bitmap_size = schema.columns.len().saturating_sub(1).div_ceil(8);
 
-    fn build_tuple_buffer(
-        id: i32,
-        age: u8,
-        letter: Option<u8>,
-        balance: f64,
-        bonus: f64,
-        name: &str,
-    ) -> Vec<u8> {
-        // null_bitmap: bit set if NULL; here letter is nullable (bit 2)
-        let null_bitmap = if letter.is_none() { [0b00000100] } else { [0b00000000] };
+    let mut total_size = key_size + null_bitmap_size;
+    for value in values.iter().skip(1) {
+        if !matches!(value, DataType::Null) {
+            total_size += value.size();
+        }
+    }
+    // Single allocation with exact size
+    let mut buffer: Box<[std::mem::MaybeUninit<u8>]> = Box::new_uninit_slice(total_size);
 
-        let mut buffer = Vec::new();
-        buffer.extend_from_slice(&null_bitmap);
-        buffer.extend_from_slice(&id.to_le_bytes());
-        buffer.extend_from_slice(&age.to_le_bytes());
+    // Safe initialization
+    unsafe {
+        // Initialize null bitmap to 0
+        let ptr = buffer.as_mut_ptr() as *mut u8;
+        let mut cursor = 0;
 
-        buffer.extend_from_slice(&balance.to_le_bytes());
-        buffer.extend_from_slice(&bonus.to_le_bytes());
+        // Write the key first.
+        if let Some(value) = values.first() {
+            let data = value.as_ref();
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
+            cursor += data.len();
+        }
 
-        // Serialize text using VarInt prefix
-        let mut length_buffer = [0u8; 9];
-        let length_bytes = VarInt::encode(name.len() as i64, &mut length_buffer);
+        std::ptr::write_bytes(ptr.add(cursor), 0, null_bitmap_size);
+        let bitmap_start = cursor;
+        cursor += null_bitmap_size;
 
-        buffer.extend_from_slice(length_bytes);
-        buffer.extend_from_slice(name.as_bytes());
+        // Write values
+        for (col_idx, col_def) in schema.columns.iter().enumerate().skip(1) {
+            let value_opt = values.get(col_idx);
+            match value_opt {
+                Some(DataType::Null) | None => {
+                    // Set null bit
+                    let i = col_idx - 1; // offset because bitmap covers only non-key columns
 
-        buffer
+                    let byte_idx = i / 8;
+                    let bit_idx = i % 8;
+                    *ptr.add(bitmap_start + byte_idx) |= 1 << bit_idx;
+                }
+                Some(value) => {
+                    let data = value.as_ref();
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
+                    cursor += data.len();
+                }
+            }
+        }
+
+        Ok(Box::from_raw(Box::into_raw(buffer) as *mut [u8]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Blob, DataType, Float64, Int32, UInt8};
+
+    fn create_schema() -> Schema {
+        Schema::from(
+            [
+                ColumnDef::new(DataTypeKind::Int, "id"),
+                ColumnDef::new(DataTypeKind::Text, "name"),
+                ColumnDef::new(DataTypeKind::Boolean, "active"),
+                ColumnDef::new(DataTypeKind::Double, "balance"),
+                ColumnDef::new(DataTypeKind::Double, "bonus"),
+                ColumnDef::new(DataTypeKind::Text, "description"),
+            ]
+            .as_ref(),
+        )
     }
 
-
     fn create_blob(content: &str) -> Vec<u8> {
-
         let mut len_buf = [0u8; 9];
         let mut blob = VarInt::encode(content.len() as i64, &mut len_buf).to_vec();
         blob.extend_from_slice(content.as_bytes());
         blob
     }
 
-
     #[test]
     fn test_serialization() {
         let schema = create_schema();
 
-        let id: i32 = 42;
-        let age: u8 = 33;
-        let balance: f64 = 1234.5678;
-        let bonus: f64 = 99.9;
-        let name: &str = "Test tuple";
-        let mut buffer = build_tuple_buffer(id, age, None, balance, bonus, name);
+        let id = 42;
+        let name = "Test tuple";
+        let active: Option<bool> = None;
+        let balance = 1234.5678;
+        let bonus = 99.9;
+        let description = "Initial description";
 
-        let tuple = Tuple::read(&mut buffer, &schema).unwrap();
+        let values = vec![
+            DataType::Int(Int32(id)),
+            DataType::Text(Blob::from(name)),
+            DataType::Null,
+            DataType::Double(Float64(balance)),
+            DataType::Double(Float64(bonus)),
+            DataType::Text(Blob::from(description)),
+        ];
+
+        let tuple_buffer = tuple(&values, &schema).unwrap();
+
+        let mut tuple_bytes = tuple_buffer.to_vec();
+        let tuple = Tuple::read(&mut tuple_bytes, &schema).unwrap();
+
         println!("{}", tuple.display(&schema));
 
         let id_ref = tuple.value(&schema, 0).unwrap();
         assert_eq!(id_ref.as_ref(), &id.to_le_bytes());
 
-        let age_ref = tuple.value(&schema, 1).unwrap();
-        assert_eq!(age_ref.as_ref(), &age.to_le_bytes());
+        let name_ref = tuple.value(&schema, 1).unwrap();
+        assert_eq!(name_ref.as_ref(), name.as_bytes());
 
-        let letter_ref = tuple.value(&schema, 2).unwrap();
-        assert!(matches!(letter_ref, DataTypeRef::Null));
+        let active_ref = tuple.value(&schema, 2).unwrap();
+        assert!(matches!(active_ref, DataTypeRef::Null));
 
         let balance_ref = tuple.value(&schema, 3).unwrap();
         assert_eq!(balance_ref.as_ref(), &balance.to_le_bytes());
 
         let bonus_ref = tuple.value(&schema, 4).unwrap();
         assert_eq!(bonus_ref.as_ref(), &bonus.to_le_bytes());
-
-        println!("{}", tuple.display(&schema));
     }
 
     #[test]
     fn test_updates() {
         let schema = create_schema();
 
-        let id: i32 = 42;
-        let age: u8 = 33;
-        let balance: f64 = 1234.5678;
-        let bonus: f64 = 99.9;
-        let name: &str = "Test tuple";
-        let mut buffer = build_tuple_buffer(id, age, None, balance, bonus, name);
+        let id = 42;
+        let name = "Test tuple";
+        let balance = 1234.5678;
+        let bonus = 99.9;
+        let description = "Initial description";
 
-        dbg!(buffer.len());
-        let new_bonus = 100.0;
+        let values = vec![
+            DataType::Int(Int32(id)),
+            DataType::Text(Blob::from(name)),
+            DataType::Null,
+            DataType::Double(Float64(balance)),
+            DataType::Double(Float64(bonus)),
+            DataType::Text(Blob::from(description)),
+        ];
 
+        let tuple_buffer = tuple(&values, &schema).unwrap();
+        let mut buffer_vec = tuple_buffer.to_vec();
 
-        let new_name: &str = "Tess tupla";
-        let mut blob = create_blob(new_name);
+        let mut tuple = Tuple::read(&mut buffer_vec, &schema).unwrap();
 
-
-        let mut tuple = Tuple::read(&mut buffer, &schema).unwrap();
-        println!("{}", tuple.display(&schema));
+        println!("Before update:\n{}", tuple.display(&schema));
 
         let bonus_ref = tuple.value(&schema, 4).unwrap();
         assert_eq!(bonus_ref.as_ref(), &bonus.to_le_bytes());
 
-        tuple.set_value(&schema, 4, DataType::Double(Float64(new_bonus))).unwrap();
-        tuple.set_value(&schema, 5, DataType::Text(Blob::from_bytes(blob.as_mut()))).unwrap();
+        let new_bonus = 100.0;
+        tuple
+            .set_value(&schema, 4, DataType::Double(Float64(new_bonus)))
+            .unwrap();
+
+        let new_description = "Updated description";
+        let mut blob = create_blob(new_description);
+        tuple
+            .set_value(&schema, 5, DataType::Text(Blob::from_bytes(blob.as_mut())))
+            .unwrap();
 
         let bonus_ref = tuple.value(&schema, 4).unwrap();
         assert_eq!(bonus_ref.as_ref(), &new_bonus.to_le_bytes());
+
+        let desc_ref = tuple.value(&schema, 5).unwrap();
+        assert_eq!(desc_ref.as_ref(), new_description.as_bytes());
 
         tuple.set_null(&schema, 4);
         let bonus_ref = tuple.value(&schema, 4).unwrap();
-        assert_eq!(bonus_ref, DataTypeRef::Null);
-
-        println!("{}", tuple.display(&schema));
+        assert!(matches!(bonus_ref, DataTypeRef::Null));
 
         tuple.clear_null(&schema, 4);
-
         let bonus_ref = tuple.value(&schema, 4).unwrap();
         assert_eq!(bonus_ref.as_ref(), &new_bonus.to_le_bytes());
 
-        println!("{}", tuple.display(&schema));
+        println!("After update:\n{}", tuple.display(&schema));
+    }
+    #[test]
+    fn test_tuple_creation() {
+        let schema = Schema::from(
+            [
+                ColumnDef::new(DataTypeKind::Int, "id"),
+                ColumnDef::new(DataTypeKind::Text, "name"),
+                ColumnDef::new(DataTypeKind::Boolean, "active"),
+            ]
+            .as_ref(),
+        );
 
+        let values = vec![
+            DataType::Int(Int32(42)),
+            DataType::Text(Blob::from("Alice")),
+            DataType::Boolean(UInt8(1)),
+        ];
+
+        let tuple_buffer = tuple(&values, &schema).unwrap();
+
+        dbg!(&tuple_buffer);
+        let expected_size = 1 + 4 + (1 + 5) + 1;
+        assert!(tuple_buffer.len() >= expected_size);
+
+        let mut buffer_vec = tuple_buffer.to_vec();
+        let tuple_ref = Tuple::read(&mut buffer_vec, &schema).unwrap();
+
+        match tuple_ref.value(&schema, 0).unwrap() {
+            DataTypeRef::Int(v) => assert_eq!(v.to_owned().0, 42),
+            _ => panic!("Wrong type for id"),
+        }
     }
 }

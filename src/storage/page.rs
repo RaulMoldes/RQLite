@@ -35,16 +35,15 @@ fn align_down(value: usize, align: usize) -> usize {
 #[repr(C)]
 pub struct BtreePageHeader {
     pub page_number: PageId,
-    pub num_slots: u16,
-    pub free_space_ptr: u32,
-    pub page_size: u32,
-    pub free_space: u32,
     pub page_lsn: LogId,
-    pub padding: u32,
     pub right_child: PageId,
     pub next_sibling: PageId,
     pub previous_sibling: PageId,
-    reserved: [u8; 24],
+    pub free_space_ptr: u32,
+    pub page_size: u32,
+    pub free_space: u32,
+    pub padding: u32,
+    pub num_slots: u16,
 }
 pub const BTREE_PAGE_HEADER_SIZE: usize = std::mem::size_of::<BtreePageHeader>();
 
@@ -55,32 +54,40 @@ pub(crate) struct OverflowPageHeader {
     pub next: PageId,
     pub num_bytes: u32,
     pub padding: u32,
-    pub reserved: [u8; 48],
+    pub reserved: [u8; 40],
 }
 pub const OVERFLOW_HEADER_SIZE: usize = std::mem::size_of::<OverflowPageHeader>();
 
 impl Header for OverflowPageHeader {
     fn alloc(size: u32) -> Self {
         let effective_size = size.next_multiple_of(PAGE_ALIGNMENT);
+        debug_assert!(
+            std::mem::size_of::<OverflowPageHeader>() % CELL_ALIGNMENT as usize == 0,
+            "Header size is not a multiple of cell alignment. Must ensure header is aligned"
+        );
 
         Self {
             page_number: PageId::new_key(),
             next: PAGE_ZERO,
             num_bytes: effective_size.saturating_sub(OVERFLOW_HEADER_SIZE as u32),
             padding: effective_size.saturating_sub(size),
-            reserved: [0u8; 48],
+            reserved: [0u8; 40],
         }
     }
 
     fn init(size: u32, page_number: PageId) -> Self {
         let effective_size = size.next_multiple_of(PAGE_ALIGNMENT);
+        debug_assert!(
+            std::mem::size_of::<OverflowPageHeader>() % CELL_ALIGNMENT as usize == 0,
+            "Header size is not a multiple of cell alignment. Must ensure header is aligned"
+        );
 
         Self {
             page_number,
             next: PAGE_ZERO,
             num_bytes: effective_size,
             padding: effective_size.saturating_sub(size),
-            reserved: [0u8; 48],
+            reserved: [0u8; 40],
         }
     }
 }
@@ -88,18 +95,18 @@ impl Header for OverflowPageHeader {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C, align(8))]
 pub(crate) struct DatabaseHeader {
+    pub first_free_page: PageId,
+    pub last_free_page: PageId,
+    pub flushed_lsn: LogId,
     pub axmo: u32,
     pub page_size: u32,
     pub total_pages: u32,
     pub free_pages: u32,
-    pub first_free_page: PageId,
-    pub last_free_page: PageId,
+    pub cache_size: u16,
     pub rw_version: crate::ReadWriteVersion,
     pub text_encoding: crate::TextEncoding,
     pub incremental_vacuum_mode: crate::IncrementalVaccum,
-    pub flushed_lsn: LogId,
-    pub cache_size: u16,
-    reserved: [u8; 20],
+    reserved: [u8; 8],
 }
 pub const DB_HEADER_SIZE: usize = std::mem::size_of::<DatabaseHeader>();
 
@@ -109,6 +116,10 @@ impl Header for DatabaseHeader {
     }
 
     fn init(__size: u32, __page_number: PageId) -> Self {
+        debug_assert!(
+            std::mem::size_of::<DatabaseHeader>() % CELL_ALIGNMENT as usize == 0,
+            "Header size is not a multiple of cell alignment. Must ensure header is aligned"
+        );
         Self {
             axmo: AXMO,
             page_size: DEFAULT_PAGE_SIZE,
@@ -121,7 +132,7 @@ impl Header for DatabaseHeader {
             rw_version: ReadWriteVersion::Legacy,
             incremental_vacuum_mode: IncrementalVaccum::Disabled,
             cache_size: DEFAULT_CACHE_SIZE,
-            reserved: [0; 20],
+            reserved: [0; 8],
         }
     }
 }
@@ -136,6 +147,11 @@ impl Header for BtreePageHeader {
     fn alloc(size: u32) -> Self {
         let aligned_size = size.next_multiple_of(PAGE_ALIGNMENT);
 
+        debug_assert!(
+            std::mem::size_of::<BtreePageHeader>() % CELL_ALIGNMENT as usize == 0,
+            "Header size is not a multiple of cell alignment. Must ensure header is aligned"
+        );
+
         Self {
             page_number: PageId::new_key(),
             num_slots: 0,
@@ -147,12 +163,15 @@ impl Header for BtreePageHeader {
             padding: aligned_size.saturating_sub(size),
             next_sibling: PAGE_ZERO,
             previous_sibling: PAGE_ZERO,
-            reserved: [0u8; 24], // Necessary padding so that cell writes are aligned.
         }
     }
     fn init(size: u32, page_number: PageId) -> Self {
         let aligned_size = size.next_multiple_of(PAGE_ALIGNMENT);
-
+        dbg!(std::mem::size_of::<BtreePageHeader>());
+        debug_assert!(
+            std::mem::size_of::<BtreePageHeader>() % CELL_ALIGNMENT as usize == 0,
+            "Header size is not a multiple of cell alignment. Must ensure header is aligned"
+        );
         Self {
             page_number,
             num_slots: 0,
@@ -164,7 +183,6 @@ impl Header for BtreePageHeader {
             padding: aligned_size.saturating_sub(size),
             next_sibling: PAGE_ZERO,
             previous_sibling: PAGE_ZERO,
-            reserved: [0u8; 24], // Necessary padding so that cell writes are aligned.
         }
     }
 }
@@ -183,6 +201,7 @@ pub type BtreePage = BufferWithMetadata<BtreePageHeader>;
 
 impl Page for BtreePage {
     type Header = BtreePageHeader;
+
     fn alloc(size: u32) -> Self {
         assert!(
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
@@ -409,7 +428,7 @@ impl BtreePage {
 
         debug_assert!(
             (offset as usize % CELL_ALIGNMENT as usize) == 0,
-            "Offset is not aligned!"
+            "Offset is not aligned! {offset}"
         );
 
         // Write new cell.

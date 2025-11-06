@@ -8,13 +8,13 @@ use crate::storage::{
 };
 use crate::CELL_ALIGNMENT;
 
-use std::cmp::min;
-use std::cmp::Ordering;
-use std::marker::PhantomData;
-
 use crate::types::{PageId, VarInt, PAGE_ZERO};
 use std::cell::RefCell;
+use std::cmp::min;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 
 type Position = (PageId, Slot);
 
@@ -277,6 +277,23 @@ where
         debug_assert!(min_keys > 2, "Invalid argument. Minimum allowed keys is 2");
         let root = pager.write().alloc_page::<BtreePage>().unwrap();
 
+        Self {
+            shared_pager: pager,
+            root,
+            min_keys,
+            num_siblings_per_side,
+            comparator,
+        }
+    }
+
+    pub(crate) fn from_existent(
+        pager: SharedPager,
+        root: PageId,
+        min_keys: usize,
+        num_siblings_per_side: usize,
+        comparator: Cmp,
+    ) -> Self {
+        debug_assert!(min_keys > 2, "Invalid argument. Minimum allowed keys is 2");
         Self {
             shared_pager: pager,
             root,
@@ -2004,7 +2021,7 @@ where
                         Payload::Boxed(cell.used().to_vec().into_boxed_slice())
                     };
 
-                    self.current_slot = self.current_slot + 1usize;
+                    self.current_slot += 1usize;
                     Some(Ok(payload))
                 } else {
                     match self.adv() {
@@ -2027,7 +2044,7 @@ where
                     };
 
                     if self.current_slot.0 > 0 {
-                        self.current_slot = self.current_slot - 1usize;
+                        self.current_slot -= 1usize;
                     } else {
                         match self.rev() {
                             Ok(false) => self.current_page = None, // No hay más páginas

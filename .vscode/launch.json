@@ -6,7 +6,7 @@
       "request": "launch",
       "name": "Debug Rust test (rqlite)",
       "program": "${workspaceFolder}/target/debug/deps/rqlite-820b7b56180ece4c",
-      "args": ["--nocapture", "test_tuple_serialization"],
+      "args": ["--nocapture", "test_create_table"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {

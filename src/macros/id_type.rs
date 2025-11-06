@@ -3,10 +3,10 @@
 macro_rules! id_type {
     ($name:ident, $counter_name:ident, $display_name:literal) => {
         // Global counter for this ID type
-        static $counter_name: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        static $counter_name: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
         #[derive(Debug, Clone, Hash, PartialEq, Eq, Copy, Default)]
-        pub struct $name(u32);
+        pub struct $name(u64);
 
         impl $name {
             // Generate a new ID with atomic counter
@@ -14,12 +14,12 @@ macro_rules! id_type {
                 Self($counter_name.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
             }
 
-            pub const fn to_be_bytes(self) -> [u8; 4] {
+            pub const fn to_be_bytes(self) -> [u8; 8] {
                 self.0.to_be_bytes()
             }
 
-            pub const fn from_be_bytes(bytes: [u8; 4]) -> Self {
-                Self(u32::from_be_bytes(bytes))
+            pub const fn from_be_bytes(bytes: [u8; 8]) -> Self {
+                Self(u64::from_be_bytes(bytes))
             }
         }
 
@@ -29,25 +29,25 @@ macro_rules! id_type {
             }
         }
 
-        impl From<u32> for $name {
-            fn from(value: u32) -> Self {
+        impl From<u64> for $name {
+            fn from(value: u64) -> Self {
                 Self(value)
             }
         }
 
-        impl From<$crate::types::UInt32> for $name {
-            fn from(value: $crate::types::UInt32) -> Self {
+        impl From<$crate::types::UInt64> for $name {
+            fn from(value: $crate::types::UInt64) -> Self {
                 Self(value.0)
             }
         }
 
-        impl From<$name> for $crate::types::UInt32 {
-            fn from(value: $name) -> $crate::types::UInt32 {
-                $crate::types::UInt32(value.0)
+        impl From<$name> for $crate::types::UInt64 {
+            fn from(value: $name) -> $crate::types::UInt64 {
+                $crate::types::UInt64(value.0)
             }
         }
 
-        impl From<$name> for u32 {
+        impl From<$name> for u64 {
             fn from(value: $name) -> Self {
                 value.0
             }
@@ -79,17 +79,17 @@ macro_rules! id_type {
                 use std::io::{Error, ErrorKind};
 
                 // Verify length
-                if value.len() < 4 {
+                if value.len() < 8 {
                     return Err(Error::new(ErrorKind::UnexpectedEof, "not enough bytes"));
                 }
 
                 // Copies to a fixed size array
-                let arr: [u8; 4] = value[0..4]
+                let arr: [u8; 8] = value[0..8]
                     .try_into()
                     .map_err(|_| Error::new(ErrorKind::InvalidData, "failed to copy bytes"))?;
 
                 // Converts from an inner type.
-                Ok(Self(u32::from_ne_bytes(arr)))
+                Ok(Self(u64::from_ne_bytes(arr)))
             }
         }
 
@@ -97,12 +97,12 @@ macro_rules! id_type {
             fn as_ref(&self) -> &[u8] {
                 unsafe {
                     std::slice::from_raw_parts(
-                        &self.0 as *const u32 as *const u8,
-                        std::mem::size_of::<u32>(),
+                        &self.0 as *const u64 as *const u8,
+                        std::mem::size_of::<u64>(),
                     )
                 }
             }
         }
-        $crate::arith!($name, u32);
+        $crate::arith!($name, u64);
     };
 }
