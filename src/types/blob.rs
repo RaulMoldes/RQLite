@@ -18,7 +18,7 @@ pub(crate) fn decode_utf16be(bytes: &[u8]) -> String {
     String::from_utf16(&units).unwrap()
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Blob(Box<[u8]>);
 
 impl AsRef<[u8]> for Blob {

@@ -1,364 +1,13 @@
-use std::ptr::null;
 
-use crate::types::varint::MAX_VARINT_LEN;
 use crate::types::{
-    BlobRef, BlobRefMut, DataType, DataTypeKind, DataTypeRef, DataTypeRefMut, DateRef, DateRefMut,
-    DateTimeRef, DateTimeRefMut, Float32Ref, Float32RefMut, Float64Ref, Float64RefMut, Int16Ref,
-    Int16RefMut, Int32, Int32Ref, Int32RefMut, Int64Ref, Int64RefMut, Int8Ref, Int8RefMut,
-    UInt16Ref, UInt16RefMut, UInt32Ref, UInt32RefMut, UInt64Ref, UInt64RefMut, UInt8Ref,
+   DataType, DataTypeKind, DataTypeRef, DataTypeRefMut, reinterpret_cast, reinterpret_cast_mut,
+    Int16RefMut,  Int32RefMut,  Int64RefMut,  Int8RefMut,
+     UInt16RefMut,UInt32RefMut, UInt64RefMut, Float64RefMut, Float32RefMut,
     UInt8RefMut, VarInt,
 };
 use crate::TextEncoding;
+use crate::database::schema::Schema;
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Schema {
-    pub(crate) columns: Vec<ColumnDef>,
-}
-
-impl Schema {
-    pub fn write_to(self) -> std::io::Result<Vec<u8>> {
-        let mut out_buffer =
-            Vec::with_capacity(self.columns.len() * std::mem::size_of::<ColumnDef>());
-
-        let mut varint_buf = [0u8; MAX_VARINT_LEN];
-        let buffer = VarInt::encode(self.columns.len() as i64, &mut varint_buf);
-        out_buffer.extend_from_slice(buffer);
-        for column in self.columns {
-            out_buffer.extend_from_slice(&[column.dtype as u8]);
-            let mut varint_buf = [0u8; MAX_VARINT_LEN];
-            let buffer = VarInt::encode(column.name.len() as i64, &mut varint_buf);
-            out_buffer.extend_from_slice(buffer);
-            out_buffer.extend_from_slice(&column.name.as_bytes());
-        }
-        Ok(out_buffer)
-    }
-
-    pub fn read_from(bytes: &[u8]) -> std::io::Result<Self> {
-        let (column_count, offset) = VarInt::from_encoded_bytes(bytes)?;
-        let column_count_usize = column_count
-            .try_into()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        let mut cursor = offset;
-        let mut columns = Vec::with_capacity(column_count_usize);
-
-        while columns.len() < column_count_usize {
-            // Verificar que tenemos bytes suficientes
-            if cursor >= bytes.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Insufficient bytes for schema",
-                ));
-            }
-
-            // Leer dtype
-            let dtype_byte = bytes[cursor];
-            let dtype = DataTypeKind::from_repr(dtype_byte)?;
-            cursor += 1;
-
-            let (name_len, name_len_offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-            let name_len_usize: usize = name_len.try_into()?;
-            cursor += name_len_offset;
-
-            if cursor + name_len_usize > bytes.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Insufficient bytes for column name",
-                ));
-            }
-
-            let name_bytes = &bytes[cursor..cursor + name_len_usize];
-            let name = String::from_utf8(name_bytes.to_vec())
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            cursor += name_len_usize;
-
-            columns.push(ColumnDef { dtype, name });
-        }
-
-        Ok(Schema { columns })
-    }
-}
-
-fn align_cursor(cursor: usize, align: usize) -> usize {
-    cursor.next_multiple_of(align)
-}
-
-impl Schema {
-    fn alignment(&self) -> usize {
-        self.columns
-            .iter()
-            .map(|c| c.dtype.alignment())
-            .max()
-            .unwrap_or(1)
-    }
-}
-
-impl From<&[ColumnDef]> for Schema {
-    fn from(value: &[ColumnDef]) -> Self {
-        Self {
-            columns: value.to_vec(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ColumnDef {
-    pub(crate) dtype: DataTypeKind,
-    pub(crate) name: String,
-}
-
-impl ColumnDef {
-    pub fn new(dtype: DataTypeKind, name: &str) -> Self {
-        Self {
-            dtype,
-            name: name.to_string(),
-        }
-    }
-}
-
-fn reinterpret_cast<'a>(
-    dtype: DataTypeKind,
-    buffer: &'a [u8],
-) -> std::io::Result<(DataTypeRef<'a>, usize)> {
-    match dtype {
-        DataTypeKind::Blob => {
-            let mut cursor = 0;
-            let (len_varint, offset) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
-            let len_usize: usize = len_varint.try_into()?;
-            cursor += offset;
-
-            let value = DataTypeRef::Blob(BlobRef::from_bytes(&buffer[cursor..cursor + len_usize]));
-            cursor += len_usize;
-            Ok((value, cursor))
-        }
-
-        DataTypeKind::Text => {
-            let mut cursor = 0;
-            let (len_varint, offset) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
-            let len_usize: usize = len_varint.try_into()?;
-            cursor += offset;
-
-            let value = DataTypeRef::Text(BlobRef::from_bytes(&buffer[cursor..cursor + len_usize]));
-            cursor += len_usize;
-            Ok((value, cursor))
-        }
-        DataTypeKind::BigInt => {
-            let mut cursor = 0;
-            let value = Int64Ref::try_from(&buffer[cursor..])?;
-            cursor += Int64Ref::SIZE;
-            Ok((DataTypeRef::BigInt(value), cursor))
-        }
-        DataTypeKind::Int => {
-            let mut cursor = 0;
-            let value = Int32Ref::try_from(&buffer[cursor..])?;
-            cursor += Int32Ref::SIZE;
-            Ok((DataTypeRef::Int(value), cursor))
-        }
-        DataTypeKind::HalfInt => {
-            let mut cursor = 0;
-            let value = Int16Ref::try_from(&buffer[cursor..])?;
-            cursor += Int16Ref::SIZE;
-            Ok((DataTypeRef::HalfInt(value), cursor))
-        }
-        DataTypeKind::SmallInt => {
-            let mut cursor = 0;
-            let value = Int8Ref::try_from(&buffer[cursor..])?;
-            cursor += Int8Ref::SIZE;
-            Ok((DataTypeRef::SmallInt(value), cursor))
-        }
-        DataTypeKind::BigUInt => {
-            let mut cursor = 0;
-            let value = UInt64Ref::try_from(&buffer[cursor..])?;
-            cursor += UInt64Ref::SIZE;
-            Ok((DataTypeRef::BigUInt(value), cursor))
-        }
-        DataTypeKind::UInt => {
-            let mut cursor = 0;
-            let value = UInt32Ref::try_from(&buffer[cursor..])?;
-            cursor += UInt32Ref::SIZE;
-            Ok((DataTypeRef::UInt(value), cursor))
-        }
-        DataTypeKind::HalfUInt => {
-            let mut cursor = 0;
-            let value = UInt16Ref::try_from(&buffer[cursor..])?;
-            cursor += UInt16Ref::SIZE;
-            Ok((DataTypeRef::HalfUInt(value), cursor))
-        }
-        DataTypeKind::SmallUInt => {
-            let mut cursor = 0;
-            let value = UInt8Ref::try_from(&buffer[cursor..])?;
-            cursor += UInt8Ref::SIZE;
-            Ok((DataTypeRef::SmallUInt(value), cursor))
-        }
-        DataTypeKind::Float => {
-            let mut cursor = 0;
-            let value = Float32Ref::try_from(&buffer[cursor..])?;
-            cursor += Float32Ref::SIZE;
-            Ok((DataTypeRef::Float(value), cursor))
-        }
-        DataTypeKind::Double => {
-            let mut cursor = 0;
-            let value = Float64Ref::try_from(&buffer[cursor..])?;
-            cursor += Float64Ref::SIZE;
-            Ok((DataTypeRef::Double(value), cursor))
-        }
-        DataTypeKind::Boolean => {
-            let mut cursor = 0;
-            let value = UInt8Ref::try_from(&buffer[cursor..])?;
-            cursor += UInt8Ref::SIZE;
-            Ok((DataTypeRef::Boolean(value), cursor))
-        }
-        DataTypeKind::Char => {
-            let mut cursor = 0;
-            let value = UInt8Ref::try_from(&buffer[cursor..])?;
-            cursor += UInt8Ref::SIZE;
-            Ok((DataTypeRef::Char(value), cursor))
-        }
-        DataTypeKind::Byte => {
-            let mut cursor = 0;
-            let value = UInt8Ref::try_from(&buffer[cursor..])?;
-            cursor += UInt8Ref::SIZE;
-            Ok((DataTypeRef::Byte(value), cursor))
-        }
-        DataTypeKind::Date => {
-            let mut cursor = 0;
-            let value = DateRef::try_from(&buffer[cursor..])?;
-            cursor += DateRef::SIZE;
-            Ok((DataTypeRef::Date(value), cursor))
-        }
-        DataTypeKind::DateTime => {
-            let mut cursor = 0;
-            let value = DateTimeRef::try_from(&buffer[cursor..])?;
-            cursor += DateTimeRef::SIZE;
-            Ok((DataTypeRef::DateTime(value), cursor))
-        }
-    }
-}
-
-fn reinterpret_cast_mut<'a>(
-    dtype: DataTypeKind,
-    buffer: &'a mut [u8],
-) -> std::io::Result<(DataTypeRefMut<'a>, usize)> {
-    match dtype {
-        DataTypeKind::Blob => {
-            let mut cursor = 0;
-            let (len_varint, offset) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
-            let len_usize: usize = len_varint.try_into()?;
-            cursor += offset;
-
-            let value = DataTypeRefMut::Blob(BlobRefMut::from_bytes(
-                &mut buffer[cursor..cursor + len_usize],
-            ));
-            cursor += len_usize;
-
-            Ok((value, cursor))
-        }
-
-        DataTypeKind::Text => {
-            let mut cursor = 0;
-            let (len_varint, offset) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
-            let len_usize: usize = len_varint.try_into()?;
-            cursor += offset;
-
-            let value = DataTypeRefMut::Text(BlobRefMut::from_bytes(
-                &mut buffer[cursor..cursor + len_usize],
-            ));
-            cursor += len_usize;
-
-            Ok((value, cursor))
-        }
-        DataTypeKind::BigInt => {
-            let mut cursor = 0;
-            let value = Int64RefMut::try_from(&mut buffer[cursor..])?;
-            cursor += Int64RefMut::SIZE;
-            Ok((DataTypeRefMut::BigInt(value), cursor))
-        }
-        DataTypeKind::Int => {
-            let mut cursor = 0;
-            let value = Int32RefMut::try_from(&mut buffer[cursor..])?;
-            cursor += Int32RefMut::SIZE;
-            Ok((DataTypeRefMut::Int(value), cursor))
-        }
-        DataTypeKind::HalfInt => {
-            let mut cursor = 0;
-            let value = Int16RefMut::try_from(&mut buffer[cursor..])?;
-            cursor += Int16RefMut::SIZE;
-            Ok((DataTypeRefMut::HalfInt(value), cursor))
-        }
-        DataTypeKind::SmallInt => {
-            let mut cursor = 0;
-            let value = Int8RefMut::try_from(&mut buffer[cursor..])?;
-            cursor += Int8RefMut::SIZE;
-            Ok((DataTypeRefMut::SmallInt(value), cursor))
-        }
-        DataTypeKind::BigUInt => {
-            let mut cursor = 0;
-            let value = UInt64RefMut::try_from(&mut buffer[cursor..])?;
-            cursor += UInt64RefMut::SIZE;
-            Ok((DataTypeRefMut::BigUInt(value), cursor))
-        }
-        DataTypeKind::UInt => {
-            let mut cursor = 0;
-            let value = UInt32RefMut::try_from(&mut buffer[cursor..])?;
-            cursor += UInt32RefMut::SIZE;
-            Ok((DataTypeRefMut::UInt(value), cursor))
-        }
-        DataTypeKind::HalfUInt => {
-            let mut cursor = 0;
-            let value = UInt16RefMut::try_from(&mut buffer[cursor..])?;
-            cursor += UInt16RefMut::SIZE;
-            Ok((DataTypeRefMut::HalfUInt(value), cursor))
-        }
-        DataTypeKind::SmallUInt => {
-            let mut cursor = 0;
-            let value = UInt8RefMut::try_from(&mut buffer[cursor..])?;
-            cursor += UInt8RefMut::SIZE;
-            Ok((DataTypeRefMut::SmallUInt(value), cursor))
-        }
-        DataTypeKind::Float => {
-            let mut cursor = 0;
-            let value = Float32RefMut::try_from(&mut buffer[cursor..])?;
-            cursor += Float32RefMut::SIZE;
-            Ok((DataTypeRefMut::Float(value), cursor))
-        }
-        DataTypeKind::Double => {
-            let mut cursor = 0;
-            let value = Float64RefMut::try_from(&mut buffer[cursor..])?;
-            cursor += Float64RefMut::SIZE;
-            Ok((DataTypeRefMut::Double(value), cursor))
-        }
-        DataTypeKind::Boolean => {
-            let mut cursor = 0;
-            let value = UInt8RefMut::try_from(&mut buffer[cursor..])?;
-            cursor += UInt8RefMut::SIZE;
-            Ok((DataTypeRefMut::Boolean(value), cursor))
-        }
-        DataTypeKind::Char => {
-            let mut cursor = 0;
-            let value = UInt8RefMut::try_from(&mut buffer[cursor..])?;
-            cursor += UInt8RefMut::SIZE;
-            Ok((DataTypeRefMut::Char(value), cursor))
-        }
-        DataTypeKind::Byte => {
-            let mut cursor = 0;
-            let value = UInt8RefMut::try_from(&mut buffer[cursor..])?;
-            cursor += UInt8RefMut::SIZE;
-            Ok((DataTypeRefMut::Byte(value), cursor))
-        }
-        DataTypeKind::Date => {
-            let mut cursor = 0;
-            let value = DateRefMut::try_from(&mut buffer[cursor..])?;
-            cursor += DateRefMut::SIZE;
-            Ok((DataTypeRefMut::Date(value), cursor))
-        }
-        DataTypeKind::DateTime => {
-            let mut cursor = 0;
-            let value = DateTimeRefMut::try_from(&mut buffer[cursor..])?;
-            cursor += DateTimeRefMut::SIZE;
-            Ok((DataTypeRefMut::DateTime(value), cursor))
-        }
-    }
-}
 
 pub struct Tuple<'a> {
     data: &'a mut [u8],
@@ -863,16 +512,17 @@ pub(crate) fn tuple(values: &[DataType], schema: &Schema) -> std::io::Result<Box
 mod tests {
     use super::*;
     use crate::types::{Blob, DataType, Float64, Int32, UInt8};
+    use crate::database::schema::Column;
 
     fn create_schema() -> Schema {
         Schema::from(
             [
-                ColumnDef::new(DataTypeKind::Int, "id"),
-                ColumnDef::new(DataTypeKind::Text, "name"),
-                ColumnDef::new(DataTypeKind::Boolean, "active"),
-                ColumnDef::new(DataTypeKind::Double, "balance"),
-                ColumnDef::new(DataTypeKind::Double, "bonus"),
-                ColumnDef::new(DataTypeKind::Text, "description"),
+                Column::new(DataTypeKind::Int, "id", true, true, true),
+                Column::new(DataTypeKind::Text, "name",false, false, false),
+                Column::new(DataTypeKind::Boolean, "active", false, false, false),
+                Column::new(DataTypeKind::Double, "balance", false, false, false),
+                Column::new(DataTypeKind::Double, "bonus", false, false, false),
+                Column::new(DataTypeKind::Text, "description", false, false, false),
             ]
             .as_ref(),
         )
@@ -988,9 +638,9 @@ mod tests {
     fn test_tuple_creation() {
         let schema = Schema::from(
             [
-                ColumnDef::new(DataTypeKind::Int, "id"),
-                ColumnDef::new(DataTypeKind::Text, "name"),
-                ColumnDef::new(DataTypeKind::Boolean, "active"),
+                Column::new(DataTypeKind::Int, "id", true, true, true),
+                Column::new(DataTypeKind::Text, "name", false, false, false),
+                Column::new(DataTypeKind::Boolean, "active", false, false, false),
             ]
             .as_ref(),
         );

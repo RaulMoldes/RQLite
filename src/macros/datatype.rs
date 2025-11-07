@@ -2,7 +2,7 @@
 macro_rules! def_data_type {
     ($name:ident, Owned) => {
         paste::paste! {
-            #[derive(Debug, PartialEq)]
+            #[derive(Debug, PartialEq, Clone)]
             pub(crate) enum $name {
                 Null,
                 SmallInt(Int8),
@@ -46,6 +46,11 @@ macro_rules! def_data_type {
                             | Self::Date(_)
                     )
                 }
+
+
+
+
+                
 
                 #[inline]
                 pub fn size(&self) -> usize {

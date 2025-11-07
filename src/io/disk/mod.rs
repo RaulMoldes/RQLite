@@ -4,15 +4,13 @@ pub mod unix;
 pub mod windows;
 
 use std::{
-    fs::{self, File},
-    io::{self, Read, Seek, Write},
-    path::Path,
-    alloc::{alloc_zeroed, Layout},
+    alloc::{Layout, alloc_zeroed}, fs::{self, File}, io::{self, Read, Seek, Write}, os::fd::AsRawFd, path::Path
 };
 
 pub(crate) trait FileSystemBlockSize {
     fn block_size(path: impl AsRef<Path>) -> io::Result<usize>;
 }
+
 
 /// Trait for opening a file depending on the OS.
 pub(crate) trait Open {
@@ -159,6 +157,12 @@ impl Write for DBFile {
 }
 
 
+impl AsRawFd for DBFile {
+    fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
 
 
 
@@ -175,6 +179,7 @@ impl FileOperations for DBFile {
             .read(true)
             .write(true)
             .bypass_cache(true)
+            .sync_on_write(false)
             .open(path)?;
         Ok(Self(f))
     }
@@ -184,7 +189,8 @@ impl FileOperations for DBFile {
         let f = FileSystem::options()
             .read(true)
             .write(true)
-            .bypass_cache(true)  // ← SIEMPRE O_DIRECT
+            .bypass_cache(true)
+            .sync_on_write(false)
             .open(path)?;
         Ok(Self(f))
     }

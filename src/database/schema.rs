@@ -1,22 +1,395 @@
 use crate::io::pager::SharedPager;
-use crate::repr_enum;
-use crate::storage::cell::Slot;
-use crate::storage::page::BtreePage;
-use crate::storage::tuple::{tuple, ColumnDef, Schema, Tuple, TupleRef};
-use crate::structures::bplustree::{BPlusTree, FixedSizeComparator, Payload, SearchResult};
-use crate::structures::bplustree::{NodeAccessMode, VarlenComparator};
-use crate::types::{Blob, DataType, DataTypeRef, OId, PageId, UInt64, UInt8};
-use crate::types::{DataTypeKind, Key, META_INDEX_ROOT, META_TABLE_ROOT, PAGE_ZERO};
-use crate::TextEncoding;
+use crate::storage::{
+    cell::Slot,
+    page::BtreePage,
+    tuple::{tuple,  Tuple, TupleRef}
+};
+
+use crate::structures::bplustree::{BPlusTree, FixedSizeComparator,NodeAccessMode, VarlenComparator,  SearchResult};
+use crate::types::{Blob, DataType, DataTypeRef, OId, PageId, UInt64, UInt8, VarInt, DataTypeKind, Key, META_INDEX_ROOT, META_TABLE_ROOT, PAGE_ZERO, varint::MAX_VARINT_LEN,
+reinterpret_cast
+};
+
+use crate::{TextEncoding, repr_enum};
 
 pub const META_TABLE: &str = "rqcatalog";
 pub const META_INDEX: &str = "rqindex";
 
+
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Schema {
+    pub(crate) columns: Vec<Column>,
+}
+
+pub trait AsBytes {
+    fn write_to(&self) -> std::io::Result<Vec<u8>>;
+    fn read_from(bytes: &[u8]) -> std::io::Result<(Self, usize)>
+    where Self: Sized;
+
+}
+
+impl AsBytes for Schema {
+    fn write_to(&self) -> std::io::Result<Vec<u8>> {
+        let mut out_buffer = Vec::new();
+        let mut varint_buf = [0u8; MAX_VARINT_LEN];
+
+        let buffer = VarInt::encode(self.columns.len() as i64, &mut varint_buf);
+        out_buffer.extend_from_slice(buffer);
+
+
+        for column in &self.columns {
+            let column_bytes = column.write_to()?;
+            let buffer = VarInt::encode(column_bytes.len() as i64, &mut varint_buf);
+            out_buffer.extend_from_slice(buffer);
+            out_buffer.extend_from_slice(&column_bytes);
+        }
+
+        Ok(out_buffer)
+    }
+
+    fn read_from(bytes: &[u8]) -> std::io::Result<(Self, usize)> {
+        let (column_count, mut cursor) = VarInt::from_encoded_bytes(bytes)?;
+        let column_count_usize: usize = column_count.try_into()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        let mut columns = Vec::with_capacity(column_count_usize);
+
+        for _ in 0..column_count_usize {
+
+            let (column_len, column_len_offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
+            let column_len_usize: usize = column_len.try_into()?;
+            cursor += column_len_offset;
+
+            if cursor + column_len_usize > bytes.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Insufficient bytes for column",
+                ));
+            }
+
+
+            let (column, _) = Column::read_from(&bytes[cursor..cursor + column_len_usize])?;
+            cursor += column_len_usize;
+
+            columns.push(column);
+        }
+
+        Ok((Schema { columns }, cursor))
+    }
+}
+
+
+
+impl Schema {
+    fn alignment(&self) -> usize {
+        self.columns
+            .iter()
+            .map(|c| c.dtype.alignment())
+            .max()
+            .unwrap_or(1)
+    }
+}
+
+impl From<&[Column]> for Schema {
+    fn from(value: &[Column]) -> Self {
+        Self {
+            columns: value.to_vec(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Column {
+    pub(crate) dtype: DataTypeKind,
+    pub(crate) name: String,
+    is_primary_key: bool,
+    non_null: bool,
+    unique: bool,
+    foreign_key: Option<ForeignKey>,
+    default: Option<DataType>
+}
+
+impl Column {
+    pub fn new(dtype: DataTypeKind, name: &str, is_primary_key: bool, non_null: bool, unique: bool) -> Self {
+
+        Self {
+            dtype,
+            name: name.to_string(),
+            is_primary_key,
+            non_null,
+            unique,
+            foreign_key: None,
+            default: None
+        }
+    }
+
+    pub fn is_not_null(&self) -> bool {
+        self.non_null
+    }
+
+    pub fn is_primary(&self) -> bool {
+        self.is_primary_key
+    }
+
+    pub fn is_unique(&self) -> bool {
+        self.unique
+    }
+
+    pub fn default(&self) -> Option<&DataType> {
+        self.default.as_ref()
+    }
+
+     pub fn foreign_key(&self) -> Option<&ForeignKey> {
+        self.foreign_key.as_ref()
+    }
+
+    pub fn set_unique(&mut self, unique: bool) {
+        self.unique = unique;
+    }
+
+    pub fn set_default(&mut self, default: Option<DataType>) {
+        self.default = default;
+    }
+
+    pub fn set_primary(&mut self, primary: bool) {
+        self.is_primary_key = primary;
+    }
+
+
+    pub fn set_foreign_key(&mut self, fk: Option<ForeignKey>) {
+        self.foreign_key = fk;
+    }
+
+    pub fn set_non_null(&mut self, non_null: bool) {
+        self.non_null = non_null;
+    }
+
+    pub fn rename(&mut self, name: String) {
+        self.name = name;
+    }
+
+    pub fn set_datatype(&mut self, datatype: DataTypeKind) {
+        debug_assert!(self.dtype.can_cast_to(datatype), "Error: cannot cast between types: {}, and {}", self.dtype, datatype);
+        self.dtype = datatype;
+    }
+}
+
+
+
+
+impl AsBytes for Column {
+    fn write_to(&self) -> std::io::Result<Vec<u8>> {
+        let mut out_buffer = Vec::new();
+        let mut varint_buf = [0u8; MAX_VARINT_LEN];
+
+        out_buffer.push(self.dtype as u8);
+
+
+        let name_bytes = self.name.as_bytes();
+        let buffer = VarInt::encode(name_bytes.len() as i64, &mut varint_buf);
+        out_buffer.extend_from_slice(buffer);
+        out_buffer.extend_from_slice(name_bytes);
+        out_buffer.push(self.is_primary_key as u8);
+        out_buffer.push(self.non_null as u8);
+        out_buffer.push(self.unique as u8);
+
+        match &self.foreign_key {
+            Some(fk) => {
+                out_buffer.push(1u8);
+
+                let table_bytes = fk.table().as_bytes();
+                let buffer = VarInt::encode(table_bytes.len() as i64, &mut varint_buf);
+                out_buffer.extend_from_slice(buffer);
+                out_buffer.extend_from_slice(table_bytes);
+
+
+                let column_bytes = fk.column().as_bytes();
+                let buffer = VarInt::encode(column_bytes.len() as i64, &mut varint_buf);
+                out_buffer.extend_from_slice(buffer);
+                out_buffer.extend_from_slice(column_bytes);
+            }
+            None => {
+                out_buffer.push(0u8);
+            }
+        }
+
+
+        match &self.default {
+            Some(default_val) => {
+                out_buffer.push(1u8);
+                out_buffer.extend_from_slice(default_val.as_ref());
+            }
+            None => {
+                out_buffer.push(0u8);
+            }
+        }
+
+        Ok(out_buffer)
+    }
+
+    fn read_from(bytes: &[u8]) -> std::io::Result<(Self, usize)> {
+        let mut cursor = 0;
+
+
+        if cursor >= bytes.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Insufficient bytes for dtype",
+            ));
+        }
+        let dtype = DataTypeKind::from_repr(bytes[cursor])?;
+        cursor += 1;
+
+
+        let (name_len, name_len_offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
+        let name_len_usize: usize = name_len.try_into()?;
+        cursor += name_len_offset;
+
+        if cursor + name_len_usize > bytes.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Insufficient bytes for column name",
+            ));
+        }
+
+        let name = String::from_utf8(bytes[cursor..cursor + name_len_usize].to_vec())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        cursor += name_len_usize;
+
+        if cursor >= bytes.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Insufficient bytes for is_primary_key",
+            ));
+        }
+        let is_primary_key = bytes[cursor] != 0;
+        cursor += 1;
+
+
+        if cursor >= bytes.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Insufficient bytes for non_null",
+            ));
+        }
+        let non_null = bytes[cursor] != 0;
+        cursor += 1;
+
+
+        if cursor >= bytes.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Insufficient bytes for unique",
+            ));
+        }
+        let unique = bytes[cursor] != 0;
+        cursor += 1;
+
+
+        if cursor >= bytes.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Insufficient bytes for foreign_key flag",
+            ));
+        }
+        let foreign_key = if bytes[cursor] != 0 {
+            cursor += 1;
+
+
+            let (table_len, table_len_offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
+            let table_len_usize: usize = table_len.try_into()?;
+            cursor += table_len_offset;
+
+            if cursor + table_len_usize > bytes.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Insufficient bytes for foreign key table",
+                ));
+            }
+
+            let table = String::from_utf8(bytes[cursor..cursor + table_len_usize].to_vec())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            cursor += table_len_usize;
+
+
+            let (column_len, column_len_offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
+            let column_len_usize: usize = column_len.try_into()?;
+            cursor += column_len_offset;
+
+            if cursor + column_len_usize > bytes.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Insufficient bytes for foreign key column",
+                ));
+            }
+
+            let column = String::from_utf8(bytes[cursor..cursor + column_len_usize].to_vec())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            cursor += column_len_usize;
+
+            Some(ForeignKey { ref_table: table, ref_col: column })
+        } else {
+            cursor += 1;
+            None
+        };
+
+  
+        if cursor >= bytes.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Insufficient bytes for default flag",
+            ));
+        }
+        let default = if bytes[cursor] != 0 {
+            cursor += 1;
+
+
+            let (default_val, bytes_read) = reinterpret_cast(dtype, bytes)?;
+            cursor += bytes_read;
+
+            Some(default_val.to_owned())
+        } else {
+            cursor += 1;
+            None
+        };
+
+        Ok((
+            Column {
+                dtype,
+                name,
+                is_primary_key,
+                non_null,
+                unique,
+                foreign_key,
+                default,
+            },
+            cursor,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignKey {
+    ref_table: String,
+    ref_col: String
+}
+
+impl ForeignKey {
+    pub fn table(&self) -> &str {
+        &self.ref_table
+    }
+
+    pub fn column(&self) -> &str {
+        &self.ref_col
+    }
+}
+
 pub fn meta_idx_schema() -> Schema {
     Schema::from(
         [
-            ColumnDef::new(DataTypeKind::Text, "o_name"),
-            ColumnDef::new(DataTypeKind::BigUInt, "o_id"),
+            Column::new(DataTypeKind::Text, "o_name", false, true, true),
+            Column::new(DataTypeKind::BigUInt, "o_id", false, true, true),
         ]
         .as_ref(),
     )
@@ -24,11 +397,11 @@ pub fn meta_idx_schema() -> Schema {
 pub fn meta_table_schema() -> Schema {
     Schema::from(
         [
-            ColumnDef::new(DataTypeKind::BigUInt, "o_id"),
-            ColumnDef::new(DataTypeKind::BigUInt, "o_root"),
-            ColumnDef::new(DataTypeKind::Byte, "o_type"),
-            ColumnDef::new(DataTypeKind::Blob, "o_metadata"),
-            ColumnDef::new(DataTypeKind::Text, "o_name"),
+            Column::new(DataTypeKind::BigUInt, "o_id", true, true, true),
+            Column::new(DataTypeKind::BigUInt, "o_root",false, true, true),
+            Column::new(DataTypeKind::Byte, "o_type", false, true, false),
+            Column::new(DataTypeKind::Blob, "o_metadata", false, false, false),
+            Column::new(DataTypeKind::Text, "o_name", false, true, true),
         ]
         .as_ref(),
     )
@@ -516,14 +889,14 @@ mod tests {
         assert_ne!(oid, OId::from(0));
         let obj = db.get_obj(oid)?;
         assert_eq!(obj.root, META_TABLE_ROOT);
-        let meta_schema = Schema::read_from(obj.metadata().unwrap())?;
+        let (meta_schema, _) = Schema::read_from(obj.metadata().unwrap())?;
         assert_eq!(meta_schema, meta_table_schema());
 
         let oid = db.search_obj(META_INDEX)?;
         assert_ne!(oid, OId::from(0));
         let obj = db.get_obj(oid)?;
         assert_eq!(obj.root, META_INDEX_ROOT);
-        let meta_schema = Schema::read_from(obj.metadata().unwrap())?;
+        let (meta_schema, _) = Schema::read_from(obj.metadata().unwrap())?;
         assert_eq!(meta_schema, meta_idx_schema());
         Ok(())
     }
@@ -534,9 +907,9 @@ mod tests {
         let mut db = create_db(4096, 100, "test.db")?;
         let schema = Schema::from(
             [
-                ColumnDef::new(DataTypeKind::BigUInt, "id"),
-                ColumnDef::new(DataTypeKind::BigUInt, "age"),
-                ColumnDef::new(DataTypeKind::Text, "description"),
+                Column::new(DataTypeKind::BigUInt, "id", true, true, true),
+                Column::new(DataTypeKind::BigUInt, "age", false, false, false),
+                Column::new(DataTypeKind::Text, "description",false, false, false),
             ]
             .as_ref(),
         );
@@ -554,15 +927,15 @@ mod tests {
         assert!(obj_ret.root.is_valid());
         assert_eq!(obj_ret.o_id, id, "Objects do not match");
         assert_eq!(obj_ret.metadata().unwrap(), schema_bytes);
-        let des = Schema::read_from(obj_ret.metadata().unwrap())?;
+        let (des, _) = Schema::read_from(obj_ret.metadata().unwrap())?;
 
         assert_eq!(
             des,
             Schema::from(
                 [
-                    ColumnDef::new(DataTypeKind::BigUInt, "id"),
-                    ColumnDef::new(DataTypeKind::BigUInt, "age"),
-                    ColumnDef::new(DataTypeKind::Text, "description"),
+                    Column::new(DataTypeKind::BigUInt, "id", true, true, true),
+                    Column::new(DataTypeKind::BigUInt, "age",false, false, false),
+                    Column::new(DataTypeKind::Text, "description",false, false, false),
                 ]
                 .as_ref(),
             )

@@ -45,6 +45,7 @@ pub enum DataTypeKind: u8 {
     DateTime = 14,
     Blob = 15,
     Text = 16,
+    Null = 17
 }
 
 );
@@ -56,6 +57,7 @@ impl DataTypeKind {
 
     pub fn size(&self) -> Option<usize> {
         match self {
+            DataTypeKind::Null => Some(0),
             DataTypeKind::SmallInt => Some(size_of::<i8>()),
             DataTypeKind::HalfInt => Some(size_of::<i16>()),
             DataTypeKind::Int => Some(size_of::<i32>()),
@@ -110,6 +112,36 @@ impl DataType {
     }
 }
 
+
+
+
+
+impl DataTypeKind {
+    pub fn can_cast_to(&self, other: DataTypeKind) -> bool {
+        match (self, other) {
+            (DataTypeKind::SmallInt, _) => true,
+            (DataTypeKind::HalfInt, _) => true,
+            (DataTypeKind::Int, _) => true,
+            (DataTypeKind::BigInt, _) => true,
+            (DataTypeKind::SmallUInt, _) => true,
+            (DataTypeKind::HalfUInt, _) => true,
+            (DataTypeKind::UInt, _) => true,
+            (DataTypeKind::BigUInt, _) => true,
+            (DataTypeKind::Float, _) => true,
+            (DataTypeKind::Double, _) => true,
+            (DataTypeKind::Byte, _) => true,
+            (DataTypeKind::Char, _) => true,
+            (DataTypeKind::Boolean, _) => false,
+            (DataTypeKind::Date, _) => true,
+            (DataTypeKind::DateTime, _) => true,
+            (DataTypeKind::Text, DataTypeKind::Blob | DataTypeKind::Text) => true,
+            (DataTypeKind::Blob, DataTypeKind::Blob | DataTypeKind::Text) => true,
+            (DataTypeKind::Null, _) => false,
+            _ => false,
+        }
+    }
+}
+
 impl AsRef<[u8]> for DataType {
     fn as_ref(&self) -> &[u8] {
         match self {
@@ -157,6 +189,7 @@ impl<'a> AsRef<[u8]> for DataTypeRef<'a> {
 impl DataTypeKind {
     pub fn alignment(&self) -> usize {
         match self {
+            DataTypeKind::Null => 0,
             DataTypeKind::BigInt | DataTypeKind::BigUInt | DataTypeKind::DateTime => 8,
             DataTypeKind::Int | DataTypeKind::UInt | DataTypeKind::Float | DataTypeKind::Date => 4,
             DataTypeKind::HalfInt | DataTypeKind::HalfUInt => 2,
@@ -167,6 +200,258 @@ impl DataTypeKind {
             | DataTypeKind::Boolean => 1,
             DataTypeKind::Double => 8,
             DataTypeKind::Blob | DataTypeKind::Text => 1,
+        }
+    }
+}
+
+
+
+
+
+
+
+pub fn reinterpret_cast<'a>(
+    dtype: DataTypeKind,
+    buffer: &'a [u8],
+) -> std::io::Result<(DataTypeRef<'a>, usize)> {
+    match dtype {
+        DataTypeKind::Null => Ok((DataTypeRef::Null, 0)),
+        DataTypeKind::Blob => {
+            let mut cursor = 0;
+            let (len_varint, offset) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
+            let len_usize: usize = len_varint.try_into()?;
+            cursor += offset;
+
+            let value = DataTypeRef::Blob(BlobRef::from_bytes(&buffer[cursor..cursor + len_usize]));
+            cursor += len_usize;
+            Ok((value, cursor))
+        }
+
+        DataTypeKind::Text => {
+            let mut cursor = 0;
+            let (len_varint, offset) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
+            let len_usize: usize = len_varint.try_into()?;
+            cursor += offset;
+
+            let value = DataTypeRef::Text(BlobRef::from_bytes(&buffer[cursor..cursor + len_usize]));
+            cursor += len_usize;
+            Ok((value, cursor))
+        }
+        DataTypeKind::BigInt => {
+            let mut cursor = 0;
+            let value = Int64Ref::try_from(&buffer[cursor..])?;
+            cursor += Int64Ref::SIZE;
+            Ok((DataTypeRef::BigInt(value), cursor))
+        }
+        DataTypeKind::Int => {
+            let mut cursor = 0;
+            let value = Int32Ref::try_from(&buffer[cursor..])?;
+            cursor += Int32Ref::SIZE;
+            Ok((DataTypeRef::Int(value), cursor))
+        }
+        DataTypeKind::HalfInt => {
+            let mut cursor = 0;
+            let value = Int16Ref::try_from(&buffer[cursor..])?;
+            cursor += Int16Ref::SIZE;
+            Ok((DataTypeRef::HalfInt(value), cursor))
+        }
+        DataTypeKind::SmallInt => {
+            let mut cursor = 0;
+            let value = Int8Ref::try_from(&buffer[cursor..])?;
+            cursor += Int8Ref::SIZE;
+            Ok((DataTypeRef::SmallInt(value), cursor))
+        }
+        DataTypeKind::BigUInt => {
+            let mut cursor = 0;
+            let value = UInt64Ref::try_from(&buffer[cursor..])?;
+            cursor += UInt64Ref::SIZE;
+            Ok((DataTypeRef::BigUInt(value), cursor))
+        }
+        DataTypeKind::UInt => {
+            let mut cursor = 0;
+            let value = UInt32Ref::try_from(&buffer[cursor..])?;
+            cursor += UInt32Ref::SIZE;
+            Ok((DataTypeRef::UInt(value), cursor))
+        }
+        DataTypeKind::HalfUInt => {
+            let mut cursor = 0;
+            let value = UInt16Ref::try_from(&buffer[cursor..])?;
+            cursor += UInt16Ref::SIZE;
+            Ok((DataTypeRef::HalfUInt(value), cursor))
+        }
+        DataTypeKind::SmallUInt => {
+            let mut cursor = 0;
+            let value = UInt8Ref::try_from(&buffer[cursor..])?;
+            cursor += UInt8Ref::SIZE;
+            Ok((DataTypeRef::SmallUInt(value), cursor))
+        }
+        DataTypeKind::Float => {
+            let mut cursor = 0;
+            let value = Float32Ref::try_from(&buffer[cursor..])?;
+            cursor += Float32Ref::SIZE;
+            Ok((DataTypeRef::Float(value), cursor))
+        }
+        DataTypeKind::Double => {
+            let mut cursor = 0;
+            let value = Float64Ref::try_from(&buffer[cursor..])?;
+            cursor += Float64Ref::SIZE;
+            Ok((DataTypeRef::Double(value), cursor))
+        }
+        DataTypeKind::Boolean => {
+            let mut cursor = 0;
+            let value = UInt8Ref::try_from(&buffer[cursor..])?;
+            cursor += UInt8Ref::SIZE;
+            Ok((DataTypeRef::Boolean(value), cursor))
+        }
+        DataTypeKind::Char => {
+            let mut cursor = 0;
+            let value = UInt8Ref::try_from(&buffer[cursor..])?;
+            cursor += UInt8Ref::SIZE;
+            Ok((DataTypeRef::Char(value), cursor))
+        }
+        DataTypeKind::Byte => {
+            let mut cursor = 0;
+            let value = UInt8Ref::try_from(&buffer[cursor..])?;
+            cursor += UInt8Ref::SIZE;
+            Ok((DataTypeRef::Byte(value), cursor))
+        }
+        DataTypeKind::Date => {
+            let mut cursor = 0;
+            let value = DateRef::try_from(&buffer[cursor..])?;
+            cursor += DateRef::SIZE;
+            Ok((DataTypeRef::Date(value), cursor))
+        }
+        DataTypeKind::DateTime => {
+            let mut cursor = 0;
+            let value = DateTimeRef::try_from(&buffer[cursor..])?;
+            cursor += DateTimeRef::SIZE;
+            Ok((DataTypeRef::DateTime(value), cursor))
+        }
+    }
+}
+
+pub fn reinterpret_cast_mut<'a>(
+    dtype: DataTypeKind,
+    buffer: &'a mut [u8],
+) -> std::io::Result<(DataTypeRefMut<'a>, usize)> {
+    match dtype {
+        DataTypeKind::Null => Ok((DataTypeRefMut::Null, 0)),
+        DataTypeKind::Blob => {
+            let mut cursor = 0;
+            let (len_varint, offset) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
+            let len_usize: usize = len_varint.try_into()?;
+            cursor += offset;
+
+            let value = DataTypeRefMut::Blob(BlobRefMut::from_bytes(
+                &mut buffer[cursor..cursor + len_usize],
+            ));
+            cursor += len_usize;
+
+            Ok((value, cursor))
+        }
+
+        DataTypeKind::Text => {
+            let mut cursor = 0;
+            let (len_varint, offset) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
+            let len_usize: usize = len_varint.try_into()?;
+            cursor += offset;
+
+            let value = DataTypeRefMut::Text(BlobRefMut::from_bytes(
+                &mut buffer[cursor..cursor + len_usize],
+            ));
+            cursor += len_usize;
+
+            Ok((value, cursor))
+        }
+        DataTypeKind::BigInt => {
+            let mut cursor = 0;
+            let value = Int64RefMut::try_from(&mut buffer[cursor..])?;
+            cursor += Int64RefMut::SIZE;
+            Ok((DataTypeRefMut::BigInt(value), cursor))
+        }
+        DataTypeKind::Int => {
+            let mut cursor = 0;
+            let value = Int32RefMut::try_from(&mut buffer[cursor..])?;
+            cursor += Int32RefMut::SIZE;
+            Ok((DataTypeRefMut::Int(value), cursor))
+        }
+        DataTypeKind::HalfInt => {
+            let mut cursor = 0;
+            let value = Int16RefMut::try_from(&mut buffer[cursor..])?;
+            cursor += Int16RefMut::SIZE;
+            Ok((DataTypeRefMut::HalfInt(value), cursor))
+        }
+        DataTypeKind::SmallInt => {
+            let mut cursor = 0;
+            let value = Int8RefMut::try_from(&mut buffer[cursor..])?;
+            cursor += Int8RefMut::SIZE;
+            Ok((DataTypeRefMut::SmallInt(value), cursor))
+        }
+        DataTypeKind::BigUInt => {
+            let mut cursor = 0;
+            let value = UInt64RefMut::try_from(&mut buffer[cursor..])?;
+            cursor += UInt64RefMut::SIZE;
+            Ok((DataTypeRefMut::BigUInt(value), cursor))
+        }
+        DataTypeKind::UInt => {
+            let mut cursor = 0;
+            let value = UInt32RefMut::try_from(&mut buffer[cursor..])?;
+            cursor += UInt32RefMut::SIZE;
+            Ok((DataTypeRefMut::UInt(value), cursor))
+        }
+        DataTypeKind::HalfUInt => {
+            let mut cursor = 0;
+            let value = UInt16RefMut::try_from(&mut buffer[cursor..])?;
+            cursor += UInt16RefMut::SIZE;
+            Ok((DataTypeRefMut::HalfUInt(value), cursor))
+        }
+        DataTypeKind::SmallUInt => {
+            let mut cursor = 0;
+            let value = UInt8RefMut::try_from(&mut buffer[cursor..])?;
+            cursor += UInt8RefMut::SIZE;
+            Ok((DataTypeRefMut::SmallUInt(value), cursor))
+        }
+        DataTypeKind::Float => {
+            let mut cursor = 0;
+            let value = Float32RefMut::try_from(&mut buffer[cursor..])?;
+            cursor += Float32RefMut::SIZE;
+            Ok((DataTypeRefMut::Float(value), cursor))
+        }
+        DataTypeKind::Double => {
+            let mut cursor = 0;
+            let value = Float64RefMut::try_from(&mut buffer[cursor..])?;
+            cursor += Float64RefMut::SIZE;
+            Ok((DataTypeRefMut::Double(value), cursor))
+        }
+        DataTypeKind::Boolean => {
+            let mut cursor = 0;
+            let value = UInt8RefMut::try_from(&mut buffer[cursor..])?;
+            cursor += UInt8RefMut::SIZE;
+            Ok((DataTypeRefMut::Boolean(value), cursor))
+        }
+        DataTypeKind::Char => {
+            let mut cursor = 0;
+            let value = UInt8RefMut::try_from(&mut buffer[cursor..])?;
+            cursor += UInt8RefMut::SIZE;
+            Ok((DataTypeRefMut::Char(value), cursor))
+        }
+        DataTypeKind::Byte => {
+            let mut cursor = 0;
+            let value = UInt8RefMut::try_from(&mut buffer[cursor..])?;
+            cursor += UInt8RefMut::SIZE;
+            Ok((DataTypeRefMut::Byte(value), cursor))
+        }
+        DataTypeKind::Date => {
+            let mut cursor = 0;
+            let value = DateRefMut::try_from(&mut buffer[cursor..])?;
+            cursor += DateRefMut::SIZE;
+            Ok((DataTypeRefMut::Date(value), cursor))
+        }
+        DataTypeKind::DateTime => {
+            let mut cursor = 0;
+            let value = DateTimeRefMut::try_from(&mut buffer[cursor..])?;
+            cursor += DateTimeRefMut::SIZE;
+            Ok((DataTypeRefMut::DateTime(value), cursor))
         }
     }
 }

@@ -8,6 +8,7 @@
 #![allow(unused_variables)]
 #![feature(slice_ptr_get)]
 #![feature(concat_bytes)]
+#![feature(let_chains)]
 #![feature(str_from_raw_parts)]
 mod configs;
 mod database;
@@ -16,6 +17,7 @@ mod macros;
 mod storage;
 mod structures;
 mod types;
+mod sql;
 
 /// Jemalloc apparently has better alignment guarantees than rust's standard allocator.
 /// Rust's global system allocator does not seem to guarantee that allocations are aligned.

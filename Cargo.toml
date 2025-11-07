@@ -12,7 +12,9 @@ repository = "https://github.com/RaulMoldes/rqlite"
 paste = "1.0.15"
 parking_lot = { version = "0.12.5", features = ["arc_lock"] }
 jemallocator = "0.5"
+lazy_static = "1.4"
 libc =  "0.2"
+regex = "1.12.2"
 
 
 
