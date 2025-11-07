@@ -2,14 +2,25 @@ use crate::io::pager::SharedPager;
 use crate::repr_enum;
 use crate::storage::cell::Slot;
 use crate::storage::page::BtreePage;
-use crate::storage::tuple::{ColumnDef,  Schema, Tuple, TupleRef, tuple};
-use crate::structures::bplustree::NodeAccessMode;
+use crate::storage::tuple::{tuple, ColumnDef, Schema, Tuple, TupleRef};
 use crate::structures::bplustree::{BPlusTree, FixedSizeComparator, Payload, SearchResult};
+use crate::structures::bplustree::{NodeAccessMode, VarlenComparator};
 use crate::types::{Blob, DataType, DataTypeRef, OId, PageId, UInt64, UInt8};
-use crate::types::{DataTypeKind, Key, META_TABLE_ROOT, PAGE_ZERO};
+use crate::types::{DataTypeKind, Key, META_INDEX_ROOT, META_TABLE_ROOT, PAGE_ZERO};
 use crate::TextEncoding;
-pub const META_TABLE: &str = "rqcatalog";
 
+pub const META_TABLE: &str = "rqcatalog";
+pub const META_INDEX: &str = "rqindex";
+
+pub fn meta_idx_schema() -> Schema {
+    Schema::from(
+        [
+            ColumnDef::new(DataTypeKind::Text, "o_name"),
+            ColumnDef::new(DataTypeKind::BigUInt, "o_id"),
+        ]
+        .as_ref(),
+    )
+}
 pub fn meta_table_schema() -> Schema {
     Schema::from(
         [
@@ -305,10 +316,6 @@ impl DBObject {
             DataType::Null
         };
 
-
-
-
-
         let schema = meta_table_schema();
         tuple(
             &[
@@ -323,10 +330,6 @@ impl DBObject {
     }
 }
 
-
-
-
-
 struct Database {
     pager: SharedPager,
 }
@@ -334,6 +337,31 @@ struct Database {
 impl Database {
     fn new(pager: SharedPager) -> Self {
         Self { pager }
+    }
+
+    // Lazy initialization.
+    fn init(&mut self) -> std::io::Result<()> {
+        let meta_schema = meta_table_schema();
+        let schema_bytes = meta_schema.write_to()?;
+        let mut meta_table_obj = DBObject::new(ObjectType::Table, META_TABLE, Some(&schema_bytes));
+        if !meta_table_obj.is_allocated() {
+            meta_table_obj.alloc(&mut self.pager)?;
+        };
+
+        let meta_idx_schema = meta_idx_schema();
+        let schema_bytes = meta_idx_schema.write_to()?;
+        let mut meta_idx_obj = DBObject::new(ObjectType::Index, META_INDEX, Some(&schema_bytes));
+        if !meta_idx_obj.is_allocated() {
+            meta_idx_obj.alloc(&mut self.pager)?;
+        };
+
+        self.index_obj(&meta_table_obj)?;
+        self.create_obj(meta_table_obj)?;
+
+        self.index_obj(&meta_idx_obj)?;
+        self.create_obj(meta_idx_obj)?;
+
+        Ok(())
     }
 
     fn create_obj(&mut self, mut obj: DBObject) -> std::io::Result<OId> {
@@ -354,8 +382,60 @@ impl Database {
         let tuple = obj.into_boxed_tuple()?;
 
         meta_table.insert(META_TABLE_ROOT, &tuple)?;
-
         Ok(oid)
+    }
+
+    fn index_obj(&mut self, obj: &DBObject) -> std::io::Result<()> {
+        let mut meta_idx =
+            BPlusTree::from_existent(self.pager.clone(), META_INDEX_ROOT, 3, 2, VarlenComparator);
+
+        let schema = meta_idx_schema();
+        let tuple = tuple(
+            &[
+                DataType::Text(Blob::from(obj.name.as_str())),
+                DataType::BigUInt(UInt64::from(obj.o_id)),
+            ],
+            &schema,
+        )?;
+
+        meta_idx.insert(META_INDEX_ROOT, &tuple)?;
+
+        Ok(())
+    }
+
+    fn search_obj(&self, obj_name: &str) -> std::io::Result<OId> {
+        let mut meta_idx =
+            BPlusTree::from_existent(self.pager.clone(), META_INDEX_ROOT, 3, 2, VarlenComparator);
+        let blob = Blob::from(obj_name);
+        let result = meta_idx.search(
+            &(META_INDEX_ROOT, Slot(0)),
+            blob.as_ref(),
+            NodeAccessMode::Read,
+        )?;
+
+        let payload = match result {
+            SearchResult::Found(position) => meta_idx.get_content_from_result(result),
+            SearchResult::NotFound(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Object not found in meta table",
+                ))
+            }
+        };
+
+        if let Some(p) = payload {
+            let schema = meta_idx_schema();
+            let tuple = TupleRef::read(p.as_ref(), &schema)?;
+
+            if let DataTypeRef::BigUInt(u) = tuple.value(&schema, 1)? {
+                return Ok(OId::from(u.to_owned()));
+            };
+        };
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Object not found in meta table",
+        ))
     }
 
     fn get_obj(&self, obj_id: OId) -> std::io::Result<DBObject> {
@@ -385,8 +465,6 @@ impl Database {
             }
         };
 
-
-
         if let Some(p) = payload {
             let schema = meta_table_schema();
             let tuple = TupleRef::read(p.as_ref(), &schema)?;
@@ -406,9 +484,14 @@ mod tests {
     use super::*;
     use crate::io::pager::Pager;
     use crate::{IncrementalVaccum, RQLiteConfig, ReadWriteVersion, TextEncoding};
+    use serial_test::serial;
     use std::path::Path;
 
-    fn create_db(page_size: u32, capacity: u16, path: impl AsRef<Path>) -> Database {
+    fn create_db(
+        page_size: u32,
+        capacity: u16,
+        path: impl AsRef<Path>,
+    ) -> std::io::Result<Database> {
         let config = RQLiteConfig {
             page_size,
             cache_size: Some(capacity),
@@ -417,29 +500,54 @@ mod tests {
             text_encoding: TextEncoding::Utf8,
         };
 
-        let mut pager = Pager::from_config(config, &path).unwrap();
-        let id = pager.alloc_page::<BtreePage>().unwrap(); // Allocate the meta table
-        debug_assert_eq!(id, META_TABLE_ROOT);
-        Database::new(SharedPager::from(pager))
+        let pager = Pager::from_config(config, &path).unwrap();
+
+        let mut db = Database::new(SharedPager::from(pager));
+        db.init()?;
+        Ok(db)
     }
 
     #[test]
-    fn test_create_table() -> std::io::Result<()> {
-        let mut db = create_db(4096, 100, "test.db");
-        let schema =  Schema::from(
-        [
-            ColumnDef::new(DataTypeKind::BigUInt, "id"),
-            ColumnDef::new(DataTypeKind::BigUInt, "age"),
-            ColumnDef::new(DataTypeKind::Text, "description"),
-        ]
-        .as_ref(),
-    );
+    #[serial]
+    fn test_meta_table() -> std::io::Result<()> {
+        let db = create_db(4096, 100, "test.db")?;
 
+        let oid = db.search_obj(META_TABLE)?;
+        assert_ne!(oid, OId::from(0));
+        let obj = db.get_obj(oid)?;
+        assert_eq!(obj.root, META_TABLE_ROOT);
+        let meta_schema = Schema::read_from(obj.metadata().unwrap())?;
+        assert_eq!(meta_schema, meta_table_schema());
+
+        let oid = db.search_obj(META_INDEX)?;
+        assert_ne!(oid, OId::from(0));
+        let obj = db.get_obj(oid)?;
+        assert_eq!(obj.root, META_INDEX_ROOT);
+        let meta_schema = Schema::read_from(obj.metadata().unwrap())?;
+        assert_eq!(meta_schema, meta_idx_schema());
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_create_table() -> std::io::Result<()> {
+        let mut db = create_db(4096, 100, "test.db")?;
+        let schema = Schema::from(
+            [
+                ColumnDef::new(DataTypeKind::BigUInt, "id"),
+                ColumnDef::new(DataTypeKind::BigUInt, "age"),
+                ColumnDef::new(DataTypeKind::Text, "description"),
+            ]
+            .as_ref(),
+        );
 
         let schema_bytes = schema.write_to()?;
         let obj_creat = DBObject::new(ObjectType::Table, "table_a", Some(&schema_bytes));
         assert_eq!(obj_creat.metadata().unwrap(), schema_bytes);
-        let id = db.create_obj(obj_creat)?;
+        db.index_obj(&obj_creat)?;
+        db.create_obj(obj_creat)?;
+
+        let id = db.search_obj("table_a")?;
         let obj_ret = db.get_obj(id)?;
         assert_eq!(obj_ret.name, "table_a");
         assert!(obj_ret.metadata().is_some());
@@ -448,14 +556,17 @@ mod tests {
         assert_eq!(obj_ret.metadata().unwrap(), schema_bytes);
         let des = Schema::read_from(obj_ret.metadata().unwrap())?;
 
-        assert_eq!(des, Schema::from(
-        [
-            ColumnDef::new(DataTypeKind::BigUInt, "id"),
-            ColumnDef::new(DataTypeKind::BigUInt, "age"),
-            ColumnDef::new(DataTypeKind::Text, "description"),
-        ]
-        .as_ref(),
-    ));
+        assert_eq!(
+            des,
+            Schema::from(
+                [
+                    ColumnDef::new(DataTypeKind::BigUInt, "id"),
+                    ColumnDef::new(DataTypeKind::BigUInt, "age"),
+                    ColumnDef::new(DataTypeKind::Text, "description"),
+                ]
+                .as_ref(),
+            )
+        );
         Ok(())
     }
 }

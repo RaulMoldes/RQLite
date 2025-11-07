@@ -13,3 +13,4 @@ impl PageId {
 
 pub const PAGE_ZERO: PageId = PageId(0);
 pub const META_TABLE_ROOT: PageId = PageId(1);
+pub const META_INDEX_ROOT: PageId = PageId(2);

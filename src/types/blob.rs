@@ -275,13 +275,11 @@ impl From<&str> for Blob {
 
 impl From<&[u8]> for Blob {
     fn from(value: &[u8]) -> Self {
-
         let mut buffer = [0u8; MAX_VARINT_LEN];
         let vlen = VarInt::encode(value.len() as i64, &mut buffer);
         let mut blob_buffer = vlen.to_vec();
         blob_buffer.extend_from_slice(value);
 
-        
         Blob(blob_buffer.into_boxed_slice())
     }
 }

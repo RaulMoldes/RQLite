@@ -15,10 +15,10 @@ pub(crate) struct Schema {
     pub(crate) columns: Vec<ColumnDef>,
 }
 
-
 impl Schema {
     pub fn write_to(self) -> std::io::Result<Vec<u8>> {
-        let mut out_buffer = Vec::with_capacity(self.columns.len() * std::mem::size_of::<ColumnDef>());
+        let mut out_buffer =
+            Vec::with_capacity(self.columns.len() * std::mem::size_of::<ColumnDef>());
 
         let mut varint_buf = [0u8; MAX_VARINT_LEN];
         let buffer = VarInt::encode(self.columns.len() as i64, &mut varint_buf);
@@ -31,13 +31,12 @@ impl Schema {
             out_buffer.extend_from_slice(&column.name.as_bytes());
         }
         Ok(out_buffer)
-
     }
-
 
     pub fn read_from(bytes: &[u8]) -> std::io::Result<Self> {
         let (column_count, offset) = VarInt::from_encoded_bytes(bytes)?;
-        let column_count_usize = column_count.try_into()
+        let column_count_usize = column_count
+            .try_into()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         let mut cursor = offset;
@@ -48,7 +47,7 @@ impl Schema {
             if cursor >= bytes.len() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
-                    "Insufficient bytes for schema"
+                    "Insufficient bytes for schema",
                 ));
             }
 
@@ -57,7 +56,6 @@ impl Schema {
             let dtype = DataTypeKind::from_repr(dtype_byte)?;
             cursor += 1;
 
-
             let (name_len, name_len_offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
             let name_len_usize: usize = name_len.try_into()?;
             cursor += name_len_offset;
@@ -65,35 +63,27 @@ impl Schema {
             if cursor + name_len_usize > bytes.len() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
-                    "Insufficient bytes for column name"
+                    "Insufficient bytes for column name",
                 ));
             }
-
 
             let name_bytes = &bytes[cursor..cursor + name_len_usize];
             let name = String::from_utf8(name_bytes.to_vec())
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             cursor += name_len_usize;
 
-            columns.push(ColumnDef {
-                dtype,
-                name,
-            });
+            columns.push(ColumnDef { dtype, name });
         }
 
         Ok(Schema { columns })
     }
 }
 
-
 fn align_cursor(cursor: usize, align: usize) -> usize {
     cursor.next_multiple_of(align)
 }
 
-
-
-
-impl Schema{
+impl Schema {
     fn alignment(&self) -> usize {
         self.columns
             .iter()
@@ -101,8 +91,6 @@ impl Schema{
             .max()
             .unwrap_or(1)
     }
-
-
 }
 
 impl From<&[ColumnDef]> for Schema {
@@ -126,7 +114,6 @@ impl ColumnDef {
             name: name.to_string(),
         }
     }
-
 }
 
 fn reinterpret_cast<'a>(
@@ -651,6 +638,7 @@ impl<'a> Tuple<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct TupleRef<'a> {
     data: &'a [u8],
     offsets: Vec<usize>,
