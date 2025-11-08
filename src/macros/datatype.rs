@@ -50,7 +50,7 @@ macro_rules! def_data_type {
 
 
 
-                
+
 
                 #[inline]
                 pub fn size(&self) -> usize {

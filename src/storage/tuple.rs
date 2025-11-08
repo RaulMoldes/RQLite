@@ -1,13 +1,10 @@
-
+use crate::database::schema::Schema;
 use crate::types::{
-   DataType, DataTypeKind, DataTypeRef, DataTypeRefMut, reinterpret_cast, reinterpret_cast_mut,
-    Int16RefMut,  Int32RefMut,  Int64RefMut,  Int8RefMut,
-     UInt16RefMut,UInt32RefMut, UInt64RefMut, Float64RefMut, Float32RefMut,
-    UInt8RefMut, VarInt,
+    reinterpret_cast, reinterpret_cast_mut, DataType, DataTypeKind, DataTypeRef, DataTypeRefMut,
+    Float32RefMut, Float64RefMut, Int16RefMut, Int32RefMut, Int64RefMut, Int8RefMut, UInt16RefMut,
+    UInt32RefMut, UInt64RefMut, UInt8RefMut, VarInt,
 };
 use crate::TextEncoding;
-use crate::database::schema::Schema;
-
 
 pub struct Tuple<'a> {
     data: &'a mut [u8],
@@ -511,18 +508,18 @@ pub(crate) fn tuple(values: &[DataType], schema: &Schema) -> std::io::Result<Box
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Blob, DataType, Float64, Int32, UInt8};
     use crate::database::schema::Column;
+    use crate::types::{Blob, DataType, Float64, Int32, UInt8};
 
     fn create_schema() -> Schema {
         Schema::from(
             [
-                Column::new(DataTypeKind::Int, "id", true, true, true),
-                Column::new(DataTypeKind::Text, "name",false, false, false),
-                Column::new(DataTypeKind::Boolean, "active", false, false, false),
-                Column::new(DataTypeKind::Double, "balance", false, false, false),
-                Column::new(DataTypeKind::Double, "bonus", false, false, false),
-                Column::new(DataTypeKind::Text, "description", false, false, false),
+                Column::new(DataTypeKind::Int, "id", None),
+                Column::new(DataTypeKind::Text, "name", None),
+                Column::new(DataTypeKind::Boolean, "active", None),
+                Column::new(DataTypeKind::Double, "balance", None),
+                Column::new(DataTypeKind::Double, "bonus", None),
+                Column::new(DataTypeKind::Text, "description", None),
             ]
             .as_ref(),
         )
@@ -638,9 +635,9 @@ mod tests {
     fn test_tuple_creation() {
         let schema = Schema::from(
             [
-                Column::new(DataTypeKind::Int, "id", true, true, true),
-                Column::new(DataTypeKind::Text, "name", false, false, false),
-                Column::new(DataTypeKind::Boolean, "active", false, false, false),
+                Column::new(DataTypeKind::Int, "id", None),
+                Column::new(DataTypeKind::Text, "name", None),
+                Column::new(DataTypeKind::Boolean, "active", None),
             ]
             .as_ref(),
         );

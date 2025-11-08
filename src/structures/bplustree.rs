@@ -15,7 +15,6 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::marker::PhantomData;
 
-
 type Position = (PageId, Slot);
 
 #[derive(Debug)]

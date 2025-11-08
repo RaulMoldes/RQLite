@@ -87,7 +87,9 @@ sql_test!(
             ColumnDefExpr {
                 name: "status".to_string(),
                 data_type: DataTypeKind::Text,
-                constraints: vec![ColumnConstraintExpr::Default(Expr::String("draft".to_string()))]
+                constraints: vec![ColumnConstraintExpr::Default(Expr::String(
+                    "draft".to_string()
+                ))]
             }
         ],
         constraints: vec![]

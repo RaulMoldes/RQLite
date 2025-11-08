@@ -1192,7 +1192,7 @@ sql_test!(
 );
 
 sql_test!(
-   test_parser_select_in,
+    test_parser_select_in,
     "SELECT * FROM table1 WHERE Value IN (1,2);",
     Statement::Select(SelectStatement {
         distinct: false,

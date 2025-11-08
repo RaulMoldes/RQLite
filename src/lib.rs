@@ -14,10 +14,10 @@ mod configs;
 mod database;
 mod io;
 mod macros;
+mod sql;
 mod storage;
 mod structures;
 mod types;
-mod sql;
 
 /// Jemalloc apparently has better alignment guarantees than rust's standard allocator.
 /// Rust's global system allocator does not seem to guarantee that allocations are aligned.

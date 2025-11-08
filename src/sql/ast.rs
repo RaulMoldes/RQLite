@@ -459,7 +459,6 @@ pub(crate) enum Statement {
     Transaction(TransactionStatement),
 }
 
-
 impl Simplify for Statement {
     fn simplify(&mut self) -> Result<(), String> {
         match self {
@@ -470,8 +469,7 @@ impl Simplify for Statement {
             Self::Select(s) => s.simplify(),
             Self::Update(s) => s.simplify(),
             Self::CreateTable(s) => s.simplify(),
-            _ => Ok(())
-
+            _ => Ok(()),
         }
     }
 }
@@ -539,7 +537,7 @@ pub(crate) struct UpdateStatement {
 
 impl Simplify for UpdateStatement {
     fn simplify(&mut self) -> Result<(), String> {
-        for item in self.set_clauses.iter_mut(){
+        for item in self.set_clauses.iter_mut() {
             item.simplify()?;
         }
 
@@ -584,12 +582,12 @@ pub(crate) struct CreateTableStatement {
     pub(crate) constraints: Vec<TableConstraintExpr>,
 }
 
-impl Simplify for CreateTableStatement{
+impl Simplify for CreateTableStatement {
     fn simplify(&mut self) -> Result<(), String> {
-        for ct in self.columns.iter_mut(){
+        for ct in self.columns.iter_mut() {
             ct.simplify()?;
         }
-        for ct in self.constraints.iter_mut(){
+        for ct in self.constraints.iter_mut() {
             ct.simplify()?;
         }
         Ok(())
@@ -625,8 +623,8 @@ pub(crate) enum ColumnConstraintExpr {
 impl Simplify for ColumnConstraintExpr {
     fn simplify(&mut self) -> Result<(), String> {
         match self {
-            Self::Check(expr) | Self::Default(expr ) => expr.simplify(),
-            _=> Ok(())
+            Self::Check(expr) | Self::Default(expr) => expr.simplify(),
+            _ => Ok(()),
         }
     }
 }
@@ -658,7 +656,6 @@ pub(crate) struct AlterTableStatement {
     pub(crate) action: AlterAction,
 }
 
-
 impl Simplify for AlterTableStatement {
     fn simplify(&mut self) -> Result<(), String> {
         self.action.simplify()
@@ -685,7 +682,6 @@ pub(crate) enum AlterAction {
     AddConstraint(TableConstraintExpr),
     DropConstraint(String),
 }
-
 
 impl Simplify for AlterAction {
     fn simplify(&mut self) -> Result<(), String> {

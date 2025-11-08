@@ -4,13 +4,16 @@ pub mod unix;
 pub mod windows;
 
 use std::{
-    alloc::{Layout, alloc_zeroed}, fs::{self, File}, io::{self, Read, Seek, Write}, os::fd::AsRawFd, path::Path
+    alloc::{alloc_zeroed, Layout},
+    fs::{self, File},
+    io::{self, Read, Seek, Write},
+    os::fd::AsRawFd,
+    path::Path,
 };
 
 pub(crate) trait FileSystemBlockSize {
     fn block_size(path: impl AsRef<Path>) -> io::Result<usize>;
 }
-
 
 /// Trait for opening a file depending on the OS.
 pub(crate) trait Open {
@@ -42,11 +45,9 @@ impl Default for OpenOptions {
 }
 
 impl FileSystem {
-
     pub fn options() -> OpenOptions {
         OpenOptions::default()
     }
-
 
     /// Allocate an aligned buffer for aligned for [O_DIRECT] operations
     pub fn alloc_buffer(path: impl AsRef<Path>, size: usize) -> io::Result<Vec<u8>> {
@@ -61,7 +62,7 @@ impl FileSystem {
             if ptr.is_null() {
                 return Err(io::Error::new(
                     io::ErrorKind::OutOfMemory,
-                    "Failed to allocate aligned buffer"
+                    "Failed to allocate aligned buffer",
                 ));
             }
 
@@ -130,7 +131,6 @@ pub(crate) trait FileOperations: Seek + Read + Write {
     fn sync_all(&self) -> io::Result<()>;
 }
 
-
 #[derive(Debug)]
 pub struct DBFile(File);
 
@@ -156,19 +156,14 @@ impl Write for DBFile {
     }
 }
 
-
 impl AsRawFd for DBFile {
     fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
         self.0.as_raw_fd()
     }
 }
 
-
-
-
 impl FileOperations for DBFile {
     fn create(path: impl AsRef<Path>) -> io::Result<Self> {
-
         if let Some(parent) = path.as_ref().parent() {
             fs::create_dir_all(parent)?
         }
@@ -185,7 +180,6 @@ impl FileOperations for DBFile {
     }
 
     fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-
         let f = FileSystem::options()
             .read(true)
             .write(true)

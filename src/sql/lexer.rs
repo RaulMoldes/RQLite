@@ -174,7 +174,6 @@ impl fmt::Display for Token {
     }
 }
 
-
 /// ESCAPE QUOTE IS A CONSTANT FOR THE LEXER PROGRAM.
 const ESCAPE_QUOTE: char = '\'';
 const DOUBLE_QUOTE: char = '"';

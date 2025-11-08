@@ -35,13 +35,12 @@ impl Open for OpenOptions {
         let file = self.inner.open(&path)?;
 
         if self.lock {
-            let lock = unsafe {
-                libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
-            };
+            let lock = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if lock != 0 {
-                return Err(io::Error::other(
-                    format!("could not lock file {}", path.as_ref().display()),
-                ));
+                return Err(io::Error::other(format!(
+                    "could not lock file {}",
+                    path.as_ref().display()
+                )));
             }
         }
 

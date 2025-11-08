@@ -1,6 +1,6 @@
 use crate::sql::ast::*;
-use crate::types::DataTypeKind;
 use crate::sql::lexer::{Lexer, Token};
+use crate::types::DataTypeKind;
 use std::mem;
 
 /// Main parser implementation.
@@ -1371,8 +1371,7 @@ impl Parser {
                 "BOOLEAN" | "BOOL" => DataTypeKind::Boolean,
                 "BYTE" => DataTypeKind::Byte,
                 "BLOB" => DataTypeKind::Blob,
-                _ => DataTypeKind::Null
-
+                _ => DataTypeKind::Null,
             }
         } else {
             return Err("Expected data type".to_string());

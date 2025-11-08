@@ -112,10 +112,6 @@ impl DataType {
     }
 }
 
-
-
-
-
 impl DataTypeKind {
     pub fn can_cast_to(&self, other: DataTypeKind) -> bool {
         match (self, other) {
@@ -203,12 +199,6 @@ impl DataTypeKind {
         }
     }
 }
-
-
-
-
-
-
 
 pub fn reinterpret_cast<'a>(
     dtype: DataTypeKind,

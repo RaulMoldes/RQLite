@@ -1,13 +1,13 @@
-use std::io::{Read, Seek, Write};
-use std::sync::Arc;
-use crate::io::disk::{DBFile, FileOperations};
 use crate::io::cache::PageCache;
+use crate::io::disk::{DBFile, FileOperations};
 use crate::io::frames::MemFrame;
 use crate::storage::buffer::BufferWithMetadata;
 use crate::storage::page::{MemPage, OverflowPage, Page, PageZero};
 use crate::types::{PageId, PAGE_ZERO};
 use crate::{RQLiteConfig, DEFAULT_CACHE_SIZE, PAGE_ALIGNMENT};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::io::{Read, Seek, Write};
+use std::sync::Arc;
 
 /// Compute the offset at which a page is placed given the database header size and the page id.
 /// [`PAGEZERO`] contains the header.
@@ -42,14 +42,12 @@ impl Pager {
         let cache =
             PageCache::with_capacity(config.cache_size.unwrap_or(DEFAULT_CACHE_SIZE) as usize);
 
-
         let mut page_zero: PageZero = PageZero::alloc(config.page_size);
         page_zero.metadata_mut().page_size = config.page_size;
         page_zero.metadata_mut().incremental_vacuum_mode = config.incremental_vacuum_mode;
         page_zero.metadata_mut().rw_version = config.read_write_version;
         page_zero.metadata_mut().text_encoding = config.text_encoding;
         page_zero.metadata_mut().cache_size = config.cache_size.unwrap_or(DEFAULT_CACHE_SIZE);
-
 
         file.seek(std::io::SeekFrom::Start(0))?;
         file.write_all(page_zero.as_ref())?;
@@ -274,7 +272,7 @@ mod tests {
     use std::path::Path;
     use tempfile::tempdir;
 
-    fn create_test_pager(path: impl AsRef<Path> , cache_size: usize) -> std::io::Result<Pager> {
+    fn create_test_pager(path: impl AsRef<Path>, cache_size: usize) -> std::io::Result<Pager> {
         let dir = tempdir()?;
         let path = dir.path().join(&path);
 
@@ -292,7 +290,7 @@ mod tests {
     #[test]
     #[serial]
     fn pager_creation() -> std::io::Result<()> {
-        let mut pager = create_test_pager("test.db",16)?;
+        let mut pager = create_test_pager("test.db", 16)?;
         pager.file.seek(SeekFrom::Start(0))?;
         let mut buf = FileSystem::alloc_buffer("test.db", pager.page_size() as usize)?;
         pager.file.read_exact(&mut buf)?;
@@ -303,7 +301,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_single_page_rw() -> std::io::Result<()> {
-        let mut pager = create_test_pager("test.db",16)?;
+        let mut pager = create_test_pager("test.db", 16)?;
         let page_size = pager.page_size();
         let mut page1 = BtreePage::alloc(page_size);
         let page_id = page1.metadata().page_number;
@@ -324,14 +322,14 @@ mod tests {
     #[test]
     #[serial]
     fn test_multiple_pages_rw() -> std::io::Result<()> {
-        let mut pager = create_test_pager("test.db",16)?;
+        let mut pager = create_test_pager("test.db", 16)?;
         let page_size = pager.page_size();
         let mut pages = Vec::new();
         let num_pages = 10;
         let total_size = num_pages * page_size;
 
         // Create a dynamic buffer
-        let mut raw_buffer = FileSystem::alloc_buffer("test.db",total_size as usize)?;
+        let mut raw_buffer = FileSystem::alloc_buffer("test.db", total_size as usize)?;
         let mut offset = 0;
         // Accumulate all pages in our buffers.
         for i in 0..num_pages {
@@ -356,7 +354,7 @@ mod tests {
 
         for page in pages {
             // Try to read page 1 back.
-            let mut buf = FileSystem::alloc_buffer("test.db",page.metadata().page_size as usize)?;
+            let mut buf = FileSystem::alloc_buffer("test.db", page.metadata().page_size as usize)?;
 
             pager.read_block_unchecked(page.metadata().page_number, &mut buf)?;
             assert_eq!(
@@ -364,11 +362,7 @@ mod tests {
                 page.as_ref(),
                 "Retrieved content should match the allocated page!!"
             );
-
-
         }
-
-
 
         Ok(())
     }
@@ -376,7 +370,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_cache_eviction() -> std::io::Result<()> {
-        let mut pager = create_test_pager("test.db",16)?;
+        let mut pager = create_test_pager("test.db", 16)?;
         let page_size = pager.page_size();
         let cache_size = 2; // Set a small cache capacity to force eviction.
         pager.cache = PageCache::with_capacity(cache_size);
@@ -419,7 +413,7 @@ mod tests {
     #[serial]
     #[cfg(not(miri))]
     fn test_dirty_page() -> std::io::Result<()> {
-        let mut pager = create_test_pager("test.db" , 16)?;
+        let mut pager = create_test_pager("test.db", 16)?;
         pager.cache = PageCache::with_capacity(1); // Cache pequeña
 
         // Create a dirty page
@@ -433,8 +427,8 @@ mod tests {
         let _id2 = pager.alloc_page::<BtreePage>()?;
 
         // Verify it has been written out to disk.
-        let mut buf = FileSystem::alloc_buffer("test.db",pager.page_size() as usize)?;
-        pager.read_block_unchecked(id1,&mut buf)?;
+        let mut buf = FileSystem::alloc_buffer("test.db", pager.page_size() as usize)?;
+        pager.read_block_unchecked(id1, &mut buf)?;
 
         Ok(())
     }
@@ -473,7 +467,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_page_reusability() -> std::io::Result<()> {
-        let mut pager = create_test_pager("test.db",2)?;
+        let mut pager = create_test_pager("test.db", 2)?;
         let num_pages = 350;
         let num_cells = 15;
         let mut ids: std::collections::HashSet<PageId> =

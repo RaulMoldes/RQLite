@@ -3,7 +3,7 @@ use crate::sql::parse_sql;
 use crate::sql_test;
 
 sql_test!(
-   test_parser_update_basic,
+    test_parser_update_basic,
     "UPDATE my_table SET col1 = 5 WHERE col2 < 3;",
     Statement::Update(UpdateStatement {
         table: "my_table".to_string(),
@@ -47,7 +47,7 @@ sql_test!(
 );
 
 sql_test!(
-   test_parser_update_with_expression,
+    test_parser_update_with_expression,
     "UPDATE products SET price = price * 1.1 WHERE category = 'electronics';",
     Statement::Update(UpdateStatement {
         table: "products".to_string(),
@@ -68,7 +68,7 @@ sql_test!(
 );
 
 sql_test!(
-   test_parser_update_no_where,
+    test_parser_update_no_where,
     "UPDATE settings SET enabled = true;",
     Statement::Update(UpdateStatement {
         table: "settings".to_string(),
