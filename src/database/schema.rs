@@ -8,6 +8,7 @@ use crate::storage::{
 use crate::structures::bplustree::{
     BPlusTree, FixedSizeComparator, NodeAccessMode, SearchResult, VarlenComparator,
 };
+use crate::types::initialize_atomics;
 use crate::types::{
     reinterpret_cast, varint::MAX_VARINT_LEN, Blob, DataType, DataTypeKind, DataTypeRef, Key, OId,
     PageId, UInt64, UInt8, VarInt, META_INDEX_ROOT, META_TABLE_ROOT, PAGE_ZERO,
@@ -25,6 +26,38 @@ pub(crate) struct Schema {
 }
 
 impl Schema {
+    pub fn new() -> Self {
+        Self {
+            columns: Vec::new(),
+        }
+    }
+
+    pub fn add_column(
+        self,
+        name: &str,
+        dtype: DataTypeKind,
+        primary: bool,
+        non_null: bool,
+        unique: bool,
+    ) -> Self {
+        let mut columns = self.columns;
+        let mut col = Column::new(dtype, name, None);
+        if primary {
+            col.add_constraint(format!("{name}_primary_key"), Constraint::PrimaryKey);
+        };
+
+        if non_null {
+            col.add_constraint(format!("{name}_non_null"), Constraint::NonNull);
+        };
+
+        if unique {
+            col.add_constraint(format!("{name}_unique"), Constraint::Unique);
+        };
+
+        columns.push(col);
+        Self { columns }
+    }
+
     pub fn has_column(&self, column_name: &str) -> bool {
         self.columns.iter().any(|p| p.name == column_name)
     }
@@ -205,12 +238,6 @@ impl Column {
     }
 
     pub fn set_datatype(&mut self, datatype: DataTypeKind) {
-        debug_assert!(
-            self.dtype.can_cast_to(datatype),
-            "Error: cannot cast between types: {}, and {}",
-            self.dtype,
-            datatype
-        );
         self.dtype = datatype;
     }
 }
@@ -465,7 +492,7 @@ pub fn meta_table_schema() -> Schema {
 }
 
 repr_enum!(
-    enum ObjectType: u8 {
+    pub enum ObjectType: u8 {
         Table = 0,
         Index = 1,
         Column = 2,
@@ -474,7 +501,7 @@ repr_enum!(
     }
 );
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct DBObject {
     o_id: OId,
     root: PageId,
@@ -486,6 +513,15 @@ pub struct DBObject {
 impl DBObject {
     pub fn name(&self) -> String {
         self.name.clone()
+    }
+
+    pub fn get_schema(&self) -> Schema {
+        if let Some(metadata) = self.metadata() {
+            if let Ok((schema, _)) = Schema::read_from(metadata) {
+                return schema;
+            }
+        };
+        panic!("Object does not have schema");
     }
 }
 impl<'a> TryFrom<TupleRef<'a>> for DBObject {
@@ -707,7 +743,7 @@ impl TryFrom<UInt8> for ObjectType {
 }
 
 impl DBObject {
-    fn new(o_type: ObjectType, name: &str, metadata: Option<&[u8]>) -> Self {
+    pub fn new(o_type: ObjectType, name: &str, metadata: Option<&[u8]>) -> Self {
         Self {
             o_id: OId::new_key(),
             root: PAGE_ZERO,
@@ -770,25 +806,25 @@ pub struct Database {
 }
 
 impl Database {
-    fn new(pager: SharedPager) -> Self {
+    pub fn new(pager: SharedPager) -> Self {
         Self { pager }
     }
 
     // Lazy initialization.
-    fn init(&mut self) -> std::io::Result<()> {
+    pub fn init(&mut self) -> std::io::Result<()> {
+        initialize_atomics();
         let meta_schema = meta_table_schema();
         let schema_bytes = meta_schema.write_to()?;
+
         let mut meta_table_obj = DBObject::new(ObjectType::Table, META_TABLE, Some(&schema_bytes));
-        if !meta_table_obj.is_allocated() {
-            meta_table_obj.alloc(&mut self.pager)?;
-        };
+
+        meta_table_obj.alloc(&mut self.pager)?;
 
         let meta_idx_schema = meta_idx_schema();
         let schema_bytes = meta_idx_schema.write_to()?;
         let mut meta_idx_obj = DBObject::new(ObjectType::Index, META_INDEX, Some(&schema_bytes));
-        if !meta_idx_obj.is_allocated() {
-            meta_idx_obj.alloc(&mut self.pager)?;
-        };
+
+        meta_idx_obj.alloc(&mut self.pager)?;
 
         self.index_obj(&meta_table_obj)?;
         self.create_obj(meta_table_obj)?;
@@ -796,6 +832,14 @@ impl Database {
         self.index_obj(&meta_idx_obj)?;
         self.create_obj(meta_idx_obj)?;
 
+        Ok(())
+    }
+
+    pub fn create_table(&mut self, name: &str, schema: Schema) -> std::io::Result<()> {
+        let schema_bytes = schema.write_to()?;
+        let obj_creat = DBObject::new(ObjectType::Table, name, Some(&schema_bytes));
+        self.index_obj(&obj_creat)?;
+        self.create_obj(obj_creat)?;
         Ok(())
     }
 
@@ -887,8 +931,6 @@ impl Database {
             obj_id.as_ref(),
             NodeAccessMode::Read,
         )?;
-
-        std::fs::write("meta_table.json", meta_table.json()?)?;
 
         let payload = match result {
             SearchResult::Found(position) => meta_table.get_content_from_result(result),

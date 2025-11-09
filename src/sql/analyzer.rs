@@ -1,11 +1,13 @@
-use crate::database::schema::Schema;
+use crate::database::schema::ObjectType;
 use crate::database::schema::{AsBytes, DBObject, Database};
+use crate::database::schema::{Column, Schema};
 use crate::sql::ast::{
-    AlterAction, AlterColumnAction, Expr, SelectItem, SelectStatement, Statement,
-    TableConstraintExpr, TableReference, TransactionStatement, Values, WhenClause,
+    AlterAction, AlterColumnAction, BinaryOperator, ColumnConstraintExpr, Expr, SelectItem,
+    SelectStatement, Statement, TableConstraintExpr, TableReference, TransactionStatement, Values,
 };
-use crate::{storage::tuple, types::DataTypeKind};
+use crate::types::DataTypeKind;
 use regex::Regex;
+use std::collections::HashSet;
 use std::{collections::HashMap, fmt::Display};
 
 fn is_date_iso(s: &str) -> bool {
@@ -16,7 +18,7 @@ fn is_date_iso(s: &str) -> bool {
 
 fn is_datetime_iso(s: &str) -> bool {
     // Format: YYYY-MM-DDTHH:MM:SS
-    let re = Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$").unwrap();
+    let re = Regex::new(r"(?i)^\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}$").unwrap();
     re.is_match(s)
 }
 
@@ -30,9 +32,14 @@ pub(crate) enum AnalyzerError {
     MultiplePrimaryKeys,
     AlreadyExists(AlreadyExists),
     ArithmeticOverflow(f64, DataTypeKind),
+    InvalidFormat(String, String),
     InvalidExpression,
     AlreadyStarted,
     NotStarted,
+    InvalidDataType(DataTypeKind),
+    AliasNotProvided,
+    DuplicatedConstraint(String),
+    InvalidValue(DataTypeKind),
 }
 
 #[derive(Debug, PartialEq)]
@@ -82,68 +89,201 @@ impl Display for AnalyzerError {
             },
             Self::NotStarted => {
                 f.write_str("Transaction has not started. Must be on a transaction in order to call [ROLLBACK] or [COMMIT].")
+            },
+            Self::InvalidDataType(dtype) => {
+                write!(f, "Invalid datatype for expression: {dtype}")
+            },
+            Self::InvalidValue(dtype) => {
+                write!(f, "Invalid value for datatype: {dtype}")
+            },
+            Self::InvalidFormat(s, o) => {
+                write!(f, "Invalid formatting for string: {s}, expected: {o}")
+            },
+            Self::AliasNotProvided => {
+                write!(f, "An alias is required in order to reference columns when referencing multiple tables in the same statement.")
+            },
+            Self::DuplicatedConstraint(s) => {
+                write!(f, "Duplicated constraint on column {s}")
             }
         }
     }
 }
 
+struct AnalyzerCtx {
+    table_aliases: HashMap<String, String>,
+    subqueries: HashMap<String, DBObject>,
+    current_table: Option<String>,
+    on_transaction: bool,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+enum ExprResult {
+    Table(Vec<DataTypeKind>),
+    Value(DataTypeKind),
+}
 struct Analyzer<'a> {
     db: &'a Database,
-    aliases: HashMap<String, DBObject>,
-    is_on_transaction: bool,
+    ctx: AnalyzerCtx,
 }
 
 impl<'a> Analyzer<'a> {
-    fn analyze_ident(&mut self, ident: &str) -> Result<(), AnalyzerError> {
-        Ok(()) // TODO.
+    fn new(db: &'a Database) -> Self {
+        Self {
+            db,
+            ctx: AnalyzerCtx {
+                table_aliases: HashMap::new(),
+                subqueries: HashMap::new(),
+                on_transaction: false,
+                current_table: None,
+            },
+        }
+    }
+    fn table_aliases(&self) -> &HashMap<String, String> {
+        &self.ctx.table_aliases
     }
 
-    fn analyze_func(&mut self, ident: &str) -> Result<(), AnalyzerError> {
-        Ok(()) // TODO. SHOULD VALIDATE THAT THE FUNCTION EXISTS.
+    fn analyze_identifier(&mut self, ident: &str) -> Result<DataTypeKind, AnalyzerError> {
+        if self.ctx.current_table.is_none() {
+            return Err(AnalyzerError::AliasNotProvided);
+        }
+
+        let obj = self.obj_exists(self.ctx.current_table.as_ref().unwrap())?;
+        let schema = obj.get_schema();
+        if let Some((_, dtype, _)) = schema.get_dtype(ident) {
+            return Ok(dtype);
+        }
+
+        Err(AnalyzerError::NotFound(ident.to_string()))
     }
 
-    fn analyze_when(&mut self, clause: &WhenClause) -> Result<(), AnalyzerError> {
-        self.analyze_expr(&clause.condition)?;
-        self.analyze_expr(&clause.result)?;
-
-        Ok(()) // TODO
+    fn analyze_func(
+        &mut self,
+        ident: &str,
+        args_dtypes: Vec<DataTypeKind>,
+    ) -> Result<ExprResult, AnalyzerError> {
+        Ok(ExprResult::Value(DataTypeKind::Null)) // TODO. SHOULD VALIDATE THAT THE FUNCTION EXISTS.
     }
 
-    fn analyze_expr(&mut self, expr: &Expr) -> Result<(), AnalyzerError> {
+    fn analyze_expr(&mut self, expr: &Expr) -> Result<ExprResult, AnalyzerError> {
         match expr {
+            // Qualified idents only appear on select clauses.
+            // This can be either on a select clause inside an outer insert or with clause, or on a main select clause.
             Expr::QualifiedIdentifier { table, column } => {
-                if let Some(obj) = self.aliases.get(table) {
+                if let Some(obj_name) = self.table_aliases().get(table) {
+                    let obj = self.obj_exists(obj_name)?;
                     if let Some(metadata) = obj.metadata() {
                         if let Ok((schema, _)) = Schema::read_from(metadata) {
                             if schema.has_column(column) {
-                                return Ok(());
+                                let (_, dtype, _) = schema
+                                    .get_dtype(column)
+                                    .ok_or(AnalyzerError::NotFound(column.to_string()))?;
+
+                                return Ok(ExprResult::Value(dtype)); // Return the datatype of the column
                             } else {
                                 return Err(AnalyzerError::MissingColumns);
                             };
                         };
                     };
                 };
-                return Err(AnalyzerError::NotFound(table.clone()));
+                Err(AnalyzerError::NotFound(table.clone()))
             }
+            // Binary operators typically appear inside either where or join clauses.
+            // What we need to validate here is that the
             Expr::BinaryOp { left, op, right } => {
-                self.analyze_expr(left)?;
-                self.analyze_expr(right)?;
+                let left_result = self.analyze_expr(left)?;
+
+                if let ExprResult::Value(left_dt) = left_result {
+                    self.analyze_value(left_dt, right)?;
+                }
+
+                match (left_result, self.analyze_expr(right)?) {
+                    (ExprResult::Value(left_dt), ExprResult::Value(right_dt)) => {
+                        if !left_dt.can_be_coerced(right_dt) && !right_dt.can_be_coerced(left_dt) {
+                            return Err(AnalyzerError::InvalidDataType(right_dt));
+                        }
+
+                        if matches!(
+                            op,
+                            BinaryOperator::Plus
+                                | BinaryOperator::Minus
+                                | BinaryOperator::Multiply
+                                | BinaryOperator::Divide
+                                | BinaryOperator::Modulo
+                        ) {
+                            if !left_dt.is_numeric() {
+                                return Err(AnalyzerError::InvalidDataType(left_dt));
+                            }
+
+                            if !right_dt.is_numeric() {
+                                return Err(AnalyzerError::InvalidDataType(right_dt));
+                            }
+
+                            Ok(ExprResult::Value(left_dt))
+
+                        } else {
+                            Ok(ExprResult::Value(DataTypeKind::Boolean))
+                        }
+                    }
+                    (ExprResult::Value(left_dt), ExprResult::Table(right_dts)) => {
+
+                        if !right_dts.iter().all(|c| *c == right_dts[0])  {
+
+                            return Err(AnalyzerError::InvalidExpression);
+                        }
+
+                        if !left_dt.can_be_coerced(right_dts[0])
+                            && !right_dts[0].can_be_coerced(left_dt)
+                        {
+                            return Err(AnalyzerError::InvalidDataType(right_dts[0]));
+                        }
+
+                        if matches!(
+                            op,
+                            BinaryOperator::Plus
+                                | BinaryOperator::Minus
+                                | BinaryOperator::Multiply
+                                | BinaryOperator::Divide
+                                | BinaryOperator::Modulo
+                        ) {
+                            if !left_dt.is_numeric() {
+                                return Err(AnalyzerError::InvalidDataType(left_dt));
+                            }
+
+                            if !right_dts[0].is_numeric() {
+                                return Err(AnalyzerError::InvalidDataType(right_dts[0]));
+                            }
+
+                            Ok(ExprResult::Value(left_dt))
+                        } else {
+                            Ok(ExprResult::Value(DataTypeKind::Boolean))
+                        }
+                    }
+                    _ => Err(AnalyzerError::InvalidExpression),
+                }
             }
             Expr::Identifier(str) => {
-                self.analyze_ident(str)?;
+                let datatype = self.analyze_identifier(str)?;
+                Ok(ExprResult::Value(datatype))
             }
             Expr::Exists(stmt) => {
                 self.analyze_select(stmt.as_ref())?;
+                Ok(ExprResult::Value(DataTypeKind::Boolean))
             }
             Expr::FunctionCall {
                 name,
                 args,
                 distinct,
             } => {
-                self.analyze_func(name)?;
+                let mut args_dtypes = Vec::with_capacity(args.len());
                 for arg in args {
-                    self.analyze_expr(arg)?;
+                    if let ExprResult::Value(item) = self.analyze_expr(arg)? {
+                        args_dtypes.push(item);
+                    } else {
+                        return Err(AnalyzerError::InvalidExpression);
+                    }
                 }
+                let return_dtype = self.analyze_func(name, args_dtypes)?;
+                Ok(return_dtype)
             }
             Expr::Between {
                 expr,
@@ -151,55 +291,127 @@ impl<'a> Analyzer<'a> {
                 low,
                 high,
             } => {
-                self.analyze_expr(expr)?;
-                self.analyze_expr(low)?;
-                self.analyze_expr(high)?;
+                if let ExprResult::Value(expr_dtype) = self.analyze_expr(expr)? {
+                    if let ExprResult::Value(left_dtype) = self.analyze_expr(low)? {
+                        if !expr_dtype.can_be_coerced(left_dtype)
+                            && !left_dtype.can_be_coerced(expr_dtype)
+                        {
+                            return Err(AnalyzerError::InvalidDataType(left_dtype));
+                        }
+
+                        if let ExprResult::Value(right_dtype) = self.analyze_expr(high)? {
+                            if !expr_dtype.can_be_coerced(right_dtype)
+                                && !right_dtype.can_be_coerced(expr_dtype)
+                            {
+                                return Err(AnalyzerError::InvalidDataType(right_dtype));
+                            }
+
+                            return Ok(ExprResult::Value(DataTypeKind::Boolean));
+                        }
+                    }
+                }
+                Err(AnalyzerError::InvalidExpression)
             }
             Expr::List(items) => {
+                let mut dtypes = Vec::new();
                 for item in items {
-                    self.analyze_expr(item)?;
+                    match self.analyze_expr(item)? {
+                        ExprResult::Table(values) => dtypes.extend(values),
+                        ExprResult::Value(value) => dtypes.push(value),
+                    }
                 }
+                Ok(ExprResult::Table(dtypes))
             }
             Expr::Case {
                 operand,
                 when_clauses,
                 else_clause,
             } => {
-                for item in when_clauses {
-                    self.analyze_when(item)?;
-                }
-                if let Some(expr) = operand {
-                    self.analyze_expr(expr)?;
-                }
-                if let Some(expr) = else_clause {
-                    self.analyze_expr(expr)?;
-                }
-            }
-            Expr::UnaryOp { op, expr } => {
-                self.analyze_expr(expr)?;
-            }
-            _ => {}
-        }
+                let mut out_dtypes = Vec::new();
 
-        Ok(())
+                let op_dtype = if let Some(expr) = operand {
+                    if let ExprResult::Value(item) = self.analyze_expr(expr)? {
+                        Some(item)
+                    } else {
+                        return Err(AnalyzerError::InvalidExpression);
+                    }
+                } else {
+                    None
+                };
+
+                for item in when_clauses {
+                    if let ExprResult::Value(cond_dtype) = self.analyze_expr(&item.condition)? {
+                        if let Some(dtype) = op_dtype {
+                            if !dtype.can_be_coerced(cond_dtype)
+                                && !cond_dtype.can_be_coerced(dtype)
+                            {
+                                return Err(AnalyzerError::InvalidDataType(dtype));
+                            };
+                        }
+                    } else {
+                        return Err(AnalyzerError::InvalidExpression);
+                    };
+
+                    if let ExprResult::Value(out_dtype) = self.analyze_expr(&item.result)? {
+                        out_dtypes.push(out_dtype);
+                    } else {
+                        return Err(AnalyzerError::InvalidExpression);
+                    }
+                }
+
+                if let Some(expr) = else_clause {
+                    if let ExprResult::Value(else_dtype) = self.analyze_expr(expr)? {
+                        out_dtypes.push(else_dtype);
+                    } else {
+                        return Err(AnalyzerError::InvalidExpression);
+                    }
+                }
+
+                if !out_dtypes.iter().all(|&x| x == out_dtypes[0]) {
+                    return Err(AnalyzerError::InvalidExpression);
+                }
+                Ok(ExprResult::Value(out_dtypes[0]))
+            }
+            Expr::UnaryOp { op, expr } => self.analyze_expr(expr),
+
+            Expr::Null => Ok(ExprResult::Value(DataTypeKind::Null)),
+            Expr::Star => {
+                let mut out = Vec::new();
+                for table in self.table_aliases().values() {
+                    let obj = self.obj_exists(table)?;
+                    let schema = obj.get_schema();
+                    let types: Vec<DataTypeKind> = schema.columns.iter().map(|c| c.dtype).collect();
+                    out.extend(types);
+                }
+                for subq in self.ctx.subqueries.values() {
+                    let schema = subq.get_schema();
+                    let types: Vec<DataTypeKind> = schema.columns.iter().map(|c| c.dtype).collect();
+                    out.extend(types);
+                }
+                Ok(ExprResult::Table(out))
+            }
+            Expr::Number(_) => Ok(ExprResult::Value(DataTypeKind::Double)),
+            Expr::String(_) => Ok(ExprResult::Value(DataTypeKind::Blob)),
+            Expr::Boolean(_) => Ok(ExprResult::Value(DataTypeKind::Boolean)),
+            Expr::Subquery(item) => {
+                let schema = self.analyze_select(item)?;
+                Ok(ExprResult::Table(
+                    schema.columns.iter().map(|d| d.dtype).collect(),
+                ))
+            }
+        }
     }
 
     fn analyze_table_ref(&mut self, reference: &TableReference) -> Result<(), AnalyzerError> {
         match reference {
             TableReference::Table { name, alias } => {
-                let oid = self
-                    .db
-                    .search_obj(name)
-                    .map_err(|_| AnalyzerError::NotFound(name.clone()))?;
-                let obj = self
-                    .db
-                    .get_obj(oid)
-                    .map_err(|_| AnalyzerError::NotFound(name.clone()))?;
+                let obj = self.obj_exists(name)?;
+                self.ctx.current_table = Some(name.to_string());
 
                 if let Some(aliased) = alias {
-                    self.aliases.insert(aliased.clone(), obj);
+                    self.ctx.table_aliases.insert(aliased.clone(), name.clone());
                 } else {
-                    self.aliases.insert(name.clone(), obj);
+                    self.ctx.table_aliases.insert(name.clone(), name.clone());
                 };
             }
             TableReference::Join {
@@ -207,30 +419,70 @@ impl<'a> Analyzer<'a> {
             } => {
                 self.analyze_table_ref(left)?;
                 self.analyze_table_ref(right)?;
+                self.ctx.current_table = None;
 
-                if let Some(Expr::BinaryOp { left, op, right }) = on {
-                    self.analyze_expr(left)?;
-                    self.analyze_expr(right)?;
-                };
+                if let Some(on_expr) = on {
+                    self.analyze_expr(on_expr)?;
+                }
             }
             TableReference::Subquery { query, alias } => {
-                self.analyze_select(query.as_ref())?;
+                let schema = self.analyze_select(query.as_ref())?;
+                let obj =
+                    DBObject::new(ObjectType::Table, alias, Some(&schema.write_to().unwrap()));
+                self.ctx.subqueries.insert(alias.to_string(), obj);
             }
         };
         Ok(())
     }
 
-    fn analyze_select(&mut self, stmt: &SelectStatement) -> Result<(), AnalyzerError> {
+    fn analyze_select(&mut self, stmt: &SelectStatement) -> Result<Schema, AnalyzerError> {
+        let mut out_columns = Vec::with_capacity(stmt.columns.len());
+
         if let Some(table_ref) = &stmt.from {
             self.analyze_table_ref(table_ref)?;
         }
         for item in stmt.columns.iter() {
-            if let SelectItem::ExprWithAlias { expr, .. } = item {
-                self.analyze_expr(expr)?;
+            match item {
+                SelectItem::Star => {
+                    // Push all the columns from all cached tables
+                    for table in self.table_aliases().values() {
+                        let obj = self.obj_exists(table)?;
+                        let schema = obj.get_schema();
+                        out_columns.extend(schema.columns);
+                    }
+                    for subq in self.ctx.subqueries.values() {
+                        let schema = subq.get_schema();
+                        out_columns.extend(schema.columns);
+                    }
+                }
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    let cname = if let Some(aliased) = alias {
+                        aliased
+                    } else if let Expr::Identifier(value) = expr {
+                        value
+                    } else if let Expr::QualifiedIdentifier { table, column } = expr {
+                        column
+                    } else {
+                        "Unknown"
+                    };
+
+                    let result = self.analyze_expr(expr)?;
+                    if let ExprResult::Value(item) = result {
+                        let column = Column::new(item, cname, None);
+                        out_columns.push(column);
+                    };
+                }
             }
         }
+
         if let Some(clause) = &stmt.where_clause {
-            self.analyze_expr(clause)?;
+            if let ExprResult::Value(dt) = self.analyze_expr(clause)? {
+                if !matches!(dt, DataTypeKind::Boolean) {
+                    return Err(AnalyzerError::InvalidExpression);
+                }
+            } else {
+                return Err(AnalyzerError::InvalidExpression);
+            }
         }
 
         for order_by in stmt.order_by.iter() {
@@ -241,40 +493,47 @@ impl<'a> Analyzer<'a> {
             self.analyze_expr(group_by)?;
         }
 
-        Ok(())
+        Ok(Schema {
+            columns: out_columns,
+        })
     }
+
     fn analyze(&mut self, stmt: &Statement) -> Result<(), AnalyzerError> {
         match stmt {
             Statement::Transaction(t) => match t {
                 TransactionStatement::Begin => {
-                    if self.is_on_transaction {
+                    if self.ctx.on_transaction {
                         return Err(AnalyzerError::AlreadyStarted);
                     };
 
-                    self.is_on_transaction = true;
+                    self.ctx.on_transaction = true;
                 }
                 TransactionStatement::Commit | TransactionStatement::Rollback => {
-                    if !self.is_on_transaction {
+                    if !self.ctx.on_transaction {
                         return Err(AnalyzerError::NotStarted);
                     };
 
-                    self.is_on_transaction = false;
+                    self.ctx.on_transaction = false;
                 }
             },
-            Statement::Select(s) => self.analyze_select(s)?,
+            Statement::Select(s) => {
+                self.analyze_select(s)?;
+            }
             Statement::With(s) => {
-                self.analyze_select(&s.body)?;
                 for (alias, item) in s.ctes.iter() {
-                    self.analyze_select(item)?;
+                    let schema = self.analyze_select(item)?;
+                    let obj =
+                        DBObject::new(ObjectType::Table, alias, Some(&schema.write_to().unwrap()));
+                    self.ctx.subqueries.insert(alias.to_string(), obj);
                 }
+                self.analyze_select(&s.body)?;
             }
             Statement::Insert(s) => {
                 let obj = self.obj_exists(&s.table)?;
-                let schema = self.get_schema(&obj);
+                let schema = obj.get_schema();
 
                 let column_dtypes: Vec<(String, DataTypeKind, bool)> =
                     if let Some(cols) = &s.columns {
-                        self.obj_has_columns(&obj, cols)?;
                         cols.iter()
                             .map(|c| {
                                 schema
@@ -292,7 +551,25 @@ impl<'a> Analyzer<'a> {
 
                 match &s.values {
                     Values::Query(expr) => {
-                        self.analyze_select(expr)?;
+                        let schema = self.analyze_select(expr)?;
+                        if column_dtypes.len() != schema.columns.len() {
+                            return Err(AnalyzerError::ColumnValueCountMismatch(0));
+                        };
+
+                        for (i, column) in schema.columns.iter().enumerate() {
+                            if !column_dtypes[i].2 && matches!(column.dtype, DataTypeKind::Null) {
+                                return Err(AnalyzerError::ConstraintViolation(
+                                    "Non null constraint".to_string(),
+                                    column_dtypes[i].0.to_string(),
+                                ));
+                            }
+
+                            if !column.dtype.can_be_coerced(column_dtypes[i].1)
+                                && !column_dtypes[i].1.can_be_coerced(column.dtype)
+                            {
+                                return Err(AnalyzerError::InvalidDataType(column.dtype));
+                            }
+                        }
                     }
                     Values::Values(expr_list) => {
                         for (i, row) in expr_list.iter().enumerate() {
@@ -301,7 +578,7 @@ impl<'a> Analyzer<'a> {
                             };
 
                             for (i, value) in row.iter().enumerate() {
-                                let (name, dtype, is_non_null) = &column_dtypes[i];
+                                let (name, cdtype, is_non_null) = &column_dtypes[i];
 
                                 if *is_non_null && matches!(value, Expr::Null) {
                                     return Err(AnalyzerError::ConstraintViolation(
@@ -310,7 +587,7 @@ impl<'a> Analyzer<'a> {
                                     ));
                                 };
 
-                                // TODO: Datatype validation is not yet implemented.
+                                self.analyze_value(*cdtype, value)?;
                             }
                         }
                     }
@@ -321,6 +598,87 @@ impl<'a> Analyzer<'a> {
                     return Err(AnalyzerError::AlreadyExists(AlreadyExists::Table(
                         stmt.table.clone(),
                     )));
+                }
+                let mut has_primary = false;
+                let mut column_set = HashSet::with_capacity(stmt.columns.len());
+                for col in stmt.columns.iter() {
+                    let mut has_default = false;
+
+                    if column_set.contains(&col.name) {
+                        return Err(AnalyzerError::DuplicatedColumn(col.name.to_string()));
+                    } else {
+                        column_set.insert(col.name.to_string());
+                    };
+
+                    for constraint in col.constraints.iter() {
+                        match constraint {
+                            ColumnConstraintExpr::Default(_) => {
+                                if has_default {
+                                    return Err(AnalyzerError::DuplicatedConstraint(
+                                        col.name.to_string(),
+                                    ));
+                                } else {
+                                    has_default = true;
+                                }
+                            }
+                            ColumnConstraintExpr::PrimaryKey => {
+                                if has_primary {
+                                    return Err(AnalyzerError::MultiplePrimaryKeys);
+                                } else {
+                                    has_primary = true;
+                                }
+                            }
+                            ColumnConstraintExpr::ForeignKey { table, column } => {
+                                let other_obj = self.obj_exists(table)?;
+                                if let Some((_, dtype, _)) =
+                                    other_obj.get_schema().get_dtype(column)
+                                {
+                                    if !dtype.can_be_coerced(col.data_type)
+                                        && !col.data_type.can_be_coerced(dtype)
+                                    {
+                                        return Err(AnalyzerError::InvalidDataType(col.data_type));
+                                    }
+                                } else {
+                                    return Err(AnalyzerError::NotFound(column.to_string()));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                for constraint in &stmt.constraints {
+                    match constraint {
+                        TableConstraintExpr::PrimaryKey(columns) => {
+                            if !columns.iter().all(|c| column_set.contains(c)) {
+                                return Err(AnalyzerError::MissingColumns);
+                            };
+
+                            if has_primary {
+                                return Err(AnalyzerError::MultiplePrimaryKeys);
+                            } else {
+                                has_primary = true;
+                            }
+                        }
+                        TableConstraintExpr::Unique(columns) => {
+                            if !columns.iter().all(|c| column_set.contains(c)) {
+                                return Err(AnalyzerError::MissingColumns);
+                            };
+                        }
+                        TableConstraintExpr::ForeignKey {
+                            columns,
+                            ref_table,
+                            ref_columns,
+                        } => {
+                            if !columns.iter().all(|c| column_set.contains(c)) {
+                                return Err(AnalyzerError::MissingColumns);
+                            };
+
+                            let other_obj = self.obj_exists(ref_table)?;
+                            self.obj_has_columns(&other_obj, ref_columns)?;
+                        }
+                        _ => {}
+                    }
                 }
             }
             Statement::AlterTable(stmt) => {
@@ -337,7 +695,7 @@ impl<'a> Analyzer<'a> {
                     }
                     AlterAction::AlterColumn(alter_col) => {
                         self.obj_has_columns(&obj, &[alter_col.name.to_string()])?;
-                        let schema = self.get_schema(&obj);
+                        let schema = obj.get_schema();
 
                         let (name, dtype_info, is_non_null) = schema
                             .get_dtype(&alter_col.name)
@@ -351,7 +709,6 @@ impl<'a> Analyzer<'a> {
                                         name,
                                     ));
                                 }
-                                // TODO. I NEED TO REVIEW HOW TO PERFORM TYPE COERCION
                             }
                             AlterColumnAction::SetDataType(value) => {
                                 if matches!(value, DataTypeKind::Null) && is_non_null {
@@ -375,7 +732,7 @@ impl<'a> Analyzer<'a> {
                             self.obj_has_columns(&other_obj, ref_columns)?;
                         }
                         TableConstraintExpr::PrimaryKey(cols) => {
-                            let schema = self.get_schema(&obj);
+                            let schema = obj.get_schema();
                             if schema.has_pk() {
                                 return Err(AnalyzerError::MultiplePrimaryKeys);
                             };
@@ -390,7 +747,7 @@ impl<'a> Analyzer<'a> {
                         self.obj_has_columns(&obj, &[col.to_string()])?;
                     }
                     AlterAction::DropConstraint(name) => {
-                        let schema = self.get_schema(&obj);
+                        let schema = obj.get_schema();
                         if schema.has_constraint(name) {
                             return Err(AnalyzerError::AlreadyExists(AlreadyExists::Constraint(
                                 name.to_string(),
@@ -401,14 +758,21 @@ impl<'a> Analyzer<'a> {
             }
             Statement::Delete(stmt) => {
                 let obj = self.obj_exists(&stmt.table)?;
-
+                self.ctx
+                    .table_aliases
+                    .insert(stmt.table.to_string(), stmt.table.to_string());
+                self.ctx.current_table = Some(stmt.table.to_string());
                 if let Some(clause) = &stmt.where_clause {
                     self.analyze_expr(clause)?;
                 }
             }
             Statement::Update(stmt) => {
                 let obj = self.obj_exists(&stmt.table)?;
-                let schema = self.get_schema(&obj);
+                self.ctx
+                    .table_aliases
+                    .insert(stmt.table.to_string(), stmt.table.to_string());
+                self.ctx.current_table = Some(stmt.table.to_string());
+                let schema = obj.get_schema();
                 if let Some(clause) = &stmt.where_clause {
                     self.analyze_expr(clause)?;
                 }
@@ -424,6 +788,7 @@ impl<'a> Analyzer<'a> {
                             name,
                         ));
                     }
+                    self.analyze_value(dtype, &column.value)?;
                 }
             }
             Statement::DropTable(stmt) => {
@@ -447,6 +812,10 @@ impl<'a> Analyzer<'a> {
     }
 
     fn obj_exists(&self, obj_name: &str) -> Result<DBObject, AnalyzerError> {
+        if let Some(subquery) = self.ctx.subqueries.get(obj_name) {
+            return Ok(subquery.clone()); // TODO: avoid cloning here
+        };
+
         let oid = self
             .db
             .search_obj(obj_name)
@@ -458,15 +827,6 @@ impl<'a> Analyzer<'a> {
             .map_err(|_| AnalyzerError::NotFound(obj_name.to_string()))?;
 
         Ok(obj)
-    }
-
-    fn get_schema(&self, obj: &DBObject) -> Schema {
-        if let Some(metadata) = obj.metadata() {
-            if let Ok((schema, _)) = Schema::read_from(metadata) {
-                return schema;
-            }
-        };
-        panic!("Object does not have schema");
     }
 
     fn obj_has_columns(&self, obj: &DBObject, cols: &[String]) -> Result<(), AnalyzerError> {
@@ -482,115 +842,804 @@ impl<'a> Analyzer<'a> {
 
         Ok(())
     }
+
+    fn analyze_value(
+        &self,
+        dtype: DataTypeKind,
+        value: &Expr,
+    ) -> Result<DataTypeKind, AnalyzerError> {
+        match value {
+            Expr::Number(f) => {
+                match dtype {
+                    DataTypeKind::Boolean
+                    | DataTypeKind::Byte
+                    | DataTypeKind::Char
+                    | DataTypeKind::SmallInt
+                    | DataTypeKind::SmallUInt => {
+                        if *f > u8::MAX as f64 {
+                            return Err(AnalyzerError::ArithmeticOverflow(*f, dtype));
+                        };
+                    }
+                    DataTypeKind::HalfInt | DataTypeKind::HalfUInt => {
+                        if *f > u16::MAX as f64 {
+                            return Err(AnalyzerError::ArithmeticOverflow(*f, dtype));
+                        };
+                    }
+                    DataTypeKind::Int | DataTypeKind::UInt | DataTypeKind::Date => {
+                        if *f > u32::MAX as f64 {
+                            return Err(AnalyzerError::ArithmeticOverflow(*f, dtype));
+                        };
+                    }
+                    _ => {}
+                }
+
+                Ok(DataTypeKind::BigInt)
+            }
+            Expr::String(item) => {
+                let len = item.len();
+                let numeric = item.parse::<f64>().is_ok();
+
+                match dtype {
+                    DataTypeKind::Byte | DataTypeKind::SmallInt | DataTypeKind::SmallUInt => {
+                        if !numeric {
+                            return Err(AnalyzerError::InvalidValue(DataTypeKind::SmallInt));
+                        }
+
+                        if len > crate::types::UInt8::SIZE {
+                            return Err(AnalyzerError::ArithmeticOverflow(
+                                item.parse::<f64>().unwrap(),
+                                dtype,
+                            ));
+                        };
+                    }
+                    DataTypeKind::HalfInt | DataTypeKind::HalfUInt => {
+                        if !numeric {
+                            return Err(AnalyzerError::InvalidValue(DataTypeKind::HalfInt));
+                        }
+
+                        if len > crate::types::UInt16::SIZE {
+                            return Err(AnalyzerError::ArithmeticOverflow(
+                                item.parse::<f64>().unwrap(),
+                                dtype,
+                            ));
+                        };
+                    }
+                    DataTypeKind::Int | DataTypeKind::UInt => {
+                        if !numeric {
+                            return Err(AnalyzerError::InvalidValue(DataTypeKind::Int));
+                        }
+
+                        if len > crate::types::UInt32::SIZE {
+                            return Err(AnalyzerError::ArithmeticOverflow(
+                                item.parse::<f64>().unwrap(),
+                                dtype,
+                            ));
+                        };
+                    }
+                    DataTypeKind::BigInt | DataTypeKind::BigUInt => {
+                        if !numeric {
+                            return Err(AnalyzerError::InvalidValue(DataTypeKind::BigInt));
+                        }
+
+                        if len > crate::types::UInt64::SIZE {
+                            return Err(AnalyzerError::ArithmeticOverflow(
+                                item.parse::<f64>().unwrap(),
+                                dtype,
+                            ));
+                        };
+                    }
+                    DataTypeKind::Char => {
+                        if len > crate::types::UInt8::SIZE {
+                            return Err(AnalyzerError::InvalidValue(DataTypeKind::Char));
+                        };
+                    }
+                    DataTypeKind::Boolean => {
+                        if item != "TRUE" && item != "FALSE" {
+                            return Err(AnalyzerError::InvalidValue(DataTypeKind::Boolean));
+                        };
+                    }
+                    DataTypeKind::Date => {
+                        if !is_date_iso(item) {
+                            return Err(AnalyzerError::InvalidFormat(
+                                item.to_string(),
+                                "YY-MM-DD".to_string(),
+                            ));
+                        }
+                    }
+                    DataTypeKind::DateTime => {
+                        if !is_datetime_iso(item) {
+                            return Err(AnalyzerError::InvalidFormat(
+                                item.to_string(),
+                                "YY-MM-DD:hh::mm::ss".to_string(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+
+                Ok(DataTypeKind::Blob)
+            }
+            Expr::Boolean(b) => {
+                if !matches!(dtype, DataTypeKind::Boolean) {
+                    return Err(AnalyzerError::InvalidValue(dtype));
+                }
+
+                Ok(DataTypeKind::Boolean)
+            }
+            _ => Ok(DataTypeKind::Null),
+        }
+    }
 }
 
-fn validate_dataype(dtype: DataTypeKind, value: Expr) -> Result<(), AnalyzerError> {
-    match value {
-        Expr::Number(f) => match dtype {
-            DataTypeKind::Boolean
-            | DataTypeKind::Byte
-            | DataTypeKind::Char
-            | DataTypeKind::SmallInt
-            | DataTypeKind::SmallUInt => {
-                if f > u8::MAX as f64 {
-                    return Err(AnalyzerError::ArithmeticOverflow(f, dtype));
-                };
-            }
-            DataTypeKind::HalfInt | DataTypeKind::HalfUInt => {
-                if f > u16::MAX as f64 {
-                    return Err(AnalyzerError::ArithmeticOverflow(f, dtype));
-                };
-            }
-            DataTypeKind::Int | DataTypeKind::UInt | DataTypeKind::Date => {
-                if f > u32::MAX as f64 {
-                    return Err(AnalyzerError::ArithmeticOverflow(f, dtype));
-                };
-            }
-            _ => {}
-        },
-        Expr::String(item) => {
-            let len = item.len();
-            let numeric = item.parse::<f64>().is_ok();
+#[cfg(test)]
+mod sql_analyzer_tests {
+    use super::*;
+    use super::*;
+    use crate::database::schema::{Column, Database, Schema};
+    use crate::io::pager::{Pager, SharedPager};
+    use crate::sql::analyzer::{AlreadyExists, Analyzer, AnalyzerError};
+    use crate::sql::lexer::Lexer;
+    use crate::sql::parser::Parser;
+    use crate::types::DataTypeKind;
+    use crate::{IncrementalVaccum, RQLiteConfig, ReadWriteVersion, TextEncoding};
+    use serial_test::serial;
+    use std::path::Path;
+    use std::result;
+    use tempfile::tempdir;
 
-            match dtype {
-                DataTypeKind::Byte | DataTypeKind::SmallInt | DataTypeKind::SmallUInt => {
-                    if !numeric {
-                        return Err(AnalyzerError::InvalidExpression);
-                    }
+    fn create_db(
+        page_size: u32,
+        capacity: u16,
+        path: impl AsRef<Path>,
+    ) -> std::io::Result<Database> {
+        let config = RQLiteConfig {
+            page_size,
+            cache_size: Some(capacity),
+            incremental_vacuum_mode: IncrementalVaccum::Disabled,
+            read_write_version: ReadWriteVersion::Legacy,
+            text_encoding: TextEncoding::Utf8,
+        };
 
-                    if len > crate::types::UInt8::SIZE {
-                        return Err(AnalyzerError::ArithmeticOverflow(
-                            item.parse::<f64>().unwrap(),
-                            dtype,
-                        ));
-                    };
-                }
-                DataTypeKind::HalfInt | DataTypeKind::HalfUInt => {
-                    if !numeric {
-                        return Err(AnalyzerError::InvalidExpression);
-                    }
+        let pager = Pager::from_config(config, &path).unwrap();
 
-                    if len > crate::types::UInt16::SIZE {
-                        return Err(AnalyzerError::ArithmeticOverflow(
-                            item.parse::<f64>().unwrap(),
-                            dtype,
-                        ));
-                    };
-                }
-                DataTypeKind::Int | DataTypeKind::UInt => {
-                    if !numeric {
-                        return Err(AnalyzerError::InvalidExpression);
-                    }
+        let mut db = Database::new(SharedPager::from(pager));
+        db.init()?;
 
-                    if len > crate::types::UInt32::SIZE {
-                        return Err(AnalyzerError::ArithmeticOverflow(
-                            item.parse::<f64>().unwrap(),
-                            dtype,
-                        ));
-                    };
-                }
-                DataTypeKind::BigInt | DataTypeKind::BigUInt => {
-                    if !numeric {
-                        return Err(AnalyzerError::InvalidExpression);
-                    }
+        // Create a users table
+        let users_schema = Schema::new()
+            .add_column("id", DataTypeKind::Int, true, true, false)
+            .add_column("name", DataTypeKind::Text, false, false, false)
+            .add_column("email", DataTypeKind::Text, false, true, false)
+            .add_column("age", DataTypeKind::Int, false, false, true)
+            .add_column("created_at", DataTypeKind::DateTime, false, false, false);
 
-                    if len > crate::types::UInt64::SIZE {
-                        return Err(AnalyzerError::ArithmeticOverflow(
-                            item.parse::<f64>().unwrap(),
-                            dtype,
-                        ));
-                    };
-                }
-                DataTypeKind::Char => {
-                    if len > crate::types::UInt8::SIZE {
-                        return Err(AnalyzerError::InvalidExpression);
-                    };
-                }
-                DataTypeKind::Boolean => {
-                    if item != "TRUE" && item != "FALSE" {
-                        return Err(AnalyzerError::InvalidExpression);
-                    };
-                }
-                DataTypeKind::Date => {
-                    if !(is_date_iso(&item) || numeric && len <= crate::types::Date::SIZE) {
-                        return Err(AnalyzerError::InvalidExpression);
-                    }
-                }
-                DataTypeKind::DateTime => {
-                    if !(is_datetime_iso(&item) || numeric && len <= crate::types::DateTime::SIZE) {
-                        return Err(AnalyzerError::InvalidExpression);
-                    }
-                }
-                _ => {}
-            }
-        }
-        Expr::Boolean(b) => {
+        db.create_table("users", users_schema)?;
 
-            if !matches!(dtype, DataTypeKind::Boolean) {
-                return Err(AnalyzerError::InvalidExpression);
-            }
-        },
-        _ => {}
+        let posts_schema = Schema::new()
+            .add_column("id", DataTypeKind::Int, true, true, false)
+            .add_column("user_id", DataTypeKind::Int, false, false, false)
+            .add_column("title", DataTypeKind::Text, false, false, false)
+            .add_column("content", DataTypeKind::Blob, false, false, true)
+            .add_column("published", DataTypeKind::Boolean, false, false, false);
+
+        db.create_table("posts", posts_schema)?;
+
+        Ok(db)
     }
-    Ok(())
+
+    fn parse_and_analyze(sql: &str, db: &Database) -> Result<(), AnalyzerError> {
+        let lexer = Lexer::new(sql);
+        let mut parser = Parser::new(lexer);
+        let statement = parser.parse().expect("Failed to parse SQL");
+
+        let mut analyzer = Analyzer::new(db);
+        analyzer.analyze(&statement)
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "CREATE TABLE products (
+            id INT PRIMARY KEY,
+            name TEXT NOT NULL,
+            price DOUBLE,
+            in_stock BOOLEAN DEFAULT TRUE
+        )";
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "CREATE TABLE users (id INT)";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(
+            result,
+            Err(AnalyzerError::AlreadyExists(AlreadyExists::Table(name))) if name == "users"
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_3() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "CREATE TABLE test (
+            id INT PRIMARY KEY,
+            email TEXT PRIMARY KEY
+        )";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(result, Err(AnalyzerError::MultiplePrimaryKeys)));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_4() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "INSERT INTO users (id, name, email) VALUES (1, 'John', 'john@example.com')";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_5() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "INSERT INTO users (id, name) VALUES (1, 'John', 'extra@email.com')";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(
+            result,
+            Err(AnalyzerError::ColumnValueCountMismatch(_))
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_6() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "INSERT INTO users (id, name, email, age) VALUES (1, 'John', NULL, 34)";
+
+        let result = parse_and_analyze(sql, &db);
+        dbg!(&result);
+        assert!(matches!(
+            result,
+            Err(AnalyzerError::ConstraintViolation(_, column)) if column == "email"
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_7() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "INSERT INTO users (id, name, age) VALUES (1, 'John', 'not_a_number')";
+
+        let result = parse_and_analyze(sql, &db);
+        dbg!(&result);
+        assert!(matches!(result, Err(AnalyzerError::InvalidValue(_))));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "INSERT INTO users (id, name, email, age) VALUES
+                   (1, 'John', 'john@example.com', 25),
+                   (2, 'Jane', 'jane@example.com', 30)";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_9() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "SELECT * FROM users";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_10() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "SELECT name, email FROM users WHERE age > 18";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_11() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "SELECT u.name, p.title
+                   FROM users u
+                   JOIN posts p ON u.id = p.user_id";
+        let result = parse_and_analyze(sql, &db);
+        dbg!(&result);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_12() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "SELECT invalid_column FROM users";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_13() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "SELECT * FROM non_existent_table";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_14() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "SELECT name FROM users WHERE id IN (SELECT user_id FROM posts)";
+        let result = parse_and_analyze(sql, &db);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_15() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "SELECT name,
+                        CASE
+                            WHEN age < 18 THEN 'Minor'
+                            WHEN age >= 18 AND age < 65 THEN 'Adult'
+                            ELSE 'Senior'
+                        END as category
+                   FROM users";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_16() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "SELECT name FROM users u
+                   WHERE EXISTS (SELECT 1 FROM posts p WHERE p.user_id = u.id)";
+        let result = parse_and_analyze(sql, &db);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_17() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "UPDATE users SET name = 'Updated Name' WHERE id = 1";
+        let result = parse_and_analyze(sql, &db);
+        dbg!(&result);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_18() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "UPDATE users SET name = 'New Name', age = 30 WHERE id = 1";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_19() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "UPDATE users SET email = NULL WHERE id = 1";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(
+            result,
+            Err(AnalyzerError::ConstraintViolation(_, column)) if column == "email"
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_20() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "UPDATE users SET invalid_column = 'value'";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_21() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "DELETE FROM users WHERE age < 18";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_22() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "DELETE FROM users";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_23() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "DELETE FROM non_existent";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_24() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "ALTER TABLE users ADD COLUMN phone TEXT";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_25() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "ALTER TABLE users ADD COLUMN name TEXT";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(
+            result,
+            Err(AnalyzerError::AlreadyExists(AlreadyExists::Column(_, column))) if column == "name"
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_26() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "ALTER TABLE users DROP COLUMN email";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_27() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "ALTER TABLE users DROP COLUMN phone";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_28() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        // Create a table without primary key first
+        let sql = "ALTER TABLE posts ADD CONSTRAINT PRIMARY KEY (id)";
+
+        // Note: This might fail if posts already has a PK
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(result, Err(AnalyzerError::MultiplePrimaryKeys)));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_29() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "ALTER TABLE posts ADD CONSTRAINT FOREIGN KEY (user_id) REFERENCES users(id)";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_30() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "DROP TABLE users";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_31() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "DROP TABLE IF EXISTS non_existent";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_32() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "DROP TABLE non_existent";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_33() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+
+        assert!(parse_and_analyze("BEGIN", &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_34() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let mut analyzer = Analyzer::new(&db);
+
+        // Start a transaction
+        let lexer = Lexer::new("BEGIN");
+        let mut parser = Parser::new(lexer);
+        let stmt = parser.parse().unwrap();
+        assert!(analyzer.analyze(&stmt).is_ok());
+
+        // Try to start another one
+        let lexer = Lexer::new("BEGIN");
+        let mut parser = Parser::new(lexer);
+        let stmt = parser.parse().unwrap();
+        let result = analyzer.analyze(&stmt);
+
+        assert!(matches!(result, Err(AnalyzerError::AlreadyStarted)));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_35() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "WITH adult_users AS (
+                      SELECT * FROM users WHERE age >= 18
+                   )
+                   SELECT name FROM adult_users";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_36() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "WITH
+                      adults AS (SELECT * FROM users WHERE age >= 18),
+                      active_posts AS (SELECT * FROM posts WHERE published = TRUE)
+                   SELECT a.name, p.title
+                   FROM adults a
+                   JOIN active_posts p ON a.id = p.user_id";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_37() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "CREATE INDEX idx_users_email ON users(email)";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_38() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "CREATE UNIQUE INDEX idx_users_email_unique ON users(email)";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_39() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "CREATE INDEX IF NOT EXISTS idx_test ON users(name)";
+        let result = parse_and_analyze(sql, &db);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_40() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "CREATE INDEX idx_invalid ON users(invalid_column)";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_41() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "INSERT INTO users (id, name, email, age)
+                   VALUES (999999999999, 'John', 'john@example.com', 25)";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(
+            result,
+            Err(AnalyzerError::ArithmeticOverflow(_, _))
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_42() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+
+        let sql = "INSERT INTO users (id, name, email, age, created_at)
+                   VALUES (1, 'John', 'john@example.com', 25, '2024-01-15T10:30:00')";
+
+        let result = parse_and_analyze(sql, &db);
+        dbg!(&result);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_43() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "INSERT INTO users (id, name, email, age, created_at)
+                   VALUES (1, 'John', 'john@example.com', 25, 'not-a-date')";
+
+        let result = parse_and_analyze(sql, &db);
+        assert!(matches!(result, Err(AnalyzerError::InvalidFormat(..))));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_44() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "SELECT * FROM users WHERE age = 'not_a_number'";
+
+        let result = parse_and_analyze(sql, &db);
+
+        assert!(matches!(result, Err(AnalyzerError::InvalidValue(_))));
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_45() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "SELECT * FROM users WHERE age BETWEEN 18 AND 65";
+        let result = parse_and_analyze(sql, &db);
+        dbg!(&result);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_46() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "SELECT * FROM users WHERE id IN (1, 2, 3, 4)";
+        let result = parse_and_analyze(sql, &db);
+        dbg!(&result);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_analyzer_47() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 10, &path).unwrap();
+        let sql = "SELECT * FROM users WHERE name LIKE 'John%'";
+
+        assert!(parse_and_analyze(sql, &db).is_ok());
+    }
 }

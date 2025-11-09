@@ -28,7 +28,7 @@ keywords! {
     Distinct, Union, Intersect, Except, With, Recursive, Primary, Key, Foreign,
     References, Unique, Index, View, Procedure, Function, Trigger, Database,
     Schema, Grant, Revoke, Commit, Rollback, Transaction, Begin, End, Constraint,
-    Default, Check, Alter, Add, Column, Modify, Rename, To, Lock
+    Default, Check, Alter, Add, Column, Modify, Rename, To, Lock, If
 }
 
 #[allow(dead_code)]
@@ -71,12 +71,13 @@ pub(crate) enum Token {
     Limit,
     Join,
     Inner,
+    If,
+    Exists,
     Outer,
     Full,
     Left,
     Right,
     Cross,
-    Exists,
     Any,
     All,
     Some,
@@ -340,6 +341,9 @@ impl Lexer {
             Some(ch) if ch.is_ascii_digit() => Token::NumberLiteral(self.read_number()),
             Some(ch) if ch.is_alphabetic() || ch == '_' => {
                 let ident = self.read_identifier();
+                if ident.to_lowercase() == "if" {
+                    dbg!("Reading if");
+                };
                 keyword_to_token(&ident)
             }
             Some(STAR) => {

@@ -531,7 +531,6 @@ impl Parser {
                 let next_token = self.__peek_token();
                 match next_token {
                     Token::Table => {
-                        dbg!("PARSING CREATE TABLE");
                         Ok(Statement::CreateTable(self.parse_create_table_statement()?))
                     }
                     Token::Index | Token::Unique => {
@@ -686,7 +685,6 @@ impl Parser {
         };
 
         self.expect(Token::LParen)?;
-        dbg!("READING COLUMNS");
 
         let mut columns = Vec::new();
         let mut constraints = Vec::new();
@@ -699,13 +697,12 @@ impl Parser {
             ) {
                 constraints.push(self.parse_table_constraint()?);
             } else if let Token::Identifier(name) = &self.current_token {
-                dbg!("parsing column name");
                 let col_name = name.clone();
 
                 self.next_token();
-                dbg!("parsing datatype");
+
                 let data_type = self.parse_data_type()?;
-                dbg!(data_type);
+
                 let col_constraints = self.parse_column_constraints()?;
 
                 columns.push(ColumnDefExpr {
@@ -736,10 +733,11 @@ impl Parser {
 
         let unique = self.consume_if(&Token::Unique);
         self.expect(Token::Index)?;
-        let if_not_exists = if self.current_token == Token::Identifier("if".to_string()) {
+
+        let if_not_exists = if self.current_token == Token::If {
             self.next_token();
             self.expect(Token::Not)?;
-            self.expect(Token::Identifier("exists".to_string()))?;
+            self.expect(Token::Exists)?;
             true
         } else {
             false
@@ -841,25 +839,15 @@ impl Parser {
         self.expect(Token::Table)?;
 
         // Check for IF EXISTS clause
-        let if_exists = if let Token::Identifier(s) = &self.current_token {
-            if s.to_lowercase() == "if" {
+        let if_exists = if let Token::If = &self.current_token {
                 self.next_token();
-                if let Token::Identifier(s2) = &self.current_token {
-                    if s2.to_lowercase() == "exists" {
-                        self.next_token();
-                        true
-                    } else {
-                        return Err("Expected EXISTS after IF".to_string());
-                    }
-                } else if self.current_token == Token::Exists {
+                if self.current_token == Token::Exists {
                     self.next_token();
                     true
                 } else {
                     return Err("Expected EXISTS after IF".to_string());
                 }
-            } else {
-                false
-            }
+
         } else {
             false
         };

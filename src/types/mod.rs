@@ -112,32 +112,6 @@ impl DataType {
     }
 }
 
-impl DataTypeKind {
-    pub fn can_cast_to(&self, other: DataTypeKind) -> bool {
-        match (self, other) {
-            (DataTypeKind::SmallInt, _) => true,
-            (DataTypeKind::HalfInt, _) => true,
-            (DataTypeKind::Int, _) => true,
-            (DataTypeKind::BigInt, _) => true,
-            (DataTypeKind::SmallUInt, _) => true,
-            (DataTypeKind::HalfUInt, _) => true,
-            (DataTypeKind::UInt, _) => true,
-            (DataTypeKind::BigUInt, _) => true,
-            (DataTypeKind::Float, _) => true,
-            (DataTypeKind::Double, _) => true,
-            (DataTypeKind::Byte, _) => true,
-            (DataTypeKind::Char, _) => true,
-            (DataTypeKind::Boolean, _) => false,
-            (DataTypeKind::Date, _) => true,
-            (DataTypeKind::DateTime, _) => true,
-            (DataTypeKind::Text, DataTypeKind::Blob | DataTypeKind::Text) => true,
-            (DataTypeKind::Blob, DataTypeKind::Blob | DataTypeKind::Text) => true,
-            (DataTypeKind::Null, _) => false,
-            _ => false,
-        }
-    }
-}
-
 impl AsRef<[u8]> for DataType {
     fn as_ref(&self) -> &[u8] {
         match self {
@@ -443,5 +417,46 @@ pub fn reinterpret_cast_mut<'a>(
             cursor += DateTimeRefMut::SIZE;
             Ok((DataTypeRefMut::DateTime(value), cursor))
         }
+    }
+}
+
+impl DataTypeKind {
+    pub fn can_be_coerced(&self, other: DataTypeKind) -> bool {
+        if std::mem::discriminant(self) == std::mem::discriminant(&other) {
+            return true;
+        }
+
+        if matches!(self, DataTypeKind::Null) {
+            return true;
+        }
+
+        if matches!(
+            other,
+            DataTypeKind::Null | DataTypeKind::Blob | DataTypeKind::Text
+        ) {
+            return true;
+        }
+
+        let self_align = self.alignment();
+        let other_align = other.alignment();
+        self_align <= other_align
+    }
+
+    pub fn is_numeric(&self) -> bool {
+        matches!(
+            self,
+            DataTypeKind::SmallInt
+                | DataTypeKind::HalfInt
+                | DataTypeKind::Int
+                | DataTypeKind::BigInt
+                | DataTypeKind::SmallUInt
+                | DataTypeKind::HalfUInt
+                | DataTypeKind::UInt
+                | DataTypeKind::BigUInt
+                | DataTypeKind::Float
+                | DataTypeKind::Double
+                | DataTypeKind::Date
+                | DataTypeKind::DateTime
+        )
     }
 }
