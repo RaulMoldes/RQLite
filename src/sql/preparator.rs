@@ -5,8 +5,6 @@ use crate::sql::ast::{Expr, SelectItem, SelectStatement, Statement, TableReferen
 use crate::types::DataTypeKind;
 use std::collections::{HashMap, HashSet};
 
-
-
 struct PreparatorCtx {
     table_aliases: HashMap<String, String>,
     subqueries: HashMap<String, DBObject>,
@@ -976,7 +974,4 @@ mod sql_prepare_tests {
             },)
         )
     }
-
-
-
 }

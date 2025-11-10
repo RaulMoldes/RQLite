@@ -279,8 +279,6 @@ impl Simplify for Expr {
             // Literals and identifiers cannot be simplified.
             _ => {}
         }
-
-
     }
 }
 
@@ -345,7 +343,7 @@ pub(crate) struct SelectStatement {
 }
 
 impl Simplify for SelectStatement {
-    fn simplify(&mut self)  {
+    fn simplify(&mut self) {
         for col in self.columns.iter_mut() {
             col.simplify();
         }
@@ -365,7 +363,6 @@ impl Simplify for SelectStatement {
         if let Some(having_clause) = self.having.as_mut() {
             having_clause.simplify();
         };
-
     }
 }
 
@@ -380,7 +377,6 @@ impl Simplify for SelectItem {
         if let Self::ExprWithAlias { expr, .. } = self {
             expr.simplify();
         }
-
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -419,7 +415,6 @@ impl Simplify for TableReference {
             }
             _ => {}
         }
-
     }
 }
 
@@ -441,7 +436,6 @@ pub(crate) struct OrderByExpr {
 impl Simplify for OrderByExpr {
     fn simplify(&mut self) {
         self.expr.simplify();
-
     }
 }
 
@@ -487,7 +481,6 @@ impl Simplify for WithStatement {
         }
 
         self.body.as_mut().simplify();
-
     }
 }
 
@@ -524,7 +517,6 @@ impl Simplify for Values {
                 query.simplify();
             }
         }
-
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -543,7 +535,6 @@ impl Simplify for UpdateStatement {
         if let Some(clause) = self.where_clause.as_mut() {
             clause.simplify();
         }
-
     }
 }
 
@@ -570,7 +561,6 @@ impl Simplify for DeleteStatement {
         if let Some(clause) = self.where_clause.as_mut() {
             clause.simplify();
         };
-
     }
 }
 
@@ -589,7 +579,6 @@ impl Simplify for CreateTableStatement {
         for ct in self.constraints.iter_mut() {
             ct.simplify();
         }
-
     }
 }
 
@@ -605,7 +594,6 @@ impl Simplify for ColumnDefExpr {
         for ct in self.constraints.iter_mut() {
             ct.simplify();
         }
-
     }
 }
 
@@ -623,7 +611,7 @@ impl Simplify for ColumnConstraintExpr {
     fn simplify(&mut self) {
         match self {
             Self::Check(expr) | Self::Default(expr) => expr.simplify(),
-            _ => {},
+            _ => {}
         }
     }
 }
@@ -645,7 +633,6 @@ impl Simplify for TableConstraintExpr {
         if let Self::Check(expr) = self {
             expr.simplify();
         }
-
     }
 }
 
@@ -688,7 +675,7 @@ impl Simplify for AlterAction {
             Self::AddColumn(col) => col.simplify(),
             Self::AlterColumn(col) => col.simplify(),
             Self::AddConstraint(ct) => ct.simplify(),
-            _ => {},
+            _ => {}
         }
     }
 }
@@ -707,7 +694,6 @@ impl Simplify for AlterColumnAction {
         if let Self::SetDefault(expr) = self {
             expr.simplify();
         }
-
     }
 }
 

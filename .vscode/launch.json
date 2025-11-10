@@ -6,7 +6,7 @@
       "request": "launch",
       "name": "Debug Rust test (rqlite)",
       "program": "${workspaceFolder}/target/debug/deps/rqlite-8e08cd16a80bec5f",
-      "args": ["--nocapture", "test_preparator_7"],
+      "args": ["--nocapture", "test_planner_alter_table_drop_column"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {

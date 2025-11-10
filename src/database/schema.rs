@@ -36,6 +36,10 @@ impl Schema {
         self.columns.iter().find(|c| c.name == name)
     }
 
+    pub fn push_column(&mut self, col: Column) {
+        self.columns.push(col);
+    }
+
     pub fn add_column(
         self,
         name: &str,
@@ -47,7 +51,7 @@ impl Schema {
         let mut columns = self.columns;
         let mut col = Column::new(dtype, name, None);
         if primary {
-            col.add_constraint(format!("{name}_primary_key"), Constraint::PrimaryKey);
+            col.add_constraint(format!("{name}_pkey"), Constraint::PrimaryKey);
         };
 
         if non_null {
@@ -189,6 +193,10 @@ impl Column {
 
     pub fn has_constraint(&self, ct_name: &str) -> bool {
         self.cts.contains_key(ct_name)
+    }
+
+    pub fn constraints(&self) -> &HashMap<String, Constraint> {
+        &self.cts
     }
 
     pub fn drop_constraint(&mut self, ct_name: &str) {
@@ -414,6 +422,12 @@ pub struct ForeignKey {
     ref_col: String,
 }
 
+impl ForeignKey {
+    pub fn new(ref_table: String, ref_col: String) -> Self {
+        Self { ref_table, ref_col }
+    }
+}
+
 impl AsBytes for ForeignKey {
     fn write_to(&self) -> std::io::Result<Vec<u8>> {
         let mut buffer = Vec::with_capacity(self.ref_table.len() + self.ref_col.len());
@@ -517,6 +531,14 @@ pub struct DBObject {
 impl DBObject {
     pub fn name(&self) -> String {
         self.name.clone()
+    }
+
+    pub fn set_meta(&mut self, new_meta: &[u8]) {
+        self.metadata = Some(new_meta.to_vec().into_boxed_slice());
+    }
+
+    pub fn object_type(&self) -> ObjectType {
+        self.o_type
     }
 
     pub fn get_schema(&self) -> Schema {
@@ -847,7 +869,7 @@ impl Database {
         Ok(())
     }
 
-    fn create_obj(&mut self, mut obj: DBObject) -> std::io::Result<OId> {
+    pub fn create_obj(&mut self, mut obj: DBObject) -> std::io::Result<OId> {
         let oid = obj.o_id;
 
         if !obj.is_allocated() {
@@ -863,12 +885,54 @@ impl Database {
         );
 
         let tuple = obj.into_boxed_tuple()?;
-
+        meta_table.clear_stack();
         meta_table.insert(META_TABLE_ROOT, &tuple)?;
         Ok(oid)
     }
 
-    fn index_obj(&mut self, obj: &DBObject) -> std::io::Result<()> {
+    pub fn update_obj(&mut self, obj: DBObject) -> std::io::Result<OId> {
+        let oid = obj.o_id;
+
+        let mut meta_table = BPlusTree::from_existent(
+            self.pager.clone(),
+            META_TABLE_ROOT,
+            3,
+            2,
+            FixedSizeComparator::with_type::<u64>(),
+        );
+
+        let tuple = obj.into_boxed_tuple()?;
+        meta_table.clear_stack();
+        meta_table.update(META_TABLE_ROOT, &tuple)?;
+        Ok(oid)
+    }
+
+    pub fn remove_obj(&mut self, oid: OId, obj_name: &str) -> std::io::Result<()> {
+        let mut meta_table = BPlusTree::from_existent(
+            self.pager.clone(),
+            META_TABLE_ROOT,
+            3,
+            2,
+            FixedSizeComparator::with_type::<u64>(),
+        );
+
+        let mut meta_index = BPlusTree::from_existent(
+            self.pager.clone(),
+            META_INDEX_ROOT,
+            3,
+            2,
+            VarlenComparator,
+        );
+
+        meta_table.clear_stack();
+        meta_index.clear_stack();
+        let blob = Blob::from(obj_name);
+        meta_index.remove(META_INDEX_ROOT, blob.as_ref())?;
+        meta_table.remove(META_TABLE_ROOT, oid.as_ref())?;
+        Ok(())
+    }
+
+    pub fn index_obj(&mut self, obj: &DBObject) -> std::io::Result<()> {
         let mut meta_idx =
             BPlusTree::from_existent(self.pager.clone(), META_INDEX_ROOT, 3, 2, VarlenComparator);
 
@@ -880,7 +944,7 @@ impl Database {
             ],
             &schema,
         )?;
-
+        meta_idx.clear_stack();
         meta_idx.insert(META_INDEX_ROOT, &tuple)?;
 
         Ok(())
@@ -905,6 +969,8 @@ impl Database {
                 ))
             }
         };
+
+        meta_idx.clear_stack();
 
         if let Some(p) = payload {
             let schema = meta_idx_schema();
@@ -945,6 +1011,8 @@ impl Database {
                 ))
             }
         };
+
+        meta_table.clear_stack();
 
         if let Some(p) = payload {
             let schema = meta_table_schema();

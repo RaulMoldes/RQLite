@@ -284,6 +284,17 @@ impl From<&[u8]> for Blob {
     }
 }
 
+impl From<&[u8; 8]> for Blob {
+    fn from(value: &[u8; 8]) -> Self {
+        let mut buffer = [0u8; MAX_VARINT_LEN];
+        let vlen = VarInt::encode(value.len() as i64, &mut buffer);
+        let mut blob_buffer = vlen.to_vec();
+        blob_buffer.extend_from_slice(value);
+
+        Blob(blob_buffer.into_boxed_slice())
+    }
+}
+
 impl PartialEq for Blob {
     fn eq(&self, other: &Self) -> bool {
         self.0.as_ref() == other.0.as_ref()

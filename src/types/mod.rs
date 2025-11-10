@@ -19,10 +19,10 @@ pub use sized_types::{
     UInt64Ref, UInt64RefMut, UInt8, UInt8Ref, UInt8RefMut,
 };
 
+use crate::sql::ast::Expr;
+use crate::{def_data_type, repr_enum};
 pub use blob::{Blob, BlobRef, BlobRefMut};
 pub use varint::VarInt;
-
-use crate::{def_data_type, repr_enum};
 #[cfg(test)]
 mod tests;
 
@@ -108,6 +108,91 @@ impl DataType {
             (DataType::Blob(_), DataTypeKind::Blob) => true,
             (DataType::Null, _) => true, // NULL matches any type
             _ => false,
+        }
+    }
+}
+
+impl DataType {
+    pub fn from_expr(expr: Expr, kind: DataTypeKind) -> DataType {
+        match (kind, expr) {
+            (DataTypeKind::Null, _) | (_, Expr::Null) => DataType::Null,
+            (DataTypeKind::Boolean, Expr::Boolean(b)) => DataType::Boolean(UInt8::from(b as u8)),
+            (DataTypeKind::Boolean, Expr::Number(n)) => {
+                DataType::Boolean(UInt8::from((n != 0.0) as u8))
+            }
+            (DataTypeKind::Boolean, Expr::String(n)) => {
+                if n == "TRUE" {
+                    DataType::Boolean(UInt8::TRUE)
+                } else if n == "FALSE" {
+                    DataType::Boolean(UInt8::FALSE)
+                } else {
+                    panic!("Invalid expression for parsing boolean type: {n}");
+                }
+            }
+            (DataTypeKind::SmallInt, Expr::Number(n)) => DataType::SmallInt(Int8::from(n as i8)),
+            (DataTypeKind::SmallInt, Expr::String(n)) => {
+                DataType::SmallInt(Int8::from(n.parse::<i8>().unwrap()))
+            }
+            (DataTypeKind::HalfInt, Expr::Number(n)) => DataType::HalfInt(Int16::from(n as i16)),
+            (DataTypeKind::HalfInt, Expr::String(n)) => {
+                DataType::HalfInt(Int16::from(n.parse::<i16>().unwrap()))
+            }
+            (DataTypeKind::Int, Expr::Number(n)) => DataType::Int(Int32::from(n as i32)),
+            (DataTypeKind::Int, Expr::String(n)) => {
+                DataType::Int(Int32::from(n.parse::<i32>().unwrap()))
+            }
+            (DataTypeKind::BigInt, Expr::Number(n)) => DataType::BigInt(Int64::from(n as i64)),
+            (DataTypeKind::BigInt, Expr::String(n)) => {
+                DataType::BigInt(Int64::from(n.parse::<i64>().unwrap()))
+            }
+            (DataTypeKind::SmallUInt, Expr::Number(n)) => DataType::SmallUInt(UInt8::from(n as u8)),
+            (DataTypeKind::SmallUInt, Expr::String(n)) => {
+                DataType::SmallUInt(UInt8::from(n.parse::<u8>().unwrap()))
+            }
+            (DataTypeKind::HalfUInt, Expr::Number(n)) => DataType::HalfUInt(UInt16::from(n as u16)),
+            (DataTypeKind::HalfUInt, Expr::String(n)) => {
+                DataType::HalfUInt(UInt16::from(n.parse::<u16>().unwrap()))
+            }
+            (DataTypeKind::UInt, Expr::Number(n)) => DataType::UInt(UInt32::from(n as u32)),
+            (DataTypeKind::UInt, Expr::String(n)) => {
+                DataType::UInt(UInt32::from(n.parse::<u32>().unwrap()))
+            }
+            (DataTypeKind::BigUInt, Expr::Number(n)) => DataType::BigUInt(UInt64::from(n as u64)),
+            (DataTypeKind::BigUInt, Expr::String(n)) => {
+                DataType::BigUInt(UInt64::from(n.parse::<u64>().unwrap()))
+            }
+            (DataTypeKind::Float, Expr::Number(n)) => DataType::Float(Float32::from(n as f32)),
+            (DataTypeKind::Float, Expr::String(n)) => {
+                DataType::Float(Float32::from(n.parse::<f32>().unwrap()))
+            }
+            (DataTypeKind::Double, Expr::Number(n)) => DataType::Double(Float64::from(n)),
+            (DataTypeKind::Double, Expr::String(n)) => {
+                DataType::Double(Float64::from(n.parse::<f64>().unwrap()))
+            }
+            (DataTypeKind::Text, Expr::String(s)) => DataType::Text(Blob::from(s.as_bytes())),
+            (DataTypeKind::Blob, Expr::String(s)) => DataType::Blob(Blob::from(s.as_bytes())),
+            (DataTypeKind::Text, Expr::Number(s)) => DataType::Text(Blob::from(&s.to_ne_bytes())),
+            (DataTypeKind::Blob, Expr::Number(s)) => DataType::Blob(Blob::from(&s.to_ne_bytes())),
+            (DataTypeKind::Char, Expr::String(s)) if s.len() == 1 => {
+                DataType::Char(UInt8::from(s.as_bytes()[0]))
+            }
+            (DataTypeKind::Char, Expr::Number(n)) => DataType::Char(UInt8::from((n) as u8)),
+            (DataTypeKind::Date, Expr::String(s)) => DataType::Date(
+                Date::parse_iso(&s)
+                    .unwrap_or_else(|_| panic!("Invalid date format for value '{}'", s)),
+            ),
+            (DataTypeKind::Date, Expr::Number(f)) => DataType::Date(Date::from(f as u32)),
+            (DataTypeKind::DateTime, Expr::String(s)) => DataType::DateTime(
+                DateTime::parse_iso(&s)
+                    .unwrap_or_else(|_| panic!("Invalid datetime format for value '{}'", s)),
+            ),
+            (DataTypeKind::DateTime, Expr::Number(f)) => {
+                DataType::DateTime(DateTime::from(f as u64))
+            }
+            (kind, expr) => panic!(
+                "Cannot convert expression {:?} into data type {:?}",
+                expr, kind
+            ),
         }
     }
 }
