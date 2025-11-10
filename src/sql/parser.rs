@@ -3,6 +3,31 @@ use crate::sql::lexer::{Lexer, Token};
 use crate::types::DataTypeKind;
 use std::mem;
 
+
+
+
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) enum ParserError {
+
+    InvalidExpression(String),
+    UnexpectedToken(Token),
+    UnexpectedEof
+
+}
+
+
+impl std::fmt::Display for ParserError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidExpression(s) => write!(f, "invalid expression {s}"),
+            Self::UnexpectedToken(s) => write!(f, "unexpected token  {s}"),
+            Self::UnexpectedEof => f.write_str("unexpected EOF reached")
+        }
+    }
+}
+
+
+
 /// Main parser implementation.
 /// Uses a pratt parsing approach to parse sql expressions into AST nodes.
 pub(crate) struct Parser {
@@ -27,16 +52,15 @@ impl Parser {
         self.lexer.__peek_token()
     }
 
-    fn expect(&mut self, expected: Token) -> Result<(), String> {
+    fn expect(&mut self, expected: Token) -> Result<(), ParserError> {
         // docs on std::mem::discriminant: https://doc.rust-lang.org/std/mem/fn.discriminant.html
         // Returns a value uniquely identifying the enum variant in the calling token.
         if mem::discriminant(&self.current_token) == mem::discriminant(&expected) {
             self.next_token();
             Ok(())
         } else {
-            Err(format!(
-                "Expected {:?}, got {:?}",
-                expected, self.current_token
+            Err(ParserError::UnexpectedToken(
+                self.current_token.clone()
             ))
         }
     }
@@ -52,13 +76,13 @@ impl Parser {
     }
 
     /// Expression parsing with Pratt parsing
-    pub(crate) fn parse_expression(&mut self) -> Result<Expr, String> {
+    pub(crate) fn parse_expression(&mut self) -> Result<Expr, ParserError> {
         self.parse_expr_bp(0)
     }
 
     /// Obtains the expression binding power using a Pratt Parsing approach.
     /// I recommend this read on Pratt Parsing: https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html
-    fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expr, String> {
+    fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expr, ParserError> {
         let mut lhs = self.parse_prefix()?;
 
         while let Some((l_bp, r_bp)) = self.infix_binding_power() {
@@ -73,7 +97,7 @@ impl Parser {
     }
 
     /// Given the current token, obtains the parsed prefix of the expression.
-    fn parse_prefix(&mut self) -> Result<Expr, String> {
+    fn parse_prefix(&mut self) -> Result<Expr, ParserError> {
         match &self.current_token {
             Token::NumberLiteral(n) => {
                 let num = *n;
@@ -119,7 +143,7 @@ impl Parser {
                         self.next_token();
                         Ok(Expr::Star) // Actually should be QualifiedStar in SELECT
                     } else {
-                        Err("Expected column name after '.'".to_string())
+                        Err(ParserError::InvalidExpression("expected column name after '.'".to_string()))
                     }
                 }
                 // Check for function call
@@ -230,14 +254,11 @@ impl Parser {
                 self.expect(Token::RParen)?;
                 Ok(Expr::Exists(Box::new(subquery)))
             }
-            _ => Err(format!(
-                "Unexpected token in expression: {:?}",
-                self.current_token
-            )),
+            _ => Err(ParserError::InvalidExpression(self.current_token.to_string())),
         }
     }
 
-    fn parse_infix(&mut self, left: Expr, r_bp: u8) -> Result<Expr, String> {
+    fn parse_infix(&mut self, left: Expr, r_bp: u8) -> Result<Expr, ParserError> {
         let op = match &self.current_token {
             Token::Plus => {
                 self.next_token();
@@ -349,9 +370,8 @@ impl Parser {
                         });
                     }
                     _ => {
-                        return Err(format!(
-                            "Unexpected token after NOT in infix position: {:?}",
-                            self.current_token
+                        return Err(ParserError::UnexpectedToken(
+                            self.current_token.clone()
                         ));
                     }
                 }
@@ -410,10 +430,10 @@ impl Parser {
                 BinaryOperator::Concat
             }
             _ => {
-                return Err(format!(
-                    "Unexpected infix operator: {:?}",
+                return Err(ParserError::InvalidExpression(format!(
+                    "unexpected infix operator: {:?}",
                     self.current_token
-                ));
+                )));
             }
         };
 
@@ -465,7 +485,7 @@ impl Parser {
     /// ELSE ...
     /// [...]
     /// ```
-    fn parse_case_expression(&mut self) -> Result<Expr, String> {
+    fn parse_case_expression(&mut self) -> Result<Expr, ParserError> {
         self.expect(Token::Case)?;
 
         let mut operand = None;
@@ -501,7 +521,7 @@ impl Parser {
     }
 
     /// Parses a list of identifier tokens: (col1, col2, col3 ...).
-    fn parse_identifier_list(&mut self) -> Result<Vec<String>, String> {
+    fn parse_identifier_list(&mut self) -> Result<Vec<String>, ParserError> {
         let mut identifiers = Vec::new();
 
         loop {
@@ -509,7 +529,7 @@ impl Parser {
                 identifiers.push(name.clone());
                 self.next_token();
             } else {
-                return Err("Expected identifier".to_string());
+                return Err(ParserError::InvalidExpression("expected identifier".to_string()));
             }
 
             if !self.consume_if(&Token::Comma) {
@@ -520,7 +540,7 @@ impl Parser {
         Ok(identifiers)
     }
 
-    pub fn parse(&mut self) -> Result<Statement, String> {
+    pub fn parse(&mut self) -> Result<Statement, ParserError> {
         match &self.current_token {
             Token::With => Ok(Statement::With(self.parse_with_statement()?)),
             Token::Select => Ok(Statement::Select(self.parse_select_statement()?)),
@@ -537,7 +557,7 @@ impl Parser {
                         Ok(Statement::CreateIndex(self.parse_create_index_statement()?))
                     }
 
-                    _ => Err(format!("Invalid token: {next_token}").to_string()),
+                    _ => Err(ParserError::UnexpectedToken(next_token)),
                 }
             }
             Token::Alter => Ok(Statement::AlterTable(self.parse_alter_statement()?)),
@@ -545,10 +565,7 @@ impl Parser {
             Token::Begin | Token::Commit | Token::Rollback => {
                 Ok(Statement::Transaction(self.parse_transaction_statement()?))
             }
-            _ => Err(format!(
-                "Unexpected statement type: {:?}",
-                self.current_token
-            )),
+            _ => Err(ParserError::UnexpectedEof),
         }
     }
 
@@ -562,7 +579,7 @@ impl Parser {
     /// ALTER TABLE [table] ALTER COLUMN
     /// [...]
     /// ```
-    fn parse_alter_statement(&mut self) -> Result<AlterTableStatement, String> {
+    fn parse_alter_statement(&mut self) -> Result<AlterTableStatement, ParserError> {
         self.expect(Token::Alter)?;
         self.expect(Token::Table)?;
 
@@ -572,7 +589,7 @@ impl Parser {
             self.next_token();
             table_name
         } else {
-            return Err("Expected table name".to_string());
+            return Err(ParserError::InvalidExpression("expected table name".to_string()));
         };
 
         let action = if self.consume_if(&Token::Add) {
@@ -587,7 +604,7 @@ impl Parser {
                 let constraint = self.parse_table_constraint()?;
                 AlterAction::AddConstraint(constraint)
             } else {
-                return Err("Expected COLUMN or CONSTRAINT after ADD".to_string());
+                return Err(ParserError::InvalidExpression("expected COLUMN or CONSTRAINT after ADD".to_string()));
             }
 
         // Drop alter statements
@@ -599,7 +616,7 @@ impl Parser {
                     self.next_token();
                     AlterAction::DropColumn(name)
                 } else {
-                    return Err("Expected column name".to_string());
+                    return Err(ParserError::InvalidExpression("expected column name".to_string()));
                 }
 
             // Drop constraint
@@ -609,10 +626,10 @@ impl Parser {
                     self.next_token();
                     AlterAction::DropConstraint(name)
                 } else {
-                    return Err("Expected constraint name".to_string());
+                    return Err(ParserError::InvalidExpression("expected constraint name".to_string()));
                 }
             } else {
-                return Err("Expected COLUMN or CONSTRAINT after DROP".to_string());
+                return Err(ParserError::InvalidExpression("expected COLUMN or CONSTRAINT after DROP".to_string()));
             }
 
         // Alter statements to modify a column.
@@ -637,7 +654,7 @@ impl Parser {
                         self.expect(Token::Null)?;
                         AlterColumnAction::SetNotNull
                     } else {
-                        return Err("Expected DEFAULT or NOT NULL after SET".to_string());
+                        return Err(ParserError::InvalidExpression("expected DEFAULT or NOT NULL after SET".to_string()));
                     }
                 } else if self.consume_if(&Token::Drop) {
                     if self.consume_if(&Token::Default) {
@@ -646,7 +663,7 @@ impl Parser {
                         self.expect(Token::Null)?;
                         AlterColumnAction::DropNotNull
                     } else {
-                        return Err("Expected DEFAULT or NOT NULL after DROP".to_string());
+                        return Err(ParserError::InvalidExpression("expected DEFAULT or NOT NULL after DROP".to_string()));
                     }
                 } else {
                     // Assume it's a type change
@@ -656,10 +673,10 @@ impl Parser {
 
                 AlterAction::AlterColumn(AlterColumnStatement { name, action })
             } else {
-                return Err("Expected column name".to_string());
+                return Err(ParserError::InvalidExpression("expected column name".to_string()));
             }
         } else {
-            return Err("Expected ADD, DROP, ALTER, or MODIFY".to_string());
+            return Err(ParserError::InvalidExpression("expected ADD, DROP, ALTER, or MODIFY".to_string()));
         };
 
         Ok(AlterTableStatement { table, action })
@@ -673,7 +690,7 @@ impl Parser {
     ///    [...]
     /// );",
     ///```
-    fn parse_create_table_statement(&mut self) -> Result<CreateTableStatement, String> {
+    fn parse_create_table_statement(&mut self) -> Result<CreateTableStatement, ParserError> {
         self.expect(Token::Create)?;
         self.expect(Token::Table)?;
         let table = if let Token::Identifier(name) = &self.current_token {
@@ -681,7 +698,7 @@ impl Parser {
             self.next_token();
             table_name
         } else {
-            return Err("Expected table name".to_string());
+            return Err(ParserError::InvalidExpression("expected table name".to_string()));
         };
 
         self.expect(Token::LParen)?;
@@ -711,7 +728,7 @@ impl Parser {
                     constraints: col_constraints,
                 });
             } else {
-                return Err("Expected column definition or constraint".to_string());
+                return Err(ParserError::InvalidExpression("expected column definition or constraint".to_string()));
             }
 
             if !self.consume_if(&Token::Comma) {
@@ -728,7 +745,7 @@ impl Parser {
         })
     }
 
-    fn parse_create_index_statement(&mut self) -> Result<CreateIndexStatement, String> {
+    fn parse_create_index_statement(&mut self) -> Result<CreateIndexStatement, ParserError> {
         self.expect(Token::Create)?;
 
         let unique = self.consume_if(&Token::Unique);
@@ -748,7 +765,7 @@ impl Parser {
             self.next_token();
             index_name
         } else {
-            return Err("Expected index name".to_string());
+            return Err(ParserError::InvalidExpression("expected index name".to_string()));
         };
 
         self.expect(Token::On)?;
@@ -758,7 +775,7 @@ impl Parser {
             self.next_token();
             table_name
         } else {
-            return Err("Expected table name".to_string());
+            return Err(ParserError::InvalidExpression("expected table name".to_string()));
         };
 
         self.expect(Token::LParen)?;
@@ -779,7 +796,7 @@ impl Parser {
 
                 columns.push(IndexColumn { name, order });
             } else {
-                return Err("Expected column name".to_string());
+                return Err(ParserError::InvalidExpression("expected column name".to_string()));
             }
 
             if !self.consume_if(&Token::Comma) {
@@ -805,7 +822,7 @@ impl Parser {
     /// WHERE [expr]
     /// [...]
     /// ```
-    fn parse_delete_statement(&mut self) -> Result<DeleteStatement, String> {
+    fn parse_delete_statement(&mut self) -> Result<DeleteStatement, ParserError> {
         self.expect(Token::Delete)?;
         self.expect(Token::From)?;
 
@@ -814,7 +831,7 @@ impl Parser {
             self.next_token();
             table_name
         } else {
-            return Err("Expected table name".to_string());
+            return Err(ParserError::InvalidExpression("expected table name".to_string()));
         };
 
         let where_clause = if self.consume_if(&Token::Where) {
@@ -834,20 +851,19 @@ impl Parser {
     /// ```sql
     /// DROP TABLE [table]
     /// ```
-    fn parse_drop_statement(&mut self) -> Result<DropTableStatement, String> {
+    fn parse_drop_statement(&mut self) -> Result<DropTableStatement, ParserError> {
         self.expect(Token::Drop)?;
         self.expect(Token::Table)?;
 
         // Check for IF EXISTS clause
         let if_exists = if let Token::If = &self.current_token {
+            self.next_token();
+            if self.current_token == Token::Exists {
                 self.next_token();
-                if self.current_token == Token::Exists {
-                    self.next_token();
-                    true
-                } else {
-                    return Err("Expected EXISTS after IF".to_string());
-                }
-
+                true
+            } else {
+                return Err(ParserError::InvalidExpression("expected EXISTS after IF".to_string()));
+            }
         } else {
             false
         };
@@ -857,7 +873,7 @@ impl Parser {
             self.next_token();
             table_name
         } else {
-            return Err("Expected table name".to_string());
+            return Err(ParserError::InvalidExpression("expected table name".to_string()));
         };
 
         let cascade = if let Token::Identifier(s) = &self.current_token {
@@ -890,7 +906,7 @@ impl Parser {
     /// INSERT INTO [table] (col1, col2, col3)
     /// SELECT FROM [other table];
     /// ```
-    fn parse_insert_statement(&mut self) -> Result<InsertStatement, String> {
+    fn parse_insert_statement(&mut self) -> Result<InsertStatement, ParserError> {
         self.expect(Token::Insert)?;
         self.expect(Token::Into)?;
 
@@ -899,7 +915,7 @@ impl Parser {
             self.next_token();
             table_name
         } else {
-            return Err("Expected table name".to_string());
+            return Err(ParserError::InvalidExpression("expected table name".to_string()));
         };
 
         // Parse optional column list
@@ -911,7 +927,7 @@ impl Parser {
                     cols.push(col.clone());
                     self.next_token();
                 } else {
-                    return Err("Expected column name".to_string());
+                    return Err(ParserError::InvalidExpression("expected column name".to_string()));
                 }
                 if !self.consume_if(&Token::Comma) {
                     break;
@@ -946,7 +962,7 @@ impl Parser {
         } else if self.current_token == Token::Select {
             Values::Query(Box::new(self.parse_select_statement()?))
         } else {
-            return Err("Expected VALUES or SELECT".to_string());
+            return Err(ParserError::InvalidExpression("expected VALUES or SELECT".to_string()));
         };
 
         Ok(InsertStatement {
@@ -964,7 +980,7 @@ impl Parser {
     /// ROLLBACK
     /// END TRANSACTION
     /// ```
-    fn parse_transaction_statement(&mut self) -> Result<TransactionStatement, String> {
+    fn parse_transaction_statement(&mut self) -> Result<TransactionStatement, ParserError> {
         match &self.current_token {
             Token::Begin => {
                 self.next_token();
@@ -979,7 +995,7 @@ impl Parser {
                 self.next_token();
                 Ok(TransactionStatement::Rollback)
             }
-            _ => Err("Expected BEGIN, COMMIT, or ROLLBACK".to_string()),
+            _ => Err(ParserError::InvalidExpression("expected BEGIN, COMMIT, or ROLLBACK".to_string())),
         }
     }
 
@@ -991,7 +1007,7 @@ impl Parser {
     /// WHERE [expr]
     /// [...]
     /// ```
-    fn parse_update_statement(&mut self) -> Result<UpdateStatement, String> {
+    fn parse_update_statement(&mut self) -> Result<UpdateStatement, ParserError> {
         self.expect(Token::Update)?;
 
         let table = if let Token::Identifier(name) = &self.current_token {
@@ -999,7 +1015,7 @@ impl Parser {
             self.next_token();
             table_name
         } else {
-            return Err("Expected table name".to_string());
+            return Err(ParserError::InvalidExpression("expected table name".to_string()));
         };
 
         self.expect(Token::Set)?;
@@ -1013,7 +1029,7 @@ impl Parser {
                 let value = self.parse_expression()?;
                 set_clauses.push(SetClause { column, value });
             } else {
-                return Err("Expected column name".to_string());
+                return Err(ParserError::InvalidExpression("expected column name".to_string()));
             }
 
             if !self.consume_if(&Token::Comma) {
@@ -1042,7 +1058,7 @@ impl Parser {
     /// ([CTE])
     ///[...] (Supports up to N ctes)
     /// SELECT [...]
-    fn parse_with_statement(&mut self) -> Result<WithStatement, String> {
+    fn parse_with_statement(&mut self) -> Result<WithStatement, ParserError> {
         self.expect(Token::With)?;
         let recursive = if matches!(self.current_token, Token::Recursive) {
             self.next_token();
@@ -1059,7 +1075,7 @@ impl Parser {
                 self.next_token();
                 id
             } else {
-                return Err("Expected CTE name".to_string());
+                return Err(ParserError::InvalidExpression("expected CTE name".to_string()));
             };
 
             self.expect(Token::As)?;
@@ -1093,7 +1109,7 @@ impl Parser {
     /// ORDER BY [item] [ASC/DESC]
     /// LIMIT n;
     /// ```
-    fn parse_select_statement(&mut self) -> Result<SelectStatement, String> {
+    fn parse_select_statement(&mut self) -> Result<SelectStatement, ParserError> {
         self.expect(Token::Select)?;
 
         let distinct = self.consume_if(&Token::Distinct);
@@ -1160,7 +1176,7 @@ impl Parser {
                 self.next_token();
                 Some(limit_val)
             } else {
-                return Err("Expected number after LIMIT".to_string());
+                return Err(ParserError::InvalidExpression("expected number after LIMIT".to_string()));
             }
         } else {
             None
@@ -1178,7 +1194,7 @@ impl Parser {
         })
     }
 
-    fn parse_select_list(&mut self) -> Result<Vec<SelectItem>, String> {
+    fn parse_select_list(&mut self) -> Result<Vec<SelectItem>, ParserError> {
         let mut items = Vec::new();
 
         loop {
@@ -1195,7 +1211,7 @@ impl Parser {
                         self.next_token();
                         Some(alias_str)
                     } else {
-                        return Err("Expected identifier after AS".to_string());
+                        return Err(ParserError::InvalidExpression("expected identifier after AS".to_string()));
                     }
                 } else if let Token::Identifier(_) = &self.current_token {
                     // Implicit alias without AS
@@ -1229,7 +1245,7 @@ impl Parser {
     /// [...]
     /// JOIN tablen ON .[..]
     /// ```
-    fn parse_table_ref(&mut self) -> Result<TableReference, String> {
+    fn parse_table_ref(&mut self) -> Result<TableReference, ParserError> {
         let mut table_ref = match &self.current_token {
             Token::Identifier(name) => {
                 let table_name = name.clone();
@@ -1262,7 +1278,7 @@ impl Parser {
                     self.next_token();
                     alias_name
                 } else {
-                    return Err("Expected alias for subquery".to_string());
+                    return Err(ParserError::InvalidExpression("expected alias for subquery".to_string()));
                 };
                 TableReference::Subquery {
                     query: Box::new(subquery),
@@ -1270,10 +1286,7 @@ impl Parser {
                 }
             }
             _ => {
-                return Err(format!(
-                    "Unexpected token in table reference: {:?}",
-                    self.current_token
-                ));
+                return Err(ParserError::UnexpectedEof);
             }
         };
 
@@ -1336,7 +1349,7 @@ impl Parser {
     /// Parses data types.
     ///
     /// Supports both SQL standard data types and RQLite specific types (VARINT, BLOB and TEXT).
-    fn parse_data_type(&mut self) -> Result<DataTypeKind, String> {
+    fn parse_data_type(&mut self) -> Result<DataTypeKind, ParserError> {
         let data_type = if let Token::Identifier(type_name) = &self.current_token {
             let name = type_name.to_uppercase();
             self.next_token();
@@ -1346,7 +1359,7 @@ impl Parser {
                 "BIGINT" => DataTypeKind::BigInt,
                 "HALFINT" => DataTypeKind::HalfInt,
                 "SMALLINT" => DataTypeKind::SmallInt,
-                "UINT" | "UNSIGNED INTEGER" => DataTypeKind::UInt,
+                "uINT" | "uNSIGNED INTEGER" => DataTypeKind::UInt,
                 "BIGUINT" => DataTypeKind::BigUInt,
                 "HALFUINT" => DataTypeKind::HalfUInt,
                 "SMALLUINT" => DataTypeKind::SmallUInt,
@@ -1362,7 +1375,7 @@ impl Parser {
                 _ => DataTypeKind::Null,
             }
         } else {
-            return Err("Expected data type".to_string());
+            return Err(ParserError::InvalidExpression("expected data type".to_string()));
         };
 
         Ok(data_type)
@@ -1370,13 +1383,13 @@ impl Parser {
 
     /// Parses a column definition statement.
     /// [COL_NAME] [DATA TYPE] [CONSTRAINTS]
-    fn parse_column_def(&mut self) -> Result<ColumnDefExpr, String> {
+    fn parse_column_def(&mut self) -> Result<ColumnDefExpr, ParserError> {
         let name = if let Token::Identifier(col_name) = &self.current_token {
             let name = col_name.clone();
             self.next_token();
             name
         } else {
-            return Err("Expected column name".to_string());
+            return Err(ParserError::InvalidExpression("expected column name".to_string()));
         };
 
         let data_type = self.parse_data_type()?;
@@ -1398,7 +1411,7 @@ impl Parser {
     /// - Primary and Foriegn Keys,
     /// - Check Constraints,
     /// - Default Constraints.
-    fn parse_column_constraints(&mut self) -> Result<Vec<ColumnConstraintExpr>, String> {
+    fn parse_column_constraints(&mut self) -> Result<Vec<ColumnConstraintExpr>, ParserError> {
         let mut constraints = Vec::new();
 
         loop {
@@ -1424,7 +1437,7 @@ impl Parser {
                         self.next_token();
                         table
                     } else {
-                        return Err("Expected referenced table name".to_string());
+                        return Err(ParserError::InvalidExpression("expected referenced table name".to_string()));
                     };
 
                     let ref_column = if self.current_token == Token::LParen {
@@ -1434,7 +1447,7 @@ impl Parser {
                             self.next_token();
                             column
                         } else {
-                            return Err("Expected referenced column name".to_string());
+                            return Err(ParserError::InvalidExpression("expected referenced column name".to_string()));
                         };
                         self.expect(Token::RParen)?;
                         col
@@ -1472,7 +1485,7 @@ impl Parser {
     /// ```sql
     /// ALTER TABLE foo ADD CONSTRAINT [body];
     /// ```
-    fn parse_table_constraint(&mut self) -> Result<TableConstraintExpr, String> {
+    fn parse_table_constraint(&mut self) -> Result<TableConstraintExpr, ParserError> {
         // Skip optional CONSTRAINT name
         if self.consume_if(&Token::Constraint)
             && let Token::Identifier(_) = self.current_token
@@ -1509,7 +1522,7 @@ impl Parser {
                     self.next_token();
                     table
                 } else {
-                    return Err("Expected referenced table name".to_string());
+                    return Err(ParserError::InvalidExpression("expected referenced table name".to_string()));
                 };
 
                 self.expect(Token::LParen)?;
@@ -1529,10 +1542,9 @@ impl Parser {
                 self.expect(Token::RParen)?;
                 Ok(TableConstraintExpr::Check(expr))
             }
-            _ => Err(format!(
-                "Unexpected constraint type: {:?}",
-                self.current_token
-            )),
+            _ => Err(ParserError::UnexpectedToken(
+                self.current_token.clone())
+            ),
         }
     }
 }

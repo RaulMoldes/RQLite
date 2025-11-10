@@ -32,6 +32,10 @@ impl Schema {
         }
     }
 
+    pub fn find_col(&self, name: &str) -> Option<&Column> {
+        self.columns.iter().find(|c| c.name == name)
+    }
+
     pub fn add_column(
         self,
         name: &str,

@@ -1,7 +1,7 @@
 use crate::types::DataTypeKind;
 
 pub(crate) trait Simplify {
-    fn simplify(&mut self) -> Result<(), String>;
+    fn simplify(&mut self);
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,13 +66,13 @@ pub(crate) enum Expr {
 }
 
 impl Simplify for Expr {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         match self {
             // Simplify binary operations.
             Expr::BinaryOp { left, op, right } => {
                 // First, recursively simplify the children
-                left.simplify()?;
-                right.simplify()?;
+                left.simplify();
+                right.simplify();
 
                 // Attempt to simplify with basic algebraic rules.
                 // For literals, we can apply a simple basic arithmetic to unnest the query and apply the operations in place.
@@ -232,7 +232,7 @@ impl Simplify for Expr {
             // Simplify lists
             Expr::List(items) => {
                 for e in items {
-                    e.simplify()?;
+                    e.simplify();
                 }
             }
 
@@ -243,36 +243,36 @@ impl Simplify for Expr {
                 else_clause,
             } => {
                 if let Some(op) = operand {
-                    op.simplify()?;
+                    op.simplify();
                 }
                 for clause in when_clauses {
-                    clause.condition.simplify()?;
-                    clause.result.simplify()?;
+                    clause.condition.simplify();
+                    clause.result.simplify();
                 }
                 if let Some(else_expr) = else_clause {
-                    else_expr.simplify()?;
+                    else_expr.simplify();
                 }
             }
 
             // Simplify subqueries
             Expr::Subquery(subq) | Expr::Exists(subq) => {
                 // Call the select statement simplifier.
-                subq.as_mut().simplify()?;
+                subq.as_mut().simplify();
             }
 
             // Simplify BETWEEN
             Expr::Between {
                 expr, low, high, ..
             } => {
-                expr.simplify()?;
-                low.simplify()?;
-                high.simplify()?;
+                expr.simplify();
+                low.simplify();
+                high.simplify();
             }
 
             // In function calls we can simplify the arguments.
             Expr::FunctionCall { args, .. } => {
                 for arg in args {
-                    arg.simplify()?;
+                    arg.simplify();
                 }
             }
 
@@ -280,7 +280,7 @@ impl Simplify for Expr {
             _ => {}
         }
 
-        Ok(())
+
     }
 }
 
@@ -345,27 +345,27 @@ pub(crate) struct SelectStatement {
 }
 
 impl Simplify for SelectStatement {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self)  {
         for col in self.columns.iter_mut() {
-            col.simplify()?;
+            col.simplify();
         }
 
         if let Some(clause) = self.from.as_mut() {
-            clause.simplify()?;
+            clause.simplify();
         };
 
         if let Some(clause) = self.where_clause.as_mut() {
-            clause.simplify()?;
+            clause.simplify();
         };
 
         for g_clause in self.group_by.iter_mut() {
-            g_clause.simplify()?;
+            g_clause.simplify();
         }
 
         if let Some(having_clause) = self.having.as_mut() {
-            having_clause.simplify()?;
+            having_clause.simplify();
         };
-        Ok(())
+
     }
 }
 
@@ -376,11 +376,11 @@ pub(crate) enum SelectItem {
 }
 
 impl Simplify for SelectItem {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         if let Self::ExprWithAlias { expr, .. } = self {
-            expr.simplify()?;
+            expr.simplify();
         }
-        Ok(())
+
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -402,24 +402,24 @@ pub(crate) enum TableReference {
 }
 
 impl Simplify for TableReference {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         match self {
             Self::Join {
                 left, right, on, ..
             } => {
-                left.as_mut().simplify()?;
-                right.as_mut().simplify()?;
+                left.as_mut().simplify();
+                right.as_mut().simplify();
 
                 if let Some(on_expr) = on {
-                    on_expr.simplify()?;
+                    on_expr.simplify();
                 };
             }
             Self::Subquery { query, .. } => {
-                query.as_mut().simplify()?;
+                query.as_mut().simplify();
             }
             _ => {}
         }
-        Ok(())
+
     }
 }
 
@@ -439,9 +439,9 @@ pub(crate) struct OrderByExpr {
 }
 
 impl Simplify for OrderByExpr {
-    fn simplify(&mut self) -> Result<(), String> {
-        self.expr.simplify()?;
-        Ok(())
+    fn simplify(&mut self) {
+        self.expr.simplify();
+
     }
 }
 
@@ -460,7 +460,7 @@ pub(crate) enum Statement {
 }
 
 impl Simplify for Statement {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         match self {
             Self::With(s) => s.simplify(),
             Self::AlterTable(s) => s.simplify(),
@@ -469,7 +469,7 @@ impl Simplify for Statement {
             Self::Select(s) => s.simplify(),
             Self::Update(s) => s.simplify(),
             Self::CreateTable(s) => s.simplify(),
-            _ => Ok(()),
+            _ => {}
         }
     }
 }
@@ -481,13 +481,13 @@ pub(crate) struct WithStatement {
 }
 
 impl Simplify for WithStatement {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         for (_, clause) in self.ctes.iter_mut() {
-            clause.simplify()?;
+            clause.simplify();
         }
 
-        self.body.as_mut().simplify()?;
-        Ok(())
+        self.body.as_mut().simplify();
+
     }
 }
 
@@ -499,7 +499,7 @@ pub(crate) struct InsertStatement {
 }
 
 impl Simplify for InsertStatement {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         self.values.simplify()
     }
 }
@@ -511,21 +511,20 @@ pub(crate) enum Values {
 }
 
 impl Simplify for Values {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         match self {
             Self::Values(values) => {
                 for vi in values.iter_mut() {
                     for vj in vi.iter_mut() {
-                        vj.simplify()?;
+                        vj.simplify();
                     }
                 }
             }
             Self::Query(query) => {
-                query.simplify()?;
+                query.simplify();
             }
         }
 
-        Ok(())
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -536,15 +535,15 @@ pub(crate) struct UpdateStatement {
 }
 
 impl Simplify for UpdateStatement {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         for item in self.set_clauses.iter_mut() {
-            item.simplify()?;
+            item.simplify();
         }
 
         if let Some(clause) = self.where_clause.as_mut() {
-            clause.simplify()?;
+            clause.simplify();
         }
-        Ok(())
+
     }
 }
 
@@ -555,7 +554,7 @@ pub(crate) struct SetClause {
 }
 
 impl Simplify for SetClause {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         self.value.simplify()
     }
 }
@@ -567,11 +566,11 @@ pub(crate) struct DeleteStatement {
 }
 
 impl Simplify for DeleteStatement {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         if let Some(clause) = self.where_clause.as_mut() {
-            clause.simplify()?;
+            clause.simplify();
         };
-        Ok(())
+
     }
 }
 
@@ -583,14 +582,14 @@ pub(crate) struct CreateTableStatement {
 }
 
 impl Simplify for CreateTableStatement {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         for ct in self.columns.iter_mut() {
-            ct.simplify()?;
+            ct.simplify();
         }
         for ct in self.constraints.iter_mut() {
-            ct.simplify()?;
+            ct.simplify();
         }
-        Ok(())
+
     }
 }
 
@@ -602,11 +601,11 @@ pub(crate) struct ColumnDefExpr {
 }
 
 impl Simplify for ColumnDefExpr {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         for ct in self.constraints.iter_mut() {
-            ct.simplify()?;
+            ct.simplify();
         }
-        Ok(())
+
     }
 }
 
@@ -621,10 +620,10 @@ pub(crate) enum ColumnConstraintExpr {
 }
 
 impl Simplify for ColumnConstraintExpr {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         match self {
             Self::Check(expr) | Self::Default(expr) => expr.simplify(),
-            _ => Ok(()),
+            _ => {},
         }
     }
 }
@@ -642,11 +641,11 @@ pub(crate) enum TableConstraintExpr {
 }
 
 impl Simplify for TableConstraintExpr {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         if let Self::Check(expr) = self {
-            expr.simplify()?;
+            expr.simplify();
         }
-        Ok(())
+
     }
 }
 
@@ -657,7 +656,7 @@ pub(crate) struct AlterTableStatement {
 }
 
 impl Simplify for AlterTableStatement {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         self.action.simplify()
     }
 }
@@ -669,7 +668,7 @@ pub(crate) struct AlterColumnStatement {
 }
 
 impl Simplify for AlterColumnStatement {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         self.action.simplify()
     }
 }
@@ -684,12 +683,12 @@ pub(crate) enum AlterAction {
 }
 
 impl Simplify for AlterAction {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         match self {
             Self::AddColumn(col) => col.simplify(),
             Self::AlterColumn(col) => col.simplify(),
             Self::AddConstraint(ct) => ct.simplify(),
-            _ => Ok(()),
+            _ => {},
         }
     }
 }
@@ -704,11 +703,11 @@ pub(crate) enum AlterColumnAction {
 }
 
 impl Simplify for AlterColumnAction {
-    fn simplify(&mut self) -> Result<(), String> {
+    fn simplify(&mut self) {
         if let Self::SetDefault(expr) = self {
-            expr.simplify()?;
+            expr.simplify();
         }
-        Ok(())
+
     }
 }
 
