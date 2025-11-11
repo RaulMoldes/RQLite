@@ -3,7 +3,7 @@ use crate::database::schema::Database;
 use crate::sql::ast::Expr;
 use crate::sql::ast::BinaryOperator;
 
-struct Candidate {
+pub struct Candidate {
     index_oid: OId,
     column_name: String,
     selectivity_score: f64,

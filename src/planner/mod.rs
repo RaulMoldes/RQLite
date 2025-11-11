@@ -60,7 +60,7 @@ fn build_scan_steps(
     match table_ref {
         TableReference::Table { name, alias } => {
             let table_oid = db.search_obj(name).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, format!("Table '{}' not found", name))
+                std::io::Error::new(std::io::ErrorKind::NotFound, format!("Table '{name}' not found"))
             })?;
 
             let table_obj = db.get_obj(table_oid)?;
@@ -125,9 +125,9 @@ fn build_select_plan(
     db: &Database,
     plan: &mut ExecutionPlan,
 ) -> std::io::Result<()> {
-    // Step 1: Add scan operators (FROM clause)
+
     if let Some(from) = &select.from {
-      //  build_scan_steps(from, select.where_clause.as_ref(), db, plan)?;
+        build_scan_steps(from, select.where_clause.as_ref(), db, plan)?;
     }
 
 
