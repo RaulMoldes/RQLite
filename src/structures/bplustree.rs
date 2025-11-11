@@ -479,8 +479,11 @@ where
             .map_err(|_| std::io::Error::other("Latch stack is unavailable"))?
     }
 
-
-    pub fn search_from_root(&self, entry: &[u8], access_mode: NodeAccessMode) -> std::io::Result<SearchResult>{
+    pub fn search_from_root(
+        &self,
+        entry: &[u8],
+        access_mode: NodeAccessMode,
+    ) -> std::io::Result<SearchResult> {
         self.search(&(self.root, Slot(0)), entry, access_mode)
     }
 

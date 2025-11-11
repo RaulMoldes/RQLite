@@ -6,7 +6,7 @@ use crate::storage::{
 };
 
 use crate::structures::bplustree::{
-    BPlusTree, FixedSizeComparator, NodeAccessMode, SearchResult, VarlenComparator,
+    BPlusTree, Comparator, FixedSizeComparator, NodeAccessMode, SearchResult, VarlenComparator,
 };
 use crate::types::initialize_atomics;
 use crate::types::{
@@ -915,9 +915,6 @@ repr_enum!(
     pub enum ObjectType: u8 {
         Table = 0,
         Index = 1,
-        Column = 2,
-        Constraint = 3,
-        View = 4,
     }
 );
 
@@ -1163,9 +1160,6 @@ impl TryFrom<UInt8> for ObjectType {
         match value.0 {
             0 => Ok(ObjectType::Table),
             1 => Ok(ObjectType::Index),
-            2 => Ok(ObjectType::Column),
-            3 => Ok(ObjectType::Constraint),
-            4 => Ok(ObjectType::View),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Invalid ObjectType value: {}", value.0),
@@ -1268,6 +1262,42 @@ impl Database {
         self.create_obj(meta_idx_obj)?;
 
         Ok(())
+    }
+
+
+    fn btree_fixed_size_key(
+        &self,
+        value: DBObject
+    ) -> std::io::Result<BPlusTree<FixedSizeComparator>> {
+        let datatype = value.get_schema().columns[0].dtype;
+        debug_assert!(datatype.is_fixed_size(), "Invalid key type for btree with fixed length key");
+        let comparator= FixedSizeComparator::for_size(datatype.size().unwrap());
+        self.build_tree(value, comparator)
+    }
+
+    fn btree_var_size_key(
+        &self,
+        value: DBObject
+    ) -> std::io::Result<BPlusTree<VarlenComparator>> {
+        let datatype = value.get_schema().columns[0].dtype;
+        debug_assert!(!datatype.is_fixed_size(), "Invalid key type for btree with variable length key");
+        let comparator= VarlenComparator;
+        self.build_tree(value, comparator)
+
+    }
+
+    fn build_tree<T: Comparator>(
+        &self,
+        value: DBObject,
+        comparator: T,
+    ) -> std::io::Result<BPlusTree<T>> {
+        Ok(BPlusTree::from_existent(
+            self.pager(),
+            value.root,
+            3,
+            3,
+            comparator,
+        ))
     }
 
     pub fn create_table(&mut self, name: &str, schema: Schema) -> std::io::Result<()> {
