@@ -514,12 +514,12 @@ mod tests {
     fn create_schema() -> Schema {
         Schema::from(
             [
-                Column::new(DataTypeKind::Int, "id", None),
-                Column::new(DataTypeKind::Text, "name", None),
-                Column::new(DataTypeKind::Boolean, "active", None),
-                Column::new(DataTypeKind::Double, "balance", None),
-                Column::new(DataTypeKind::Double, "bonus", None),
-                Column::new(DataTypeKind::Text, "description", None),
+                Column::new_unindexed(DataTypeKind::Int, "id", None),
+                Column::new_unindexed(DataTypeKind::Text, "name", None),
+                Column::new_unindexed(DataTypeKind::Boolean, "active", None),
+                Column::new_unindexed(DataTypeKind::Double, "balance", None),
+                Column::new_unindexed(DataTypeKind::Double, "bonus", None),
+                Column::new_unindexed(DataTypeKind::Text, "description", None),
             ]
             .as_ref(),
         )
@@ -635,9 +635,9 @@ mod tests {
     fn test_tuple_creation() {
         let schema = Schema::from(
             [
-                Column::new(DataTypeKind::Int, "id", None),
-                Column::new(DataTypeKind::Text, "name", None),
-                Column::new(DataTypeKind::Boolean, "active", None),
+                Column::new_unindexed(DataTypeKind::Int, "id", None),
+                Column::new_unindexed(DataTypeKind::Text, "name", None),
+                Column::new_unindexed(DataTypeKind::Boolean, "active", None),
             ]
             .as_ref(),
         );

@@ -1420,7 +1420,11 @@ impl Parser {
                 "BOOLEAN" | "BOOL" => DataTypeKind::Boolean,
                 "BYTE" => DataTypeKind::Byte,
                 "BLOB" => DataTypeKind::Blob,
-                _ => return Err(ParserError::UnexpectedToken(Token::Identifier(name.to_string()))),
+                _ => {
+                    return Err(ParserError::UnexpectedToken(Token::Identifier(
+                        name.to_string(),
+                    )))
+                }
             }
         } else {
             return Err(ParserError::InvalidExpression(

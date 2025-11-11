@@ -193,8 +193,8 @@ impl<'a> Analyzer<'a> {
         if let Some(current) = &self.ctx.current_table {
             let obj = self.obj_exists(current)?;
             let schema = obj.get_schema();
-            if let Some((_, dtype, _)) = schema.get_dtype(ident) {
-                return Ok(dtype);
+            if let Some(column) = schema.find_col(ident) {
+                return Ok(column.dtype);
             }
         }
 
@@ -205,16 +205,16 @@ impl<'a> Analyzer<'a> {
             for table in self.ctx.table_aliases.values() {
                 let obj = self.obj_exists(table)?;
                 let schema = obj.get_schema();
-                if let Some((_, dtype, _)) = schema.get_dtype(ident) {
-                    found_types.push(dtype);
+                if let Some(column) = schema.find_col(ident) {
+                    return Ok(column.dtype);
                 }
             }
 
             // Check subqueries too
             for subquery in self.ctx.subqueries.values() {
                 let schema = subquery.get_schema();
-                if let Some((_, dtype, _)) = schema.get_dtype(ident) {
-                    found_types.push(dtype);
+                if let Some(column) = schema.find_col(ident) {
+                    return Ok(column.dtype);
                 }
             }
 
@@ -293,8 +293,8 @@ impl<'a> Analyzer<'a> {
                 // Check in subqueries first
                 if let Some(subquery) = self.ctx.subqueries.get(table) {
                     let schema = subquery.get_schema();
-                    if let Some((_, dtype, _)) = schema.get_dtype(column) {
-                        return Ok(ExprResult::Value(dtype));
+                    if let Some(column) = schema.find_col(column) {
+                        return Ok(ExprResult::Value(column.dtype));
                     }
                 }
 
@@ -303,8 +303,8 @@ impl<'a> Analyzer<'a> {
                 let schema = obj.get_schema();
 
                 schema
-                    .get_dtype(column)
-                    .map(|(_, dtype, _)| ExprResult::Value(dtype))
+                    .find_col(column)
+                    .map(|c| ExprResult::Value(c.dtype))
                     .ok_or_else(|| AnalyzerError::NotFound(format!("{table}.{column}")))
             }
             Expr::BinaryOp { left, op, right } => {
@@ -681,13 +681,13 @@ impl<'a> Analyzer<'a> {
                     let result = self.analyze_expr(expr)?;
                     match result {
                         ExprResult::Value(dtype) => {
-                            let column = Column::new(dtype, &cname, None);
+                            let column = Column::new_unindexed(dtype, &cname, None);
                             out_columns.push(column);
                         }
                         ExprResult::Table(dtypes) => {
                             // For subqueries returning multiple columns
                             if dtypes.len() == 1 {
-                                let column = Column::new(dtypes[0], &cname, None);
+                                let column = Column::new_unindexed(dtypes[0], &cname, None);
                                 out_columns.push(column);
                             } else {
                                 return Err(AnalyzerError::InvalidExpression);
@@ -719,9 +719,7 @@ impl<'a> Analyzer<'a> {
             self.analyze_expr(group_by)?;
         }
 
-        Ok(Schema {
-            columns: out_columns,
-        })
+        Ok(Schema::from(out_columns.as_slice()))
     }
 
     pub fn analyze(&mut self, stmt: &Statement) -> Result<(), AnalyzerError> {
@@ -769,42 +767,37 @@ impl<'a> Analyzer<'a> {
                 let obj = self.obj_exists(&s.table)?;
                 let schema = obj.get_schema();
 
-                let column_dtypes: Vec<(String, DataTypeKind, bool)> =
-                    if let Some(cols) = &s.columns {
-                        cols.iter()
-                            .map(|c| {
-                                schema
-                                    .get_dtype(c)
-                                    .ok_or_else(|| AnalyzerError::NotFound(c.clone()))
-                            })
-                            .collect::<Result<Vec<_>, _>>()?
-                    } else {
-                        schema
-                            .columns
-                            .iter()
-                            .map(|c| (c.name.clone(), c.dtype, c.is_non_null()))
-                            .collect::<Vec<_>>()
-                    };
+                let columns: Vec<&Column> = if let Some(cols) = &s.columns {
+                    cols.iter()
+                        .map(|c| {
+                            schema
+                                .find_col(c)
+                                .ok_or_else(|| AnalyzerError::NotFound(c.clone()))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    schema.columns.iter().collect::<Vec<_>>()
+                };
 
                 match &s.values {
                     Values::Query(select_expr) => {
                         let select_schema = self.analyze_select(select_expr)?;
-                        if column_dtypes.len() != select_schema.columns.len() {
+                        if columns.len() != select_schema.columns.len() {
                             return Err(AnalyzerError::ColumnValueCountMismatch(0));
                         };
 
                         for (i, column) in select_schema.columns.iter().enumerate() {
-                            let (name, target_dtype, is_non_null) = &column_dtypes[i];
-
-                            if *is_non_null && matches!(column.dtype, DataTypeKind::Null) {
+                            if columns[i].is_non_null()
+                                && matches!(column.dtype, DataTypeKind::Null)
+                            {
                                 return Err(AnalyzerError::ConstraintViolation(
                                     "Non null constraint".to_string(),
-                                    name.clone(),
+                                    columns[i].name.clone(),
                                 ));
                             }
 
-                            if !column.dtype.can_be_coerced(*target_dtype)
-                                && !target_dtype.can_be_coerced(column.dtype)
+                            if !column.dtype.can_be_coerced(columns[i].dtype)
+                                && !columns[i].dtype.can_be_coerced(column.dtype)
                                 && !matches!(column.dtype, DataTypeKind::Null)
                             {
                                 return Err(AnalyzerError::InvalidDataType(column.dtype));
@@ -813,21 +806,19 @@ impl<'a> Analyzer<'a> {
                     }
                     Values::Values(expr_list) => {
                         for (i, row) in expr_list.iter().enumerate() {
-                            if column_dtypes.len() != row.len() {
+                            if columns.len() != row.len() {
                                 return Err(AnalyzerError::ColumnValueCountMismatch(i));
                             };
 
                             for (j, value) in row.iter().enumerate() {
-                                let (name, cdtype, is_non_null) = &column_dtypes[j];
-
-                                if *is_non_null && matches!(value, Expr::Null) {
+                                if columns[j].is_non_null() && matches!(value, Expr::Null) {
                                     return Err(AnalyzerError::ConstraintViolation(
                                         "Non null constraint".to_string(),
-                                        name.to_owned(),
+                                        columns[j].name.to_owned(),
                                     ));
                                 };
 
-                                self.analyze_value(*cdtype, value)?;
+                                self.analyze_value(columns[j].dtype, value)?;
                             }
                         }
                     }
@@ -892,11 +883,9 @@ impl<'a> Analyzer<'a> {
                             }
                             ColumnConstraintExpr::ForeignKey { table, column } => {
                                 let other_obj = self.obj_exists(table)?;
-                                if let Some((_, dtype, _)) =
-                                    other_obj.get_schema().get_dtype(column)
-                                {
-                                    if !dtype.can_be_coerced(col.data_type)
-                                        && !col.data_type.can_be_coerced(dtype)
+                                if let Some(schema_col) = other_obj.get_schema().find_col(column) {
+                                    if !schema_col.dtype.can_be_coerced(col.data_type)
+                                        && !col.data_type.can_be_coerced(schema_col.dtype)
                                     {
                                         return Err(AnalyzerError::InvalidDataType(col.data_type));
                                     }
@@ -964,24 +953,24 @@ impl<'a> Analyzer<'a> {
                         self.obj_has_columns(&obj, &[alter_col.name.to_string()])?;
                         let schema = obj.get_schema();
 
-                        let (name, _dtype_info, is_non_null) = schema
-                            .get_dtype(&alter_col.name)
+                        let column = schema
+                            .find_col(&alter_col.name)
                             .ok_or_else(|| AnalyzerError::NotFound(alter_col.name.to_string()))?;
 
                         match &alter_col.action {
                             AlterColumnAction::SetDefault(value) => {
-                                if matches!(value, Expr::Null) && is_non_null {
+                                if matches!(value, Expr::Null) && column.is_non_null() {
                                     return Err(AnalyzerError::ConstraintViolation(
                                         "Non null constraint".to_string(),
-                                        name,
+                                        column.name.to_string(),
                                     ));
                                 }
                             }
                             AlterColumnAction::SetDataType(value) => {
-                                if matches!(value, DataTypeKind::Null) && is_non_null {
+                                if matches!(value, DataTypeKind::Null) && column.is_non_null() {
                                     return Err(AnalyzerError::ConstraintViolation(
                                         "Non null constraint".to_string(),
-                                        name,
+                                        column.name.to_string(),
                                     ));
                                 }
                             }
@@ -1046,14 +1035,14 @@ impl<'a> Analyzer<'a> {
                 }
 
                 for column in stmt.set_clauses.iter() {
-                    let (name, dtype, is_non_null) = schema
-                        .get_dtype(&column.column)
+                    let col = schema
+                        .find_col(&column.column)
                         .ok_or_else(|| AnalyzerError::NotFound(column.column.to_string()))?;
 
-                    if matches!(column.value, Expr::Null) && is_non_null {
+                    if matches!(column.value, Expr::Null) && col.is_non_null() {
                         return Err(AnalyzerError::ConstraintViolation(
                             "Non null constraint".to_string(),
-                            name,
+                            col.name.to_string(),
                         ));
                     }
 
@@ -1065,8 +1054,8 @@ impl<'a> Analyzer<'a> {
                         | Expr::FunctionCall { .. } => {
                             let result = self.analyze_expr(&column.value)?;
                             if let ExprResult::Value(value_type) = result {
-                                if !value_type.can_be_coerced(dtype)
-                                    && !dtype.can_be_coerced(value_type)
+                                if !value_type.can_be_coerced(col.dtype)
+                                    && !col.dtype.can_be_coerced(value_type)
                                     && !matches!(value_type, DataTypeKind::Null)
                                 {
                                     return Err(AnalyzerError::InvalidDataType(value_type));
@@ -1074,7 +1063,7 @@ impl<'a> Analyzer<'a> {
                             }
                         }
                         _ => {
-                            self.analyze_value(dtype, &column.value)?;
+                            self.analyze_value(col.dtype, &column.value)?;
                         }
                     }
                 }
@@ -1364,21 +1353,21 @@ mod sql_analyzer_tests {
         db.init()?;
 
         // Create a users table
-        let users_schema = Schema::new()
-            .add_column("id", DataTypeKind::Int, true, true, false)
-            .add_column("name", DataTypeKind::Text, false, false, false)
-            .add_column("email", DataTypeKind::Text, false, true, false)
-            .add_column("age", DataTypeKind::Int, false, false, true)
-            .add_column("created_at", DataTypeKind::DateTime, false, false, false);
+        let mut users_schema = Schema::new();
+        users_schema.add_column("id", DataTypeKind::Int, true, true, false);
+        users_schema.add_column("name", DataTypeKind::Text, false, false, false);
+        users_schema.add_column("email", DataTypeKind::Text, false, true, false);
+        users_schema.add_column("age", DataTypeKind::Int, false, false, true);
+        users_schema.add_column("created_at", DataTypeKind::DateTime, false, false, false);
 
         db.create_table("users", users_schema)?;
 
-        let posts_schema = Schema::new()
-            .add_column("id", DataTypeKind::Int, true, true, false)
-            .add_column("user_id", DataTypeKind::Int, false, false, false)
-            .add_column("title", DataTypeKind::Text, false, false, false)
-            .add_column("content", DataTypeKind::Blob, false, false, true)
-            .add_column("published", DataTypeKind::Boolean, false, false, false);
+        let mut posts_schema = Schema::new();
+        posts_schema.add_column("id", DataTypeKind::Int, true, true, false);
+        posts_schema.add_column("user_id", DataTypeKind::Int, false, false, false);
+        posts_schema.add_column("title", DataTypeKind::Text, false, false, false);
+        posts_schema.add_column("content", DataTypeKind::Blob, false, false, true);
+        posts_schema.add_column("published", DataTypeKind::Boolean, false, false, false);
 
         db.create_table("posts", posts_schema)?;
 

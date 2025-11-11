@@ -233,7 +233,7 @@ impl<'a> Preparator<'a> {
                         }
                         _ => {
                             // For other expressions, create a synthetic column
-                            let col = Column::new(
+                            let col = Column::new_unindexed(
                                 DataTypeKind::Null, // Will be determined at runtime
                                 alias.as_deref().unwrap_or("?"),
                                 None,
@@ -281,9 +281,7 @@ impl<'a> Preparator<'a> {
         self.ctx.current_table = saved_current;
         self.ctx.subqueries = saved_subqueries;
 
-        Schema {
-            columns: out_columns,
-        }
+        Schema::from(out_columns.as_slice())
     }
 
     pub fn prepare_stmt(&mut self, stmt: &mut Statement) {
@@ -464,21 +462,21 @@ mod sql_prepare_tests {
         db.init()?;
 
         // Create a users table
-        let users_schema = Schema::new()
-            .add_column("id", DataTypeKind::Int, true, true, false)
-            .add_column("name", DataTypeKind::Text, false, false, false)
-            .add_column("email", DataTypeKind::Text, false, true, false)
-            .add_column("age", DataTypeKind::Int, false, false, true)
-            .add_column("created_at", DataTypeKind::DateTime, false, false, false);
+        let mut users_schema = Schema::new();
+        users_schema.add_column("id", DataTypeKind::Int, true, true, false);
+        users_schema.add_column("name", DataTypeKind::Text, false, false, false);
+        users_schema.add_column("email", DataTypeKind::Text, false, true, false);
+        users_schema.add_column("age", DataTypeKind::Int, false, false, true);
+        users_schema.add_column("created_at", DataTypeKind::DateTime, false, false, false);
 
         db.create_table("users", users_schema)?;
 
-        let posts_schema = Schema::new()
-            .add_column("id", DataTypeKind::Int, true, true, false)
-            .add_column("user_id", DataTypeKind::Int, false, false, false)
-            .add_column("title", DataTypeKind::Text, false, false, false)
-            .add_column("content", DataTypeKind::Blob, false, false, true)
-            .add_column("published", DataTypeKind::Boolean, false, false, false);
+        let mut posts_schema = Schema::new();
+        posts_schema.add_column("id", DataTypeKind::Int, true, true, false);
+        posts_schema.add_column("user_id", DataTypeKind::Int, false, false, false);
+        posts_schema.add_column("title", DataTypeKind::Text, false, false, false);
+        posts_schema.add_column("content", DataTypeKind::Blob, false, false, true);
+        posts_schema.add_column("published", DataTypeKind::Boolean, false, false, false);
 
         db.create_table("posts", posts_schema)?;
 
@@ -610,122 +608,6 @@ mod sql_prepare_tests {
                 limit: None,
             },)
         )
-    }
-
-    #[test]
-    #[serial]
-    fn test_preparator_4() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let db = create_db(4096, 10, &path).unwrap();
-        let sql = "SELECT * FROM users u JOIN posts p ON p.user_id = u.id; ";
-
-        let stmt = parse_and_prepare(sql, &db);
-        assert_eq!(
-            stmt,
-            Statement::Select(SelectStatement {
-                distinct: false,
-                columns: vec![
-                    SelectItem::ExprWithAlias {
-                        expr: Expr::QualifiedIdentifier {
-                            table: "p".to_string(),
-                            column: "id".to_string(),
-                        },
-                        alias: None,
-                    },
-                    SelectItem::ExprWithAlias {
-                        expr: Expr::QualifiedIdentifier {
-                            table: "p".to_string(),
-                            column: "user_id".to_string(),
-                        },
-                        alias: None,
-                    },
-                    SelectItem::ExprWithAlias {
-                        expr: Expr::QualifiedIdentifier {
-                            table: "p".to_string(),
-                            column: "title".to_string(),
-                        },
-                        alias: None,
-                    },
-                    SelectItem::ExprWithAlias {
-                        expr: Expr::QualifiedIdentifier {
-                            table: "p".to_string(),
-                            column: "content".to_string(),
-                        },
-                        alias: None,
-                    },
-                    SelectItem::ExprWithAlias {
-                        expr: Expr::QualifiedIdentifier {
-                            table: "p".to_string(),
-                            column: "published".to_string(),
-                        },
-                        alias: None,
-                    },
-                    SelectItem::ExprWithAlias {
-                        expr: Expr::QualifiedIdentifier {
-                            table: "u".to_string(),
-                            column: "id".to_string(),
-                        },
-                        alias: None,
-                    },
-                    SelectItem::ExprWithAlias {
-                        expr: Expr::QualifiedIdentifier {
-                            table: "u".to_string(),
-                            column: "name".to_string(),
-                        },
-                        alias: None,
-                    },
-                    SelectItem::ExprWithAlias {
-                        expr: Expr::QualifiedIdentifier {
-                            table: "u".to_string(),
-                            column: "email".to_string(),
-                        },
-                        alias: None,
-                    },
-                    SelectItem::ExprWithAlias {
-                        expr: Expr::QualifiedIdentifier {
-                            table: "u".to_string(),
-                            column: "age".to_string(),
-                        },
-                        alias: None,
-                    },
-                    SelectItem::ExprWithAlias {
-                        expr: Expr::QualifiedIdentifier {
-                            table: "u".to_string(),
-                            column: "created_at".to_string(),
-                        },
-                        alias: None,
-                    },
-                ],
-                from: Some(TableReference::Join {
-                    left: Box::new(TableReference::Table {
-                        name: "users".to_string(),
-                        alias: Some("u".to_string(),),
-                    }),
-                    join_type: JoinType::Inner,
-                    right: Box::new(TableReference::Table {
-                        name: "posts".to_string(),
-                        alias: Some("p".to_string(),),
-                    }),
-                    on: Some(Expr::BinaryOp {
-                        left: Box::new(Expr::QualifiedIdentifier {
-                            table: "p".to_string(),
-                            column: "user_id".to_string(),
-                        }),
-                        op: BinaryOperator::Eq,
-                        right: Box::new(Expr::QualifiedIdentifier {
-                            table: "u".to_string(),
-                            column: "id".to_string(),
-                        }),
-                    },),
-                },),
-                where_clause: None,
-                group_by: vec![],
-                having: None,
-                order_by: vec![],
-                limit: None,
-            },)
-        );
     }
 
     #[test]

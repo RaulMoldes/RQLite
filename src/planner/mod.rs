@@ -1,12 +1,12 @@
-use crate::database::schema::Schema;
 use crate::database::schema::{
     AsBytes, Column, Constraint, DBObject, Database, ForeignKey, ObjectType,
 };
+use crate::database::schema::{Schema, TableConstraint};
 use crate::sql::ast::{AlterAction, AlterColumnAction, ColumnConstraintExpr, TableConstraintExpr};
 use crate::sql::{parsing_pipeline, SQLError, Statement};
-use crate::types::{DataType, DataTypeKind};
+use crate::types::DataType;
 use std::collections::{HashMap, VecDeque};
-
+mod scan;
 enum Scan {
     SeqScan,
     IndexScan,
@@ -64,7 +64,11 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
                     }
                 }
 
-                let col = Column::new(new_column.data_type, &new_column.name, Some(constraints));
+                let col = Column::new_unindexed(
+                    new_column.data_type,
+                    &new_column.name,
+                    Some(constraints),
+                );
                 table_columns.push(col);
             }
 
@@ -125,7 +129,7 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
                         }
                     }
 
-                    let column = Column::new(
+                    let column = Column::new_unindexed(
                         col_def.data_type,
                         &col_def.name,
                         if constraints.is_empty() {
@@ -167,7 +171,6 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
                             let constraint_name = format!("{}_default", alter_col.name);
                             column.add_constraint(constraint_name, Constraint::Default(value));
                         }
-
                         AlterColumnAction::DropDefault => {
                             // Find and remove any default constraint
                             let constraints_to_remove: Vec<String> = column
@@ -229,35 +232,43 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
                 AlterAction::DropConstraint(constraint_name) => {
                     let mut table_obj = db.get_obj(table_oid)?;
                     let mut schema = table_obj.get_schema();
-
-                    // Find the column with this constraint and remove it
-                    let mut found = false;
-                    for column in &mut schema.columns {
-                        if column.has_constraint(&constraint_name) {
-                            column.drop_constraint(&constraint_name);
-                            found = true;
-                            break;
-                        }
-                    }
-
-                    if !found {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            format!("Constraint '{constraint_name}' not found"),
-                        ));
-                    }
-
+                    schema.drop_constraint(&constraint_name);
                     // Write the updated schema back
                     table_obj.set_meta(&schema.write_to()?);
                     db.update_obj(table_obj)?;
                 }
 
                 AlterAction::AddConstraint(constraint) => {
-                    // Table constraints are not supported yet
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        "Table constraints are not yet supported",
-                    ));
+                    let mut table_obj = db.get_obj(table_oid)?;
+                    let mut schema = table_obj.get_schema();
+                    match constraint {
+                        TableConstraintExpr::PrimaryKey(columns) => {
+                            let ct = TableConstraint::PrimaryKey(columns);
+                            schema.add_constraint(ct);
+                        }
+                        TableConstraintExpr::ForeignKey {
+                            columns,
+                            ref_table,
+                            ref_columns,
+                        } => {
+                            let ct = TableConstraint::ForeignKey {
+                                columns,
+                                ref_table,
+                                ref_columns,
+                            };
+                            schema.add_constraint(ct);
+                        }
+                        TableConstraintExpr::Unique(columns) => {
+                            let ct = TableConstraint::Unique(columns);
+                            schema.add_constraint(ct);
+                        }
+                        _ => {
+                            return Err(std::io::Error::other("Unsupported table constraint type"))
+                        }
+                    }
+
+                    table_obj.set_meta(&schema.write_to()?);
+                    db.update_obj(table_obj)?;
                 }
             }
 
@@ -267,8 +278,7 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
             // Check if table exists only if IF EXISTS is not specified
             if let Ok(oid) = db.search_obj(&drop.table) {
                 // Drop the table
-                // TODO: The cascade option should handle dependent objects if supported
-                db.remove_obj(oid, &drop.table)?;
+                db.remove_obj(oid, &drop.table, drop.cascade)?;
             } else if drop.if_exists {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -302,22 +312,46 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
 
             // Get the table to verify columns exist
             let table_obj = db.get_obj(table_oid)?;
-            let table_schema = table_obj.get_schema();
+            let mut table_schema = table_obj.get_schema();
+            let row_id = table_schema.columns.first().unwrap().clone();
 
-            // Verify all columns exist in the table
-            for idx_col in &create_idx.columns {
-                if !table_schema.has_column(&idx_col.name) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        format!(
-                            "Column '{}' not found in table '{}'",
-                            idx_col.name, create_idx.table
-                        ),
-                    ));
-                }
-            }
+            debug_assert!(
+                create_idx.columns.len() == 1,
+                "Multicolumn indexes are not supported yet!"
+            );
 
-            // TODO: COMPLETE CREATE INDEX STATEMENT PLAN
+            let index_schema = Schema::from(
+                [
+                    table_schema
+                        .find_col(&create_idx.columns[0].name)
+                        .ok_or(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "Column not Found",
+                        ))?
+                        .clone(),
+                    row_id,
+                ]
+                .as_slice(),
+            );
+            let index_name = format!("{}_{}_idx", create_idx.table, create_idx.columns[0].name);
+
+            // Verify columns exist in the table
+            if let Some(column) = table_schema.find_column_mut(&create_idx.columns[0].name) {
+                let obj = DBObject::new(
+                    ObjectType::Index,
+                    &index_name,
+                    Some(&index_schema.write_to()?),
+                );
+                db.index_obj(&obj)?;
+                let index_id = db.create_obj(obj)?;
+                column.set_index(index_name);
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Column {} does not exist", &create_idx.columns[0].name),
+                ));
+            };
+
             Ok(ExecutionPlan::empty())
         }
 
@@ -364,21 +398,21 @@ mod planner_tests {
         db.init()?;
 
         // Create a users table
-        let users_schema = Schema::new()
-            .add_column("id", DataTypeKind::Int, true, true, false)
-            .add_column("name", DataTypeKind::Text, false, false, false)
-            .add_column("email", DataTypeKind::Text, false, true, false)
-            .add_column("age", DataTypeKind::Int, false, false, true)
-            .add_column("created_at", DataTypeKind::DateTime, false, false, false);
+        let mut users_schema = Schema::new();
+        users_schema.add_column("id", DataTypeKind::Int, true, true, false);
+        users_schema.add_column("name", DataTypeKind::Text, false, false, false);
+        users_schema.add_column("email", DataTypeKind::Text, false, true, false);
+        users_schema.add_column("age", DataTypeKind::Int, false, false, true);
+        users_schema.add_column("created_at", DataTypeKind::DateTime, false, false, false);
 
         db.create_table("users", users_schema)?;
 
-        let posts_schema = Schema::new()
-            .add_column("id", DataTypeKind::Int, true, true, false)
-            .add_column("user_id", DataTypeKind::Int, false, false, false)
-            .add_column("title", DataTypeKind::Text, false, false, false)
-            .add_column("content", DataTypeKind::Blob, false, false, true)
-            .add_column("published", DataTypeKind::Boolean, false, false, false);
+        let mut posts_schema = Schema::new();
+        posts_schema.add_column("id", DataTypeKind::Int, true, true, false);
+        posts_schema.add_column("user_id", DataTypeKind::Int, false, false, false);
+        posts_schema.add_column("title", DataTypeKind::Text, false, false, false);
+        posts_schema.add_column("content", DataTypeKind::Blob, false, false, true);
+        posts_schema.add_column("published", DataTypeKind::Boolean, false, false, false);
 
         db.create_table("posts", posts_schema)?;
 
@@ -410,8 +444,8 @@ mod planner_tests {
         assert!(obj.metadata().is_some());
         let (schema, bytes) = Schema::read_from(obj.metadata().unwrap()).unwrap();
 
-        let mut id = Column::new(DataTypeKind::Int, "id", None);
-        let email = Column::new(DataTypeKind::Text, "email", None);
+        let mut id = Column::new_unindexed(DataTypeKind::Int, "id", None);
+        let email = Column::new_unindexed(DataTypeKind::Text, "email", None);
         id.add_constraint("id_pkey".to_string(), Constraint::PrimaryKey);
 
         assert_eq!(schema, Schema::from([id, email].as_slice()));
@@ -642,5 +676,4 @@ mod planner_tests {
         let sql = "DROP TABLE non_existent";
         assert!(exec(sql, &mut db).is_err());
     }
-
 }

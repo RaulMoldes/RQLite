@@ -22,6 +22,8 @@ pub use sized_types::{
 use crate::sql::ast::Expr;
 use crate::{def_data_type, repr_enum};
 pub use blob::{Blob, BlobRef, BlobRefMut};
+
+use crate::structures::bplustree::{FixedSizeComparator, VarlenComparator};
 pub use varint::VarInt;
 #[cfg(test)]
 mod tests;

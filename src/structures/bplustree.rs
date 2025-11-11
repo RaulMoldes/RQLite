@@ -120,6 +120,10 @@ impl FixedSizeComparator {
     pub fn with_type<T>() -> Self {
         Self(std::mem::size_of::<T>())
     }
+
+    pub fn for_size(size: usize) -> Self {
+        Self(size)
+    }
 }
 
 impl Comparator for FixedSizeComparator {
@@ -302,6 +306,10 @@ where
         }
     }
 
+    pub fn compare(&self, lhs: &[u8], rhs: &[u8]) -> std::io::Result<Ordering> {
+        self.comparator.compare(lhs, rhs)
+    }
+
     fn is_root(&self, id: PageId) -> bool {
         self.root == id
     }
@@ -471,8 +479,13 @@ where
             .map_err(|_| std::io::Error::other("Latch stack is unavailable"))?
     }
 
+
+    pub fn search_from_root(&self, entry: &[u8], access_mode: NodeAccessMode) -> std::io::Result<SearchResult>{
+        self.search(&(self.root, Slot(0)), entry, access_mode)
+    }
+
     pub fn search(
-        &mut self,
+        &self,
         start: &Position,
         entry: &[u8],
         access_mode: NodeAccessMode,
@@ -615,7 +628,7 @@ where
     }
 
     fn binary_search_key(
-        &mut self,
+        &self,
         page_id: PageId,
         search_key: &[u8],
     ) -> std::io::Result<SearchResult> {
@@ -1843,7 +1856,7 @@ where
     }
 
     pub fn iter_from(
-        &mut self,
+        &self,
         key: &[u8],
         direction: IterDirection,
     ) -> std::io::Result<BPlusTreeIterator<Cmp>> {
