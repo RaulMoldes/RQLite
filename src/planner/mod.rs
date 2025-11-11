@@ -2,23 +2,170 @@ use crate::database::schema::{
     AsBytes, Column, Constraint, DBObject, Database, ForeignKey, ObjectType,
 };
 use crate::database::schema::{Schema, TableConstraint};
-use crate::sql::ast::{AlterAction, AlterColumnAction, ColumnConstraintExpr, TableConstraintExpr};
-use crate::sql::{parsing_pipeline, SQLError, Statement};
+use crate::sql::ast::{
+    AlterAction, AlterColumnAction, ColumnConstraintExpr, SelectItem, TableConstraintExpr, TableReference
+};
+use crate::sql::{parsing_pipeline, SQLError, Statement, ast::{SelectStatement, Expr}};
+
 use crate::types::DataType;
 use std::collections::{HashMap, VecDeque};
+
+mod groupby;
+mod join;
+mod orderby;
+mod project;
 mod scan;
-enum Scan {
-    SeqScan,
-    IndexScan,
+mod index_selection;
+mod filter;
+
+
+use groupby::GroupBy;
+use orderby::{Limit, OrderBy};
+use join::NestedLoopJoin;
+use filter::Filter;
+use project::Project;
+use scan::Scan;
+use index_selection::find_applicable_indexes;
+
+pub struct ResultSet {
+    inner: Vec<Box<[u8]>>,
 }
 
-enum ExecutionPlanStep {
-    SeqScan,
-    IndexScan,
+impl ResultSet {
+    fn new() -> Self {
+        Self { inner: Vec::new() }
+    }
+
+    fn push(&mut self, payload: Box<[u8]>) {
+        self.inner.push(payload);
+    }
+}
+
+pub trait ExecutionPlanStep {
+    fn exec(&mut self, db: &mut Database) -> std::io::Result<()>;
+    fn take_result_set(&mut self) -> Option<ResultSet> {
+        None
+    }
+}
+
+
+
+
+fn build_scan_steps(
+    table_ref: &TableReference,
+    where_clause: Option<&Expr>,
+    db: &Database,
+    plan: &mut ExecutionPlan,
+) -> std::io::Result<()> {
+    match table_ref {
+        TableReference::Table { name, alias } => {
+            let table_oid = db.search_obj(name).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, format!("Table '{}' not found", name))
+            })?;
+
+            let table_obj = db.get_obj(table_oid)?;
+            let schema = table_obj.get_schema();
+
+            // Try to find applicable indexes
+            let index_candidates = find_applicable_indexes(name, where_clause, db);
+
+            let scan: Box<dyn ExecutionPlanStep> = if let Some(best_index) = index_candidates.first() {
+                // Use index scan
+                let index_obj = db.get_obj(best_index.get())?;
+                let index_schema = index_obj.get_schema();
+
+                let (start_key, end_key) = if let Some(where_expr) = where_clause {
+                    // TODO: This should extract the actual bounds for an index. Currently I am not maintaining an stats table like postgres does so returns (None, None) for convenience.
+                    (None, None)
+                } else {
+                    (None, None)
+                };
+
+                Box::new(Scan::IndexScan {
+                    table_oid,
+                    index_oid: best_index.get(),
+                    table_schema: schema,
+                    index_schema,
+                    start_key,
+                    end_key,
+                    cached_resultset: Some(ResultSet::new()),
+                })
+            } else {
+                // Use sequential scan
+                Box::new(Scan::SeqScan {
+                    table_oid,
+                    schema,
+                    cached_resultset: Some(ResultSet::new()),
+                })
+            };
+
+            plan.push_step(scan);
+        }
+
+        TableReference::Join { left, join_type, right, on } => {
+            // Build scans for both sides
+            build_scan_steps(left, None, db, plan)?;
+            build_scan_steps(right, None, db, plan)?;
+
+            // TODO! Implement joins
+        }
+
+        TableReference::Subquery { query, alias } => {
+            build_select_plan(query, db, plan)?;
+        }
+    }
+
+    Ok(())
+}
+
+
+// Main function to build SELECT execution plan
+fn build_select_plan(
+    select: &SelectStatement,
+    db: &Database,
+    plan: &mut ExecutionPlan,
+) -> std::io::Result<()> {
+    // Step 1: Add scan operators (FROM clause)
+    if let Some(from) = &select.from {
+      //  build_scan_steps(from, select.where_clause.as_ref(), db, plan)?;
+    }
+
+
+    if let Some(where_clause) = &select.where_clause {
+        // Check if we need additional filtering beyond what index provides
+        let needs_filter = true; // TODO: Determine based on index usage
+        if needs_filter {
+
+            let filter = Filter::new(where_clause.clone());
+            plan.push_step(Box::new(filter));
+        }
+    }
+
+    if !select.group_by.is_empty() {
+        let group = GroupBy::new(select.group_by.clone(), select.having.clone());
+        plan.push_step(Box::new(group));
+    }
+
+    // TODO: MUST TRANSFORM SELECT ITEMS INTO A HASHMAP OF TABLE -> COLUMNS
+       // let project = Project::new(select.columns.iter().map(|c| c.column.to_string()),Schema::new());
+       // plan.push_step(Box::new(project));
+
+    // Step 5: Add order by operator (ORDER BY clause)
+    if !select.order_by.is_empty() {
+      //  let order = OrderBy::new(select.order_by.iter().map(|o| o.));
+      //  plan.push_step(Box::new(order));
+    }
+
+    if let Some(limit) = select.limit {
+        let limit_step = Limit::new(limit);
+        plan.push_step(Box::new(limit_step));
+    }
+
+    Ok(())
 }
 
 struct ExecutionPlan {
-    steps: VecDeque<ExecutionPlanStep>,
+    steps: VecDeque<Box<dyn ExecutionPlanStep>>,
 }
 
 impl ExecutionPlan {
@@ -26,6 +173,10 @@ impl ExecutionPlan {
         Self {
             steps: VecDeque::new(),
         }
+    }
+
+    fn push_step(&mut self, step: Box<dyn ExecutionPlanStep>) {
+        self.steps.push_back(step);
     }
 }
 
@@ -72,20 +223,30 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
                 table_columns.push(col);
             }
 
+            let mut schema = Schema::from(table_columns.as_slice());
+
             for table_constraint in create.constraints {
                 match table_constraint {
-                    TableConstraintExpr::PrimaryKey(pk_list) => {}
+                    TableConstraintExpr::PrimaryKey(pk_list) => {
+                        schema.add_constraint(TableConstraint::PrimaryKey(pk_list));
+                    }
                     TableConstraintExpr::ForeignKey {
                         columns,
                         ref_table,
                         ref_columns,
-                    } => {}
-                    TableConstraintExpr::Unique(items) => {}
-                    _ => {} // TODO !
+                    } => {
+                        schema.add_constraint(TableConstraint::ForeignKey {
+                            columns,
+                            ref_table,
+                            ref_columns,
+                        });
+                    }
+                    TableConstraintExpr::Unique(items) => {
+                        schema.add_constraint(TableConstraint::Unique(items));
+                    }
+                    _ => {}
                 }
             }
-
-            let schema = Schema::from(table_columns.as_slice());
 
             db.create_table(&create.table, schema)?;
             Ok(ExecutionPlan::empty())
@@ -353,9 +514,11 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
             };
 
             Ok(ExecutionPlan::empty())
-        }
-
-        _ => Ok(ExecutionPlan::empty()),
+        },
+        Statement::Select(select) => {
+          Ok(ExecutionPlan::empty())
+        },
+        _ => Ok(ExecutionPlan::empty())
     }
 }
 

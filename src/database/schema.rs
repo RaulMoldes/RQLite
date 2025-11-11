@@ -6,7 +6,8 @@ use crate::storage::{
 };
 
 use crate::structures::bplustree::{
-    BPlusTree, Comparator, FixedSizeComparator, NodeAccessMode, SearchResult, VarlenComparator,
+    BPlusTree, Comparator, DynComparator, FixedSizeComparator, NodeAccessMode, SearchResult,
+    VarlenComparator,
 };
 use crate::types::initialize_atomics;
 use crate::types::{
@@ -1264,33 +1265,15 @@ impl Database {
         Ok(())
     }
 
+    pub fn build_tree(&self, value: DBObject) -> std::io::Result<BPlusTree<DynComparator>> {
+        let dtype = value.get_schema().columns[0].dtype;
 
-    fn btree_fixed_size_key(
-        &self,
-        value: DBObject
-    ) -> std::io::Result<BPlusTree<FixedSizeComparator>> {
-        let datatype = value.get_schema().columns[0].dtype;
-        debug_assert!(datatype.is_fixed_size(), "Invalid key type for btree with fixed length key");
-        let comparator= FixedSizeComparator::for_size(datatype.size().unwrap());
-        self.build_tree(value, comparator)
-    }
+        let comparator = if dtype.is_fixed_size() {
+            DynComparator::Fixed(FixedSizeComparator::for_size(dtype.size().unwrap()))
+        } else {
+            DynComparator::Variable(VarlenComparator)
+        };
 
-    fn btree_var_size_key(
-        &self,
-        value: DBObject
-    ) -> std::io::Result<BPlusTree<VarlenComparator>> {
-        let datatype = value.get_schema().columns[0].dtype;
-        debug_assert!(!datatype.is_fixed_size(), "Invalid key type for btree with variable length key");
-        let comparator= VarlenComparator;
-        self.build_tree(value, comparator)
-
-    }
-
-    fn build_tree<T: Comparator>(
-        &self,
-        value: DBObject,
-        comparator: T,
-    ) -> std::io::Result<BPlusTree<T>> {
         Ok(BPlusTree::from_existent(
             self.pager(),
             value.root,
@@ -1568,7 +1551,6 @@ mod tests {
             )
         );
 
-        dbg!(des);
         Ok(())
     }
 }

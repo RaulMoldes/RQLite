@@ -43,11 +43,48 @@ pub enum Payload<'b> {
     Reference(&'b [u8]),
 }
 
+impl From<Payload<'_>> for Box<[u8]> {
+    fn from(value: Payload<'_>) -> Self {
+        match value {
+            Payload::Boxed(b) => b,
+            Payload::Reference(b) => b.to_vec().into_boxed_slice(),
+        }
+    }
+}
+
 pub(crate) trait Comparator {
     fn compare(&self, lhs: &[u8], rhs: &[u8]) -> std::io::Result<Ordering>;
     fn key_size(&self, data: &[u8]) -> std::io::Result<usize>;
     fn is_fixed_size(&self) -> bool {
         false
+    }
+}
+
+pub(crate) enum DynComparator {
+    Variable(VarlenComparator),
+    Fixed(FixedSizeComparator),
+}
+
+impl Comparator for DynComparator {
+    fn compare(&self, lhs: &[u8], rhs: &[u8]) -> std::io::Result<Ordering> {
+        match self {
+            Self::Fixed(c) => c.compare(lhs, rhs),
+            Self::Variable(c) => c.compare(lhs, rhs),
+        }
+    }
+
+    fn is_fixed_size(&self) -> bool {
+        match self {
+            Self::Fixed(c) => c.is_fixed_size(),
+            Self::Variable(c) => c.is_fixed_size(),
+        }
+    }
+
+    fn key_size(&self, data: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Fixed(c) => c.key_size(data),
+            Self::Variable(c) => c.key_size(data),
+        }
     }
 }
 
