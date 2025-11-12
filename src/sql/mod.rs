@@ -4,7 +4,7 @@ mod lexer;
 mod parser;
 mod preparator;
 
-use crate::database::schema::Database;
+use crate::database::Database;
 use crate::sql::ast::Simplify;
 use crate::sql::parser::ParserError;
 use crate::sql::preparator::Preparator;

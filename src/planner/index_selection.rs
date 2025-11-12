@@ -1,5 +1,5 @@
 use crate::types::OId;
-use crate::database::schema::Database;
+use crate::database::Database;
 use crate::sql::ast::Expr;
 use crate::sql::ast::BinaryOperator;
 

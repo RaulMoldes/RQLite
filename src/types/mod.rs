@@ -89,6 +89,31 @@ def_data_type!(DataTypeRefMut, RefMut);
 def_data_type!(DataType, Owned);
 
 impl DataType {
+
+    pub fn datatype(&self) -> DataTypeKind {
+        match self {
+
+            DataType::SmallInt(_) => DataTypeKind::SmallInt,
+            DataType::HalfInt(_) => DataTypeKind::HalfInt,
+            DataType::Int(_) => DataTypeKind::Int,
+            DataType::BigInt(_) => DataTypeKind::BigInt,
+            DataType::SmallUInt(_) => DataTypeKind::SmallUInt,
+            DataType::HalfUInt(_) => DataTypeKind::HalfUInt,
+            DataType::UInt(_) => DataTypeKind::UInt,
+            DataType::BigUInt(_) => DataTypeKind::BigUInt,
+            DataType::Float(_) => DataTypeKind::Float,
+            DataType::Double(_) => DataTypeKind::Double,
+            DataType::Byte(_) => DataTypeKind::Byte,
+            DataType::Char(_) => DataTypeKind::Char,
+            DataType::Boolean(_) => DataTypeKind::Boolean,
+            DataType::Date(_) => DataTypeKind::Date,
+            DataType::DateTime(_) => DataTypeKind::DateTime,
+            DataType::Text(_) => DataTypeKind::Text,
+            DataType::Blob(_) => DataTypeKind::Blob,
+            DataType::Null => DataTypeKind::Null,
+
+        }
+    }
     pub fn matches(&self, other: DataTypeKind) -> bool {
         match (self, other) {
             (DataType::SmallInt(_), DataTypeKind::SmallInt) => true,

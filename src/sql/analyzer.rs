@@ -1,5 +1,6 @@
 use crate::database::schema::ObjectType;
-use crate::database::schema::{AsBytes, DBObject, Database};
+use crate::database::schema::{AsBytes, DBObject};
+use crate::database::Database;
 use crate::database::schema::{Column, Schema};
 use crate::sql::ast::{
     AlterAction, AlterColumnAction, BinaryOperator, ColumnConstraintExpr, Expr, SelectItem,
@@ -1324,7 +1325,7 @@ impl<'a> Analyzer<'a> {
 
 #[cfg(test)]
 mod sql_analyzer_tests {
-    use crate::database::schema::{Database, Schema};
+    use crate::database::{Database, schema::Schema};
     use crate::io::pager::{Pager, SharedPager};
     use crate::sql::analyzer::{AlreadyExists, Analyzer, AnalyzerError};
     use crate::sql::lexer::Lexer;

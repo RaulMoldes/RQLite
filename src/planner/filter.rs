@@ -1,10 +1,8 @@
-use crate::database::schema::{Database, Schema};
+use crate::database::Database;
 use crate::planner::{ExecutionPlanStep, ResultSet};
-use crate::sql::ast::{
-    BinaryOperator, Expr, JoinType, OrderByExpr, SelectItem, SelectStatement, TableReference,
-};
-use crate::structures::bplustree::{BPlusTree, Comparator};
-use std::collections::VecDeque;
+use crate::sql::ast::Expr;
+
+
 
 pub struct Filter {
     predicate: Expr,

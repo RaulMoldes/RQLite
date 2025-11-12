@@ -1,25 +1,18 @@
 use crate::io::pager::SharedPager;
 use crate::storage::{
-    cell::Slot,
     page::BtreePage,
     tuple::{tuple, Tuple, TupleRef},
 };
 
-use crate::structures::bplustree::{
-    BPlusTree, Comparator, DynComparator, FixedSizeComparator, NodeAccessMode, SearchResult,
-    VarlenComparator,
-};
-use crate::types::initialize_atomics;
+
 use crate::types::{
     reinterpret_cast, varint::MAX_VARINT_LEN, Blob, DataType, DataTypeKind, DataTypeRef, Key, OId,
-    PageId, UInt64, UInt8, VarInt, META_INDEX_ROOT, META_TABLE_ROOT, PAGE_ZERO,
+    PageId, UInt64, UInt64Ref, UInt8, VarInt,  PAGE_ZERO,
 };
 
 use crate::{repr_enum, TextEncoding};
 use std::collections::HashMap;
-
-pub const META_TABLE: &str = "rqcatalog";
-pub const META_INDEX: &str = "rqindex";
+use super::{Database, meta_table_schema};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Schema {
@@ -498,6 +491,259 @@ impl From<&[Column]> for Schema {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Table {
+    object_id: OId,
+    name: String,
+    schema: Schema,
+    next_row: UInt64,
+}
+
+
+impl Table {
+    pub fn new(name: &str, schema: Schema) -> Self {
+        Self {
+            object_id: OId::new_key(),
+            name: name.to_string(),
+            schema,
+            next_row: UInt64(0)
+        }
+    }
+
+    pub fn id(&self) -> OId {
+        self.object_id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    pub fn next(&self) -> UInt64 {
+        self.next_row
+    }
+
+    pub fn build(id: OId, name: &str, schema: Schema, next_row: UInt64) -> Self {
+        Self {
+            object_id: id,
+            name: name.to_string(),
+            schema,
+            next_row
+        }
+    }
+
+    pub fn add_row(&mut self)  {
+        self.next_row+= 1usize;
+    }
+}
+
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Index {
+    object_id: OId,
+    name: String,
+    num_keys: u8,
+    min_val: DataType,
+    max_val: DataType,
+    schema: Schema,
+}
+
+
+impl Index {
+    pub fn new(name: &str, schema: Schema, min_val: DataType, max_val: DataType) -> Self {
+        Self {
+            object_id: OId::new_key(),
+            num_keys: 0,
+            name: name.to_string(),
+            min_val,
+            max_val,
+            schema,
+        }
+    }
+
+
+    pub fn build(id: OId, name: &str, schema: Schema, min_val: DataType, max_val: DataType, num_keys: u8) -> Self {
+        Self {
+            object_id: id,
+            num_keys,
+            name: name.to_string(),
+            min_val,
+            max_val,
+            schema,
+        }
+    }
+
+
+    pub fn id(&self) -> OId {
+        self.object_id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+
+    pub fn range(&self) -> (DataTypeRef, DataTypeRef) {
+        let dtype = self.min_val.datatype();
+        (reinterpret_cast(dtype, self.min_val.as_ref()).unwrap().0, reinterpret_cast(dtype, self.max_val.as_ref()).unwrap().0)
+    }
+
+
+    pub fn num_keys(&self) -> usize {
+        self.num_keys as usize
+    }
+
+
+
+
+
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Relation {
+    TableRel(Table),
+    IndexRel(Index)
+}
+
+
+
+impl TryFrom<Relation> for DBObject {
+    type Error = std::io::Error;
+
+    fn try_from(value: Relation) -> Result<Self, Self::Error> {
+        match value {
+            Relation::IndexRel(index) => {
+                let mut metadata_buffer = Vec::new();
+
+                // First write the schema
+                let schema_bytes = index.schema.write_to()?;
+                metadata_buffer.extend_from_slice(&schema_bytes);
+
+                // Then write index-specific fields
+                metadata_buffer.push(index.num_keys);
+
+                // Write min_val
+                let min_val_bytes = index.min_val.as_ref();
+                metadata_buffer.extend_from_slice(min_val_bytes);
+
+                // Write max_val
+                let max_val_bytes = index.max_val.as_ref();
+                metadata_buffer.extend_from_slice(max_val_bytes);
+
+                Ok(DBObject {
+                    o_id: index.object_id,
+                    root: PAGE_ZERO, // Will be allocated when creating
+                    o_type: ObjectType::Index,
+                    name: index.name,
+                    metadata: Some(metadata_buffer.into_boxed_slice()),
+                })
+            },
+            Relation::TableRel(table) => {
+                let mut metadata_buffer = Vec::new();
+
+                // First write the schema
+                let schema_bytes = table.schema.write_to()?;
+                metadata_buffer.extend_from_slice(&schema_bytes);
+
+                // Then write table-specific fields (next_row)
+                let next_row_bytes = table.next_row.as_ref();
+                metadata_buffer.extend_from_slice(next_row_bytes);
+
+                Ok(DBObject {
+                    o_id: table.object_id,
+                    root: PAGE_ZERO, // Will be allocated when creating
+                    o_type: ObjectType::Table,
+                    name: table.name,
+                    metadata: Some(metadata_buffer.into_boxed_slice()),
+                })
+            }
+        }
+    }
+}
+
+impl TryFrom<DBObject> for Relation {
+    type Error = std::io::Error;
+
+    fn try_from(value: DBObject) -> Result<Self, Self::Error> {
+        let metadata = value.metadata.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "Missing metadata")
+        })?;
+
+        match value.o_type {
+            ObjectType::Index => {
+                let mut cursor = 0;
+
+                // Read schema
+                let (schema, schema_bytes_read) = Schema::read_from(&metadata[cursor..])?;
+                cursor += schema_bytes_read;
+
+                // Read index-specific fields
+                if cursor >= metadata.len() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "Missing index-specific metadata"
+                    ));
+                }
+
+                let num_keys = metadata[cursor];
+                cursor += 1;
+
+
+                // Assuming first column dtype for reinterpret_cast
+                let dtype = schema.columns.first()
+                    .ok_or_else(|| std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Index schema must have at least one column"
+                    ))?
+                    .dtype;
+
+                let (min_val, read_bytes) = reinterpret_cast(dtype, &metadata[cursor..])?;
+                cursor += read_bytes;
+                let (max_val, __read_bytes) = reinterpret_cast(dtype, &metadata[cursor..])?;
+
+                Ok(Relation::IndexRel(Index {
+                    object_id: value.o_id,
+                    name: value.name,
+                    num_keys,
+                    min_val: min_val.to_owned(),
+                    max_val: max_val.to_owned(),
+                    schema,
+                }))
+            },
+            ObjectType::Table => {
+                let mut cursor = 0;
+
+                // Read schema
+                let (schema, schema_bytes_read) = Schema::read_from(&metadata[cursor..])?;
+                cursor += schema_bytes_read;
+
+                // Read table-specific fields (next_row)
+                let next_row = if cursor + 8 <= metadata.len() {
+                    let mut bytes = [0u8; 8];
+                    bytes.copy_from_slice(&metadata[cursor..cursor + 8]);
+                    UInt64Ref::try_from(bytes.as_slice())?.to_owned()
+                } else {
+                    UInt64(0) // Default value if not present
+                };
+
+                Ok(Relation::TableRel(Table {
+                    object_id: value.o_id,
+                    name: value.name,
+                    schema,
+                    next_row,
+                }))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Column {
     pub(crate) dtype: DataTypeKind,
     pub(crate) name: String,
@@ -885,32 +1131,7 @@ impl ForeignKey {
     }
 }
 
-pub fn meta_idx_schema() -> Schema {
-    Schema::from(
-        [
-            Column::new_unindexed(DataTypeKind::Text, "o_name", None),
-            Column::new_unindexed(DataTypeKind::BigUInt, "o_id", None),
-        ]
-        .as_ref(),
-    )
-}
-pub fn meta_table_schema() -> Schema {
-    Schema::from(
-        [
-            Column::new_unindexed(DataTypeKind::BigUInt, "o_id", None),
-            Column::new_unindexed(DataTypeKind::BigUInt, "o_root", None),
-            Column::new_unindexed(DataTypeKind::Byte, "o_type", None),
-            Column::new_unindexed(DataTypeKind::Blob, "o_metadata", None),
-            Column::new(
-                DataTypeKind::Text,
-                "o_name",
-                Some(META_INDEX.to_string()),
-                None,
-            ),
-        ]
-        .as_ref(),
-    )
-}
+
 
 repr_enum!(
     pub enum ObjectType: u8 {
@@ -929,6 +1150,10 @@ pub struct DBObject {
 }
 
 impl DBObject {
+    pub fn id(&self) -> OId {
+        self.o_id
+    }
+
     pub fn name(&self) -> String {
         self.name.clone()
     }
@@ -1188,11 +1413,11 @@ impl DBObject {
         }
     }
 
-    fn is_allocated(&self) -> bool {
+    pub fn is_allocated(&self) -> bool {
         !matches!(self.o_type, ObjectType::Table | ObjectType::Index) || self.root.is_valid()
     }
 
-    fn alloc(&mut self, pager: &mut SharedPager) -> std::io::Result<()> {
+    pub fn alloc(&mut self, pager: &mut SharedPager) -> std::io::Result<()> {
         self.root = if matches!(self.o_type, ObjectType::Index | ObjectType::Table) {
             pager.write().alloc_page::<BtreePage>()?
         } else {
@@ -1201,7 +1426,7 @@ impl DBObject {
         Ok(())
     }
 
-    fn into_boxed_tuple(self) -> std::io::Result<Box<[u8]>> {
+    pub fn into_boxed_tuple(self) -> std::io::Result<Box<[u8]>> {
         let root_page = if self.root != PAGE_ZERO {
             DataType::BigUInt(UInt64::from(self.root))
         } else {
@@ -1225,332 +1450,5 @@ impl DBObject {
             ],
             &schema,
         )
-    }
-}
-
-pub struct Database {
-    pager: SharedPager,
-}
-
-impl Database {
-    pub fn new(pager: SharedPager) -> Self {
-        Self { pager }
-    }
-
-    pub fn pager(&self) -> SharedPager {
-        self.pager.clone()
-    }
-    // Lazy initialization.
-    pub fn init(&mut self) -> std::io::Result<()> {
-        initialize_atomics();
-        let meta_schema = meta_table_schema();
-        let schema_bytes = meta_schema.write_to()?;
-
-        let mut meta_table_obj = DBObject::new(ObjectType::Table, META_TABLE, Some(&schema_bytes));
-
-        meta_table_obj.alloc(&mut self.pager)?;
-
-        let meta_idx_schema = meta_idx_schema();
-        let schema_bytes = meta_idx_schema.write_to()?;
-        let mut meta_idx_obj = DBObject::new(ObjectType::Index, META_INDEX, Some(&schema_bytes));
-
-        meta_idx_obj.alloc(&mut self.pager)?;
-
-        self.index_obj(&meta_table_obj)?;
-        self.create_obj(meta_table_obj)?;
-
-        self.index_obj(&meta_idx_obj)?;
-        self.create_obj(meta_idx_obj)?;
-
-        Ok(())
-    }
-
-    pub fn build_tree(&self, value: DBObject) -> std::io::Result<BPlusTree<DynComparator>> {
-        let dtype = value.get_schema().columns[0].dtype;
-
-        let comparator = if dtype.is_fixed_size() {
-            DynComparator::Fixed(FixedSizeComparator::for_size(dtype.size().unwrap()))
-        } else {
-            DynComparator::Variable(VarlenComparator)
-        };
-
-        Ok(BPlusTree::from_existent(
-            self.pager(),
-            value.root,
-            3,
-            3,
-            comparator,
-        ))
-    }
-
-    pub fn create_table(&mut self, name: &str, schema: Schema) -> std::io::Result<()> {
-        let schema_bytes = schema.write_to()?;
-        let obj_creat = DBObject::new(ObjectType::Table, name, Some(&schema_bytes));
-        self.index_obj(&obj_creat)?;
-        self.create_obj(obj_creat)?;
-        Ok(())
-    }
-
-    pub fn create_obj(&mut self, mut obj: DBObject) -> std::io::Result<OId> {
-        let oid = obj.o_id;
-
-        if !obj.is_allocated() {
-            obj.alloc(&mut self.pager)?;
-        };
-
-        let mut meta_table = BPlusTree::from_existent(
-            self.pager.clone(),
-            META_TABLE_ROOT,
-            3,
-            2,
-            FixedSizeComparator::with_type::<u64>(),
-        );
-
-        let tuple = obj.into_boxed_tuple()?;
-        meta_table.clear_stack();
-        meta_table.insert(META_TABLE_ROOT, &tuple)?;
-        Ok(oid)
-    }
-
-    pub fn update_obj(&mut self, obj: DBObject) -> std::io::Result<OId> {
-        let oid = obj.o_id;
-
-        let mut meta_table = BPlusTree::from_existent(
-            self.pager.clone(),
-            META_TABLE_ROOT,
-            3,
-            2,
-            FixedSizeComparator::with_type::<u64>(),
-        );
-
-        let tuple = obj.into_boxed_tuple()?;
-        meta_table.clear_stack();
-        meta_table.update(META_TABLE_ROOT, &tuple)?;
-        Ok(oid)
-    }
-
-    pub fn remove_obj(&mut self, oid: OId, obj_name: &str, cascade: bool) -> std::io::Result<()> {
-        if cascade {
-            let obj = self.get_obj(oid)?;
-            let schema = obj.get_schema();
-            let dependants = schema.get_dependants();
-            for dep in dependants {
-                let oid = self.search_obj(&dep)?;
-                self.remove_obj(oid, &dep, true)?;
-            }
-        };
-
-        let mut meta_table = BPlusTree::from_existent(
-            self.pager.clone(),
-            META_TABLE_ROOT,
-            3,
-            2,
-            FixedSizeComparator::with_type::<u64>(),
-        );
-
-        let mut meta_index =
-            BPlusTree::from_existent(self.pager.clone(), META_INDEX_ROOT, 3, 2, VarlenComparator);
-
-        meta_table.clear_stack();
-        meta_index.clear_stack();
-        let blob = Blob::from(obj_name);
-        meta_index.remove(META_INDEX_ROOT, blob.as_ref())?;
-        meta_table.remove(META_TABLE_ROOT, oid.as_ref())?;
-
-        Ok(())
-    }
-
-    pub fn index_obj(&mut self, obj: &DBObject) -> std::io::Result<()> {
-        let mut meta_idx =
-            BPlusTree::from_existent(self.pager.clone(), META_INDEX_ROOT, 3, 2, VarlenComparator);
-
-        let schema = meta_idx_schema();
-        let tuple = tuple(
-            &[
-                DataType::Text(Blob::from(obj.name.as_str())),
-                DataType::BigUInt(UInt64::from(obj.o_id)),
-            ],
-            &schema,
-        )?;
-        meta_idx.clear_stack();
-        meta_idx.insert(META_INDEX_ROOT, &tuple)?;
-
-        Ok(())
-    }
-
-    pub fn search_obj(&self, obj_name: &str) -> std::io::Result<OId> {
-        let mut meta_idx =
-            BPlusTree::from_existent(self.pager.clone(), META_INDEX_ROOT, 3, 2, VarlenComparator);
-        let blob = Blob::from(obj_name);
-        let result = meta_idx.search(
-            &(META_INDEX_ROOT, Slot(0)),
-            blob.as_ref(),
-            NodeAccessMode::Read,
-        )?;
-
-        let payload = match result {
-            SearchResult::Found(position) => meta_idx.get_content_from_result(result),
-            SearchResult::NotFound(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "Object not found in meta table",
-                ))
-            }
-        };
-
-        meta_idx.clear_stack();
-
-        if let Some(p) = payload {
-            let schema = meta_idx_schema();
-            let tuple = TupleRef::read(p.as_ref(), &schema)?;
-
-            if let DataTypeRef::BigUInt(u) = tuple.value(&schema, 1)? {
-                return Ok(OId::from(u.to_owned()));
-            };
-        };
-
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "Object not found in meta table",
-        ))
-    }
-
-    pub fn get_obj(&self, obj_id: OId) -> std::io::Result<DBObject> {
-        let meta_table = BPlusTree::from_existent(
-            self.pager.clone(),
-            META_TABLE_ROOT,
-            3,
-            2,
-            FixedSizeComparator::with_type::<u64>(),
-        );
-
-        let result = meta_table.search(
-            &(META_TABLE_ROOT, Slot(0)),
-            obj_id.as_ref(),
-            NodeAccessMode::Read,
-        )?;
-
-        let payload = match result {
-            SearchResult::Found(position) => meta_table.get_content_from_result(result),
-            SearchResult::NotFound(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "Object not found in meta table",
-                ))
-            }
-        };
-
-        meta_table.clear_stack();
-
-        if let Some(p) = payload {
-            let schema = meta_table_schema();
-            let tuple = TupleRef::read(p.as_ref(), &schema)?;
-
-            Ok(tuple.try_into().unwrap())
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Object not found in meta table",
-            ))
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::io::pager::Pager;
-    use crate::{IncrementalVaccum, RQLiteConfig, ReadWriteVersion, TextEncoding};
-    use serial_test::serial;
-    use std::path::Path;
-
-    fn create_db(
-        page_size: u32,
-        capacity: u16,
-        path: impl AsRef<Path>,
-    ) -> std::io::Result<Database> {
-        let config = RQLiteConfig {
-            page_size,
-            cache_size: Some(capacity),
-            incremental_vacuum_mode: IncrementalVaccum::Disabled,
-            read_write_version: ReadWriteVersion::Legacy,
-            text_encoding: TextEncoding::Utf8,
-        };
-
-        let pager = Pager::from_config(config, &path).unwrap();
-
-        let mut db = Database::new(SharedPager::from(pager));
-        db.init()?;
-        Ok(db)
-    }
-
-    #[test]
-    #[serial]
-    fn test_meta_table() -> std::io::Result<()> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let db = create_db(4096, 100, path)?;
-
-        let oid = db.search_obj(META_TABLE)?;
-        assert_ne!(oid, OId::from(0));
-        let obj = db.get_obj(oid)?;
-        assert_eq!(obj.root, META_TABLE_ROOT);
-        let (meta_schema, _) = Schema::read_from(obj.metadata().unwrap())?;
-        assert_eq!(meta_schema, meta_table_schema());
-
-        let oid = db.search_obj(META_INDEX)?;
-        assert_ne!(oid, OId::from(0));
-        let obj = db.get_obj(oid)?;
-        assert_eq!(obj.root, META_INDEX_ROOT);
-        let (meta_schema, _) = Schema::read_from(obj.metadata().unwrap())?;
-        assert_eq!(meta_schema, meta_idx_schema());
-        Ok(())
-    }
-
-    #[test]
-    #[serial]
-    fn test_create_table() -> std::io::Result<()> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let mut db = create_db(4096, 100, path)?;
-        let mut pk = Column::new_unindexed(DataTypeKind::BigUInt, "id", None);
-        pk.add_constraint("primary".to_string(), Constraint::PrimaryKey);
-        let schema = Schema::from(
-            [
-                pk.clone(),
-                Column::new_unindexed(DataTypeKind::BigUInt, "age", None),
-                Column::new_unindexed(DataTypeKind::Text, "description", None),
-            ]
-            .as_ref(),
-        );
-
-        let schema_bytes = schema.write_to()?;
-        let obj_creat = DBObject::new(ObjectType::Table, "table_a", Some(&schema_bytes));
-        assert_eq!(obj_creat.metadata().unwrap(), schema_bytes);
-        db.index_obj(&obj_creat)?;
-        db.create_obj(obj_creat)?;
-
-        let id = db.search_obj("table_a")?;
-        let obj_ret = db.get_obj(id)?;
-        assert_eq!(obj_ret.name, "table_a");
-        assert!(obj_ret.metadata().is_some());
-        assert!(obj_ret.root.is_valid());
-        assert_eq!(obj_ret.o_id, id, "Objects do not match");
-        assert_eq!(obj_ret.metadata().unwrap(), schema_bytes);
-        let (des, _) = Schema::read_from(obj_ret.metadata().unwrap())?;
-
-        assert_eq!(
-            des,
-            Schema::from(
-                [
-                    pk,
-                    Column::new_unindexed(DataTypeKind::BigUInt, "age", None),
-                    Column::new_unindexed(DataTypeKind::Text, "description", None),
-                ]
-                .as_ref(),
-            )
-        );
-
-        Ok(())
     }
 }

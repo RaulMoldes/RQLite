@@ -1,6 +1,13 @@
-use crate::database::schema::ObjectType;
-use crate::database::schema::{AsBytes, DBObject, Database};
-use crate::database::schema::{Column, Schema};
+use crate::database::{Database,
+    schema::{
+        AsBytes,
+        DBObject,
+        ObjectType,
+        Column,
+        Schema
+}};
+
+
 use crate::sql::ast::{Expr, SelectItem, SelectStatement, Statement, TableReference, Values};
 use crate::types::DataTypeKind;
 use std::collections::{HashMap, HashSet};
@@ -428,7 +435,7 @@ impl<'a> Preparator<'a> {
 
 #[cfg(test)]
 mod sql_prepare_tests {
-    use crate::database::schema::{Database, Schema};
+    use crate::database::{Database, schema::Schema};
     use crate::io::pager::{Pager, SharedPager};
     use crate::sql::ast::{
         BinaryOperator, Expr, InsertStatement, JoinType, SelectItem, SelectStatement, Statement,

@@ -1,9 +1,10 @@
 use crate::database::schema::{
-    AsBytes, Column, Constraint, DBObject, Database, ForeignKey, ObjectType,
+    AsBytes, Column, Constraint, DBObject,  ForeignKey, ObjectType,
 };
+use crate::database::Database;
 use crate::database::schema::{Schema, TableConstraint};
 use crate::sql::ast::{
-    AlterAction, AlterColumnAction, ColumnConstraintExpr, SelectItem, TableConstraintExpr, TableReference
+    AlterAction, AlterColumnAction, ColumnConstraintExpr,  TableConstraintExpr, TableReference
 };
 use crate::sql::{parsing_pipeline, SQLError, Statement, ast::{SelectStatement, Expr}};
 
@@ -20,10 +21,9 @@ mod filter;
 
 
 use groupby::GroupBy;
-use orderby::{Limit, OrderBy};
-use join::NestedLoopJoin;
+use orderby::Limit;
 use filter::Filter;
-use project::Project;
+
 use scan::Scan;
 use index_selection::find_applicable_indexes;
 
@@ -533,7 +533,7 @@ fn exec(sql: &str, db: &mut Database) -> Result<(), SQLError> {
 #[cfg(test)]
 mod planner_tests {
     use super::*;
-    use crate::database::schema::{Database, Schema};
+    use crate::database::schema::Schema;
     use crate::io::pager::{Pager, SharedPager};
 
     use crate::types::DataTypeKind;

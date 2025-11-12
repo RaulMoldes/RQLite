@@ -1,4 +1,4 @@
-use crate::database::schema::Database;
+use crate::database::Database;
 use crate::database::schema::Schema;
 use crate::planner::{ExecutionPlanStep, ResultSet};
 use crate::storage::tuple::TupleRef;

@@ -1,4 +1,4 @@
-use crate::database::schema::{Database, Schema};
+use crate::database::{Database, schema::Schema};
 use crate::planner::{ExecutionPlanStep, ResultSet};
 
 // Project step

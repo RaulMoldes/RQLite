@@ -1,6 +1,6 @@
-use crate::database::schema::{Database, Schema};
+use crate::database::Database;
 use crate::planner::{ExecutionPlanStep, ResultSet};
-use crate::sql::ast::{Expr, JoinType};
+use crate::sql::ast::Expr;
 
 
 pub struct GroupBy {
