@@ -1,6 +1,7 @@
 use crate::types::varint::MAX_VARINT_LEN;
 use crate::{types::VarInt, TextEncoding};
 use std::cmp::PartialEq;
+use std::ops::{Deref, DerefMut};
 
 pub(crate) fn decode_utf16le(bytes: &[u8]) -> String {
     let units: Vec<u16> = bytes
@@ -23,29 +24,33 @@ pub struct Blob(Box<[u8]>);
 
 impl AsRef<[u8]> for Blob {
     fn as_ref(&self) -> &[u8] {
-        self.0.as_ref()
+        self.data()
     }
 }
 
 impl AsMut<[u8]> for Blob {
     fn as_mut(&mut self) -> &mut [u8] {
-        self.0.as_mut()
+        self.data_mut()
     }
 }
 
 impl Blob {
     /// Create a new Blob from bytes that already include the length prefix
-    pub fn from_bytes(bytes: &[u8]) -> Self {
+    pub fn from_raw_bytes(bytes: &[u8]) -> Self {
         Self(bytes.to_vec().into_boxed_slice())
+    }
+
+    pub fn from_raw_vec(vec: Vec<u8>) -> Self {
+        Self(vec.into_boxed_slice())
     }
 
     /// Get just the data portion
     pub fn data(&self) -> &[u8] {
-        self.as_ref()
+        self.0.as_ref()
     }
 
     pub fn data_mut(&mut self) -> &mut [u8] {
-        self.as_mut()
+        self.0.as_mut()
     }
 
     /// Get the length of the data
@@ -55,26 +60,26 @@ impl Blob {
 
     pub fn to_string(&self, encoding: TextEncoding) -> String {
         match encoding {
-            TextEncoding::Utf8 => String::from_utf8(self.data().to_vec()).unwrap(),
+            TextEncoding::Utf8 => String::from_utf8(self.content().to_vec()).unwrap(),
             TextEncoding::Utf16be => {
                 assert!(
                     self.len() % 2 == 0,
                     "UTF-16BE blob length must be multiple of 2"
                 );
-                decode_utf16be(self.data())
+                decode_utf16be(self.content())
             }
             TextEncoding::Utf16le => {
                 assert!(
                     self.len() % 2 == 0,
                     "UTF-16LE blob length must be multiple of 2"
                 );
-                decode_utf16le(self.data())
+                decode_utf16le(self.content())
             }
         }
     }
 
     pub fn as_utf8(&self) -> &[u8] {
-        self.data()
+        self.content()
     }
 
     pub fn as_str(&self, encoding: TextEncoding) -> &str {
@@ -102,13 +107,13 @@ pub struct BlobRef<'a>(&'a [u8]);
 
 impl<'a> AsRef<[u8]> for BlobRef<'a> {
     fn as_ref(&self) -> &[u8] {
-        self.0
+        self.data()
     }
 }
 
 impl<'a> BlobRef<'a> {
     /// Create a new Blob from bytes that already include the length prefix
-    pub fn from_bytes(bytes: &'a [u8]) -> Self {
+    pub fn from_raw_bytes(bytes: &'a [u8]) -> Self {
         Self(bytes)
     }
 
@@ -128,28 +133,32 @@ impl<'a> BlobRef<'a> {
         self.data().len()
     }
 
+    pub fn content_len(&self) -> usize {
+        self.content().len()
+    }
+
     pub fn to_string(&self, encoding: TextEncoding) -> String {
         match encoding {
-            TextEncoding::Utf8 => String::from_utf8(self.data().to_vec()).unwrap(),
+            TextEncoding::Utf8 => String::from_utf8(self.content().to_vec()).unwrap(),
             TextEncoding::Utf16be => {
                 assert!(
                     self.len() % 2 == 0,
                     "UTF-16BE blob length must be multiple of 2"
                 );
-                decode_utf16be(self.data())
+                decode_utf16be(self.content())
             }
             TextEncoding::Utf16le => {
                 assert!(
                     self.len() % 2 == 0,
                     "UTF-16LE blob length must be multiple of 2"
                 );
-                decode_utf16le(self.data())
+                decode_utf16le(self.content())
             }
         }
     }
 
     pub fn as_utf8(&self) -> &[u8] {
-        self.data()
+        self.content()
     }
 
     pub fn as_str(&self, encoding: TextEncoding) -> &str {
@@ -183,19 +192,19 @@ pub struct BlobRefMut<'a>(&'a mut [u8]);
 
 impl<'a> AsRef<[u8]> for BlobRefMut<'a> {
     fn as_ref(&self) -> &[u8] {
-        self.0
+        self.data()
     }
 }
 
 impl<'a> AsMut<[u8]> for BlobRefMut<'a> {
     fn as_mut(&mut self) -> &mut [u8] {
-        self.0
+        self.data_mut()
     }
 }
 
 impl<'a> BlobRefMut<'a> {
     /// Create a new Blob from bytes that already include the length prefix
-    pub fn from_bytes(bytes: &'a mut [u8]) -> Self {
+    pub fn from_raw_bytes(bytes: &'a mut [u8]) -> Self {
         Self(bytes)
     }
 
@@ -214,28 +223,32 @@ impl<'a> BlobRefMut<'a> {
         self.data().len()
     }
 
+    pub fn content_len(&self) -> usize {
+        self.content().len()
+    }
+
     pub fn to_string(&self, encoding: TextEncoding) -> String {
         match encoding {
-            TextEncoding::Utf8 => String::from_utf8(self.data().to_vec()).unwrap(),
+            TextEncoding::Utf8 => String::from_utf8(self.content().to_vec()).unwrap(),
             TextEncoding::Utf16be => {
                 assert!(
                     self.len() % 2 == 0,
                     "UTF-16BE blob length must be multiple of 2"
                 );
-                decode_utf16be(self.data())
+                decode_utf16be(self.content())
             }
             TextEncoding::Utf16le => {
                 assert!(
                     self.len() % 2 == 0,
                     "UTF-16LE blob length must be multiple of 2"
                 );
-                decode_utf16le(self.data())
+                decode_utf16le(self.content())
             }
         }
     }
 
     pub fn as_utf8(&self) -> &[u8] {
-        self.data()
+        self.content()
     }
 
     pub fn as_str(&self, encoding: TextEncoding) -> &str {
@@ -388,3 +401,36 @@ impl<'a> PartialEq<BlobRefMut<'a>> for &[u8] {
 impl Eq for Blob {}
 impl<'a> Eq for BlobRef<'a> {}
 impl<'a> Eq for BlobRefMut<'a> {}
+
+impl Deref for Blob {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl DerefMut for Blob {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut()
+    }
+}
+
+impl<'a> Deref for BlobRef<'a> {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl<'a> Deref for BlobRefMut<'a> {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl<'a> DerefMut for BlobRefMut<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut()
+    }
+}

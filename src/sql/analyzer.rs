@@ -1,11 +1,13 @@
-use crate::database::schema::ObjectType;
-use crate::database::schema::{AsBytes, DBObject};
-use crate::database::Database;
+use crate::database::schema::Relation;
+use crate::database::schema::Table;
 use crate::database::schema::{Column, Schema};
+use crate::database::Database;
 use crate::sql::ast::{
     AlterAction, AlterColumnAction, BinaryOperator, ColumnConstraintExpr, Expr, SelectItem,
     SelectStatement, Statement, TableConstraintExpr, TableReference, TransactionStatement, Values,
 };
+
+use crate::structures::bplustree::SearchResult;
 use crate::types::DataTypeKind;
 use regex::Regex;
 use std::collections::HashSet;
@@ -117,7 +119,7 @@ impl Display for AnalyzerError {
 
 struct AnalyzerCtx {
     table_aliases: HashMap<String, String>,
-    subqueries: HashMap<String, DBObject>,
+    subqueries: HashMap<String, Relation>,
     current_table: Option<String>,
     on_transaction: bool,
 }
@@ -142,7 +144,7 @@ impl AnalyzerCtx {
         &self,
     ) -> (
         HashMap<String, String>,
-        HashMap<String, DBObject>,
+        HashMap<String, Relation>,
         Option<String>,
     ) {
         (
@@ -156,7 +158,7 @@ impl AnalyzerCtx {
         &mut self,
         context: (
             HashMap<String, String>,
-            HashMap<String, DBObject>,
+            HashMap<String, Relation>,
             Option<String>,
         ),
     ) {
@@ -192,43 +194,34 @@ impl<'a> Analyzer<'a> {
     fn analyze_identifier(&mut self, ident: &str) -> Result<DataTypeKind, AnalyzerError> {
         // Try to find the column in current table first
         if let Some(current) = &self.ctx.current_table {
-            let obj = self.obj_exists(current)?;
-            let schema = obj.get_schema();
-            if let Some(column) = schema.find_col(ident) {
+            let obj = self
+                .get_relation(current)
+                .map_err(|e| AnalyzerError::NotFound(current.to_string()))?;
+            let schema = obj.schema();
+            if let Some(column) = schema.column(ident) {
                 return Ok(column.dtype);
             }
         }
 
         // If not found and we have multiple tables, search in all of them
         if self.ctx.table_aliases.len() > 1 {
-            let mut found_types = Vec::new();
-
             for table in self.ctx.table_aliases.values() {
-                let obj = self.obj_exists(table)?;
-                let schema = obj.get_schema();
-                if let Some(column) = schema.find_col(ident) {
+                let obj = self.get_relation(table)?;
+                let schema = obj.schema();
+                if let Some(column) = schema.column(ident) {
                     return Ok(column.dtype);
                 }
             }
 
             // Check subqueries too
             for subquery in self.ctx.subqueries.values() {
-                let schema = subquery.get_schema();
-                if let Some(column) = schema.find_col(ident) {
+                let schema = subquery.schema();
+                if let Some(column) = schema.column(ident) {
                     return Ok(column.dtype);
                 }
             }
 
-            match found_types.len() {
-                0 => Err(AnalyzerError::NotFound(ident.to_string())),
-                1 => Ok(found_types[0]),
-                _ => {
-                    // Ambiguous column reference when multiple tables have the same column
-                    // In a real database this would be an error, but we'll take the first one
-                    // for simplicity. In production, this should return an ambiguous column error.
-                    Ok(found_types[0])
-                }
-            }
+            Err(AnalyzerError::NotFound(ident.to_string()))
         } else if self.ctx.current_table.is_none() && self.ctx.table_aliases.is_empty() {
             Err(AnalyzerError::AliasNotProvided)
         } else {
@@ -293,18 +286,20 @@ impl<'a> Analyzer<'a> {
 
                 // Check in subqueries first
                 if let Some(subquery) = self.ctx.subqueries.get(table) {
-                    let schema = subquery.get_schema();
-                    if let Some(column) = schema.find_col(column) {
+                    let schema = subquery.schema();
+                    if let Some(column) = schema.column(column) {
                         return Ok(ExprResult::Value(column.dtype));
                     }
                 }
 
                 // Then check in regular tables
-                let obj = self.obj_exists(real_table)?;
-                let schema = obj.get_schema();
+                let obj = self
+                    .get_relation(real_table)
+                    .map_err(|e| AnalyzerError::NotFound(real_table.to_string()))?;
+                let schema = obj.schema();
 
                 schema
-                    .find_col(column)
+                    .column(column)
                     .map(|c| ExprResult::Value(c.dtype))
                     .ok_or_else(|| AnalyzerError::NotFound(format!("{table}.{column}")))
             }
@@ -544,8 +539,10 @@ impl<'a> Analyzer<'a> {
                 let mut processed = HashSet::new();
                 for (alias, table) in self.ctx.table_aliases.iter() {
                     if processed.insert(table.clone()) {
-                        let obj = self.obj_exists(table)?;
-                        let schema = obj.get_schema();
+                        let obj = self
+                            .get_relation(table)
+                            .map_err(|e| AnalyzerError::NotFound(table.to_string()))?;
+                        let schema = obj.schema();
                         let types: Vec<DataTypeKind> =
                             schema.columns.iter().map(|c| c.dtype).collect();
                         out.extend(types);
@@ -554,7 +551,7 @@ impl<'a> Analyzer<'a> {
 
                 // Add columns from subqueries
                 for subq in self.ctx.subqueries.values() {
-                    let schema = subq.get_schema();
+                    let schema = subq.schema();
                     let types: Vec<DataTypeKind> = schema.columns.iter().map(|c| c.dtype).collect();
                     out.extend(types);
                 }
@@ -584,7 +581,10 @@ impl<'a> Analyzer<'a> {
     fn analyze_table_ref(&mut self, reference: &TableReference) -> Result<(), AnalyzerError> {
         match reference {
             TableReference::Table { name, alias } => {
-                let obj = self.obj_exists(name)?;
+
+                let obj = self
+                    .get_relation(name)
+                    .map_err(|e| AnalyzerError::NotFound(name.to_string()))?;
                 self.ctx.current_table = Some(name.to_string());
 
                 if let Some(aliased) = alias {
@@ -622,8 +622,8 @@ impl<'a> Analyzer<'a> {
                 self.ctx.restore_context(saved_context);
 
                 // Add subquery to context
-                let obj =
-                    DBObject::new(ObjectType::Table, alias, Some(&schema.write_to().unwrap()));
+                let obj = Relation::TableRel(Table::new(alias, crate::types::PAGE_ZERO, schema));
+
                 self.ctx.subqueries.insert(alias.to_string(), obj);
                 self.ctx.table_aliases.insert(alias.clone(), alias.clone());
             }
@@ -647,8 +647,10 @@ impl<'a> Analyzer<'a> {
                     // Process main table first if exists
                     if let Some(current) = &self.ctx.current_table {
                         if processed_tables.insert(current.clone()) {
-                            let obj = self.obj_exists(current)?;
-                            let schema = obj.get_schema();
+                            let obj = self
+                                .get_relation(current)
+                                .map_err(|e| AnalyzerError::NotFound(current.to_string()))?;
+                            let schema = obj.schema();
                             out_columns.extend(schema.columns.clone());
                         }
                     }
@@ -656,15 +658,17 @@ impl<'a> Analyzer<'a> {
                     // Process aliased tables
                     for (alias, table) in self.ctx.table_aliases.iter() {
                         if processed_tables.insert(table.clone()) {
-                            let obj = self.obj_exists(table)?;
-                            let schema = obj.get_schema();
+                            let obj = self
+                                .get_relation(table)
+                                .map_err(|e| AnalyzerError::NotFound(table.to_string()))?;
+                            let schema = obj.schema();
                             out_columns.extend(schema.columns.clone());
                         }
                     }
 
                     // Process subqueries
                     for subq in self.ctx.subqueries.values() {
-                        let schema = subq.get_schema();
+                        let schema = subq.schema();
                         out_columns.extend(schema.columns.clone());
                     }
                 }
@@ -720,11 +724,11 @@ impl<'a> Analyzer<'a> {
             self.analyze_expr(group_by)?;
         }
 
-        Ok(Schema::from(out_columns.as_slice()))
+        Ok(Schema::from_columns(out_columns.as_slice(), 0))
     }
 
     pub fn analyze(&mut self, stmt: &Statement) -> Result<(), AnalyzerError> {
-        // Clear query context for each new statement (except transaction state)
+        // Clear query context for each new statement
         self.ctx.clear_query_context();
 
         match stmt {
@@ -757,7 +761,7 @@ impl<'a> Analyzer<'a> {
                     // Restore context and add CTE
                     self.ctx.restore_context(saved_context);
                     let obj =
-                        DBObject::new(ObjectType::Table, alias, Some(&schema.write_to().unwrap()));
+                        Relation::TableRel(Table::new(alias, crate::types::PAGE_ZERO, schema));
                     self.ctx.subqueries.insert(alias.to_string(), obj);
                 }
 
@@ -765,14 +769,16 @@ impl<'a> Analyzer<'a> {
                 self.analyze_select(&s.body)?;
             }
             Statement::Insert(s) => {
-                let obj = self.obj_exists(&s.table)?;
-                let schema = obj.get_schema();
+                let obj = self
+                    .get_relation(&s.table)
+                    .map_err(|e| AnalyzerError::NotFound(s.table.to_string()))?;
+                let schema = obj.schema();
 
                 let columns: Vec<&Column> = if let Some(cols) = &s.columns {
                     cols.iter()
                         .map(|c| {
                             schema
-                                .find_col(c)
+                                .column(c)
                                 .ok_or_else(|| AnalyzerError::NotFound(c.clone()))
                         })
                         .collect::<Result<Vec<_>, _>>()?
@@ -826,7 +832,7 @@ impl<'a> Analyzer<'a> {
                 }
             }
             Statement::CreateTable(stmt) => {
-                if self.obj_exists(&stmt.table).is_ok() {
+                if let Ok(SearchResult::Found(_)) = self.db.lookup(&stmt.table) {
                     return Err(AnalyzerError::AlreadyExists(AlreadyExists::Table(
                         stmt.table.clone(),
                     )));
@@ -883,8 +889,10 @@ impl<'a> Analyzer<'a> {
                                 }
                             }
                             ColumnConstraintExpr::ForeignKey { table, column } => {
-                                let other_obj = self.obj_exists(table)?;
-                                if let Some(schema_col) = other_obj.get_schema().find_col(column) {
+                                let other_obj = self
+                                    .get_relation(table)
+                                    .map_err(|e| AnalyzerError::NotFound(table.to_string()))?;
+                                if let Some(schema_col) = other_obj.schema().column(column) {
                                     if !schema_col.dtype.can_be_coerced(col.data_type)
                                         && !col.data_type.can_be_coerced(schema_col.dtype)
                                     {
@@ -926,36 +934,51 @@ impl<'a> Analyzer<'a> {
                                 return Err(AnalyzerError::MissingColumns);
                             };
 
-                            let other_obj = self.obj_exists(ref_table)?;
-                            self.obj_has_columns(&other_obj, ref_columns)?;
+                            let other_obj = self
+                                .get_relation(ref_table)
+                                .map_err(|e| AnalyzerError::NotFound(ref_table.to_string()))?;
 
-                            // Verify type compatibility
-                            if columns.len() != ref_columns.len() {
+                            let other_set: HashSet<String> = other_obj
+                                .columns()
+                                .iter()
+                                .map(|c| c.name().to_string())
+                                .collect();
+
+                            if ref_columns.iter().any(|c| !other_set.contains(c)) {
                                 return Err(AnalyzerError::MissingColumns);
-                            }
+                            };
+
+                            // TODO: MUST VERIFY TYPE COMPATIBILTY BETWEEN COLUMNS
                         }
                         _ => {}
                     }
                 }
             }
             Statement::AlterTable(stmt) => {
-                let obj = self.obj_exists(&stmt.table)?;
+                let obj = self
+                    .get_relation(&stmt.table)
+                    .map_err(|e| AnalyzerError::NotFound(stmt.table.to_string()))?;
+                let obj_set: HashSet<String> =
+                    obj.columns().iter().map(|c| c.name().to_string()).collect();
 
                 match &stmt.action {
                     AlterAction::AddColumn(col) => {
-                        if self.obj_has_columns(&obj, &[col.name.to_string()]).is_ok() {
+                        if obj_set.contains(&col.name) {
                             return Err(AnalyzerError::AlreadyExists(AlreadyExists::Column(
-                                obj.name(),
+                                obj.name().to_string(),
                                 col.name.to_string(),
                             )));
                         }
                     }
                     AlterAction::AlterColumn(alter_col) => {
-                        self.obj_has_columns(&obj, &[alter_col.name.to_string()])?;
-                        let schema = obj.get_schema();
+                        if !obj_set.contains(&alter_col.name) {
+                            return Err(AnalyzerError::MissingColumns);
+                        };
+
+                        let schema = obj.schema();
 
                         let column = schema
-                            .find_col(&alter_col.name)
+                            .column(&alter_col.name)
                             .ok_or_else(|| AnalyzerError::NotFound(alter_col.name.to_string()))?;
 
                         match &alter_col.action {
@@ -984,27 +1007,40 @@ impl<'a> Analyzer<'a> {
                             ref_table,
                             ref_columns,
                         } => {
-                            self.obj_has_columns(&obj, columns)?;
-                            let other_obj = self.obj_exists(ref_table)?;
-                            self.obj_has_columns(&other_obj, ref_columns)?;
+                            if columns.iter().any(|c| !obj_set.contains(c)) {
+                                return Err(AnalyzerError::MissingColumns);
+                            };
+                            let other_obj = self
+                                .get_relation(ref_table)
+                                .map_err(|e| AnalyzerError::NotFound(stmt.table.to_string()))?;
+                            let other_set: HashSet<String> = other_obj
+                                .columns()
+                                .iter()
+                                .map(|c| c.name().to_string())
+                                .collect();
+                            if ref_columns.iter().any(|c| !other_set.contains(c)) {
+                                return Err(AnalyzerError::MissingColumns);
+                            };
                         }
                         TableConstraintExpr::PrimaryKey(cols) => {
-                            let schema = obj.get_schema();
+                            let schema = obj.schema();
                             if schema.has_pk() {
                                 return Err(AnalyzerError::MultiplePrimaryKeys);
                             };
-                            self.obj_has_columns(&obj, cols)?;
+                            if cols.iter().any(|c| !obj_set.contains(c)) {
+                                return Err(AnalyzerError::MissingColumns);
+                            };
                         }
-                        TableConstraintExpr::Unique(cols) => {
-                            self.obj_has_columns(&obj, cols)?;
-                        }
+                        TableConstraintExpr::Unique(cols) => {}
                         _ => {}
                     },
                     AlterAction::DropColumn(col) => {
-                        self.obj_has_columns(&obj, &[col.to_string()])?;
+                        if !obj_set.contains(col) {
+                            return Err(AnalyzerError::MissingColumns);
+                        };
                     }
                     AlterAction::DropConstraint(name) => {
-                        let schema = obj.get_schema();
+                        let schema = obj.schema();
                         // Note: The original logic seems reversed - should check if constraint exists
                         if !schema.has_constraint(name) {
                             return Err(AnalyzerError::NotFound(name.to_string()));
@@ -1013,7 +1049,8 @@ impl<'a> Analyzer<'a> {
                 }
             }
             Statement::Delete(stmt) => {
-                self.obj_exists(&stmt.table)?;
+                self.get_relation(&stmt.table)
+                    .map_err(|e| AnalyzerError::NotFound(stmt.table.to_string()))?;
                 self.ctx
                     .table_aliases
                     .insert(stmt.table.to_string(), stmt.table.to_string());
@@ -1024,12 +1061,14 @@ impl<'a> Analyzer<'a> {
                 }
             }
             Statement::Update(stmt) => {
-                let obj = self.obj_exists(&stmt.table)?;
+                let obj = self
+                    .get_relation(&stmt.table)
+                    .map_err(|e| AnalyzerError::NotFound(stmt.table.to_string()))?;
                 self.ctx
                     .table_aliases
                     .insert(stmt.table.to_string(), stmt.table.to_string());
                 self.ctx.current_table = Some(stmt.table.to_string());
-                let schema = obj.get_schema();
+                let schema = obj.schema();
 
                 if let Some(clause) = &stmt.where_clause {
                     self.analyze_expr(clause)?;
@@ -1037,7 +1076,7 @@ impl<'a> Analyzer<'a> {
 
                 for column in stmt.set_clauses.iter() {
                     let col = schema
-                        .find_col(&column.column)
+                        .column(&column.column)
                         .ok_or_else(|| AnalyzerError::NotFound(column.column.to_string()))?;
 
                     if matches!(column.value, Expr::Null) && col.is_non_null() {
@@ -1071,53 +1110,29 @@ impl<'a> Analyzer<'a> {
             }
             Statement::DropTable(stmt) => {
                 if !stmt.if_exists {
-                    self.obj_exists(&stmt.table)?;
+                    self.get_relation(&stmt.table)
+                        .map_err(|e| AnalyzerError::NotFound(stmt.table.to_string()))?;
                 };
             }
             Statement::CreateIndex(stmt) => {
-                if self.obj_exists(&stmt.name).is_ok() && !stmt.if_not_exists {
+                if self.get_relation(&stmt.name).is_ok() && !stmt.if_not_exists {
                     return Err(AnalyzerError::AlreadyExists(AlreadyExists::Index(
                         stmt.name.clone(),
                     )));
                 }
-                let obj = self.obj_exists(&stmt.table)?;
+                let obj = self
+                    .get_relation(&stmt.table)
+                    .map_err(|e| AnalyzerError::NotFound(stmt.table.to_string()))?;
+                let obj_set: HashSet<String> =
+                    obj.columns().iter().map(|c| c.name().to_string()).collect();
                 let columns: Vec<String> =
                     stmt.columns.iter().map(|c| c.name.to_string()).collect();
-                self.obj_has_columns(&obj, &columns)?;
+
+                if columns.iter().any(|c| !obj_set.contains(c)) {
+                    return Err(AnalyzerError::MissingColumns);
+                };
             }
         }
-        Ok(())
-    }
-
-    fn obj_exists(&self, obj_name: &str) -> Result<DBObject, AnalyzerError> {
-        if let Some(subquery) = self.ctx.subqueries.get(obj_name) {
-            return Ok(subquery.clone());
-        };
-
-        let oid = self
-            .db
-            .search_obj(obj_name)
-            .map_err(|_| AnalyzerError::NotFound(obj_name.to_string()))?;
-
-        let obj = self
-            .db
-            .get_obj(oid)
-            .map_err(|_| AnalyzerError::NotFound(obj_name.to_string()))?;
-
-        Ok(obj)
-    }
-
-    fn obj_has_columns(&self, obj: &DBObject, cols: &[String]) -> Result<(), AnalyzerError> {
-        if let Some(metadata) = obj.metadata() {
-            if let Ok((schema, _)) = Schema::read_from(metadata) {
-                for col in cols {
-                    if !schema.has_column(col) {
-                        return Err(AnalyzerError::NotFound(col.to_string()));
-                    };
-                }
-            };
-        };
-
         Ok(())
     }
 
@@ -1321,11 +1336,21 @@ impl<'a> Analyzer<'a> {
             }
         }
     }
+
+    fn get_relation(&self, name: &str) -> Result<Relation, AnalyzerError> {
+        if let Some(subquery) = self.ctx.subqueries.get(name) {
+            return Ok(subquery.clone());
+        };
+
+        self.db
+            .relation(name)
+            .map_err(|e| AnalyzerError::NotFound(name.to_string()))
+    }
 }
 
 #[cfg(test)]
 mod sql_analyzer_tests {
-    use crate::database::{Database, schema::Schema};
+    use crate::database::{schema::Schema, Database};
     use crate::io::pager::{Pager, SharedPager};
     use crate::sql::analyzer::{AlreadyExists, Analyzer, AnalyzerError};
     use crate::sql::lexer::Lexer;
@@ -1350,7 +1375,7 @@ mod sql_analyzer_tests {
 
         let pager = Pager::from_config(config, &path).unwrap();
 
-        let mut db = Database::new(SharedPager::from(pager));
+        let mut db = Database::new(SharedPager::from(pager), 3, 2);
         db.init()?;
 
         // Create a users table
@@ -1464,7 +1489,7 @@ mod sql_analyzer_tests {
         let sql = "INSERT INTO users (id, name, email, age) VALUES (1, 'John', NULL, 34)";
 
         let result = parse_and_analyze(sql, &db);
-        dbg!(&result);
+
         assert!(matches!(
             result,
             Err(AnalyzerError::ConstraintViolation(_, column)) if column == "email"
@@ -1480,7 +1505,7 @@ mod sql_analyzer_tests {
         let sql = "INSERT INTO users (id, name, age) VALUES (1, 'John', 'not_a_number')";
 
         let result = parse_and_analyze(sql, &db);
-        dbg!(&result);
+
         assert!(matches!(result, Err(AnalyzerError::InvalidValue(_))));
     }
 
@@ -1529,7 +1554,7 @@ mod sql_analyzer_tests {
                    FROM users u
                    JOIN posts p ON u.id = p.user_id";
         let result = parse_and_analyze(sql, &db);
-        dbg!(&result);
+
         assert!(result.is_ok());
     }
 
@@ -1606,7 +1631,7 @@ mod sql_analyzer_tests {
         let db = create_db(4096, 10, &path).unwrap();
         let sql = "UPDATE users SET name = 'Updated Name' WHERE id = 1";
         let result = parse_and_analyze(sql, &db);
-        dbg!(&result);
+
         assert!(result.is_ok());
     }
 
@@ -1728,7 +1753,7 @@ mod sql_analyzer_tests {
         let sql = "ALTER TABLE users DROP COLUMN phone";
 
         let result = parse_and_analyze(sql, &db);
-        assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
+        assert!(matches!(result, Err(AnalyzerError::MissingColumns)));
     }
 
     #[test]
@@ -1896,7 +1921,7 @@ mod sql_analyzer_tests {
         let sql = "CREATE INDEX idx_invalid ON users(invalid_column)";
 
         let result = parse_and_analyze(sql, &db);
-        assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
+        assert!(matches!(result, Err(AnalyzerError::MissingColumns)));
     }
 
     #[test]
@@ -1926,7 +1951,7 @@ mod sql_analyzer_tests {
                    VALUES (1, 'John', 'john@example.com', 25, '2024-01-15T10:30:00')";
 
         let result = parse_and_analyze(sql, &db);
-        dbg!(&result);
+
         assert!(result.is_ok());
     }
 
@@ -1952,7 +1977,7 @@ mod sql_analyzer_tests {
         let sql = "SELECT * FROM users WHERE age = 'not_a_number'";
 
         let result = parse_and_analyze(sql, &db);
-        dbg!(&result);
+
         assert!(matches!(result, Err(AnalyzerError::InvalidValue(_))));
     }
 
@@ -1964,7 +1989,6 @@ mod sql_analyzer_tests {
         let db = create_db(4096, 10, &path).unwrap();
         let sql = "SELECT * FROM users WHERE age BETWEEN 18 AND 65";
         let result = parse_and_analyze(sql, &db);
-        dbg!(&result);
         assert!(result.is_ok());
     }
 
@@ -1976,7 +2000,6 @@ mod sql_analyzer_tests {
         let db = create_db(4096, 10, &path).unwrap();
         let sql = "SELECT * FROM users WHERE id IN (1, 2, 3, 4)";
         let result = parse_and_analyze(sql, &db);
-        dbg!(&result);
         assert!(result.is_ok());
     }
 

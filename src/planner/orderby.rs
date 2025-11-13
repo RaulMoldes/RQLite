@@ -8,10 +8,7 @@ pub struct OrderBy {
 }
 impl OrderBy {
     fn new(columns: Vec<String>, direction: OrderDirection) -> Self {
-        Self {
-            columns,
-            direction
-        }
+        Self { columns, direction }
     }
 }
 impl ExecutionPlanStep for OrderBy {

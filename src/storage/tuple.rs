@@ -6,38 +6,35 @@ use crate::types::{
 };
 use crate::TextEncoding;
 
-pub struct Tuple<'a> {
+pub struct TupleRefMut<'a, 'b> {
     data: &'a mut [u8],
+    schema: &'b Schema,
     offsets: Vec<usize>,
     key_len: usize,
 }
 
-impl<'a> Tuple<'a> {
-    pub fn read(buffer: &'a mut [u8], schema: &Schema) -> std::io::Result<Tuple<'a>> {
-        let mut tuple = Tuple {
+impl<'a, 'b> TupleRefMut<'a, 'b> {
+    pub fn read(buffer: &'a mut [u8], schema: &'b Schema) -> std::io::Result<TupleRefMut<'a, 'b>> {
+        let mut tuple = TupleRefMut {
             data: buffer,
+            schema,
             offsets: Vec::with_capacity(schema.columns.len()),
             key_len: 0,
         };
 
-        // Prepend always the key.
-        if let Some(key) = schema.columns.first() {
-            tuple.offsets.push(0);
-            let (value, read_bytes) = reinterpret_cast(key.dtype, &tuple.data[0..])?;
-            tuple.key_len = read_bytes;
-        } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Cannot construct tuple from empty data",
-            ));
-        };
-
-        let null_bitmap_size = (schema.columns.len() - 1).div_ceil(8);
-        let mut cursor = tuple.key_len + null_bitmap_size;
-        for (i, col) in schema.columns.iter().skip(1).enumerate() {
+        let mut cursor = 0;
+        for key in schema.iter_keys() {
             tuple.offsets.push(cursor);
-            // i+1 because we skipped the first column (key) but is_null expects the actual column index
-            let is_null = tuple.is_null(i + 1, schema);
+            let (value, read_bytes) = reinterpret_cast(key.dtype, &tuple.data[cursor..])?;
+            tuple.key_len += read_bytes;
+            cursor += read_bytes;
+        }
+
+        let null_bitmap_size = schema.values().len().div_ceil(8);
+        cursor += null_bitmap_size;
+        for (i, col) in schema.iter_values().enumerate() {
+            tuple.offsets.push(cursor);
+            let is_null = tuple.is_null(i);
 
             if !is_null {
                 let (value, read_bytes) = reinterpret_cast(col.dtype, &tuple.data[cursor..])?;
@@ -52,64 +49,59 @@ impl<'a> Tuple<'a> {
         self.offsets.len()
     }
 
-    fn is_null(&self, mut col_idx: usize, schema: &Schema) -> bool {
-        if col_idx == 0 {
-            return false;
-        } else {
-            col_idx -= 1;
-        };
-
-        let byte_idx = col_idx / 8;
-        let bit_idx = col_idx % 8;
-        let null_bitmap_size = (schema.columns.len() - 1).div_ceil(8);
+    fn is_null(&self, val_idx: usize) -> bool {
+        let byte_idx = val_idx / 8;
+        let bit_idx = val_idx % 8;
+        let null_bitmap_size = (self.schema.values().len()).div_ceil(8);
         let bitmap = &self.data[self.key_len..self.key_len + null_bitmap_size];
         (bitmap[byte_idx] & (1 << bit_idx)) != 0
     }
 
-    pub fn value(&self, schema: &Schema, index: usize) -> std::io::Result<DataTypeRef<'_>> {
-        let dtype = schema.columns[index].dtype;
-
-        let is_null = self.is_null(index, schema);
-
+    pub fn value(&self, index: usize) -> std::io::Result<DataTypeRef<'_>> {
+        let dtype = self.schema.values()[index].dtype;
+        let is_null = self.is_null(index);
+        let offset_idx = index + self.schema.num_keys as usize;
         if !is_null {
-            let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[index]..])?;
+            let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[offset_idx]..])?;
             Ok(value)
         } else {
             Ok(DataTypeRef::Null)
         }
     }
 
-    fn value_mut(&mut self, schema: &Schema, index: usize) -> std::io::Result<DataTypeRefMut<'_>> {
-        let dtype = schema.columns[index].dtype;
-        let is_null = self.is_null(index, schema);
+    fn value_mut(&mut self, index: usize) -> std::io::Result<DataTypeRefMut<'_>> {
+        let dtype = self.schema.values()[index].dtype;
+        let is_null = self.is_null(index);
+        let offset_idx = index + self.schema.num_keys as usize;
 
         if !is_null {
-            let (value, _) = reinterpret_cast_mut(dtype, &mut self.data[self.offsets[index]..])?;
+            let (value, _) =
+                reinterpret_cast_mut(dtype, &mut self.data[self.offsets[offset_idx]..])?;
             Ok(value)
         } else {
             Ok(DataTypeRefMut::Null)
         }
     }
 
-    fn key(&self, schema: &Schema) -> std::io::Result<DataTypeRef<'_>> {
-        let dtype = schema.columns[0].dtype;
-        let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[0]..])?;
+    fn key(&self, index: usize) -> std::io::Result<DataTypeRef<'_>> {
+        let dtype = self.schema.keys()[index].dtype;
+        let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[index]..])?;
         Ok(value)
     }
 
-    fn key_mut(&mut self, schema: &Schema) -> std::io::Result<DataTypeRefMut<'_>> {
-        let dtype = schema.columns[0].dtype;
-        let (value, _) = reinterpret_cast_mut(dtype, &mut self.data[self.offsets[0]..])?;
+    fn key_mut(&mut self, index: usize) -> std::io::Result<DataTypeRefMut<'_>> {
+        let dtype = self.schema.keys()[index].dtype;
+        let (value, _) = reinterpret_cast_mut(dtype, &mut self.data[self.offsets[index]..])?;
         Ok(value)
     }
 
-    fn bitmap(&self, schema: &Schema) -> &[u8] {
-        let bitmap_len = schema.columns.len();
+    fn bitmap(&self) -> &[u8] {
+        let bitmap_len = self.schema.columns.len();
         &self.data[self.key_len..self.key_len + bitmap_len]
     }
 
-    fn bitmap_mut(&mut self, schema: &Schema) -> &mut [u8] {
-        let bitmap_len = schema.columns.len();
+    fn bitmap_mut(&mut self) -> &mut [u8] {
+        let bitmap_len = self.schema.columns.len();
         &mut self.data[self.key_len..self.key_len + bitmap_len]
     }
 
@@ -123,18 +115,13 @@ impl<'a> Tuple<'a> {
     where
         F: FnOnce(DataTypeRefMut<'_>),
     {
-        let value = self.value_mut(schema, index)?;
+        let value = self.value_mut(index)?;
         updater(value);
         Ok(())
     }
 
-    pub fn set_value(
-        &mut self,
-        schema: &Schema,
-        index: usize,
-        value: DataType,
-    ) -> std::io::Result<()> {
-        let dtype = schema.columns[index].dtype;
+    pub fn set_value(&mut self, index: usize, value: DataType) -> std::io::Result<()> {
+        let dtype = self.schema.columns[index].dtype;
         let offset = self.offsets[index];
 
         match (dtype, value) {
@@ -263,60 +250,53 @@ impl<'a> Tuple<'a> {
         Ok(())
     }
 
-    pub fn set_null(&mut self, schema: &Schema, index: usize) {
-        assert!(index > 0, "Cannot set the key to NULL");
-
-        // Fix: adjust index for the bitmap (subtract 1 since key is not in bitmap)
-        let byte_idx = (index - 1) / 8;
-        let bit_idx = (index - 1) % 8;
-        let null_bitmap_size = (schema.columns.len() - 1).div_ceil(8);
+    pub fn set_null_unchecked(&mut self, index: usize) {
+        // TODO: CHECK IF THE VALUE HAS A NON-NULL CONSTRAINT
+        let byte_idx = index / 8;
+        let bit_idx = index % 8;
+        let null_bitmap_size = self.schema.values().len().div_ceil(8);
         let bitmap = &mut self.data[self.key_len..self.key_len + null_bitmap_size];
         bitmap[byte_idx] |= 1 << bit_idx;
     }
 
-    pub fn clear_null(&mut self, schema: &Schema, index: usize) {
-        // Fix: adjust index for the bitmap (subtract 1 since key is not in bitmap)
-        let byte_idx = (index - 1) / 8;
-        let bit_idx = (index - 1) % 8;
-        let null_bitmap_size = (schema.columns.len() - 1).div_ceil(8);
+    pub fn clear_null(&mut self, index: usize) {
+        let byte_idx = index / 8;
+        let bit_idx = index % 8;
+        let null_bitmap_size = self.schema.values().len().div_ceil(8);
         let bitmap = &mut self.data[self.key_len..self.key_len + null_bitmap_size];
         bitmap[byte_idx] &= !(1 << bit_idx);
     }
 }
 
-#[derive(Debug)]
-pub struct TupleRef<'a> {
+pub struct TupleRef<'a, 'b> {
     data: &'a [u8],
+    schema: &'b Schema,
     offsets: Vec<usize>,
     key_len: usize,
 }
 
-impl<'a> TupleRef<'a> {
-    pub fn read(buffer: &'a [u8], schema: &Schema) -> std::io::Result<TupleRef<'a>> {
+impl<'a, 'b> TupleRef<'a, 'b> {
+    pub fn read(buffer: &'a [u8], schema: &'b Schema) -> std::io::Result<TupleRef<'a, 'b>> {
         let mut tuple = TupleRef {
             data: buffer,
+            schema,
             offsets: Vec::with_capacity(schema.columns.len()),
             key_len: 0,
         };
 
-        // Prepend always the key.
-        if let Some(key) = schema.columns.first() {
-            tuple.offsets.push(0);
-            let (value, read_bytes) = reinterpret_cast(key.dtype, &tuple.data[0..])?;
-            tuple.key_len = read_bytes;
-        } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Cannot construct tuple from empty data",
-            ));
-        };
-
-        let null_bitmap_size = (schema.columns.len() - 1).div_ceil(8);
-        let mut cursor = tuple.key_len + null_bitmap_size;
-        for (i, col) in schema.columns.iter().skip(1).enumerate() {
+        let mut cursor = 0;
+        for key in schema.iter_keys() {
             tuple.offsets.push(cursor);
-            // i+1 because we skipped the first column (key) but is_null expects the actual column index
-            let is_null = tuple.is_null(i + 1, schema);
+            let (value, read_bytes) = reinterpret_cast(key.dtype, &tuple.data[cursor..])?;
+            tuple.key_len += read_bytes;
+            cursor += read_bytes;
+        }
+
+        let null_bitmap_size = schema.values().len().div_ceil(8);
+        cursor += null_bitmap_size;
+        for (i, col) in schema.iter_values().enumerate() {
+            tuple.offsets.push(cursor);
+            let is_null = tuple.is_null(i);
 
             if !is_null {
                 let (value, read_bytes) = reinterpret_cast(col.dtype, &tuple.data[cursor..])?;
@@ -331,71 +311,50 @@ impl<'a> TupleRef<'a> {
         self.offsets.len()
     }
 
-    fn is_null(&self, mut col_idx: usize, schema: &Schema) -> bool {
-        if col_idx == 0 {
-            return false;
-        } else {
-            col_idx -= 1;
-        };
-
-        let byte_idx = col_idx / 8;
-        let bit_idx = col_idx % 8;
-        let null_bitmap_size = (schema.columns.len() - 1).div_ceil(8);
+    fn is_null(&self, val_idx: usize) -> bool {
+        let byte_idx = val_idx / 8;
+        let bit_idx = val_idx % 8;
+        let null_bitmap_size = (self.schema.values().len()).div_ceil(8);
         let bitmap = &self.data[self.key_len..self.key_len + null_bitmap_size];
         (bitmap[byte_idx] & (1 << bit_idx)) != 0
     }
 
-    pub fn value(&self, schema: &Schema, index: usize) -> std::io::Result<DataTypeRef<'_>> {
-        let dtype = schema.columns[index].dtype;
-        // Fix: use index directly, not index - 1
-        let is_null = self.is_null(index, schema);
-
+    pub fn value(&self, index: usize) -> std::io::Result<DataTypeRef<'_>> {
+        let dtype = self.schema.values()[index].dtype;
+        let is_null = self.is_null(index);
+        let offset_idx = index + self.schema.num_keys as usize;
         if !is_null {
-            let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[index]..])?;
+            let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[offset_idx]..])?;
             Ok(value)
         } else {
             Ok(DataTypeRef::Null)
         }
     }
 
-    fn key(&self, schema: &Schema) -> std::io::Result<DataTypeRef<'_>> {
-        let dtype = schema.columns[0].dtype;
-        let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[0]..])?;
+    pub fn key(&self, index: usize) -> std::io::Result<DataTypeRef<'_>> {
+        let dtype = self.schema.keys()[index].dtype;
+        let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[index]..])?;
         Ok(value)
     }
 
-    fn bitmap(&self, schema: &Schema) -> &[u8] {
-        let bitmap_len = schema.columns.len();
+    fn bitmap(&self) -> &[u8] {
+        let bitmap_len = self.schema.columns.len();
         &self.data[self.key_len..self.key_len + bitmap_len]
     }
 }
 
-pub struct TupleDisplay<'t, 's, 'a> {
-    tuple: &'t Tuple<'a>,
-    schema: &'s Schema,
-}
-
-impl<'a> Tuple<'a> {
-    pub fn display<'s>(&'a self, schema: &'s Schema) -> TupleDisplay<'a, 's, 'a> {
-        TupleDisplay {
-            tuple: self,
-            schema,
-        }
-    }
-}
-
-impl<'t, 'b, 'a> std::fmt::Display for TupleDisplay<'t, 'b, 'a> {
+impl<'a, 'b> std::fmt::Display for TupleRefMut<'a, 'b> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Tuple[")?;
-
-        for (i, col_def) in self.schema.columns.iter().enumerate() {
+        writeln!(f, "TupleRefMut: ")?;
+        write!(f, "Keys: [")?;
+        for (i, col_def) in self.schema.iter_keys().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
-            }
+            };
 
             write!(f, "{}: ", col_def.name)?;
 
-            match self.tuple.value(self.schema, i) {
+            match self.key(i) {
                 Ok(value) => match value {
                     DataTypeRef::Null => write!(f, "NULL")?,
                     DataTypeRef::SmallInt(v) => write!(f, "{}", v.to_owned())?,
@@ -414,7 +373,47 @@ impl<'t, 'b, 'a> std::fmt::Display for TupleDisplay<'t, 'b, 'a> {
                     DataTypeRef::Date(v) => write!(f, "{}", v.to_owned())?,
                     DataTypeRef::DateTime(v) => write!(f, "{}", v.to_owned())?,
                     DataTypeRef::Blob(b) => write!(f, "Blob({} bytes)", b.len())?,
-                    DataTypeRef::Text(b) => write!(f, "\"{}\"", b.as_str(TextEncoding::Utf8))?,
+                    DataTypeRef::Text(b) => {
+                        write!(f, "Text: \"{}\"", b.as_str(TextEncoding::Utf8))?
+                    }
+                },
+                Err(e) => {
+                    write!(f, "<error: {e}>")?;
+                }
+            }
+        }
+
+        writeln!(f, "]")?;
+        write!(f, "Values: [")?;
+        for (i, col_def) in self.schema.iter_values().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            };
+
+            write!(f, "{}: ", col_def.name)?;
+
+            match self.value(i) {
+                Ok(value) => match value {
+                    DataTypeRef::Null => write!(f, "NULL")?,
+                    DataTypeRef::SmallInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::HalfInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Int(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::BigInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::SmallUInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::HalfUInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::UInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::BigUInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Float(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Double(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Byte(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Char(v) => write!(f, "'{}'", v.to_owned().to_char())?,
+                    DataTypeRef::Boolean(v) => write!(f, "{}", v.to_owned() != 0)?,
+                    DataTypeRef::Date(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::DateTime(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Blob(b) => write!(f, "Blob({} bytes)", b.len())?,
+                    DataTypeRef::Text(b) => {
+                        write!(f, "Text: \"{}\"", b.as_str(TextEncoding::Utf8))?
+                    }
                 },
                 Err(e) => {
                     write!(f, "<error: {e}>")?;
@@ -428,91 +427,239 @@ impl<'t, 'b, 'a> std::fmt::Display for TupleDisplay<'t, 'b, 'a> {
     }
 }
 
-pub(crate) fn tuple(values: &[DataType], schema: &Schema) -> std::io::Result<Box<[u8]>> {
-    if values.len() > schema.columns.len() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "Too many values: {} values for {} columns",
-                values.len(),
-                schema.columns.len()
-            ),
-        ));
-    }
+impl<'a, 'b> std::fmt::Display for TupleRef<'a, 'b> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "TupleRef: ")?;
+        write!(f, "Keys: [")?;
+        for (i, col_def) in self.schema.iter_keys().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            };
 
-    for (i, (value, col_def)) in values.iter().zip(schema.columns.iter()).enumerate() {
-        if !value.matches(col_def.dtype) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "Type mismatch at column {}: expected {:?}, got {:?}",
-                    i, col_def.dtype, value
-                ),
-            ));
-        }
-    }
+            write!(f, "{}: ", col_def.name)?;
 
-    let key_size = values.first().map(|v| v.size()).unwrap_or(0);
-    let null_bitmap_size = schema.columns.len().saturating_sub(1).div_ceil(8);
-
-    let mut total_size = key_size + null_bitmap_size;
-    for value in values.iter().skip(1) {
-        if !matches!(value, DataType::Null) {
-            total_size += value.size();
-        }
-    }
-    // Single allocation with exact size
-    let mut buffer: Box<[std::mem::MaybeUninit<u8>]> = Box::new_uninit_slice(total_size);
-
-    // Safe initialization
-    unsafe {
-        // Initialize null bitmap to 0
-        let ptr = buffer.as_mut_ptr() as *mut u8;
-        let mut cursor = 0;
-
-        // Write the key first.
-        if let Some(value) = values.first() {
-            let data = value.as_ref();
-            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
-            cursor += data.len();
-        }
-
-        std::ptr::write_bytes(ptr.add(cursor), 0, null_bitmap_size);
-        let bitmap_start = cursor;
-        cursor += null_bitmap_size;
-
-        // Write values
-        for (col_idx, col_def) in schema.columns.iter().enumerate().skip(1) {
-            let value_opt = values.get(col_idx);
-            match value_opt {
-                Some(DataType::Null) | None => {
-                    // Set null bit
-                    let i = col_idx - 1; // offset because bitmap covers only non-key columns
-
-                    let byte_idx = i / 8;
-                    let bit_idx = i % 8;
-                    *ptr.add(bitmap_start + byte_idx) |= 1 << bit_idx;
+            match self.key(i) {
+                Ok(value) => match value {
+                    DataTypeRef::Null => write!(f, "NULL")?,
+                    DataTypeRef::SmallInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::HalfInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Int(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::BigInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::SmallUInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::HalfUInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::UInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::BigUInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Float(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Double(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Byte(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Char(v) => write!(f, "'{}'", v.to_owned().to_char())?,
+                    DataTypeRef::Boolean(v) => write!(f, "{}", v.to_owned() != 0)?,
+                    DataTypeRef::Date(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::DateTime(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Blob(b) => write!(f, "Blob({} bytes)", b.len())?,
+                    DataTypeRef::Text(b) => {
+                        write!(f, "Text: \"{}\"", b.as_str(TextEncoding::Utf8))?
+                    }
+                },
+                Err(e) => {
+                    write!(f, "<error: {e}>")?;
                 }
-                Some(value) => {
-                    let data = value.as_ref();
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
-                    cursor += data.len();
+            }
+        }
+        writeln!(f, "]")?;
+        write!(f, "Values: [")?;
+        for (i, col_def) in self.schema.iter_values().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            };
+
+            write!(f, "{}: ", col_def.name)?;
+
+            match self.value(i) {
+                Ok(value) => match value {
+                    DataTypeRef::Null => write!(f, "NULL")?,
+                    DataTypeRef::SmallInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::HalfInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Int(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::BigInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::SmallUInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::HalfUInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::UInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::BigUInt(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Float(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Double(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Byte(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Char(v) => write!(f, "'{}'", v.to_owned().to_char())?,
+                    DataTypeRef::Boolean(v) => write!(f, "{}", v.to_owned() != 0)?,
+                    DataTypeRef::Date(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::DateTime(v) => write!(f, "{}", v.to_owned())?,
+                    DataTypeRef::Blob(b) => write!(f, "Blob({} bytes)", b.len())?,
+                    DataTypeRef::Text(b) => {
+                        write!(f, "Text: \"{}\"", b.as_str(TextEncoding::Utf8))?
+                    }
+                },
+                Err(e) => {
+                    write!(f, "<error: {e}>")?;
                 }
             }
         }
 
-        Ok(Box::from_raw(Box::into_raw(buffer) as *mut [u8]))
+        write!(f, "];\n")?;
+
+        Ok(())
     }
 }
 
+pub struct Tuple<'schema> {
+    data: Box<[u8]>,
+    schema: &'schema Schema,
+    offsets: Vec<usize>,
+    key_len: usize,
+}
+
+impl<'schema> Tuple<'schema> {
+    pub(crate) fn from_data(values: &[DataType], schema: &'schema Schema) -> std::io::Result<Self> {
+        if values.len() > schema.columns.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Too many values: {} values for {} columns",
+                    values.len(),
+                    schema.columns.len()
+                ),
+            ));
+        }
+
+        for (i, (value, col_def)) in values.iter().zip(schema.iter_columns()).enumerate() {
+            if !value.matches(col_def.dtype) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "Type mismatch at column {}: expected {:?}, got {:?}",
+                        i, col_def.dtype, value
+                    ),
+                ));
+            }
+        }
+
+        let mut key_len = 0;
+        let mut offsets: Vec<usize> = Vec::with_capacity(schema.columns().len());
+
+        // Compute the required size.
+        let null_bitmap_size = schema.values().len().div_ceil(8);
+        let mut total_size = values.iter().map(|c| c.size()).sum();
+        total_size += null_bitmap_size;
+
+        // Single allocation with exact size
+        let mut buffer: Box<[std::mem::MaybeUninit<u8>]> = Box::new_uninit_slice(total_size);
+
+        // Safe initialization
+        let data = unsafe {
+            // Initialize null bitmap to 0
+            let ptr = buffer.as_mut_ptr() as *mut u8;
+            let mut cursor = 0;
+
+            // Write the key first.
+            for value in values.iter().take(schema.num_keys as usize) {
+                let data = value.as_ref();
+                offsets.push(cursor);
+                key_len += cursor;
+                std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
+                cursor += data.len();
+            }
+
+            std::ptr::write_bytes(ptr.add(cursor), 0, null_bitmap_size);
+            let bitmap_start = cursor;
+            cursor += null_bitmap_size;
+
+            // Write values
+            for (i, col_def) in schema
+                .columns
+                .iter()
+                .enumerate()
+                .skip(schema.num_keys as usize)
+            {
+                let value_opt = values.get(i);
+                match value_opt {
+                    Some(DataType::Null) | None => {
+                        let byte_idx = i / 8;
+                        let bit_idx = i % 8;
+                        *ptr.add(bitmap_start + byte_idx) |= 1 << bit_idx;
+                    }
+                    Some(value) => {
+                        let data = value.as_ref();
+                        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
+                        cursor += data.len();
+                    }
+                }
+            }
+
+            Box::from_raw(Box::into_raw(buffer) as *mut [u8])
+        };
+
+        Ok(Self {
+            data,
+            schema,
+            offsets,
+            key_len,
+        })
+    }
+}
+
+impl<'a> From<Tuple<'a>> for Box<[u8]> {
+    fn from(value: Tuple<'a>) -> Self {
+        value.data
+    }
+}
+
+impl<'schema> AsRef<[u8]> for Tuple<'schema> {
+    fn as_ref(&self) -> &[u8] {
+        self.data.as_ref()
+    }
+}
+
+impl<'a, 'b> AsRef<[u8]> for TupleRef<'a, 'b> {
+    fn as_ref(&self) -> &[u8] {
+        self.data
+    }
+}
+
+impl<'schema> AsMut<[u8]> for Tuple<'schema> {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.data.as_mut()
+    }
+}
+
+impl<'a, 'b> AsMut<[u8]> for TupleRefMut<'a, 'b> {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.data
+    }
+}
+
+impl<'a> From<&'a Tuple<'a>> for TupleRef<'a, 'a> {
+    fn from(t: &'a Tuple<'a>) -> Self {
+        TupleRef::read(t.as_ref(), t.schema).unwrap()
+    }
+}
+
+impl<'a> From<&'a mut Tuple<'a>> for TupleRefMut<'a, 'a> {
+    fn from(t: &'a mut Tuple<'a>) -> Self {
+        let schema = t.schema;
+        let data = t.data.as_mut();
+        TupleRefMut::read(data, schema).unwrap()
+    }
+}
 #[cfg(test)]
 mod tests {
+
+
+    // TODO! MUST CREATE A MACRO TO AUTOMATE TEST GENERATION HERE.
     use super::*;
     use crate::database::schema::Column;
-    use crate::types::{Blob, DataType, Float64, Int32, UInt8};
+    use crate::types::{DataType, Float64, Int32, UInt8};
 
-    fn create_schema() -> Schema {
-        Schema::from(
+    fn create_single_key_schema() -> Schema {
+        Schema::from_columns(
             [
                 Column::new_unindexed(DataTypeKind::Int, "id", None),
                 Column::new_unindexed(DataTypeKind::Text, "name", None),
@@ -522,144 +669,141 @@ mod tests {
                 Column::new_unindexed(DataTypeKind::Text, "description", None),
             ]
             .as_ref(),
+            1,
         )
     }
 
-    fn create_blob(content: &str) -> Vec<u8> {
-        let mut len_buf = [0u8; 9];
-        let mut blob = VarInt::encode(content.len() as i64, &mut len_buf).to_vec();
-        blob.extend_from_slice(content.as_bytes());
-        blob
-    }
-
-    #[test]
-    fn test_serialization() {
-        let schema = create_schema();
-
-        let id = 42;
-        let name = "Test tuple";
-        let active: Option<bool> = None;
-        let balance = 1234.5678;
-        let bonus = 99.9;
-        let description = "Initial description";
-
-        let values = vec![
-            DataType::Int(Int32(id)),
-            DataType::Text(Blob::from(name)),
-            DataType::Null,
-            DataType::Double(Float64(balance)),
-            DataType::Double(Float64(bonus)),
-            DataType::Text(Blob::from(description)),
-        ];
-
-        let tuple_buffer = tuple(&values, &schema).unwrap();
-
-        let mut tuple_bytes = tuple_buffer.to_vec();
-        let tuple = Tuple::read(&mut tuple_bytes, &schema).unwrap();
-
-        println!("{}", tuple.display(&schema));
-
-        let id_ref = tuple.value(&schema, 0).unwrap();
-        assert_eq!(id_ref.as_ref(), &id.to_le_bytes());
-
-        let name_ref = tuple.value(&schema, 1).unwrap();
-        assert_eq!(name_ref.as_ref(), name.as_bytes());
-
-        let active_ref = tuple.value(&schema, 2).unwrap();
-        assert!(matches!(active_ref, DataTypeRef::Null));
-
-        let balance_ref = tuple.value(&schema, 3).unwrap();
-        assert_eq!(balance_ref.as_ref(), &balance.to_le_bytes());
-
-        let bonus_ref = tuple.value(&schema, 4).unwrap();
-        assert_eq!(bonus_ref.as_ref(), &bonus.to_le_bytes());
-    }
-
-    #[test]
-    fn test_updates() {
-        let schema = create_schema();
-
-        let id = 42;
-        let name = "Test tuple";
-        let balance = 1234.5678;
-        let bonus = 99.9;
-        let description = "Initial description";
-
-        let values = vec![
-            DataType::Int(Int32(id)),
-            DataType::Text(Blob::from(name)),
-            DataType::Null,
-            DataType::Double(Float64(balance)),
-            DataType::Double(Float64(bonus)),
-            DataType::Text(Blob::from(description)),
-        ];
-
-        let tuple_buffer = tuple(&values, &schema).unwrap();
-        let mut buffer_vec = tuple_buffer.to_vec();
-
-        let mut tuple = Tuple::read(&mut buffer_vec, &schema).unwrap();
-
-        println!("Before update:\n{}", tuple.display(&schema));
-
-        let bonus_ref = tuple.value(&schema, 4).unwrap();
-        assert_eq!(bonus_ref.as_ref(), &bonus.to_le_bytes());
-
-        let new_bonus = 100.0;
-        tuple
-            .set_value(&schema, 4, DataType::Double(Float64(new_bonus)))
-            .unwrap();
-
-        let new_description = "Updated description";
-        let mut blob = create_blob(new_description);
-        tuple
-            .set_value(&schema, 5, DataType::Text(Blob::from_bytes(blob.as_mut())))
-            .unwrap();
-
-        let bonus_ref = tuple.value(&schema, 4).unwrap();
-        assert_eq!(bonus_ref.as_ref(), &new_bonus.to_le_bytes());
-
-        let desc_ref = tuple.value(&schema, 5).unwrap();
-        assert_eq!(desc_ref.as_ref(), new_description.as_bytes());
-
-        tuple.set_null(&schema, 4);
-        let bonus_ref = tuple.value(&schema, 4).unwrap();
-        assert!(matches!(bonus_ref, DataTypeRef::Null));
-
-        tuple.clear_null(&schema, 4);
-        let bonus_ref = tuple.value(&schema, 4).unwrap();
-        assert_eq!(bonus_ref.as_ref(), &new_bonus.to_le_bytes());
-
-        println!("After update:\n{}", tuple.display(&schema));
-    }
-    #[test]
-    fn test_tuple_creation() {
-        let schema = Schema::from(
+    fn create_multi_key_schema() -> Schema {
+        Schema::from_columns(
             [
                 Column::new_unindexed(DataTypeKind::Int, "id", None),
-                Column::new_unindexed(DataTypeKind::Text, "name", None),
+                Column::new_unindexed(DataTypeKind::Text, "product_name", None),
                 Column::new_unindexed(DataTypeKind::Boolean, "active", None),
+                Column::new_unindexed(DataTypeKind::Double, "balance", None),
+                Column::new_unindexed(DataTypeKind::Double, "bonus", None),
+                Column::new_unindexed(DataTypeKind::Text, "description", None),
             ]
             .as_ref(),
-        );
+            2,
+        )
+    }
+
+    #[test]
+    fn test_tuple_1() -> std::io::Result<()> {
+        let schema = create_single_key_schema();
 
         let values = vec![
             DataType::Int(Int32(42)),
-            DataType::Text(Blob::from("Alice")),
+            DataType::Text("Alice".into()),
             DataType::Boolean(UInt8(1)),
+            DataType::Double(Float64(100.5)),
+            DataType::Double(Float64(10.0)),
+            DataType::Text("User description".into()),
         ];
 
-        let tuple_buffer = tuple(&values, &schema).unwrap();
+        let tuple = Tuple::from_data(&values, &schema)?;
+        assert!(!tuple.as_ref().is_empty());
 
-        dbg!(&tuple_buffer);
-        let expected_size = 1 + 4 + (1 + 5) + 1;
-        assert!(tuple_buffer.len() >= expected_size);
+        let tuple_ref = TupleRef::from(&tuple);
+        assert_eq!(tuple_ref.num_fields(), schema.columns().len());
+        println!("{tuple_ref}");
 
-        let mut buffer_vec = tuple_buffer.to_vec();
-        let tuple_ref = Tuple::read(&mut buffer_vec, &schema).unwrap();
-
-        match tuple_ref.value(&schema, 0).unwrap() {
-            DataTypeRef::Int(v) => assert_eq!(v.to_owned().0, 42),
-            _ => panic!("Wrong type for id"),
+        if let DataTypeRef::Int(v) = tuple_ref.key(0)? {
+            assert_eq!(v.to_owned(), 42);
+        } else {
+            panic!("Expected Int value");
         }
+
+        if let DataTypeRef::Text(v) = tuple_ref.value(0)? {
+            assert_eq!(v.as_str(TextEncoding::Utf8), "Alice");
+        } else {
+            panic!("Expected Text value");
+        }
+
+
+        if let DataTypeRef::Boolean(v) = tuple_ref.value(1)? {
+            assert_eq!(v.to_owned(), 1u8);
+        } else {
+            panic!("Expected bool value");
+        }
+
+        if let DataTypeRef::Double(v) = tuple_ref.value(2)? {
+            assert_eq!(v.to_owned(), 100.5);
+        } else {
+            panic!("Expected Float value");
+        }
+
+        if let DataTypeRef::Double(v) = tuple_ref.value(3)? {
+            assert_eq!(v.to_owned(), 10.0);
+        } else {
+            panic!("Expected Float value");
+        }
+
+        if let DataTypeRef::Text(v) = tuple_ref.value(4)? {
+            assert_eq!(v.as_str(TextEncoding::Utf8), "User description");
+        } else {
+            panic!("Expected Text value");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tuple_2() -> std::io::Result<()> {
+        let schema = create_multi_key_schema();
+
+        let values = vec![
+            DataType::Int(Int32(42)),
+            DataType::Text("Alice".into()),
+            DataType::Boolean(UInt8(1)),
+            DataType::Double(Float64(100.5)),
+            DataType::Double(Float64(10.0)),
+            DataType::Text("User description".into()),
+        ];
+
+        let tuple = Tuple::from_data(&values, &schema)?;
+        assert!(!tuple.as_ref().is_empty());
+
+        let tuple_ref = TupleRef::from(&tuple);
+        assert_eq!(tuple_ref.num_fields(), schema.columns().len());
+        println!("{tuple_ref}");
+
+        if let DataTypeRef::Int(v) = tuple_ref.key(0)? {
+            assert_eq!(v.to_owned(), 42);
+        } else {
+            panic!("Expected Int value");
+        }
+
+        if let DataTypeRef::Text(v) = tuple_ref.key(1)? {
+            assert_eq!(v.as_str(TextEncoding::Utf8), "Alice");
+        } else {
+            panic!("Expected Text value");
+        }
+
+        if let DataTypeRef::Boolean(v) = tuple_ref.value(0)? {
+            assert_eq!(v.to_owned(), 1u8);
+        } else {
+            panic!("Expected bool value");
+        }
+
+        if let DataTypeRef::Double(v) = tuple_ref.value(1)? {
+            assert_eq!(v.to_owned(), 100.5);
+        } else {
+            panic!("Expected Float value");
+        }
+
+        if let DataTypeRef::Double(v) = tuple_ref.value(2)? {
+            assert_eq!(v.to_owned(), 10.0);
+        } else {
+            panic!("Expected Float value");
+        }
+
+        if let DataTypeRef::Text(v) = tuple_ref.value(3)? {
+            assert_eq!(v.as_str(TextEncoding::Utf8), "User description");
+        } else {
+            panic!("Expected Text value");
+        }
+
+        Ok(())
     }
 }

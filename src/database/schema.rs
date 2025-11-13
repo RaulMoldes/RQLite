@@ -1,22 +1,26 @@
 use crate::io::pager::SharedPager;
 use crate::storage::{
     page::BtreePage,
-    tuple::{tuple, Tuple, TupleRef},
+    tuple::{Tuple, TupleRef},
 };
-
-
+use std::io::{Read, Seek, Write};
+use crate::structures::bplustree::Comparator;
 use crate::types::{
     reinterpret_cast, varint::MAX_VARINT_LEN, Blob, DataType, DataTypeKind, DataTypeRef, Key, OId,
-    PageId, UInt64, UInt64Ref, UInt8, VarInt,  PAGE_ZERO,
+    PageId, UInt64, UInt8, VarInt, PAGE_ZERO,
 };
 
+use super::meta_table_schema;
 use crate::{repr_enum, TextEncoding};
 use std::collections::HashMap;
-use super::{Database, meta_table_schema};
+use std::cmp::Ordering;
+
+type MemBuf = std::io::Cursor<Vec<u8>>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Schema {
     pub(crate) columns: Vec<Column>,
+    pub(crate) num_keys: u8,
     pub(crate) constraints: HashMap<String, TableConstraint>,
     column_index: HashMap<String, usize>,
 }
@@ -36,19 +40,92 @@ impl Schema {
     pub fn new() -> Self {
         Self {
             columns: Vec::new(),
+            num_keys: 0,
             constraints: HashMap::new(),
             column_index: HashMap::new(),
         }
     }
 
-    pub fn find_col(&self, name: &str) -> Option<&Column> {
+    pub fn set_num_keys(&mut self, num_keys: u8) {
+        self.num_keys = num_keys;
+    }
+
+    pub fn keys(&self) -> Vec<&Column> {
+        self.columns.iter().take(self.num_keys as usize).collect()
+    }
+
+    pub fn keys_mut(&mut self) -> Vec<&mut Column> {
+        self.columns
+            .iter_mut()
+            .take(self.num_keys as usize)
+            .collect()
+    }
+
+    pub fn key(&self, name: &str) -> Option<&Column> {
+        if let Some(idx) = self.column_index.get(name) {
+            if *idx < self.num_keys as usize {
+                return self.columns.get(*idx);
+            }
+        }
+        None
+    }
+
+    pub fn key_mut(&mut self, name: &str) -> Option<&mut Column> {
+        if let Some(idx) = self.column_index.get(name) {
+            if *idx < self.num_keys as usize {
+                return self.columns.get_mut(*idx);
+            }
+        }
+        None
+    }
+    pub fn column(&self, name: &str) -> Option<&Column> {
         if let Some(idx) = self.column_index.get(name) {
             return self.columns.get(*idx);
         }
         None
     }
 
-    pub fn find_column_mut(&mut self, name: &str) -> Option<&mut Column> {
+    pub fn columns(&self) -> &Vec<Column> {
+        &self.columns
+    }
+
+    pub fn columns_mut(&mut self) -> &mut Vec<Column> {
+        &mut self.columns
+    }
+
+    pub fn values(&self) -> &[Column] {
+        &self.columns[self.num_keys as usize..]
+    }
+
+    pub fn values_mut(&mut self) -> &mut [Column] {
+        &mut self.columns[self.num_keys as usize..]
+    }
+
+    pub fn iter_keys(&self) -> impl Iterator<Item = &Column> {
+        self.columns.iter().take(self.num_keys as usize)
+    }
+
+    pub fn iter_keys_mut(&mut self) -> impl Iterator<Item = &mut Column> {
+        self.columns.iter_mut().take(self.num_keys as usize)
+    }
+
+    pub fn iter_values(&self) -> impl Iterator<Item = &Column> {
+        self.columns.iter().skip(self.num_keys as usize)
+    }
+
+    pub fn iter_values_mut(&mut self) -> impl Iterator<Item = &mut Column> {
+        self.columns.iter_mut().skip(self.num_keys as usize)
+    }
+
+    pub fn iter_columns(&self) -> impl Iterator<Item = &Column> {
+        self.columns.iter()
+    }
+
+    pub fn iter_columns_mut(&mut self) -> impl Iterator<Item = &mut Column> {
+        self.columns.iter_mut()
+    }
+
+    pub fn column_mut(&mut self, name: &str) -> Option<&mut Column> {
         if let Some(idx) = self.column_index.get(name) {
             return self.columns.get_mut(*idx);
         }
@@ -158,46 +235,102 @@ impl Schema {
 }
 
 pub trait AsBytes {
-    fn write_to(&self) -> std::io::Result<Vec<u8>>;
-    fn read_from(bytes: &[u8]) -> std::io::Result<(Self, usize)>
+    fn write_to<W: Write>(&self, buffer: &mut W) -> std::io::Result<()>;
+    fn read_from<R: Read + Seek>(bytes: &mut R) -> std::io::Result<Self>
     where
         Self: Sized;
 }
 
+unsafe fn read_string_unchecked<R: Read>(reader: &mut R) -> std::io::Result<String> {
+    let varint = VarInt::read_buf(reader)?;
+    let (len, offset) = VarInt::from_encoded_bytes(&varint)?;
+    let len_usize: usize = len.try_into()?;
+    let mut str_buf = vec![0u8; len_usize];
+    reader.read_exact(&mut str_buf)?;
+    Ok(String::from_utf8_unchecked(str_buf))
+}
+
+fn write_string_unchecked<W: Write>(writer: &mut W, s: &str) -> std::io::Result<()> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut vbuf = [0u8; MAX_VARINT_LEN];
+    let len_varint = VarInt::encode(len as i64, &mut vbuf);
+    writer.write_all(len_varint)?;
+    writer.write_all(bytes)?;
+
+    Ok(())
+}
+
+fn read_variable_length<R: Read + Seek> (
+    buf: &mut R
+) -> std::io::Result<Box<[u8]>>
+{
+    let varint = VarInt::read_buf(buf)?;
+    let (len, offset) = VarInt::from_encoded_bytes(varint.as_ref())?;
+    let len_usize: usize = len.try_into().unwrap();
+    let mut val_buffer = vec![0u8; len_usize];
+    buf.read_exact(&mut val_buffer);
+    Ok(val_buffer.into_boxed_slice())
+}
+fn read_type_from_buf<R: Read + Seek>(
+    dtype: DataTypeKind,
+    buf: &mut R,
+) -> std::io::Result<DataType> {
+    if dtype.is_fixed_size() {
+        let mut temp_buf = vec![0u8; dtype.size().unwrap()];
+        buf.read_exact(&mut temp_buf)?;
+        Ok(reinterpret_cast(dtype, &temp_buf)?.0.to_owned())
+    } else {
+        let varint = VarInt::read_buf(buf)?;
+        let (len, offset) = VarInt::from_encoded_bytes(&varint)?;
+        let len_usize: usize = len.try_into().unwrap();
+        let mut data_buf = vec![0u8; len_usize];
+        buf.read_exact(&mut data_buf)?;
+
+
+        let mut full_buf = Vec::with_capacity(offset + len_usize);
+        full_buf.extend_from_slice(&varint[..offset]);
+        full_buf.extend_from_slice(&data_buf);
+
+        Ok(reinterpret_cast(dtype, &full_buf)?.0.to_owned())
+    }
+}
+
+repr_enum!(
+    pub enum ConstraintType: u8 {
+        PrimaryKey = 0x00,
+        ForeignKey = 0x01,
+        Unique = 0x02,
+        NonNull = 0x03,
+        Default = 0x04
+
+}
+);
 impl AsBytes for Schema {
-    fn write_to(&self) -> std::io::Result<Vec<u8>> {
-        let mut out_buffer = Vec::new();
+    fn write_to<W: Write>(&self, buffer: &mut W) -> std::io::Result<()> {
+        buffer.write_all(&[self.num_keys])?;
         let mut varint_buf = [0u8; MAX_VARINT_LEN];
 
-        let buffer = VarInt::encode(self.columns.len() as i64, &mut varint_buf);
-        out_buffer.extend_from_slice(buffer);
+        let vbuffer = VarInt::encode(self.columns.len() as i64, &mut varint_buf);
+        buffer.write_all(vbuffer)?;
 
         for column in &self.columns {
-            let column_bytes = column.write_to()?;
-            let buffer = VarInt::encode(column_bytes.len() as i64, &mut varint_buf);
-            out_buffer.extend_from_slice(buffer);
-            out_buffer.extend_from_slice(&column_bytes);
+            column.write_to(buffer)?;
         }
 
-        let buffer = VarInt::encode(self.constraints.len() as i64, &mut varint_buf);
-        out_buffer.extend_from_slice(buffer);
+        let vbuffer = VarInt::encode(self.constraints.len() as i64, &mut varint_buf);
+        buffer.write_all(vbuffer)?;
 
         for (name, constraint) in &self.constraints {
-            let name_bytes = name.as_bytes();
-            let buffer = VarInt::encode(name_bytes.len() as i64, &mut varint_buf);
-            out_buffer.extend_from_slice(buffer);
-            out_buffer.extend_from_slice(name_bytes);
+            write_string_unchecked(buffer, name)?;
 
             match constraint {
                 TableConstraint::PrimaryKey(cols) => {
-                    out_buffer.push(0);
-                    let buffer = VarInt::encode(cols.len() as i64, &mut varint_buf);
-                    out_buffer.extend_from_slice(buffer);
+                    buffer.write_all(&[ConstraintType::PrimaryKey.as_repr()])?;
+                    let vbuffer = VarInt::encode(cols.len() as i64, &mut varint_buf);
+                    buffer.write_all(vbuffer)?;
                     for col in cols {
-                        let col_bytes = col.as_bytes();
-                        let buffer = VarInt::encode(col_bytes.len() as i64, &mut varint_buf);
-                        out_buffer.extend_from_slice(buffer);
-                        out_buffer.extend_from_slice(col_bytes);
+                        write_string_unchecked(buffer, col)?;
                     }
                 }
                 TableConstraint::ForeignKey {
@@ -205,208 +338,102 @@ impl AsBytes for Schema {
                     ref_table,
                     ref_columns,
                 } => {
-                    out_buffer.push(1);
+                    buffer.write_all(&[ConstraintType::ForeignKey.as_repr()])?;
+                    write_string_unchecked(buffer, ref_table)?;
 
-                    let buffer = VarInt::encode(ref_table.len() as i64, &mut varint_buf);
-                    out_buffer.extend_from_slice(buffer);
-                    out_buffer.extend_from_slice(ref_table.as_bytes());
-
-                    let buffer = VarInt::encode(columns.len() as i64, &mut varint_buf);
-                    out_buffer.extend_from_slice(buffer);
+                    let vbuffer = VarInt::encode(columns.len() as i64, &mut varint_buf);
+                    buffer.write_all(vbuffer)?;
                     for col in columns {
-                        let col_bytes = col.as_bytes();
-                        let buffer = VarInt::encode(col_bytes.len() as i64, &mut varint_buf);
-                        out_buffer.extend_from_slice(buffer);
-                        out_buffer.extend_from_slice(col_bytes);
+                        write_string_unchecked(buffer, col)?;
                     }
 
-                    let buffer = VarInt::encode(ref_columns.len() as i64, &mut varint_buf);
-                    out_buffer.extend_from_slice(buffer);
+                    let vbuffer = VarInt::encode(ref_columns.len() as i64, &mut varint_buf);
+                    buffer.write_all(vbuffer)?;
                     for col in ref_columns {
-                        let col_bytes = col.as_bytes();
-                        let buffer = VarInt::encode(col_bytes.len() as i64, &mut varint_buf);
-                        out_buffer.extend_from_slice(buffer);
-                        out_buffer.extend_from_slice(col_bytes);
+                        write_string_unchecked(buffer, col)?;
                     }
                 }
                 TableConstraint::Unique(cols) => {
-                    out_buffer.push(2);
-                    let buffer = VarInt::encode(cols.len() as i64, &mut varint_buf);
-                    out_buffer.extend_from_slice(buffer);
+                    buffer.write_all(&[ConstraintType::Unique.as_repr()])?;
+                    let vbuffer = VarInt::encode(cols.len() as i64, &mut varint_buf);
+                    buffer.write_all(vbuffer)?;
                     for col in cols {
-                        let col_bytes = col.as_bytes();
-                        let buffer = VarInt::encode(col_bytes.len() as i64, &mut varint_buf);
-                        out_buffer.extend_from_slice(buffer);
-                        out_buffer.extend_from_slice(col_bytes);
+                        write_string_unchecked(buffer, col)?;
                     }
                 }
             }
         }
 
-        Ok(out_buffer)
+        Ok(())
     }
 
-    fn read_from(bytes: &[u8]) -> std::io::Result<(Self, usize)> {
-        let mut cursor = 0;
+    fn read_from<R: Read + Seek>(bytes: &mut R) -> std::io::Result<Self> {
 
-        let (column_count, offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-        cursor += offset;
-        let column_count_usize: usize = column_count
-            .try_into()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let mut tmp_buf = [0u8; 1];
+        bytes.read_exact(&mut tmp_buf)?;
+        let num_keys = tmp_buf[0];
+
+
+        let varint = VarInt::read_buf(bytes)?;
+        let (column_count, offset) = VarInt::from_encoded_bytes(&varint)?;
+
+        let column_count_usize: usize = column_count.try_into()?;
 
         let mut columns = Vec::with_capacity(column_count_usize);
         let mut column_index = HashMap::new();
 
         for i in 0..column_count_usize {
-            let (column_len, column_len_offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-            let column_len_usize: usize = column_len.try_into()?;
-            cursor += column_len_offset;
-
-            if cursor + column_len_usize > bytes.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Insufficient bytes for column",
-                ));
-            }
-
-            let (column, _) = Column::read_from(&bytes[cursor..cursor + column_len_usize])?;
-            cursor += column_len_usize;
-
+            let column = Column::read_from(bytes)?;
             column_index.insert(column.name.clone(), i);
             columns.push(column);
         }
 
-        let (constraint_count, offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-        cursor += offset;
-        let constraint_count_usize: usize = constraint_count
-            .try_into()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let varint = VarInt::read_buf(bytes)?;
+        let (constraint_count, offset) = VarInt::from_encoded_bytes(&varint)?;
+
+        let constraint_count_usize: usize = constraint_count.try_into()?;
 
         let mut constraints = HashMap::with_capacity(constraint_count_usize);
 
         for _ in 0..constraint_count_usize {
-            let (name_len, offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-            cursor += offset;
-            let name_len_usize: usize = name_len.try_into()?;
-
-            if cursor + name_len_usize > bytes.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Insufficient bytes for constraint name",
-                ));
-            }
-
-            let name = String::from_utf8(bytes[cursor..cursor + name_len_usize].to_vec())
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            cursor += name_len_usize;
-
-            if cursor >= bytes.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Insufficient bytes for constraint type",
-                ));
-            }
-
-            let constraint_type = bytes[cursor];
-            cursor += 1;
+            let name = unsafe { read_string_unchecked(bytes)? };
+            let mut cbuf = [0u8];
+            bytes.read_exact(&mut cbuf)?;
+            let constraint_type = ConstraintType::from_repr(cbuf[0])?;
 
             let constraint = match constraint_type {
-                0 => {
-                    let (cols_count, offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-                    cursor += offset;
+                ConstraintType::PrimaryKey => {
+                    let varint = VarInt::read_buf(bytes)?;
+                    let (cols_count, offset) = VarInt::from_encoded_bytes(&varint)?;
                     let cols_count_usize: usize = cols_count.try_into()?;
-
                     let mut cols = Vec::with_capacity(cols_count_usize);
+
                     for _ in 0..cols_count_usize {
-                        let (col_len, offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-                        cursor += offset;
-                        let col_len_usize: usize = col_len.try_into()?;
-
-                        if cursor + col_len_usize > bytes.len() {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                "Insufficient bytes for column name in constraint",
-                            ));
-                        }
-
-                        let col_name =
-                            String::from_utf8(bytes[cursor..cursor + col_len_usize].to_vec())
-                                .map_err(|e| {
-                                    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-                                })?;
-                        cursor += col_len_usize;
-                        cols.push(col_name);
+                        let name = unsafe { read_string_unchecked(bytes)? };
+                        cols.push(name);
                     }
                     TableConstraint::PrimaryKey(cols)
                 }
-                1 => {
-                    let (ref_table_len, offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-                    cursor += offset;
-                    let ref_table_len_usize: usize = ref_table_len.try_into()?;
-
-                    if cursor + ref_table_len_usize > bytes.len() {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "Insufficient bytes for reference table",
-                        ));
-                    }
-
-                    let ref_table =
-                        String::from_utf8(bytes[cursor..cursor + ref_table_len_usize].to_vec())
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                    cursor += ref_table_len_usize;
-
-                    let (cols_count, offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-                    cursor += offset;
+                ConstraintType::ForeignKey => {
+                    let ref_table = unsafe { read_string_unchecked(bytes)? };
+                    let varint = VarInt::read_buf(bytes)?;
+                    let (cols_count, offset) = VarInt::from_encoded_bytes(&varint)?;
                     let cols_count_usize: usize = cols_count.try_into()?;
 
                     let mut columns = Vec::with_capacity(cols_count_usize);
                     for _ in 0..cols_count_usize {
-                        let (col_len, offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-                        cursor += offset;
-                        let col_len_usize: usize = col_len.try_into()?;
-
-                        if cursor + col_len_usize > bytes.len() {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                "Insufficient bytes for column name",
-                            ));
-                        }
-
-                        let col_name =
-                            String::from_utf8(bytes[cursor..cursor + col_len_usize].to_vec())
-                                .map_err(|e| {
-                                    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-                                })?;
-                        cursor += col_len_usize;
-                        columns.push(col_name);
+                        let name = unsafe { read_string_unchecked(bytes)? };
+                        columns.push(name);
                     }
 
-                    let (ref_cols_count, offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-                    cursor += offset;
-                    let ref_cols_count_usize: usize = ref_cols_count.try_into()?;
+                    let varint = VarInt::read_buf(bytes)?;
+                    let (cols_count, offset) = VarInt::from_encoded_bytes(&varint)?;
+                    let cols_count_usize: usize = cols_count.try_into()?;
 
-                    let mut ref_columns = Vec::with_capacity(ref_cols_count_usize);
-                    for _ in 0..ref_cols_count_usize {
-                        let (col_len, offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-                        cursor += offset;
-                        let col_len_usize: usize = col_len.try_into()?;
-
-                        if cursor + col_len_usize > bytes.len() {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                "Insufficient bytes for reference column name",
-                            ));
-                        }
-
-                        let col_name =
-                            String::from_utf8(bytes[cursor..cursor + col_len_usize].to_vec())
-                                .map_err(|e| {
-                                    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-                                })?;
-                        cursor += col_len_usize;
-                        ref_columns.push(col_name);
+                    let mut ref_columns = Vec::with_capacity(cols_count_usize);
+                    for _ in 0..cols_count_usize {
+                        let name = unsafe { read_string_unchecked(bytes)? };
+                        ref_columns.push(name);
                     }
 
                     TableConstraint::ForeignKey {
@@ -415,30 +442,13 @@ impl AsBytes for Schema {
                         ref_columns,
                     }
                 }
-                2 => {
-                    let (cols_count, offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-                    cursor += offset;
+                ConstraintType::Unique => {
+                    let varint = VarInt::read_buf(bytes)?;
+                    let (cols_count, offset) = VarInt::from_encoded_bytes(&varint)?;
                     let cols_count_usize: usize = cols_count.try_into()?;
-
                     let mut cols = Vec::with_capacity(cols_count_usize);
                     for _ in 0..cols_count_usize {
-                        let (col_len, offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-                        cursor += offset;
-                        let col_len_usize: usize = col_len.try_into()?;
-
-                        if cursor + col_len_usize > bytes.len() {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                "Insufficient bytes for column name in constraint",
-                            ));
-                        }
-
-                        let col_name =
-                            String::from_utf8(bytes[cursor..cursor + col_len_usize].to_vec())
-                                .map_err(|e| {
-                                    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-                                })?;
-                        cursor += col_len_usize;
+                        let col_name = unsafe { read_string_unchecked(bytes)? };
                         cols.push(col_name);
                     }
                     TableConstraint::Unique(cols)
@@ -454,14 +464,12 @@ impl AsBytes for Schema {
             constraints.insert(name, constraint);
         }
 
-        Ok((
-            Schema {
-                columns,
-                constraints,
-                column_index,
-            },
-            cursor,
-        ))
+        Ok(Schema {
+            columns,
+            num_keys,
+            constraints,
+            column_index,
+        })
     }
 }
 
@@ -473,17 +481,16 @@ impl Schema {
             .max()
             .unwrap_or(1)
     }
-}
 
-impl From<&[Column]> for Schema {
-    fn from(value: &[Column]) -> Self {
+    pub fn from_columns(columns: &[Column], num_keys: u8) -> Self {
         let mut column_index = HashMap::new();
-        for (i, col) in value.iter().enumerate() {
+        for (i, col) in columns.iter().enumerate() {
             column_index.insert(col.name.clone(), i);
         }
 
         Self {
-            columns: value.to_vec(),
+            columns: columns.to_vec(),
+            num_keys,
             constraints: HashMap::new(),
             column_index,
         }
@@ -493,24 +500,29 @@ impl From<&[Column]> for Schema {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Table {
     object_id: OId,
+    root_page: PageId,
     name: String,
     schema: Schema,
     next_row: UInt64,
 }
 
-
 impl Table {
-    pub fn new(name: &str, schema: Schema) -> Self {
+    pub fn new(name: &str, root_page: PageId, schema: Schema) -> Self {
         Self {
             object_id: OId::new_key(),
+            root_page,
             name: name.to_string(),
             schema,
-            next_row: UInt64(0)
+            next_row: UInt64(0),
         }
     }
 
     pub fn id(&self) -> OId {
         self.object_id
+    }
+
+    pub fn root(&self) -> PageId {
+        self.root_page
     }
 
     pub fn name(&self) -> &str {
@@ -525,56 +537,65 @@ impl Table {
         self.next_row
     }
 
-    pub fn build(id: OId, name: &str, schema: Schema, next_row: UInt64) -> Self {
+    pub fn build(id: OId, name: &str, root_page: PageId, schema: Schema, next_row: UInt64) -> Self {
         Self {
             object_id: id,
+            root_page,
             name: name.to_string(),
             schema,
-            next_row
+            next_row,
         }
     }
 
-    pub fn add_row(&mut self)  {
-        self.next_row+= 1usize;
+    pub fn add_row(&mut self) {
+        self.next_row += 1usize;
+    }
+
+    pub fn set_next(&mut self, value: u64) {
+        self.next_row = UInt64(value);
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Index {
     object_id: OId,
+    root_page: PageId,
     name: String,
-    num_keys: u8,
-    min_val: DataType,
-    max_val: DataType,
+    min_val: Option<Box<[u8]>>,
+    max_val: Option<Box<[u8]>>,
     schema: Schema,
 }
 
-
 impl Index {
-    pub fn new(name: &str, schema: Schema, min_val: DataType, max_val: DataType) -> Self {
+    pub fn new(name: &str, root_page: PageId, schema: Schema) -> Self {
         Self {
             object_id: OId::new_key(),
-            num_keys: 0,
+            root_page,
             name: name.to_string(),
-            min_val,
-            max_val,
+            min_val: None,
+            max_val: None,
             schema,
         }
     }
 
-
-    pub fn build(id: OId, name: &str, schema: Schema, min_val: DataType, max_val: DataType, num_keys: u8) -> Self {
+    pub fn build(
+        id: OId,
+        name: &str,
+        root_page: PageId,
+        schema: Schema,
+        min_val: Box<[u8]>,
+        max_val: Box<[u8]>,
+        num_keys: u8,
+    ) -> Self {
         Self {
             object_id: id,
-            num_keys,
+            root_page,
             name: name.to_string(),
-            min_val,
-            max_val,
+            min_val: Some(min_val),
+            max_val: Some(max_val),
             schema,
         }
     }
-
 
     pub fn id(&self) -> OId {
         self.object_id
@@ -584,23 +605,44 @@ impl Index {
         &self.name
     }
 
+    pub fn root(&self) -> PageId {
+        self.root_page
+    }
+
     pub fn schema(&self) -> &Schema {
         &self.schema
     }
 
+    pub fn range(&self) -> Option<(&[u8], &[u8])> {
+        if let Some(xmin) = self.min_val.as_ref() {
+            if let Some(xmax) = self.max_val.as_ref() {
+                return Some((xmin.as_ref(), xmax.as_ref()))
+            }
+        }
+        None
 
-    pub fn range(&self) -> (DataTypeRef, DataTypeRef) {
-        let dtype = self.min_val.datatype();
-        (reinterpret_cast(dtype, self.min_val.as_ref()).unwrap().0, reinterpret_cast(dtype, self.max_val.as_ref()).unwrap().0)
     }
 
 
-    pub fn num_keys(&self) -> usize {
-        self.num_keys as usize
+    pub fn add_item(&mut self, key: &[u8], comparator: impl Comparator) {
+
+        if let Some(max) = self.max_val.as_ref() {
+            if let Ok(Ordering::Greater) = comparator.compare(max.as_ref(), key) {
+                self.max_val = Some(key.to_vec().into_boxed_slice())
+            }
+        } else {
+            self.max_val = Some(key.to_vec().into_boxed_slice())
+        };
+
+        if let Some(min) = self.min_val.as_ref() {
+            if let Ok(Ordering::Less) = comparator.compare(min.as_ref(), key) {
+                self.min_val = Some(key.to_vec().into_boxed_slice())
+            }
+        } else {
+            self.min_val = Some(key.to_vec().into_boxed_slice())
+        };
+
     }
-
-
-
 
 
 }
@@ -608,137 +650,311 @@ impl Index {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Relation {
     TableRel(Table),
-    IndexRel(Index)
+    IndexRel(Index),
 }
 
+impl Relation {
+    pub fn id(&self) -> OId {
+        match self {
+            Relation::TableRel(t) => t.object_id,
+            Relation::IndexRel(i) => i.object_id,
+        }
+    }
 
+    pub fn columns(&self) -> &Vec<Column> {
+        &self.schema().columns
+    }
 
-impl TryFrom<Relation> for DBObject {
-    type Error = std::io::Error;
+    pub fn columns_mut(&mut self) -> &mut Vec<Column> {
+        &mut self.schema_mut().columns
+    }
 
-    fn try_from(value: Relation) -> Result<Self, Self::Error> {
-        match value {
-            Relation::IndexRel(index) => {
-                let mut metadata_buffer = Vec::new();
+    pub fn keys(&self) -> Vec<&Column> {
+        self.schema().keys()
+    }
 
-                // First write the schema
-                let schema_bytes = index.schema.write_to()?;
-                metadata_buffer.extend_from_slice(&schema_bytes);
+    pub fn keys_mut(&mut self) -> Vec<&mut Column> {
+        self.schema_mut().keys_mut()
+    }
 
-                // Then write index-specific fields
-                metadata_buffer.push(index.num_keys);
+    pub fn column(&self, name: &str) -> Option<&Column> {
+        self.schema().column(name)
+    }
 
-                // Write min_val
-                let min_val_bytes = index.min_val.as_ref();
-                metadata_buffer.extend_from_slice(min_val_bytes);
+    pub fn column_mut(&mut self, name: &str) -> Option<&mut Column> {
+        self.schema_mut().column_mut(name)
+    }
 
-                // Write max_val
-                let max_val_bytes = index.max_val.as_ref();
-                metadata_buffer.extend_from_slice(max_val_bytes);
+    pub fn column_unchecked(&self, idx: usize) -> &Column {
+        &self.columns()[idx]
+    }
 
-                Ok(DBObject {
-                    o_id: index.object_id,
-                    root: PAGE_ZERO, // Will be allocated when creating
-                    o_type: ObjectType::Index,
-                    name: index.name,
-                    metadata: Some(metadata_buffer.into_boxed_slice()),
-                })
-            },
-            Relation::TableRel(table) => {
-                let mut metadata_buffer = Vec::new();
+    pub fn column_mut_unchecked(&mut self, idx: usize) -> &mut Column {
+        &mut self.columns_mut()[idx]
+    }
 
-                // First write the schema
-                let schema_bytes = table.schema.write_to()?;
-                metadata_buffer.extend_from_slice(&schema_bytes);
+    pub fn key(&self, name: &str) -> Option<&Column> {
+        self.schema().key(name)
+    }
 
-                // Then write table-specific fields (next_row)
-                let next_row_bytes = table.next_row.as_ref();
-                metadata_buffer.extend_from_slice(next_row_bytes);
+    pub fn key_mut(&mut self, name: &str) -> Option<&mut Column> {
+        self.schema_mut().key_mut(name)
+    }
 
-                Ok(DBObject {
-                    o_id: table.object_id,
-                    root: PAGE_ZERO, // Will be allocated when creating
-                    o_type: ObjectType::Table,
-                    name: table.name,
-                    metadata: Some(metadata_buffer.into_boxed_slice()),
-                })
+    pub fn schema_mut(&mut self) -> &mut Schema {
+        match self {
+            Relation::TableRel(t) => &mut t.schema,
+            Relation::IndexRel(i) => &mut i.schema,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Relation::TableRel(t) => &t.name,
+            Relation::IndexRel(i) => &i.name,
+        }
+    }
+
+    pub fn root(&self) -> PageId {
+        match self {
+            Relation::TableRel(t) => t.root_page,
+            Relation::IndexRel(i) => i.root_page,
+        }
+    }
+
+    pub fn set_root(&mut self, root: PageId) {
+        match self {
+            Relation::TableRel(t) => t.root_page = root,
+            Relation::IndexRel(i) => i.root_page = root,
+        }
+    }
+
+    pub fn schema(&self) -> &Schema {
+        match self {
+            Relation::TableRel(t) => &t.schema,
+            Relation::IndexRel(i) => &i.schema,
+        }
+    }
+
+    pub fn object_type(&self) -> ObjectType {
+        match self {
+            Relation::TableRel(_) => ObjectType::Table,
+            Relation::IndexRel(_) => ObjectType::Index,
+        }
+    }
+
+    pub fn is_allocated(&self) -> bool {
+        self.root().is_valid()
+    }
+
+    pub fn alloc(&mut self, pager: &mut SharedPager) -> std::io::Result<()> {
+        let root = pager.write().alloc_page::<BtreePage>()?;
+        self.set_root(root);
+        Ok(())
+    }
+
+    pub fn into_boxed_tuple(self) -> std::io::Result<Box<[u8]>> {
+        let root_page = if self.root() != PAGE_ZERO {
+            DataType::BigUInt(UInt64::from(self.root()))
+        } else {
+            DataType::Null
+        };
+
+        // Serialize metadata in-place
+        let metadata = DataType::Blob(self.metadata_as_blob()?);
+
+        let schema = meta_table_schema();
+        let t = Tuple::from_data(
+            &[
+                DataType::BigUInt(UInt64::from(self.id())),
+                root_page,
+                DataType::Byte(UInt8::from(self.object_type() as u8)),
+                metadata,
+                DataType::Text(Blob::from(self.name())),
+            ],
+            &schema,
+        )?;
+
+        let tuple_ref = TupleRef::from(&t);
+
+        Ok(t.into())
+    }
+
+    fn metadata_as_blob(&self) -> std::io::Result<Blob> {
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        self.schema().write_to(&mut buffer)?;
+
+        match self {
+            Relation::TableRel(t) => {
+                buffer.write_all(t.next_row.as_ref())?;
+            }
+            Relation::IndexRel(i) => {
+
+                if let Some(val) = &i.min_val {
+                    buffer.write_all(&[1u8])?;
+                    let mut vbuffer = [0u8; MAX_VARINT_LEN];
+                    let len_buffer= VarInt::encode(val.len() as i64, &mut vbuffer);
+                    buffer.write_all(len_buffer)?;
+                    buffer.write_all(val.as_ref())?;
+                } else {
+                    buffer.write_all(&[0u8])?;
+                };
+
+                if let Some(val) = &i.max_val {
+                    buffer.write_all(&[1u8])?;
+                    let mut vbuffer = [0u8; MAX_VARINT_LEN];
+                    let len_buffer= VarInt::encode(val.len() as i64, &mut vbuffer);
+                    buffer.write_all(len_buffer)?;
+                    buffer.write_all(val.as_ref())?;
+                } else {
+                    buffer.write_all(&[0u8])?;
+                };
             }
         }
+
+        let buf = buffer.into_inner();
+        let bytes : &[u8] = buf.as_ref();
+
+        Ok(Blob::from(bytes))
     }
 }
 
-impl TryFrom<DBObject> for Relation {
+impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
     type Error = std::io::Error;
 
-    fn try_from(value: DBObject) -> Result<Self, Self::Error> {
-        let metadata = value.metadata.as_ref().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "Missing metadata")
-        })?;
+    fn try_from(tuple: TupleRef<'a, 'b>) -> Result<Self, Self::Error> {
+        let schema = meta_table_schema();
 
-        match value.o_type {
-            ObjectType::Index => {
-                let mut cursor = 0;
+        if tuple.num_fields() != schema.columns.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid tuple: expected {} columns, got {}",
+                    schema.columns.len(),
+                    tuple.num_fields()
+                ),
+            ));
+        }
 
-                // Read schema
-                let (schema, schema_bytes_read) = Schema::read_from(&metadata[cursor..])?;
-                cursor += schema_bytes_read;
-
-                // Read index-specific fields
-                if cursor >= metadata.len() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "Missing index-specific metadata"
-                    ));
-                }
-
-                let num_keys = metadata[cursor];
-                cursor += 1;
-
-
-                // Assuming first column dtype for reinterpret_cast
-                let dtype = schema.columns.first()
-                    .ok_or_else(|| std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Index schema must have at least one column"
-                    ))?
-                    .dtype;
-
-                let (min_val, read_bytes) = reinterpret_cast(dtype, &metadata[cursor..])?;
-                cursor += read_bytes;
-                let (max_val, __read_bytes) = reinterpret_cast(dtype, &metadata[cursor..])?;
-
-                Ok(Relation::IndexRel(Index {
-                    object_id: value.o_id,
-                    name: value.name,
-                    num_keys,
-                    min_val: min_val.to_owned(),
-                    max_val: max_val.to_owned(),
-                    schema,
-                }))
-            },
-            ObjectType::Table => {
-                let mut cursor = 0;
-
-                // Read schema
-                let (schema, schema_bytes_read) = Schema::read_from(&metadata[cursor..])?;
-                cursor += schema_bytes_read;
-
-                // Read table-specific fields (next_row)
-                let next_row = if cursor + 8 <= metadata.len() {
-                    let mut bytes = [0u8; 8];
-                    bytes.copy_from_slice(&metadata[cursor..cursor + 8]);
-                    UInt64Ref::try_from(bytes.as_slice())?.to_owned()
-                } else {
-                    UInt64(0) // Default value if not present
-                };
-
-                Ok(Relation::TableRel(Table {
-                    object_id: value.o_id,
-                    name: value.name,
-                    schema,
-                    next_row,
-                }))
+        let o_id = match tuple.key(0)? {
+            DataTypeRef::BigUInt(v) => OId::from(v.to_owned()),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Invalid o_id",
+                ))
             }
+        };
+
+
+
+        let root = match tuple.value(0)? {
+            DataTypeRef::BigUInt(v) => PageId::from(v.to_owned()),
+            DataTypeRef::Null => PAGE_ZERO,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Invalid root",
+                ))
+            }
+        };
+
+
+        let o_type = match tuple.value(1)? {
+            DataTypeRef::Byte(v) => ObjectType::try_from(v.to_owned().0)?,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Invalid o_type",
+                ))
+            }
+        };
+
+
+
+        let name = match tuple.value(3)? {
+            DataTypeRef::Text(blob) => blob.as_str(TextEncoding::Utf8).to_string(),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Invalid name",
+                ))
+            }
+        };
+
+
+
+        match tuple.value(2)? {
+            DataTypeRef::Blob(metadata) => {
+
+                let mut metadata_buf = std::io::Cursor::new(metadata.content());
+                let schema = Schema::read_from(&mut metadata_buf)?;
+
+                match o_type {
+                    ObjectType::Table => {
+                        let mut tmp_buf = [0u8; 8];
+                        metadata_buf.read_exact(&mut tmp_buf)?;
+                        let next_row = UInt64::try_from(tmp_buf.as_slice())?;
+
+                        Ok(Relation::TableRel(Table {
+                            object_id: o_id,
+                            root_page: root,
+                            name: name.to_string(),
+                            schema,
+                            next_row,
+                        }))
+                    }
+                    ObjectType::Index => {
+
+
+                        let dtype = schema
+                            .columns
+                            .first()
+                            .ok_or_else(|| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "Index schema must have at least one column",
+                                )
+                            })?
+                            .dtype;
+
+                        let mut tmp_buf = [0u8; 1];
+                        metadata_buf.read_exact(&mut tmp_buf)?;
+                        let min_val = if tmp_buf[0] == 1 {
+                            Some(read_variable_length(&mut metadata_buf)?)
+
+                        } else {
+                            None
+                        };
+
+                        let mut tmp_buf = [0u8; 1];
+                        metadata_buf.read_exact(&mut tmp_buf)?;
+                        let max_val = if tmp_buf[0] == 1 {
+                            Some(read_variable_length(&mut metadata_buf)?)
+                        } else {
+                            None
+                        };
+
+                        Ok(Relation::IndexRel(Index {
+                            object_id: o_id,
+                            root_page: root,
+                            name: name.to_string(),
+
+                            min_val,
+                            max_val,
+                            schema,
+                        }))
+                    }
+                }
+            }
+            DataTypeRef::Null => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Missing metadata",
+            )),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid metadata type",
+            )),
         }
     }
 }
@@ -789,6 +1005,10 @@ impl Column {
 
     pub fn has_index(&self) -> bool {
         self.index.is_some()
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn index(&self) -> Option<&String> {
@@ -859,204 +1079,110 @@ impl Column {
 }
 
 impl AsBytes for Column {
-    fn write_to(&self) -> std::io::Result<Vec<u8>> {
-        let mut out_buffer = Vec::new();
+    fn write_to<W: Write>(&self, buffer: &mut W) -> std::io::Result<()> {
         let mut varint_buf = [0u8; MAX_VARINT_LEN];
 
         // Write dtype
-        out_buffer.push(self.dtype as u8);
+        buffer.write_all(&[self.dtype as u8])?;
 
         // Write index
         if let Some(idx) = &self.index {
-            out_buffer.push(1); // INDEX MARKER
-            let buffer = VarInt::encode(idx.len() as i64, &mut varint_buf);
-            out_buffer.extend_from_slice(buffer);
-            out_buffer.extend_from_slice(idx.as_ref());
+            buffer.write_all(&[1u8])?;
+            write_string_unchecked(buffer, idx)?;
         } else {
-            out_buffer.push(0);
+            buffer.write_all(&[0u8])?;
         };
 
         // Write name
-        let name_bytes = self.name.as_bytes();
-        let buffer = VarInt::encode(name_bytes.len() as i64, &mut varint_buf);
-        out_buffer.extend_from_slice(buffer);
-        out_buffer.extend_from_slice(name_bytes);
+        write_string_unchecked(buffer, &self.name)?;
 
         // Write constraints count
-        let buffer = VarInt::encode(self.cts.len() as i64, &mut varint_buf);
-        out_buffer.extend_from_slice(buffer);
+        let vbuffer = VarInt::encode(self.cts.len() as i64, &mut varint_buf);
+        buffer.write_all(vbuffer)?;
 
         // Write each constraint
         for (ct_name, constraint) in &self.cts {
             // Write constraint name
-            let ct_name_bytes = ct_name.as_bytes();
-            let buffer = VarInt::encode(ct_name_bytes.len() as i64, &mut varint_buf);
-            out_buffer.extend_from_slice(buffer);
-            out_buffer.extend_from_slice(ct_name_bytes);
-
+            write_string_unchecked(buffer, ct_name)?;
             // Write constraint type and data
             match constraint {
                 Constraint::PrimaryKey => {
-                    out_buffer.push(0); // Type tag for PrimaryKey
+                    buffer.write_all(&[ConstraintType::PrimaryKey.as_repr()])?;
                 }
                 Constraint::NonNull => {
-                    out_buffer.push(1); // Type tag for NonNull
+                    buffer.write_all(&[ConstraintType::NonNull.as_repr()])?;
                 }
                 Constraint::Unique => {
-                    out_buffer.push(2); // Type tag for Unique
+                    buffer.write_all(&[ConstraintType::Unique.as_repr()])?;
                 }
                 Constraint::ForeignKey(fk) => {
-                    out_buffer.push(3); // Type tag for ForeignKey
-                                        // Serialize ForeignKey
-                    let fk_bytes = fk.write_to()?;
-                    let buffer = VarInt::encode(fk_bytes.len() as i64, &mut varint_buf);
-                    out_buffer.extend_from_slice(buffer);
-                    out_buffer.extend_from_slice(&fk_bytes);
+                    buffer.write_all(&[ConstraintType::ForeignKey.as_repr()])?;
+                    fk.write_to(buffer)?;
                 }
                 Constraint::Default(dt) => {
-                    out_buffer.push(4); // Type tag for Default
-
-                    let dt_bytes = dt.as_ref();
-                    let buffer = VarInt::encode(dt_bytes.len() as i64, &mut varint_buf);
-                    out_buffer.extend_from_slice(buffer);
-                    out_buffer.extend_from_slice(dt_bytes);
+                    buffer.write_all(&[ConstraintType::Default.as_repr()])?;
+                    buffer.write_all(dt.as_ref())?;
                 }
             }
         }
 
-        Ok(out_buffer)
+        Ok(())
     }
 
-    fn read_from(bytes: &[u8]) -> std::io::Result<(Self, usize)> {
-        let mut cursor = 0;
-
-        // Read dtype
-        if cursor >= bytes.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "Insufficient bytes for dtype",
-            ));
-        }
-        let dtype = DataTypeKind::from_repr(bytes[cursor])?;
-        cursor += 1;
-        let next = bytes[cursor];
-        cursor += 1;
+    fn read_from<R: Read + Seek>(bytes: &mut R) -> std::io::Result<Self> {
+        let mut dtype_buf = [0u8; 2];
+        bytes.read_exact(&mut dtype_buf)?;
+        let dtype = DataTypeKind::from_repr(dtype_buf[0])?;
+        let has_index = dtype_buf[1] != 0u8;
 
         // HAS INDEX
-        let index = if next == 1 {
-            let (index_len, index_len_offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-            let index_len_usize: usize = index_len.try_into()?;
-            cursor += index_len_offset;
-
-            if cursor + index_len_usize > bytes.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Insufficient bytes for column index",
-                ));
-            }
-            let index = String::from_utf8(bytes[cursor..cursor + index_len_usize].to_vec())
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            cursor += index_len_usize;
+        let index = if has_index {
+            let index = unsafe { read_string_unchecked(bytes) }?;
             Some(index)
         } else {
             None
         };
 
         // Read name
-        let (name_len, name_len_offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-        let name_len_usize: usize = name_len.try_into()?;
-        cursor += name_len_offset;
-
-        if cursor + name_len_usize > bytes.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "Insufficient bytes for column name",
-            ));
-        }
-        let name = String::from_utf8(bytes[cursor..cursor + name_len_usize].to_vec())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        cursor += name_len_usize;
+        let name = unsafe { read_string_unchecked(bytes) }?;
 
         // Read constraints count
-        let (cts_count, cts_count_offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
+        let varint = VarInt::read_buf(bytes)?;
+        let (cts_count, cts_count_offset) = VarInt::from_encoded_bytes(&varint)?;
         let cts_count_usize: usize = cts_count.try_into().unwrap();
-        cursor += cts_count_offset;
-
         let mut cts = HashMap::new();
 
         // Read each constraint
         for _ in 0..cts_count_usize {
             // Read constraint name
-            let (ct_name_len, ct_name_len_offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-            let ct_name_len_usize: usize = ct_name_len.try_into()?;
-            cursor += ct_name_len_offset;
+            let ct_name = unsafe { read_string_unchecked(bytes) }?;
 
-            if cursor + ct_name_len_usize > bytes.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Insufficient bytes for constraint name",
-                ));
-            }
-            let ct_name = String::from_utf8(bytes[cursor..cursor + ct_name_len_usize].to_vec())
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            cursor += ct_name_len_usize;
+            let mut ctype_buf = [0u8; 1];
+            bytes.read_exact(&mut ctype_buf)?;
+            let ctype = ConstraintType::from_repr(ctype_buf[0])?;
 
-            // Read constraint type and data
-            if cursor >= bytes.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Insufficient bytes for constraint type",
-                ));
-            }
-            let constraint_type = bytes[cursor];
-            cursor += 1;
-
-            let constraint = match constraint_type {
-                0 => Constraint::PrimaryKey,
-                1 => Constraint::NonNull,
-                2 => Constraint::Unique,
-                3 => {
-                    // Read ForeignKey
-                    let (fk_len, fk_len_offset) = VarInt::from_encoded_bytes(&bytes[cursor..])?;
-                    let fk_len_usize: usize = fk_len.try_into()?;
-                    cursor += fk_len_offset;
-
-                    if cursor + fk_len_usize > bytes.len() {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "Insufficient bytes for ForeignKey",
-                        ));
-                    }
-                    let (fk, _) = ForeignKey::read_from(&bytes[cursor..cursor + fk_len_usize])?;
-                    cursor += fk_len_usize;
-                    Constraint::ForeignKey(fk)
-                }
-                4 => {
+            let constraint = match ctype {
+                ConstraintType::PrimaryKey => Constraint::PrimaryKey,
+                ConstraintType::NonNull => Constraint::NonNull,
+                ConstraintType::Unique => Constraint::Unique,
+                ConstraintType::ForeignKey => Constraint::ForeignKey(ForeignKey::read_from(bytes)?),
+                ConstraintType::Default => {
                     // Read Default DataType
-                    let (dt, bytes_read) = reinterpret_cast(dtype, &bytes[cursor..])?;
-                    cursor += bytes_read;
-                    Constraint::Default(dt.to_owned())
-                }
-                _ => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Unknown constraint type: {constraint_type}"),
-                    ));
+
+                    let dt = read_type_from_buf(dtype, bytes)?;
+                    Constraint::Default(dt)
                 }
             };
 
             cts.insert(ct_name, constraint);
         }
 
-        Ok((
-            Column {
-                dtype,
-                name,
-                index,
-                cts,
-            },
-            cursor,
-        ))
+        Ok(Column {
+            dtype,
+            name,
+            index,
+            cts,
+        })
     }
 }
 
@@ -1073,51 +1199,23 @@ impl ForeignKey {
 }
 
 impl AsBytes for ForeignKey {
-    fn write_to(&self) -> std::io::Result<Vec<u8>> {
-        let mut buffer = Vec::with_capacity(self.ref_table.len() + self.ref_col.len());
-
+    fn write_to<W: Write>(&self, buffer: &mut W) -> std::io::Result<()> {
         // Reference table
-        let mut varint_buf = [0u8; MAX_VARINT_LEN];
-        let len_bytes = VarInt::encode(self.ref_table.len() as i64, &mut varint_buf);
-        buffer.extend_from_slice(len_bytes);
-        buffer.extend_from_slice(self.ref_table.as_bytes());
+        write_string_unchecked(buffer, &self.ref_table)?;
 
         // Reference column
-        let mut varint_buf = [0u8; MAX_VARINT_LEN];
-        let len_bytes = VarInt::encode(self.ref_col.len() as i64, &mut varint_buf);
-        buffer.extend_from_slice(len_bytes);
-        buffer.extend_from_slice(self.ref_col.as_bytes());
-        Ok(buffer)
+        write_string_unchecked(buffer, &self.ref_col)?;
+        Ok(())
     }
 
-    fn read_from(bytes: &[u8]) -> std::io::Result<(Self, usize)>
+    fn read_from<R: Read + Seek>(bytes: &mut R) -> std::io::Result<Self>
     where
         Self: Sized,
     {
-        let mut cursor = 0;
-        let (len, offset) = VarInt::from_encoded_bytes(bytes)?;
-        let len_usize: usize = len.try_into()?;
-        cursor += offset;
+        let ref_table = unsafe { read_string_unchecked(bytes)? };
+        let ref_col = unsafe { read_string_unchecked(bytes)? };
 
-        let ref_table = match std::str::from_utf8(&bytes[cursor..cursor + len_usize]) {
-            Ok(s) => s.to_string(),
-            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-        };
-
-        cursor += len_usize;
-
-        let (len, offset) = VarInt::from_encoded_bytes(bytes)?;
-        let len_usize: usize = len.try_into()?;
-        cursor += offset;
-
-        let ref_col = match std::str::from_utf8(&bytes[cursor..cursor + len_usize]) {
-            Ok(s) => s.to_string(),
-            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-        };
-
-        cursor += len_usize;
-
-        Ok((Self { ref_table, ref_col }, cursor))
+        Ok(Self { ref_table, ref_col })
     }
 }
 
@@ -1131,8 +1229,6 @@ impl ForeignKey {
     }
 }
 
-
-
 repr_enum!(
     pub enum ObjectType: u8 {
         Table = 0,
@@ -1140,315 +1236,287 @@ repr_enum!(
     }
 );
 
-#[derive(Debug, PartialEq, Clone)]
-pub struct DBObject {
-    o_id: OId,
-    root: PageId,
-    o_type: ObjectType,
-    name: String,
-    metadata: Option<Box<[u8]>>,
-}
+#[cfg(test)]
+mod serialization_tests {
+    use super::*;
+    use crate::serialize_test;
+    use crate::types::{Int32, Int64};
 
-impl DBObject {
-    pub fn id(&self) -> OId {
-        self.o_id
-    }
+    serialize_test!(
+        test_serialization_1,
+        Column::new_unindexed(DataTypeKind::Int, "test_column", None),
+        "Column serialization failed"
+    );
 
-    pub fn name(&self) -> String {
-        self.name.clone()
-    }
+    serialize_test!(
+        test_serialization_2,
+        {
+            let mut col = Column::new_unindexed(DataTypeKind::Text, "user_name", None);
+            col.add_constraint("pk".to_string(), Constraint::PrimaryKey);
+            col.add_constraint("nn".to_string(), Constraint::NonNull);
+            col.add_constraint("uniq".to_string(), Constraint::Unique);
+            col
+        },
+        "Column with constraints serialization failed"
+    );
 
-    pub fn root(&self) -> PageId {
-        self.root
-    }
+    serialize_test!(
+        test_serialization_3,
+        {
+            let mut col = Column::new_unindexed(DataTypeKind::BigInt, "user_id", None);
+            let fk = ForeignKey::new("users".to_string(), "id".to_string());
+            col.add_constraint("fk_user".to_string(), Constraint::ForeignKey(fk));
+            col
+        },
+        "Column with FK serialization failed"
+    );
 
-    pub fn set_meta(&mut self, new_meta: &[u8]) {
-        self.metadata = Some(new_meta.to_vec().into_boxed_slice());
-    }
+    serialize_test!(
+        test_serialization_4,
+        {
+            let mut col = Column::new_unindexed(DataTypeKind::Int, "status", None);
+            col.add_constraint(
+                "default".to_string(),
+                Constraint::Default(DataType::Int(Int32(42))),
+            );
+            col
+        },
+        "Column with default value serialization failed"
+    );
 
-    pub fn object_type(&self) -> ObjectType {
-        self.o_type
-    }
-
-    pub fn get_schema(&self) -> Schema {
-        if let Some(metadata) = self.metadata() {
-            if let Ok((schema, _)) = Schema::read_from(metadata) {
-                return schema;
-            }
-        };
-        panic!("Object does not have schema");
-    }
-}
-impl<'a> TryFrom<TupleRef<'a>> for DBObject {
-    type Error = std::io::Error;
-
-    fn try_from(tuple: TupleRef<'a>) -> Result<Self, Self::Error> {
-        let schema = meta_table_schema();
-
-        if tuple.num_fields() != schema.columns.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "Invalid tuple: expected {} columns, got {}",
-                    schema.columns.len(),
-                    tuple.num_fields()
-                ),
-            ));
-        }
-
-        let o_id = match tuple.value(&schema, 0)? {
-            DataTypeRef::BigUInt(v) => OId::from(v.to_owned()),
-            DataTypeRef::Null => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "o_id cannot be NULL",
-                ))
-            }
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid type for o_id",
-                ))
-            }
-        };
-
-        let root = match tuple.value(&schema, 1)? {
-            DataTypeRef::BigUInt(v) => PageId::from(v.to_owned()),
-            DataTypeRef::Null => PAGE_ZERO,
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid type for o_root",
-                ))
-            }
-        };
-
-        let o_type = match tuple.value(&schema, 2)? {
-            DataTypeRef::Byte(v) => {
-                let type_val = v.to_owned();
-                ObjectType::try_from(type_val)?
-            }
-            DataTypeRef::Null => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "o_type cannot be NULL",
-                ))
-            }
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid type for o_type",
-                ))
-            }
-        };
-
-        let metadata = match tuple.value(&schema, 3)? {
-            DataTypeRef::Blob(v) => Some(v.data().to_vec().into_boxed_slice()),
-            DataTypeRef::Null => None,
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid type for metadata",
-                ))
-            }
-        };
-
-        let name = match tuple.value(&schema, 4)? {
-            DataTypeRef::Text(blob) => blob.as_str(TextEncoding::Utf8).to_string(),
-            DataTypeRef::Null => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "o_name cannot be NULL",
-                ))
-            }
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid type for o_name",
-                ))
-            }
-        };
-
-        Ok(DBObject {
-            o_id,
-            root,
-            o_type,
-            name,
-            metadata,
-        })
-    }
-}
-
-impl<'a> TryFrom<Tuple<'a>> for DBObject {
-    type Error = std::io::Error;
-
-    fn try_from(tuple: Tuple<'a>) -> Result<Self, Self::Error> {
-        let schema = meta_table_schema();
-
-        if tuple.num_fields() != schema.columns.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "Invalid tuple: expected {} columns, got {}",
-                    schema.columns.len(),
-                    tuple.num_fields()
-                ),
-            ));
-        }
-
-        let o_id = match tuple.value(&schema, 0)? {
-            DataTypeRef::BigUInt(v) => OId::from(v.to_owned()),
-            DataTypeRef::Null => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "o_id cannot be NULL",
-                ))
-            }
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid type for o_id",
-                ))
-            }
-        };
-
-        let root = match tuple.value(&schema, 1)? {
-            DataTypeRef::BigUInt(v) => PageId::from(v.to_owned()),
-            DataTypeRef::Null => PAGE_ZERO,
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid type for o_root",
-                ))
-            }
-        };
-
-        let o_type = match tuple.value(&schema, 2)? {
-            DataTypeRef::Byte(v) => {
-                let type_val = v.to_owned();
-                ObjectType::try_from(type_val)?
-            }
-            DataTypeRef::Null => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "o_type cannot be NULL",
-                ))
-            }
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid type for o_type",
-                ))
-            }
-        };
-
-        let metadata = match tuple.value(&schema, 3)? {
-            DataTypeRef::Blob(v) => Some(v.data().to_vec().into_boxed_slice()),
-            DataTypeRef::Null => None,
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid type for metadata",
-                ))
-            }
-        };
-
-        let name = match tuple.value(&schema, 4)? {
-            DataTypeRef::Text(blob) => blob.as_str(TextEncoding::Utf8).to_string(),
-            DataTypeRef::Null => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "o_name cannot be NULL",
-                ))
-            }
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid type for o_name",
-                ))
-            }
-        };
-
-        Ok(DBObject {
-            o_id,
-            root,
-            o_type,
-            name,
-            metadata,
-        })
-    }
-}
-
-impl TryFrom<UInt8> for ObjectType {
-    type Error = std::io::Error;
-
-    fn try_from(value: UInt8) -> Result<Self, Self::Error> {
-        match value.0 {
-            0 => Ok(ObjectType::Table),
-            1 => Ok(ObjectType::Index),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Invalid ObjectType value: {}", value.0),
-            )),
-        }
-    }
-}
-
-impl DBObject {
-    pub fn new(o_type: ObjectType, name: &str, metadata: Option<&[u8]>) -> Self {
-        Self {
-            o_id: OId::new_key(),
-            root: PAGE_ZERO,
-            o_type,
-            name: name.to_string(),
-            metadata: metadata.map(|v| v.to_vec().into_boxed_slice()),
-        }
-    }
-
-    pub fn metadata(&self) -> Option<&[u8]> {
-        if let Some(meta) = &self.metadata {
-            Some(meta.as_ref())
-        } else {
+    serialize_test!(
+        test_serialization_5,
+        Column::new(
+            DataTypeKind::Text,
+            "email",
+            Some("idx_email".to_string()),
             None
-        }
-    }
+        ),
+        "Column with index serialization failed"
+    );
 
-    pub fn is_allocated(&self) -> bool {
-        !matches!(self.o_type, ObjectType::Table | ObjectType::Index) || self.root.is_valid()
-    }
+    serialize_test!(
+        test_serialization_6,
+        Schema::new(),
+        "Empty schema serialization failed"
+    );
 
-    pub fn alloc(&mut self, pager: &mut SharedPager) -> std::io::Result<()> {
-        self.root = if matches!(self.o_type, ObjectType::Index | ObjectType::Table) {
-            pager.write().alloc_page::<BtreePage>()?
-        } else {
-            PAGE_ZERO
-        };
-        Ok(())
-    }
+    serialize_test!(
+        test_serialization_7,
+        {
+            let mut schema = Schema::new();
+            schema.add_column("id", DataTypeKind::BigInt, true, true, false);
+            schema.add_column("name", DataTypeKind::Text, false, true, false);
+            schema.add_column("email", DataTypeKind::Text, false, false, true);
+            schema.add_column("age", DataTypeKind::Int, false, false, false);
+            schema
+        },
+        "Schema with columns serialization failed"
+    );
 
-    pub fn into_boxed_tuple(self) -> std::io::Result<Box<[u8]>> {
-        let root_page = if self.root != PAGE_ZERO {
-            DataType::BigUInt(UInt64::from(self.root))
-        } else {
-            DataType::Null
-        };
+    serialize_test!(
+        test_serialization_8,
+        {
+            let mut schema = Schema::new();
+            schema.add_column("id", DataTypeKind::BigInt, false, true, false);
+            schema.add_column("email", DataTypeKind::Text, false, true, false);
+            schema.add_constraint(TableConstraint::PrimaryKey(vec!["id".to_string()]));
+            schema.add_constraint(TableConstraint::Unique(vec!["email".to_string()]));
+            schema
+        },
+        "Schema with table constraints serialization failed"
+    );
 
-        let parent = if let Some(obj) = self.metadata {
-            DataType::Blob(Blob::from(obj.as_ref()))
-        } else {
-            DataType::Null
-        };
+    serialize_test!(
+        test_serialization_9,
+        {
+            let mut schema = Schema::new();
+            schema.add_column("user_id", DataTypeKind::BigInt, false, true, false);
+            schema.add_column("product_id", DataTypeKind::BigInt, false, true, false);
+            schema.add_column("quantity", DataTypeKind::Int, false, true, false);
+            schema.add_constraint(TableConstraint::PrimaryKey(vec![
+                "user_id".to_string(),
+                "product_id".to_string(),
+            ]));
+            schema
+        },
+        "Schema with composite PK serialization failed"
+    );
 
-        let schema = meta_table_schema();
-        tuple(
-            &[
-                DataType::BigUInt(UInt64::from(self.o_id)),
-                root_page,
-                DataType::Byte(UInt8::from(self.o_type as u8)),
-                parent,
-                DataType::Text(Blob::from(self.name.as_str())),
-            ],
-            &schema,
-        )
-    }
+    serialize_test!(
+        test_serialization_10,
+        {
+            let mut schema = Schema::new();
+            schema.add_column("id", DataTypeKind::BigInt, true, true, false);
+            schema.add_column("user_id", DataTypeKind::BigInt, false, true, false);
+            schema.add_column("product_id", DataTypeKind::BigInt, false, true, false);
+
+            schema.add_constraint(TableConstraint::ForeignKey {
+                columns: vec!["user_id".to_string()],
+                ref_table: "users".to_string(),
+                ref_columns: vec!["id".to_string()],
+            });
+
+            schema.add_constraint(TableConstraint::ForeignKey {
+                columns: vec!["product_id".to_string()],
+                ref_table: "products".to_string(),
+                ref_columns: vec!["id".to_string()],
+            });
+            schema
+        },
+        "Schema with foreign keys serialization failed"
+    );
+
+    serialize_test!(
+        test_serialization_11,
+        {
+            let mut schema = Schema::new();
+
+            let mut col1 = Column::new_unindexed(DataTypeKind::BigInt, "id", None);
+            col1.add_constraint("pk".to_string(), Constraint::PrimaryKey);
+            col1.set_index("idx_id".to_string());
+            schema.push_column(col1);
+
+            let mut col2 = Column::new_unindexed(DataTypeKind::Text, "email", None);
+            col2.add_constraint("unique_email".to_string(), Constraint::Unique);
+            col2.add_constraint("nn_email".to_string(), Constraint::NonNull);
+            schema.push_column(col2);
+
+            let mut col3 = Column::new_unindexed(DataTypeKind::Int, "status", None);
+            col3.add_constraint(
+                "default_status".to_string(),
+                Constraint::Default(DataType::Int(Int32(1))),
+            );
+            schema.push_column(col3);
+
+            let mut col4 = Column::new_unindexed(DataTypeKind::BigInt, "org_id", None);
+            let fk = ForeignKey::new("organizations".to_string(), "id".to_string());
+            col4.add_constraint("fk_org".to_string(), Constraint::ForeignKey(fk));
+            schema.push_column(col4);
+
+            schema.add_constraint(TableConstraint::Unique(vec![
+                "email".to_string(),
+                "org_id".to_string(),
+            ]));
+
+            schema
+        },
+        "Complex schema serialization failed"
+    );
+
+    serialize_test!(
+        test_serialization_12,
+        ForeignKey::new("parent_table".to_string(), "parent_column".to_string()),
+        "ForeignKey serialization failed"
+    );
+
+    serialize_test!(
+        test_serialization_13,
+        Column::new_unindexed(DataTypeKind::Text, "", None),
+        "Empty string column name serialization failed"
+    );
+
+    serialize_test!(
+        test_serialization_14,
+        {
+            let long_name = "a".repeat(1000);
+            Column::new_unindexed(DataTypeKind::Text, &long_name, None)
+        },
+        "Long string column name serialization failed"
+    );
+
+    serialize_test!(
+        test_serialization_15,
+        Column::new_unindexed(DataTypeKind::Text, "用户名_", None),
+        "Unicode column name serialization failed"
+    );
+
+    serialize_test!(
+        test_serialization_16,
+        {
+            let mut schema = Schema::new();
+            let mut col = Column::new(
+                DataTypeKind::Text,
+                "test_col",
+                Some("idx_test".to_string()),
+                None,
+            );
+            col.add_constraint("pk".to_string(), Constraint::PrimaryKey);
+            col.add_constraint("nn".to_string(), Constraint::NonNull);
+            col.add_constraint("uniq".to_string(), Constraint::Unique);
+            col.add_constraint(
+                "def".to_string(),
+                Constraint::Default(DataType::Text(Blob::from("default_value"))),
+            );
+            col.add_constraint(
+                "fk".to_string(),
+                Constraint::ForeignKey(ForeignKey::new(
+                    "ref_table".to_string(),
+                    "ref_col".to_string(),
+                )),
+            );
+            schema.push_column(col);
+            schema
+        },
+        "Schema with all constraint types failed"
+    );
+
+    serialize_test!(
+        test_serialization_18,
+        {
+            let mut schema = Schema::new();
+            for i in 0..127 {
+                schema.add_column(&format!("col_{i}"), DataTypeKind::Int, false, false, false);
+            }
+            schema
+        },
+        "Schema with 127 columns failed"
+    );
+
+    serialize_test!(
+        test_serialization_19,
+        {
+            let mut schema = Schema::new();
+            for i in 0..128 {
+                schema.add_column(&format!("col_{i}"), DataTypeKind::Int, false, false, false);
+            }
+            schema
+        },
+        "Schema with 128 columns failed"
+    );
+
+    serialize_test!(
+        test_serialization_20,
+        {
+            let mut schema = Schema::new();
+
+            let mut col_int = Column::new_unindexed(DataTypeKind::Int, "int_col", None);
+            col_int.add_constraint(
+                "def_int".to_string(),
+                Constraint::Default(DataType::Int(Int32(42))),
+            );
+            schema.push_column(col_int);
+
+            let mut col_text = Column::new_unindexed(DataTypeKind::Text, "text_col", None);
+            col_text.add_constraint(
+                "def_text".to_string(),
+                Constraint::Default(DataType::Text(Blob::from("hello"))),
+            );
+            schema.push_column(col_text);
+
+            let mut col_bigint = Column::new_unindexed(DataTypeKind::BigInt, "bigint_col", None);
+            col_bigint.add_constraint(
+                "def_bigint".to_string(),
+                Constraint::Default(DataType::BigInt(Int64(9999999))),
+            );
+            schema.push_column(col_bigint);
+
+            let mut col_null = Column::new_unindexed(DataTypeKind::Null, "null_col", None);
+            col_null.add_constraint("def_null".to_string(), Constraint::Default(DataType::Null));
+            schema.push_column(col_null);
+
+            schema
+        },
+        "Schema with different default types failed"
+    );
 }

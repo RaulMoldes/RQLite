@@ -167,7 +167,7 @@ impl Header for BtreePageHeader {
     }
     fn init(size: u32, page_number: PageId) -> Self {
         let aligned_size = size.next_multiple_of(PAGE_ALIGNMENT);
-        dbg!(std::mem::size_of::<BtreePageHeader>());
+        
         debug_assert!(
             std::mem::size_of::<BtreePageHeader>() % CELL_ALIGNMENT as usize == 0,
             "Header size is not a multiple of cell alignment. Must ensure header is aligned"

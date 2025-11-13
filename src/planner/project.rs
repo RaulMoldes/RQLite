@@ -1,4 +1,4 @@
-use crate::database::{Database, schema::Schema};
+use crate::database::{schema::Schema, Database};
 use crate::planner::{ExecutionPlanStep, ResultSet};
 
 // Project step
@@ -9,9 +9,7 @@ pub struct Project {
 
 impl Project {
     pub fn new(columns: Vec<String>, schema: Schema) -> Self {
-        Self {
-            columns, schema
-        }
+        Self { columns, schema }
     }
 }
 impl ExecutionPlanStep for Project {

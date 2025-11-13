@@ -33,6 +33,33 @@ impl<'a> VarInt<'a> {
         ))
     }
 
+    pub fn read_buf<R: std::io::Read>(reader: &mut R) -> std::io::Result<Box<[u8]>> {
+        let mut buf = [0u8; 1];
+        let mut bytes = Vec::new();
+
+        for i in 0..MAX_VARINT_LEN {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "EOF antes de completar varint",
+                ));
+            }
+
+            let b = buf[0];
+            bytes.push(b);
+
+            if (b & 0x80) == 0 {
+                return Ok(bytes.into_boxed_slice());
+            }
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "VarInt too long",
+        ))
+    }
+
     /// Decode the value from the stored bytes
     pub fn value(&self) -> i64 {
         let mut result: u64 = 0;

@@ -1,26 +1,8 @@
 mod macros;
 
-use crate::types::{Date, DateTime, RowId};
+use crate::types::{Date, DateTime};
 
 use crate::test_ordering;
-
-// Tests RowId
-test_ordering!(
-    test_rowid_ordering,
-    RowId,
-    [
-        RowId::from(1),
-        RowId::from(3),
-        RowId::from(2),
-        RowId::from(0)
-    ],
-    [
-        RowId::from(0),
-        RowId::from(1),
-        RowId::from(2),
-        RowId::from(3)
-    ]
-);
 
 // Tests Date
 test_ordering!(

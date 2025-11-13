@@ -491,7 +491,7 @@ fn test_overflow_keys() -> io::Result<()> {
     for i in 0..10 {
         let key_content = format!("KEY_{i:04}_") + &"X".repeat(large_key_size - 10);
         let key = TestVarLengthKey::from_string(&key_content);
-        dbg!(i);
+
         tree.insert(root, &key.as_bytes())?;
     }
 
@@ -549,7 +549,7 @@ fn test_btree_iterator() -> io::Result<()> {
 
     let mut collected = Vec::new();
     for item in tree.iter()? {
-        dbg!(item.is_ok());
+
         match item {
             Ok(payload) => {
                 collected.push(payload);
@@ -562,7 +562,7 @@ fn test_btree_iterator() -> io::Result<()> {
 
     // Verify keys are sorted
     for i in 0..99 {
-        dbg!(i);
+    
         let key_i = &collected[i].as_ref()[..4];
         let key_next = &collected[i + 1].as_ref()[..4];
         assert!(key_i < key_next, "Keys should be in ascending order");
@@ -637,7 +637,6 @@ fn test_btree_iterator_iter_rev() -> io::Result<()> {
         tree.insert(root, kv.as_ref())?;
     }
 
-    std::fs::write("tree.json", tree.json()?)?;
 
     for item in tree.iter_rev()? {
         match item {

@@ -89,10 +89,8 @@ def_data_type!(DataTypeRefMut, RefMut);
 def_data_type!(DataType, Owned);
 
 impl DataType {
-
     pub fn datatype(&self) -> DataTypeKind {
         match self {
-
             DataType::SmallInt(_) => DataTypeKind::SmallInt,
             DataType::HalfInt(_) => DataTypeKind::HalfInt,
             DataType::Int(_) => DataTypeKind::Int,
@@ -111,7 +109,6 @@ impl DataType {
             DataType::Text(_) => DataTypeKind::Text,
             DataType::Blob(_) => DataTypeKind::Blob,
             DataType::Null => DataTypeKind::Null,
-
         }
     }
     pub fn matches(&self, other: DataTypeKind) -> bool {
@@ -296,10 +293,11 @@ pub fn reinterpret_cast<'a>(
             let mut cursor = 0;
             let (len_varint, offset) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
             let len_usize: usize = len_varint.try_into()?;
-            cursor += offset;
 
-            let value = DataTypeRef::Blob(BlobRef::from_bytes(&buffer[cursor..cursor + len_usize]));
-            cursor += len_usize;
+            let value = DataTypeRef::Blob(BlobRef::from_raw_bytes(
+                &buffer[cursor..cursor + offset + len_usize],
+            ));
+            cursor += len_usize + offset;
             Ok((value, cursor))
         }
 
@@ -307,10 +305,12 @@ pub fn reinterpret_cast<'a>(
             let mut cursor = 0;
             let (len_varint, offset) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
             let len_usize: usize = len_varint.try_into()?;
-            cursor += offset;
 
-            let value = DataTypeRef::Text(BlobRef::from_bytes(&buffer[cursor..cursor + len_usize]));
-            cursor += len_usize;
+            let value = DataTypeRef::Text(BlobRef::from_raw_bytes(
+                &buffer[cursor..cursor + offset + len_usize],
+            ));
+
+            cursor += len_usize + offset;
             Ok((value, cursor))
         }
         DataTypeKind::BigInt => {
@@ -416,12 +416,11 @@ pub fn reinterpret_cast_mut<'a>(
             let mut cursor = 0;
             let (len_varint, offset) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
             let len_usize: usize = len_varint.try_into()?;
-            cursor += offset;
 
-            let value = DataTypeRefMut::Blob(BlobRefMut::from_bytes(
-                &mut buffer[cursor..cursor + len_usize],
+            let value = DataTypeRefMut::Blob(BlobRefMut::from_raw_bytes(
+                &mut buffer[cursor..cursor + offset + len_usize],
             ));
-            cursor += len_usize;
+            cursor += len_usize + offset;
 
             Ok((value, cursor))
         }
@@ -432,10 +431,10 @@ pub fn reinterpret_cast_mut<'a>(
             let len_usize: usize = len_varint.try_into()?;
             cursor += offset;
 
-            let value = DataTypeRefMut::Text(BlobRefMut::from_bytes(
-                &mut buffer[cursor..cursor + len_usize],
+            let value = DataTypeRefMut::Text(BlobRefMut::from_raw_bytes(
+                &mut buffer[cursor..cursor + offset + len_usize],
             ));
-            cursor += len_usize;
+            cursor += len_usize + offset;
 
             Ok((value, cursor))
         }

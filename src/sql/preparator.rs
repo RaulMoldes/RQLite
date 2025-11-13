@@ -1,20 +1,14 @@
-use crate::database::{Database,
-    schema::{
-        AsBytes,
-        DBObject,
-        ObjectType,
-        Column,
-        Schema
-}};
-
-
+use crate::database::{
+    schema::{Column, Relation, Schema, Table},
+    Database,
+};
 use crate::sql::ast::{Expr, SelectItem, SelectStatement, Statement, TableReference, Values};
 use crate::types::DataTypeKind;
 use std::collections::{HashMap, HashSet};
 
 struct PreparatorCtx {
     table_aliases: HashMap<String, String>,
-    subqueries: HashMap<String, DBObject>,
+    subqueries: HashMap<String, Relation>,
     current_table: Option<String>,
 }
 
@@ -38,7 +32,7 @@ impl<'a> Preparator<'a> {
     fn prepare_table_ref(&mut self, reference: &mut TableReference) {
         match reference {
             TableReference::Table { name, alias } => {
-                let obj = self.get_obj_unchecked(name);
+                let obj = self.get_relation(name);
                 self.ctx.current_table = Some(name.to_string());
 
                 if let Some(aliased) = alias {
@@ -64,8 +58,7 @@ impl<'a> Preparator<'a> {
             }
             TableReference::Subquery { query, alias } => {
                 let schema = self.prepare_select(query.as_mut());
-                let obj =
-                    DBObject::new(ObjectType::Table, alias, Some(&schema.write_to().unwrap()));
+                let obj = Relation::TableRel(Table::new(alias, crate::types::PAGE_ZERO, schema));
                 self.ctx.subqueries.insert(alias.to_string(), obj);
             }
         }
@@ -168,8 +161,8 @@ impl<'a> Preparator<'a> {
                             .any(|(alias, real)| real == table && alias != table)
                             && processed_tables.insert(table.clone())
                         {
-                            let obj = self.get_obj_unchecked(table);
-                            let schema = obj.get_schema();
+                            let obj = self.get_relation(table);
+                            let schema = obj.schema();
 
                             for column in &schema.columns {
                                 out_columns.push(column.clone());
@@ -187,8 +180,8 @@ impl<'a> Preparator<'a> {
                     // Then process aliased tables
                     for (alias, real_table) in self.ctx.table_aliases.iter() {
                         if processed_tables.insert(real_table.clone()) {
-                            let obj = self.get_obj_unchecked(real_table);
-                            let schema = obj.get_schema();
+                            let obj = self.get_relation(real_table);
+                            let schema = obj.schema();
 
                             for column in &schema.columns {
                                 out_columns.push(column.clone());
@@ -205,7 +198,7 @@ impl<'a> Preparator<'a> {
 
                     // Finally add subqueries
                     for (alias, subq) in self.ctx.subqueries.iter() {
-                        let schema = subq.get_schema();
+                        let schema = subq.schema();
                         for column in &schema.columns {
                             out_columns.push(column.clone());
                             new_items.push(SelectItem::ExprWithAlias {
@@ -226,16 +219,16 @@ impl<'a> Preparator<'a> {
                     let (table, new_column) = match &expr {
                         Expr::Identifier(value) => {
                             let table = self.ctx.current_table.as_ref().unwrap();
-                            let obj = self.get_obj_unchecked(table);
-                            let schema = obj.get_schema();
-                            let col = schema.find_col(value).unwrap().clone();
+                            let obj = self.get_relation(table);
+                            let schema = obj.schema();
+                            let col = schema.column(value).unwrap().clone();
                             (table.clone(), col)
                         }
                         Expr::QualifiedIdentifier { table, column } => {
                             let real_table = self.ctx.table_aliases.get(table).unwrap_or(table);
-                            let obj = self.get_obj_unchecked(real_table);
-                            let schema = obj.get_schema();
-                            let col = schema.find_col(column).unwrap().clone();
+                            let obj = self.get_relation(real_table);
+                            let schema = obj.schema();
+                            let col = schema.column(column).unwrap().clone();
                             (table.clone(), col)
                         }
                         _ => {
@@ -288,7 +281,7 @@ impl<'a> Preparator<'a> {
         self.ctx.current_table = saved_current;
         self.ctx.subqueries = saved_subqueries;
 
-        Schema::from(out_columns.as_slice())
+        Schema::from_columns(out_columns.as_slice(), 0)
     }
 
     pub fn prepare_stmt(&mut self, stmt: &mut Statement) {
@@ -301,15 +294,15 @@ impl<'a> Preparator<'a> {
                 for (alias, cte) in &mut with_stmt.ctes {
                     let schema = self.prepare_select(cte);
                     let obj =
-                        DBObject::new(ObjectType::Table, alias, Some(&schema.write_to().unwrap()));
+                        Relation::TableRel(Table::new(alias, crate::types::PAGE_ZERO, schema));
                     self.ctx.subqueries.insert(alias.clone(), obj);
                 }
                 // Prepare main body
                 self.prepare_select(&mut with_stmt.body);
             }
             Statement::Insert(s) => {
-                let obj = self.get_obj_unchecked(&s.table);
-                let schema = obj.get_schema();
+                let obj = self.get_relation(&s.table);
+                let schema = obj.schema();
 
                 // Handle INSERT INTO ... SELECT
                 if let Values::Query(select_stmt) = &mut s.values {
@@ -423,19 +416,18 @@ impl<'a> Preparator<'a> {
         }
     }
 
-    fn get_obj_unchecked(&self, obj_name: &str) -> DBObject {
+    fn get_relation(&self, obj_name: &str) -> Relation {
         if let Some(subquery) = self.ctx.subqueries.get(obj_name) {
-            return subquery.clone(); // TODO: avoid cloning here
+            return subquery.clone();
         };
 
-        let oid = self.db.search_obj(obj_name).unwrap();
-        self.db.get_obj(oid).unwrap()
+        self.db.relation(obj_name).unwrap()
     }
 }
 
 #[cfg(test)]
 mod sql_prepare_tests {
-    use crate::database::{Database, schema::Schema};
+    use crate::database::{schema::Schema, Database};
     use crate::io::pager::{Pager, SharedPager};
     use crate::sql::ast::{
         BinaryOperator, Expr, InsertStatement, JoinType, SelectItem, SelectStatement, Statement,
@@ -465,7 +457,7 @@ mod sql_prepare_tests {
 
         let pager = Pager::from_config(config, &path).unwrap();
 
-        let mut db = Database::new(SharedPager::from(pager));
+        let mut db = Database::new(SharedPager::from(pager), 3, 2);
         db.init()?;
 
         // Create a users table

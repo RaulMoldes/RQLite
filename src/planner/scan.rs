@@ -1,23 +1,17 @@
 use crate::database::Database;
-use crate::database::schema::Schema;
 use crate::planner::{ExecutionPlanStep, ResultSet};
 use crate::storage::tuple::TupleRef;
-use crate::structures::bplustree::{
-    IterDirection, NodeAccessMode,
-};
-use crate::types::OId;
+use crate::structures::bplustree::{IterDirection, NodeAccessMode};
+use crate::types::{DataTypeKind, OId};
 
 pub enum Scan {
     SeqScan {
         table_oid: OId,
-        schema: Schema,
         cached_resultset: Option<ResultSet>,
     },
     IndexScan {
         table_oid: OId,
         index_oid: OId,
-        table_schema: Schema,
-        index_schema: Schema,
         start_key: Option<Box<[u8]>>,
         end_key: Option<Box<[u8]>>,
         cached_resultset: Option<ResultSet>,
@@ -29,12 +23,11 @@ impl ExecutionPlanStep for Scan {
         match self {
             Scan::SeqScan {
                 table_oid,
-                schema,
                 cached_resultset,
                 ..
             } => {
-                let table_obj = db.get_obj(*table_oid)?;
-                let table = db.build_tree(table_obj)?;
+                let table_object = db.relation_direct(*table_oid)?;
+                let table = db.table_btree(table_object.root())?;
 
                 let mut collected = ResultSet::new();
                 for item in table.iter()? {
@@ -50,19 +43,15 @@ impl ExecutionPlanStep for Scan {
             Scan::IndexScan {
                 table_oid,
                 index_oid,
-                table_schema,
-                index_schema,
                 start_key,
                 end_key,
                 cached_resultset,
                 ..
             } => {
-                let table_obj = db.get_obj(*table_oid)?;
-                let table = db.build_tree(table_obj)?;
-
-                let index_obj = db.get_obj(*index_oid)?;
-
-                let index = db.build_tree(index_obj)?;
+                let table_object = db.relation_direct(*table_oid)?;
+                let table = db.table_btree(table_object.root())?;
+                let index_object = db.relation_direct(*index_oid)?;
+                let index = db.index_btree(index_object.root(), DataTypeKind::Blob)?; // TODO: This is a placeholder. must figure out how to get the key type from the index schema.
 
                 let mut collected = ResultSet::new();
 
@@ -82,8 +71,8 @@ impl ExecutionPlanStep for Scan {
                             }
 
                             // Extract rowid from index tuple
-                            let tuple = TupleRef::read(payload.as_ref(), index_schema)?;
-                            let rowid = tuple.value(index_schema, 1)?;
+                            let tuple = TupleRef::read(payload.as_ref(), index_object.schema())?;
+                            let rowid = tuple.value(0)?;
 
                             let table_result =
                                 table.search_from_root(rowid.as_ref(), NodeAccessMode::Read)?;
@@ -106,12 +95,10 @@ impl ExecutionPlanStep for Scan {
     fn take_result_set(&mut self) -> Option<ResultSet> {
         match self {
             Scan::SeqScan {
-                cached_resultset,
-                ..
+                cached_resultset, ..
             } => cached_resultset.take(),
             Scan::IndexScan {
-                cached_resultset,
-                ..
+                cached_resultset, ..
             } => cached_resultset.take(),
         }
     }

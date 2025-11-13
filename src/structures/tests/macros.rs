@@ -37,11 +37,10 @@ macro_rules! insert_tests {
 
                 }
 
-                std::fs::write("tree.json", tree.json()?)?;
 
                 // Verify all keys exist (in sequential order)
                 for (i, k) in keys.iter().enumerate() {
-                    dbg!(k);
+                
                     let key = TestKey(*k);
                     let retrieved = tree.search(&start, key.as_ref(), NodeAccessMode::Read)?;
                     assert!(matches!(retrieved, SearchResult::Found(_)));
