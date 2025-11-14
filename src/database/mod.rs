@@ -14,7 +14,7 @@ use crate::structures::bplustree::{
 use crate::storage::page::BtreePage;
 
 use crate::types::initialize_atomics;
-use crate::types::{get_next_object, Blob, DataType, DataTypeKind, OId, PageId, UInt64, PAGE_ZERO};
+use crate::types::{Blob, DataType, DataTypeKind, OId, PAGE_ZERO, PageId, UInt64, get_next_object};
 use schema::{Column, Relation, Schema};
 
 pub const META_TABLE: &str = "rqcatalog";
@@ -46,6 +46,7 @@ pub fn meta_table_schema() -> Schema {
                 Some(META_INDEX.to_string()),
                 Some(key_constraints),
             ),
+            Column::new_unindexed(DataTypeKind::BigUInt, "o_last_lsn", None),
         ]
         .as_ref(),
         1,
@@ -231,8 +232,6 @@ impl Database {
 
         let blob = Blob::from(name);
 
-
-
         let result = meta_idx.search_from_root(blob.as_ref(), NodeAccessMode::Read)?;
 
         let payload = match result {
@@ -241,10 +240,9 @@ impl Database {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     "Object not found in meta table",
-                ))
+                ));
             }
         };
-
 
         meta_idx.clear_stack();
         let schema = meta_idx_schema();
@@ -269,7 +267,6 @@ impl Database {
         let meta_table = self.table_btree(self.meta_table)?;
         let bytes: &[u8] = id.as_ref();
 
-
         let payload = match meta_table.search_from_root(id.as_ref(), NodeAccessMode::Read)? {
             SearchResult::Found(position) => meta_table
                 .get_content_from_result(SearchResult::Found(position))
@@ -278,10 +275,9 @@ impl Database {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     "Object not found in meta table",
-                ))
+                ));
             }
         };
-
 
         meta_table.clear_stack();
         let schema = meta_table_schema();
@@ -291,19 +287,16 @@ impl Database {
     }
 }
 
-
-
-
 #[cfg(test)]
 mod db_tests {
 
-    use crate::database::{schema::Schema, Database};
-    use crate::io::pager::{Pager, SharedPager};
     use super::*;
+    use crate::database::{Database, schema::Schema};
+    use crate::io::pager::{Pager, SharedPager};
 
-    use crate::types::{PAGE_ZERO, DataTypeKind};
+    use crate::types::{DataTypeKind, PAGE_ZERO};
 
-    use crate::{IncrementalVaccum, RQLiteConfig, ReadWriteVersion, TextEncoding};
+    use crate::{AxmosDBConfig, IncrementalVaccum, ReadWriteVersion, TextEncoding};
     use serial_test::serial;
     use std::path::Path;
 
@@ -312,7 +305,7 @@ mod db_tests {
         capacity: u16,
         path: impl AsRef<Path>,
     ) -> std::io::Result<Database> {
-        let config = RQLiteConfig {
+        let config = AxmosDBConfig {
             page_size,
             cache_size: Some(capacity),
             incremental_vacuum_mode: IncrementalVaccum::Disabled,
@@ -347,7 +340,6 @@ mod db_tests {
         Ok(db)
     }
 
-
     #[test]
     #[serial]
     fn test_db_init() {
@@ -366,7 +358,4 @@ mod db_tests {
         let meta_index_rel = db.relation(META_INDEX);
         assert!(meta_index_rel.is_ok(), "Should find meta index");
     }
-
-
-
 }

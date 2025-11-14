@@ -1,12 +1,12 @@
 [package]
-name = "rqlite"
+name = "axmosdb"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "A SQLite-compatible storage engine implementatio in Rust"
 authors = ["Raul Moldes <raul.moldes.work@gmail.com>"]
 license = "Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/RaulMoldes/rqlite"
+repository = "https://github.com/RaulMoldes/AxmosDB"
 
 [dependencies]
 paste = "1.0.15"

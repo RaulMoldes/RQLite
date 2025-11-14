@@ -190,10 +190,7 @@ mod cell_tests {
         assert_eq!(&cell.used()[..payload.len()], payload);
 
         // Check padding is correctly added
-        assert_eq!(
-            cell.size() % CELL_ALIGNMENT as usize,
-            0
-        );
+        assert_eq!(cell.size() % CELL_ALIGNMENT as usize, 0);
         assert_eq!(cell.len(), payload.len(), "Payload size mismatch.");
 
         let expected_total_size = cell.size();
@@ -215,7 +212,7 @@ mod cell_tests {
         let data_len = cell.len() - std::mem::size_of::<PageId>();
         assert_eq!(&cell.used()[..data_len], payload);
 
-        let expected_total_size =  cell.size();
+        let expected_total_size = cell.size();
         let expected_storage_size = expected_total_size + Slot::SIZE;
 
         assert_eq!(cell.total_size() as usize, expected_total_size);

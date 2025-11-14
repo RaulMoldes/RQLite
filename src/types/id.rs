@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 
 use crate::id_type;
 id_type!(LogId, __GLOBAL_LOG_COUNT, "LogId");
+id_type!(BlockId, __GLOBAL_BLOCK_COUNT, "BlockId");
 id_type!(PageId, __GLOBAL_PAGE_COUNT, "PageId");
 id_type!(TxId, __GLOBAL_TX_COUNT, "TxId");
 id_type!(OId, __GLOBAL_OBJ_COUNT, "OId");

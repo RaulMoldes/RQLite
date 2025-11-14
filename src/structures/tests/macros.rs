@@ -40,7 +40,7 @@ macro_rules! insert_tests {
 
                 // Verify all keys exist (in sequential order)
                 for (i, k) in keys.iter().enumerate() {
-                
+
                     let key = TestKey(*k);
                     let retrieved = tree.search(&start, key.as_ref(), NodeAccessMode::Read)?;
                     assert!(matches!(retrieved, SearchResult::Found(_)));

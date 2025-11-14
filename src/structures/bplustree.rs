@@ -1,17 +1,17 @@
+use crate::CELL_ALIGNMENT;
 use crate::io::frames::MemFrame;
 use crate::io::pager::SharedPager;
 use crate::storage::cell::CELL_HEADER_SIZE;
-use crate::storage::page::{BtreePage, MemPage, OverflowPage, BTREE_PAGE_HEADER_SIZE};
+use crate::storage::page::{BTREE_PAGE_HEADER_SIZE, BtreePage, MemPage, OverflowPage};
 use crate::storage::{
     cell::{Cell, Slot},
     latches::Latch,
 };
-use crate::CELL_ALIGNMENT;
 
-use crate::types::{PageId, VarInt, PAGE_ZERO};
+use crate::types::{PAGE_ZERO, PageId, VarInt};
 use std::cell::RefCell;
-use std::cmp::min;
 use std::cmp::Ordering;
+use std::cmp::min;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::marker::PhantomData;
 
@@ -247,7 +247,9 @@ impl LatchStackFrame {
                     self.latches.insert(key, read_latch);
                 }
                 (Latch::Read(p), NodeAccessMode::Write) => {
-                    panic!("Attempted to acquire a write latch on a node that was borrowed for read. Must use upgradable latches for this use case.")
+                    panic!(
+                        "Attempted to acquire a write latch on a node that was borrowed for read. Must use upgradable latches for this use case."
+                    )
                 }
                 _ => {}
             }

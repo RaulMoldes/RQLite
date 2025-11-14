@@ -1,10 +1,10 @@
+use crate::TextEncoding;
 use crate::database::schema::Schema;
 use crate::types::{
-    reinterpret_cast, reinterpret_cast_mut, DataType, DataTypeKind, DataTypeRef, DataTypeRefMut,
-    Float32RefMut, Float64RefMut, Int16RefMut, Int32RefMut, Int64RefMut, Int8RefMut, UInt16RefMut,
-    UInt32RefMut, UInt64RefMut, UInt8RefMut, VarInt,
+    DataType, DataTypeKind, DataTypeRef, DataTypeRefMut, Float32RefMut, Float64RefMut, Int8RefMut,
+    Int16RefMut, Int32RefMut, Int64RefMut, UInt8RefMut, UInt16RefMut, UInt32RefMut, UInt64RefMut,
+    VarInt, reinterpret_cast, reinterpret_cast_mut,
 };
-use crate::TextEncoding;
 
 pub struct TupleRefMut<'a, 'b> {
     data: &'a mut [u8],
@@ -244,7 +244,7 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "Type mismatch",
-                ))
+                ));
             }
         }
         Ok(())
@@ -652,7 +652,6 @@ impl<'a> From<&'a mut Tuple<'a>> for TupleRefMut<'a, 'a> {
 #[cfg(test)]
 mod tests {
 
-
     // TODO! MUST CREATE A MACRO TO AUTOMATE TEST GENERATION HERE.
     use super::*;
     use crate::database::schema::Column;
@@ -719,7 +718,6 @@ mod tests {
         } else {
             panic!("Expected Text value");
         }
-
 
         if let DataTypeRef::Boolean(v) = tuple_ref.value(1)? {
             assert_eq!(v.to_owned(), 1u8);

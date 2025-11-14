@@ -3,19 +3,21 @@ use crate::storage::{
     page::BtreePage,
     tuple::{Tuple, TupleRef},
 };
-use std::io::{Read, Seek, Write};
 use crate::structures::bplustree::Comparator;
 use crate::types::{
-    reinterpret_cast, varint::MAX_VARINT_LEN, Blob, DataType, DataTypeKind, DataTypeRef, Key, OId,
-    PageId, UInt64, UInt8, VarInt, PAGE_ZERO,
+    Blob, DataType, DataTypeKind, DataTypeRef, Key, LogId, OId, PAGE_ZERO, PageId, UInt8, UInt64,
+    VarInt, varint::MAX_VARINT_LEN,
 };
+use std::io::{Read, Seek, Write};
 
 use super::meta_table_schema;
-use crate::{repr_enum, TextEncoding};
-use std::collections::HashMap;
+use crate::io::{
+    AsBytes, read_string_unchecked, read_type_from_buf, read_variable_length,
+    write_string_unchecked,
+};
+use crate::{TextEncoding, repr_enum};
 use std::cmp::Ordering;
-
-type MemBuf = std::io::Cursor<Vec<u8>>;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Schema {
@@ -234,68 +236,6 @@ impl Schema {
     }
 }
 
-pub trait AsBytes {
-    fn write_to<W: Write>(&self, buffer: &mut W) -> std::io::Result<()>;
-    fn read_from<R: Read + Seek>(bytes: &mut R) -> std::io::Result<Self>
-    where
-        Self: Sized;
-}
-
-unsafe fn read_string_unchecked<R: Read>(reader: &mut R) -> std::io::Result<String> {
-    let varint = VarInt::read_buf(reader)?;
-    let (len, offset) = VarInt::from_encoded_bytes(&varint)?;
-    let len_usize: usize = len.try_into()?;
-    let mut str_buf = vec![0u8; len_usize];
-    reader.read_exact(&mut str_buf)?;
-    Ok(String::from_utf8_unchecked(str_buf))
-}
-
-fn write_string_unchecked<W: Write>(writer: &mut W, s: &str) -> std::io::Result<()> {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut vbuf = [0u8; MAX_VARINT_LEN];
-    let len_varint = VarInt::encode(len as i64, &mut vbuf);
-    writer.write_all(len_varint)?;
-    writer.write_all(bytes)?;
-
-    Ok(())
-}
-
-fn read_variable_length<R: Read + Seek> (
-    buf: &mut R
-) -> std::io::Result<Box<[u8]>>
-{
-    let varint = VarInt::read_buf(buf)?;
-    let (len, offset) = VarInt::from_encoded_bytes(varint.as_ref())?;
-    let len_usize: usize = len.try_into().unwrap();
-    let mut val_buffer = vec![0u8; len_usize];
-    buf.read_exact(&mut val_buffer);
-    Ok(val_buffer.into_boxed_slice())
-}
-fn read_type_from_buf<R: Read + Seek>(
-    dtype: DataTypeKind,
-    buf: &mut R,
-) -> std::io::Result<DataType> {
-    if dtype.is_fixed_size() {
-        let mut temp_buf = vec![0u8; dtype.size().unwrap()];
-        buf.read_exact(&mut temp_buf)?;
-        Ok(reinterpret_cast(dtype, &temp_buf)?.0.to_owned())
-    } else {
-        let varint = VarInt::read_buf(buf)?;
-        let (len, offset) = VarInt::from_encoded_bytes(&varint)?;
-        let len_usize: usize = len.try_into().unwrap();
-        let mut data_buf = vec![0u8; len_usize];
-        buf.read_exact(&mut data_buf)?;
-
-
-        let mut full_buf = Vec::with_capacity(offset + len_usize);
-        full_buf.extend_from_slice(&varint[..offset]);
-        full_buf.extend_from_slice(&data_buf);
-
-        Ok(reinterpret_cast(dtype, &full_buf)?.0.to_owned())
-    }
-}
-
 repr_enum!(
     pub enum ConstraintType: u8 {
         PrimaryKey = 0x00,
@@ -368,11 +308,9 @@ impl AsBytes for Schema {
     }
 
     fn read_from<R: Read + Seek>(bytes: &mut R) -> std::io::Result<Self> {
-
         let mut tmp_buf = [0u8; 1];
         bytes.read_exact(&mut tmp_buf)?;
         let num_keys = tmp_buf[0];
-
 
         let varint = VarInt::read_buf(bytes)?;
         let (column_count, offset) = VarInt::from_encoded_bytes(&varint)?;
@@ -396,7 +334,7 @@ impl AsBytes for Schema {
         let mut constraints = HashMap::with_capacity(constraint_count_usize);
 
         for _ in 0..constraint_count_usize {
-            let name = unsafe { read_string_unchecked(bytes)? };
+            let name = read_string_unchecked(bytes)?;
             let mut cbuf = [0u8];
             bytes.read_exact(&mut cbuf)?;
             let constraint_type = ConstraintType::from_repr(cbuf[0])?;
@@ -409,20 +347,20 @@ impl AsBytes for Schema {
                     let mut cols = Vec::with_capacity(cols_count_usize);
 
                     for _ in 0..cols_count_usize {
-                        let name = unsafe { read_string_unchecked(bytes)? };
+                        let name = read_string_unchecked(bytes)?;
                         cols.push(name);
                     }
                     TableConstraint::PrimaryKey(cols)
                 }
                 ConstraintType::ForeignKey => {
-                    let ref_table = unsafe { read_string_unchecked(bytes)? };
+                    let ref_table = read_string_unchecked(bytes)?;
                     let varint = VarInt::read_buf(bytes)?;
                     let (cols_count, offset) = VarInt::from_encoded_bytes(&varint)?;
                     let cols_count_usize: usize = cols_count.try_into()?;
 
                     let mut columns = Vec::with_capacity(cols_count_usize);
                     for _ in 0..cols_count_usize {
-                        let name = unsafe { read_string_unchecked(bytes)? };
+                        let name = read_string_unchecked(bytes)?;
                         columns.push(name);
                     }
 
@@ -432,7 +370,7 @@ impl AsBytes for Schema {
 
                     let mut ref_columns = Vec::with_capacity(cols_count_usize);
                     for _ in 0..cols_count_usize {
-                        let name = unsafe { read_string_unchecked(bytes)? };
+                        let name = read_string_unchecked(bytes)?;
                         ref_columns.push(name);
                     }
 
@@ -448,7 +386,7 @@ impl AsBytes for Schema {
                     let cols_count_usize: usize = cols_count.try_into()?;
                     let mut cols = Vec::with_capacity(cols_count_usize);
                     for _ in 0..cols_count_usize {
-                        let col_name = unsafe { read_string_unchecked(bytes)? };
+                        let col_name = read_string_unchecked(bytes)?;
                         cols.push(col_name);
                     }
                     TableConstraint::Unique(cols)
@@ -457,7 +395,7 @@ impl AsBytes for Schema {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("Unknown constraint type: {constraint_type}"),
-                    ))
+                    ));
                 }
             };
 
@@ -501,9 +439,10 @@ impl Schema {
 pub struct Table {
     object_id: OId,
     root_page: PageId,
+    last_lsn: LogId,
+    next_row: UInt64,
     name: String,
     schema: Schema,
-    next_row: UInt64,
 }
 
 impl Table {
@@ -511,9 +450,10 @@ impl Table {
         Self {
             object_id: OId::new_key(),
             root_page,
+            last_lsn: LogId::from(0),
+            next_row: UInt64(0),
             name: name.to_string(),
             schema,
-            next_row: UInt64(0),
         }
     }
 
@@ -537,10 +477,18 @@ impl Table {
         self.next_row
     }
 
-    pub fn build(id: OId, name: &str, root_page: PageId, schema: Schema, next_row: UInt64) -> Self {
+    pub fn build(
+        id: OId,
+        name: &str,
+        root_page: PageId,
+        schema: Schema,
+        next_row: UInt64,
+        last_lsn: LogId,
+    ) -> Self {
         Self {
             object_id: id,
             root_page,
+            last_lsn,
             name: name.to_string(),
             schema,
             next_row,
@@ -560,6 +508,7 @@ impl Table {
 pub struct Index {
     object_id: OId,
     root_page: PageId,
+    last_lsn: LogId,
     name: String,
     min_val: Option<Box<[u8]>>,
     max_val: Option<Box<[u8]>>,
@@ -571,6 +520,7 @@ impl Index {
         Self {
             object_id: OId::new_key(),
             root_page,
+            last_lsn: LogId::from(0),
             name: name.to_string(),
             min_val: None,
             max_val: None,
@@ -582,6 +532,7 @@ impl Index {
         id: OId,
         name: &str,
         root_page: PageId,
+        last_lsn: LogId,
         schema: Schema,
         min_val: Box<[u8]>,
         max_val: Box<[u8]>,
@@ -590,6 +541,7 @@ impl Index {
         Self {
             object_id: id,
             root_page,
+            last_lsn,
             name: name.to_string(),
             min_val: Some(min_val),
             max_val: Some(max_val),
@@ -616,16 +568,13 @@ impl Index {
     pub fn range(&self) -> Option<(&[u8], &[u8])> {
         if let Some(xmin) = self.min_val.as_ref() {
             if let Some(xmax) = self.max_val.as_ref() {
-                return Some((xmin.as_ref(), xmax.as_ref()))
+                return Some((xmin.as_ref(), xmax.as_ref()));
             }
         }
         None
-
     }
 
-
     pub fn add_item(&mut self, key: &[u8], comparator: impl Comparator) {
-
         if let Some(max) = self.max_val.as_ref() {
             if let Ok(Ordering::Greater) = comparator.compare(max.as_ref(), key) {
                 self.max_val = Some(key.to_vec().into_boxed_slice())
@@ -641,10 +590,7 @@ impl Index {
         } else {
             self.min_val = Some(key.to_vec().into_boxed_slice())
         };
-
     }
-
-
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -743,6 +689,13 @@ impl Relation {
         }
     }
 
+    pub fn last_lsn(&self) -> LogId {
+        match self {
+            Relation::TableRel(t) => t.last_lsn,
+            Relation::IndexRel(i) => i.last_lsn,
+        }
+    }
+
     pub fn is_allocated(&self) -> bool {
         self.root().is_valid()
     }
@@ -771,6 +724,7 @@ impl Relation {
                 DataType::Byte(UInt8::from(self.object_type() as u8)),
                 metadata,
                 DataType::Text(Blob::from(self.name())),
+                DataType::BigUInt(UInt64::from(self.last_lsn())),
             ],
             &schema,
         )?;
@@ -789,11 +743,10 @@ impl Relation {
                 buffer.write_all(t.next_row.as_ref())?;
             }
             Relation::IndexRel(i) => {
-
                 if let Some(val) = &i.min_val {
                     buffer.write_all(&[1u8])?;
                     let mut vbuffer = [0u8; MAX_VARINT_LEN];
-                    let len_buffer= VarInt::encode(val.len() as i64, &mut vbuffer);
+                    let len_buffer = VarInt::encode(val.len() as i64, &mut vbuffer);
                     buffer.write_all(len_buffer)?;
                     buffer.write_all(val.as_ref())?;
                 } else {
@@ -803,7 +756,7 @@ impl Relation {
                 if let Some(val) = &i.max_val {
                     buffer.write_all(&[1u8])?;
                     let mut vbuffer = [0u8; MAX_VARINT_LEN];
-                    let len_buffer= VarInt::encode(val.len() as i64, &mut vbuffer);
+                    let len_buffer = VarInt::encode(val.len() as i64, &mut vbuffer);
                     buffer.write_all(len_buffer)?;
                     buffer.write_all(val.as_ref())?;
                 } else {
@@ -813,7 +766,7 @@ impl Relation {
         }
 
         let buf = buffer.into_inner();
-        let bytes : &[u8] = buf.as_ref();
+        let bytes: &[u8] = buf.as_ref();
 
         Ok(Blob::from(bytes))
     }
@@ -842,11 +795,9 @@ impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "Invalid o_id",
-                ))
+                ));
             }
         };
-
-
 
         let root = match tuple.value(0)? {
             DataTypeRef::BigUInt(v) => PageId::from(v.to_owned()),
@@ -855,10 +806,9 @@ impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "Invalid root",
-                ))
+                ));
             }
         };
-
 
         let o_type = match tuple.value(1)? {
             DataTypeRef::Byte(v) => ObjectType::try_from(v.to_owned().0)?,
@@ -866,11 +816,9 @@ impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "Invalid o_type",
-                ))
+                ));
             }
         };
-
-
 
         let name = match tuple.value(3)? {
             DataTypeRef::Text(blob) => blob.as_str(TextEncoding::Utf8).to_string(),
@@ -878,15 +826,22 @@ impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "Invalid name",
-                ))
+                ));
             }
         };
 
-
+        let last_lsn = match tuple.value(4)? {
+            DataTypeRef::BigUInt(v) => LogId::from(v.to_owned()),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Invalid last lsn",
+                ));
+            }
+        };
 
         match tuple.value(2)? {
             DataTypeRef::Blob(metadata) => {
-
                 let mut metadata_buf = std::io::Cursor::new(metadata.content());
                 let schema = Schema::read_from(&mut metadata_buf)?;
 
@@ -899,14 +854,13 @@ impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
                         Ok(Relation::TableRel(Table {
                             object_id: o_id,
                             root_page: root,
+                            last_lsn,
                             name: name.to_string(),
                             schema,
                             next_row,
                         }))
                     }
                     ObjectType::Index => {
-
-
                         let dtype = schema
                             .columns
                             .first()
@@ -922,7 +876,6 @@ impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
                         metadata_buf.read_exact(&mut tmp_buf)?;
                         let min_val = if tmp_buf[0] == 1 {
                             Some(read_variable_length(&mut metadata_buf)?)
-
                         } else {
                             None
                         };
@@ -939,6 +892,7 @@ impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
                             object_id: o_id,
                             root_page: root,
                             name: name.to_string(),
+                            last_lsn,
 
                             min_val,
                             max_val,
@@ -1137,14 +1091,14 @@ impl AsBytes for Column {
 
         // HAS INDEX
         let index = if has_index {
-            let index = unsafe { read_string_unchecked(bytes) }?;
+            let index = read_string_unchecked(bytes)?;
             Some(index)
         } else {
             None
         };
 
         // Read name
-        let name = unsafe { read_string_unchecked(bytes) }?;
+        let name = read_string_unchecked(bytes)?;
 
         // Read constraints count
         let varint = VarInt::read_buf(bytes)?;
@@ -1155,7 +1109,7 @@ impl AsBytes for Column {
         // Read each constraint
         for _ in 0..cts_count_usize {
             // Read constraint name
-            let ct_name = unsafe { read_string_unchecked(bytes) }?;
+            let ct_name = read_string_unchecked(bytes)?;
 
             let mut ctype_buf = [0u8; 1];
             bytes.read_exact(&mut ctype_buf)?;
@@ -1212,8 +1166,8 @@ impl AsBytes for ForeignKey {
     where
         Self: Sized,
     {
-        let ref_table = unsafe { read_string_unchecked(bytes)? };
-        let ref_col = unsafe { read_string_unchecked(bytes)? };
+        let ref_table = read_string_unchecked(bytes)?;
+        let ref_col = read_string_unchecked(bytes)?;
 
         Ok(Self { ref_table, ref_col })
     }

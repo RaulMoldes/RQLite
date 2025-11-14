@@ -1,6 +1,6 @@
 use crate::database::{
-    schema::{Column, Relation, Schema, Table},
     Database,
+    schema::{Column, Relation, Schema, Table},
 };
 use crate::sql::ast::{Expr, SelectItem, SelectStatement, Statement, TableReference, Values};
 use crate::types::DataTypeKind;
@@ -427,7 +427,7 @@ impl<'a> Preparator<'a> {
 
 #[cfg(test)]
 mod sql_prepare_tests {
-    use crate::database::{schema::Schema, Database};
+    use crate::database::{Database, schema::Schema};
     use crate::io::pager::{Pager, SharedPager};
     use crate::sql::ast::{
         BinaryOperator, Expr, InsertStatement, JoinType, SelectItem, SelectStatement, Statement,
@@ -438,7 +438,7 @@ mod sql_prepare_tests {
     use crate::sql::preparator::Preparator;
     use crate::types::DataTypeKind;
 
-    use crate::{IncrementalVaccum, RQLiteConfig, ReadWriteVersion, TextEncoding};
+    use crate::{AxmosDBConfig, IncrementalVaccum, ReadWriteVersion, TextEncoding};
     use serial_test::serial;
     use std::path::Path;
 
@@ -447,7 +447,7 @@ mod sql_prepare_tests {
         capacity: u16,
         path: impl AsRef<Path>,
     ) -> std::io::Result<Database> {
-        let config = RQLiteConfig {
+        let config = AxmosDBConfig {
             page_size,
             cache_size: Some(capacity),
             incremental_vacuum_mode: IncrementalVaccum::Disabled,

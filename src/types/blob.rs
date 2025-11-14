@@ -1,5 +1,5 @@
 use crate::types::varint::MAX_VARINT_LEN;
-use crate::{types::VarInt, TextEncoding};
+use crate::{TextEncoding, types::VarInt};
 use std::cmp::PartialEq;
 use std::ops::{Deref, DerefMut};
 

@@ -1,5 +1,5 @@
-use crate::database::schema::Schema;
 use crate::database::Database;
+use crate::database::schema::Schema;
 use crate::planner::{ExecutionPlanStep, ResultSet};
 use crate::sql::ast::{Expr, JoinType};
 

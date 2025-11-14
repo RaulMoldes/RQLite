@@ -3,8 +3,8 @@ use crate::io::disk::{DBFile, FileOperations};
 use crate::io::frames::MemFrame;
 use crate::storage::buffer::BufferWithMetadata;
 use crate::storage::page::{MemPage, OverflowPage, Page, PageZero};
-use crate::types::{PageId, PAGE_ZERO};
-use crate::{RQLiteConfig, DEFAULT_CACHE_SIZE, PAGE_ALIGNMENT};
+use crate::types::{PAGE_ZERO, PageId};
+use crate::{AxmosDBConfig, DEFAULT_CACHE_SIZE, PAGE_ALIGNMENT};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::io::{Read, Seek, Write};
 use std::sync::Arc;
@@ -34,7 +34,7 @@ pub struct Pager {
 
 impl Pager {
     pub(crate) fn from_config(
-        config: RQLiteConfig,
+        config: AxmosDBConfig,
         path: impl AsRef<std::path::Path>,
     ) -> std::io::Result<Self> {
         // Allocate the file and the cache.
@@ -167,7 +167,11 @@ impl Pager {
             )
         })?;
 
-        debug_assert_eq!(page.page_number(), id, "PAGE NUMBER READ FROM DISK SHOULD MATCH THE ASKED PAGE NUMBER. OTHERWISE INDICATES MEMORY CORRUPTION");
+        debug_assert_eq!(
+            page.page_number(),
+            id,
+            "PAGE NUMBER READ FROM DISK SHOULD MATCH THE ASKED PAGE NUMBER. OTHERWISE INDICATES MEMORY CORRUPTION"
+        );
 
         let mem_page = MemFrame::new(MemPage::from(page));
         if let Some(mut evicted) = self.cache.insert(id, mem_page) {
@@ -177,7 +181,11 @@ impl Pager {
                     self.cache.get(&evicted_id).is_none(),
                     "MEMORY CORRUPTION DETECTED. EVICTED PAGE SHOULD NOT BE KEPT ON CACHE"
                 );
-                debug_assert_eq!(evicted.read().page_number(), evicted_id, "PAGE NUMBER READ FROM DISK SHOULD MATCH THE ASKED PAGE NUMBER. OTHERWISE INDICATES MEMORY CORRUPTION");
+                debug_assert_eq!(
+                    evicted.read().page_number(),
+                    evicted_id,
+                    "PAGE NUMBER READ FROM DISK SHOULD MATCH THE ASKED PAGE NUMBER. OTHERWISE INDICATES MEMORY CORRUPTION"
+                );
                 self.write_block_unchecked(evicted_id, evicted.write().as_mut())?;
             };
         };
@@ -266,7 +274,7 @@ mod tests {
 
     use super::*;
     use crate::io::disk::FileSystem;
-    use crate::storage::page::{BtreePage, BTREE_PAGE_HEADER_SIZE};
+    use crate::storage::page::{BTREE_PAGE_HEADER_SIZE, BtreePage};
     use serial_test::serial;
     use std::io::{Read, Seek, SeekFrom};
     use std::path::Path;
@@ -276,7 +284,7 @@ mod tests {
         let dir = tempdir()?;
         let path = dir.path().join(&path);
 
-        let config = crate::RQLiteConfig {
+        let config = crate::AxmosDBConfig {
             page_size: 4096,
             cache_size: Some(cache_size as u16),
             incremental_vacuum_mode: crate::IncrementalVaccum::Disabled,

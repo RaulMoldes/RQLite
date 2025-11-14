@@ -1,9 +1,9 @@
+use crate::database::Database;
 use crate::database::schema::{Column, Constraint, ForeignKey};
 use crate::database::schema::{Schema, TableConstraint};
-use crate::database::Database;
 use crate::sql::ast::{AlterAction, AlterColumnAction, ColumnConstraintExpr, TableConstraintExpr};
 
-use crate::sql::{parsing_pipeline, SQLError, Statement};
+use crate::sql::{SQLError, Statement, parsing_pipeline};
 use crate::structures::bplustree::SearchResult;
 
 use crate::types::DataType;
@@ -58,13 +58,16 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
     match stmt {
         // For statements that do not need a plan, we just execute them
         Statement::CreateTable(create) => {
-
             // Prepend the row_id:
             let mut table_columns = Vec::with_capacity(create.columns.len() + 1);
             let mut row_id_constraints = HashMap::new();
             row_id_constraints.insert("RowId_unique".to_string(), Constraint::Unique);
             row_id_constraints.insert("RowId_non_null".to_string(), Constraint::NonNull);
-            let row_id = Column::new_unindexed(crate::types::DataTypeKind::BigUInt, "RowId", Some(row_id_constraints));
+            let row_id = Column::new_unindexed(
+                crate::types::DataTypeKind::BigUInt,
+                "RowId",
+                Some(row_id_constraints),
+            );
             table_columns.push(row_id);
             for new_column in create.columns {
                 let mut constraints = HashMap::with_capacity(new_column.constraints.len());
@@ -133,7 +136,6 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
             Ok(ExecutionPlan::empty())
         }
         Statement::AlterTable(alter) => {
-
             // Get the table object ID
             let mut table = db.relation(&alter.table)?;
             match alter.action {
@@ -186,7 +188,12 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
                     let mut table = db.relation(&alter.table)?;
 
                     // Find the column to alter
-                    let column = table.column_mut(&alter_col.name).ok_or(std::io::Error::new(std::io::ErrorKind::NotFound, format!("Column {} not found", alter_col.name)))?;
+                    let column = table
+                        .column_mut(&alter_col.name)
+                        .ok_or(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("Column {} not found", alter_col.name),
+                        ))?;
 
                     // Handle column alterations
                     match alter_col.action {
@@ -204,7 +211,8 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
                             let constraints_to_remove: Vec<String> = column
                                 .constraints()
                                 .iter()
-                                .filter(|(k, v)| matches!(v, Constraint::Default(_))).map(|(k, v)| k)
+                                .filter(|(k, v)| matches!(v, Constraint::Default(_)))
+                                .map(|(k, v)| k)
                                 .cloned()
                                 .collect();
 
@@ -223,7 +231,8 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
                             let constraints_to_remove: Vec<String> = column
                                 .constraints()
                                 .iter()
-                                .filter(|(k, v)| matches!(v, Constraint::NonNull)).map(|(k, v)| k)
+                                .filter(|(k, v)| matches!(v, Constraint::NonNull))
+                                .map(|(k, v)| k)
                                 .cloned()
                                 .collect();
 
@@ -284,7 +293,7 @@ fn planify(stmt: Statement, db: &mut Database) -> std::io::Result<ExecutionPlan>
                             table.schema_mut().add_constraint(ct);
                         }
                         _ => {
-                            return Err(std::io::Error::other("Unsupported table constraint type"))
+                            return Err(std::io::Error::other("Unsupported table constraint type"));
                         }
                     }
 
@@ -377,7 +386,7 @@ mod planner_tests {
 
     use crate::types::DataTypeKind;
 
-    use crate::{IncrementalVaccum, RQLiteConfig, ReadWriteVersion, TextEncoding};
+    use crate::{AxmosDBConfig, IncrementalVaccum, ReadWriteVersion, TextEncoding};
 
     use std::path::Path;
 
@@ -386,7 +395,7 @@ mod planner_tests {
         capacity: u16,
         path: impl AsRef<Path>,
     ) -> std::io::Result<Database> {
-        let config = RQLiteConfig {
+        let config = AxmosDBConfig {
             page_size,
             cache_size: Some(capacity),
             incremental_vacuum_mode: IncrementalVaccum::Disabled,

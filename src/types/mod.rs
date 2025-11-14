@@ -13,10 +13,10 @@ pub use date::{Date, DateRef, DateRefMut};
 pub use datetime::{DateTime, DateTimeRef, DateTimeRefMut};
 pub use id::*;
 pub use sized_types::{
-    Float32, Float32Ref, Float32RefMut, Float64, Float64Ref, Float64RefMut, Int16, Int16Ref,
-    Int16RefMut, Int32, Int32Ref, Int32RefMut, Int64, Int64Ref, Int64RefMut, Int8, Int8Ref,
-    Int8RefMut, UInt16, UInt16Ref, UInt16RefMut, UInt32, UInt32Ref, UInt32RefMut, UInt64,
-    UInt64Ref, UInt64RefMut, UInt8, UInt8Ref, UInt8RefMut,
+    Float32, Float32Ref, Float32RefMut, Float64, Float64Ref, Float64RefMut, Int8, Int8Ref,
+    Int8RefMut, Int16, Int16Ref, Int16RefMut, Int32, Int32Ref, Int32RefMut, Int64, Int64Ref,
+    Int64RefMut, UInt8, UInt8Ref, UInt8RefMut, UInt16, UInt16Ref, UInt16RefMut, UInt32, UInt32Ref,
+    UInt32RefMut, UInt64, UInt64Ref, UInt64RefMut,
 };
 
 use crate::sql::ast::Expr;

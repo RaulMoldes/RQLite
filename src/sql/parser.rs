@@ -1396,7 +1396,7 @@ impl Parser {
 
     /// Parses data types.
     ///
-    /// Supports both SQL standard data types and RQLite specific types (VARINT, BLOB and TEXT).
+    /// Supports both SQL standard data types and AxmosDB specific types (VARINT, BLOB and TEXT).
     fn parse_data_type(&mut self) -> Result<DataTypeKind, ParserError> {
         let data_type = if let Token::Identifier(type_name) = &self.current_token {
             let name = type_name.to_uppercase();
@@ -1423,7 +1423,7 @@ impl Parser {
                 _ => {
                     return Err(ParserError::UnexpectedToken(Token::Identifier(
                         name.to_string(),
-                    )))
+                    )));
                 }
             }
         } else {

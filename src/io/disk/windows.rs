@@ -6,8 +6,8 @@ use std::{
 };
 
 use windows::{
-    core::PCWSTR,
     Win32::{Foundation::MAX_PATH, Storage::FileSystem},
+    core::PCWSTR,
 };
 
 use super::{FileSystem as Fs, FileSystemBlockSize, Open, OpenOptions};

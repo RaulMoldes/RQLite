@@ -1,4 +1,4 @@
-/// Magic string that identifies the RQLite file format.
+/// Magic string that identifies the AxmosDB file format.
 pub(crate) const AXMO: u32 = 0x41584D4F;
 /// Maximum page size is 64 KiB.
 pub(crate) const MIN_PAGE_SIZE: u32 = 4096;
@@ -31,7 +31,7 @@ crate::repr_enum!(pub(crate) enum IncrementalVaccum: u32 {
 });
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RQLiteConfig {
+pub(crate) struct AxmosDBConfig {
     pub(crate) incremental_vacuum_mode: IncrementalVaccum,
     pub(crate) read_write_version: ReadWriteVersion,
     pub(crate) text_encoding: TextEncoding,
@@ -39,7 +39,7 @@ pub(crate) struct RQLiteConfig {
     pub(crate) page_size: u32,
 }
 
-impl Default for RQLiteConfig {
+impl Default for AxmosDBConfig {
     fn default() -> Self {
         Self {
             incremental_vacuum_mode: IncrementalVaccum::Disabled,
@@ -51,7 +51,7 @@ impl Default for RQLiteConfig {
     }
 }
 
-impl RQLiteConfig {
+impl AxmosDBConfig {
     fn new(
         page_size: u32,
         read_write_version: ReadWriteVersion,

@@ -20,7 +20,7 @@ sql_test!(
 );
 
 sql_test!(
-   test_parser_update_multiple_columns,
+    test_parser_update_multiple_columns,
     "UPDATE users SET name = 'John Doe', email = 'john.doe@example.com', updated_at = '2024-01-01' WHERE id = 1;",
     Statement::Update(UpdateStatement {
         table: "users".to_string(),

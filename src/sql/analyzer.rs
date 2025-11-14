@@ -1,7 +1,7 @@
+use crate::database::Database;
 use crate::database::schema::Relation;
 use crate::database::schema::Table;
 use crate::database::schema::{Column, Schema};
-use crate::database::Database;
 use crate::sql::ast::{
     AlterAction, AlterColumnAction, BinaryOperator, ColumnConstraintExpr, Expr, SelectItem,
     SelectStatement, Statement, TableConstraintExpr, TableReference, TransactionStatement, Values,
@@ -581,7 +581,6 @@ impl<'a> Analyzer<'a> {
     fn analyze_table_ref(&mut self, reference: &TableReference) -> Result<(), AnalyzerError> {
         match reference {
             TableReference::Table { name, alias } => {
-
                 let obj = self
                     .get_relation(name)
                     .map_err(|e| AnalyzerError::NotFound(name.to_string()))?;
@@ -1350,13 +1349,13 @@ impl<'a> Analyzer<'a> {
 
 #[cfg(test)]
 mod sql_analyzer_tests {
-    use crate::database::{schema::Schema, Database};
+    use crate::database::{Database, schema::Schema};
     use crate::io::pager::{Pager, SharedPager};
     use crate::sql::analyzer::{AlreadyExists, Analyzer, AnalyzerError};
     use crate::sql::lexer::Lexer;
     use crate::sql::parser::Parser;
     use crate::types::DataTypeKind;
-    use crate::{IncrementalVaccum, RQLiteConfig, ReadWriteVersion, TextEncoding};
+    use crate::{AxmosDBConfig, IncrementalVaccum, ReadWriteVersion, TextEncoding};
     use serial_test::serial;
     use std::path::Path;
 
@@ -1365,7 +1364,7 @@ mod sql_analyzer_tests {
         capacity: u16,
         path: impl AsRef<Path>,
     ) -> std::io::Result<Database> {
-        let config = RQLiteConfig {
+        let config = AxmosDBConfig {
             page_size,
             cache_size: Some(capacity),
             incremental_vacuum_mode: IncrementalVaccum::Disabled,

@@ -49,11 +49,7 @@ impl UInt8 {
     pub const REPLACEMENT: Self = Self(0x1A);
 
     pub const fn from_ascii(byte: u8) -> Option<Self> {
-        if byte <= 127 {
-            Some(Self(byte))
-        } else {
-            None
-        }
+        if byte <= 127 { Some(Self(byte)) } else { None }
     }
 
     pub const fn is_ascii(self) -> bool {
@@ -69,11 +65,7 @@ impl UInt8 {
     }
 
     pub const fn to_ascii(self) -> Option<u8> {
-        if self.is_ascii() {
-            Some(self.0)
-        } else {
-            None
-        }
+        if self.is_ascii() { Some(self.0) } else { None }
     }
 
     pub fn is_whitespace(self) -> bool {

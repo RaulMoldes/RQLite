@@ -1,7 +1,7 @@
 use crate::storage::latches::Latch;
 
 use parking_lot::RwLock;
-use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
+use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
 
 pub(crate) struct MemFrame<P> {
     // Better [`RwLock`] than [`Mutex`] here, as we want to allow multiple readers to the page, but a single writer at a time to avoid race conditions.

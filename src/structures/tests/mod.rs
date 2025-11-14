@@ -9,7 +9,7 @@ use crate::structures::bplustree::{
 use crate::structures::kvp::KeyValuePair;
 use crate::types::VarInt;
 use crate::{
-    delete_test, insert_tests, IncrementalVaccum, RQLiteConfig, ReadWriteVersion, TextEncoding,
+    AxmosDBConfig, IncrementalVaccum, ReadWriteVersion, TextEncoding, delete_test, insert_tests,
 };
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -57,7 +57,7 @@ fn create_test_btree<Cmp: Comparator>(
     let dir = tempdir()?;
     let path = dir.path().join("test_btree.db");
 
-    let config = RQLiteConfig {
+    let config = AxmosDBConfig {
         page_size,
         cache_size: Some(capacity as u16),
         incremental_vacuum_mode: IncrementalVaccum::Disabled,
@@ -549,7 +549,6 @@ fn test_btree_iterator() -> io::Result<()> {
 
     let mut collected = Vec::new();
     for item in tree.iter()? {
-
         match item {
             Ok(payload) => {
                 collected.push(payload);
@@ -562,7 +561,6 @@ fn test_btree_iterator() -> io::Result<()> {
 
     // Verify keys are sorted
     for i in 0..99 {
-    
         let key_i = &collected[i].as_ref()[..4];
         let key_next = &collected[i + 1].as_ref()[..4];
         assert!(key_i < key_next, "Keys should be in ascending order");
@@ -636,7 +634,6 @@ fn test_btree_iterator_iter_rev() -> io::Result<()> {
         let kv = KeyValuePair::new(key, value);
         tree.insert(root, kv.as_ref())?;
     }
-
 
     for item in tree.iter_rev()? {
         match item {

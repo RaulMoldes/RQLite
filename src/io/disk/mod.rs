@@ -4,7 +4,7 @@ pub mod unix;
 pub mod windows;
 
 use std::{
-    alloc::{alloc_zeroed, Layout},
+    alloc::{Layout, alloc_zeroed},
     fs::{self, File},
     io::{self, Read, Seek, Write},
     os::fd::AsRawFd,
