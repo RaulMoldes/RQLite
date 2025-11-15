@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const MONTH_DAYS: [u16; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 /// Check if this year is a leap year
 pub(crate) const fn is_leap_year(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    (year.is_multiple_of(4) && year.is_multiple_of(100)) || (year.is_multiple_of(400))
 }
 
 // Helper to convert year-month-day to days since epoch

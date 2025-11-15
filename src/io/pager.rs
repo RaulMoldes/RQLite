@@ -1,6 +1,7 @@
 use crate::io::cache::PageCache;
-use crate::io::disk::{DBFile, FileOperations};
+use crate::io::disk::{DBFile, FileOperations, FileSystem, allocate_aligned};
 use crate::io::frames::MemFrame;
+use crate::io::wal::WriteAheadLog;
 use crate::storage::buffer::BufferWithMetadata;
 use crate::storage::page::{MemPage, OverflowPage, Page, PageZero};
 use crate::types::{PAGE_ZERO, PageId};
@@ -24,10 +25,11 @@ use std::sync::Arc;
 fn page_offset(page_id: PageId, page_size: u32) -> u64 {
     u64::from(page_id) * page_size as u64
 }
-/// Implementation of SQLite pager. Reference: [https://sqlite.org/src/file/src/pager.c]
+/// Implementation of a pager.
 #[derive(Debug)]
 pub struct Pager {
     file: DBFile,
+    // write_ahead_log: WriteAheadLog, // TODO: Implement recoverability from the [WAL].
     cache: PageCache,
     page_zero: PageZero,
 }
@@ -38,7 +40,7 @@ impl Pager {
         path: impl AsRef<std::path::Path>,
     ) -> std::io::Result<Self> {
         // Allocate the file and the cache.
-        let mut file = DBFile::create(path)?;
+        let mut file = DBFile::create(&path)?;
         let cache =
             PageCache::with_capacity(config.cache_size.unwrap_or(DEFAULT_CACHE_SIZE) as usize);
 
@@ -157,7 +159,7 @@ impl Pager {
 
         // That was a cache miss.
         // we need to go to the disk to find the page.
-        let mut buffer = vec![0u8; self.page_size() as usize];
+        let mut buffer = allocate_aligned(PAGE_ALIGNMENT as usize, self.page_size() as usize)?;
         self.read_block_unchecked(id, &mut buffer)?;
 
         let page = P::try_from((&buffer, PAGE_ALIGNMENT as usize)).map_err(|msg| {
@@ -174,20 +176,20 @@ impl Pager {
         );
 
         let mem_page = MemFrame::new(MemPage::from(page));
-        if let Some(mut evicted) = self.cache.insert(id, mem_page) {
-            if evicted.is_dirty() {
-                let evicted_id = evicted.read().page_number();
-                debug_assert!(
-                    self.cache.get(&evicted_id).is_none(),
-                    "MEMORY CORRUPTION DETECTED. EVICTED PAGE SHOULD NOT BE KEPT ON CACHE"
-                );
-                debug_assert_eq!(
-                    evicted.read().page_number(),
-                    evicted_id,
-                    "PAGE NUMBER READ FROM DISK SHOULD MATCH THE ASKED PAGE NUMBER. OTHERWISE INDICATES MEMORY CORRUPTION"
-                );
-                self.write_block_unchecked(evicted_id, evicted.write().as_mut())?;
-            };
+        if let Some(mut evicted) = self.cache.insert(id, mem_page)
+            && evicted.is_dirty()
+        {
+            let evicted_id = evicted.read().page_number();
+            debug_assert!(
+                self.cache.get(&evicted_id).is_none(),
+                "MEMORY CORRUPTION DETECTED. EVICTED PAGE SHOULD NOT BE KEPT ON CACHE"
+            );
+            debug_assert_eq!(
+                evicted.read().page_number(),
+                evicted_id,
+                "PAGE NUMBER READ FROM DISK SHOULD MATCH THE ASKED PAGE NUMBER. OTHERWISE INDICATES MEMORY CORRUPTION"
+            );
+            self.write_block_unchecked(evicted_id, evicted.write().as_mut())?;
         };
 
         Ok(self.cache.get(&id).unwrap())

@@ -27,7 +27,7 @@ impl From<Slot> for UInt16 {
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 #[repr(C)]
-pub(crate) struct CellHeader {
+pub struct CellHeader {
     pub left_child: PageId,
     size: u16, //  Size is the totla size of the cell
     is_overflow: bool,

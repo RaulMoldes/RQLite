@@ -64,19 +64,19 @@ impl Schema {
     }
 
     pub fn key(&self, name: &str) -> Option<&Column> {
-        if let Some(idx) = self.column_index.get(name) {
-            if *idx < self.num_keys as usize {
-                return self.columns.get(*idx);
-            }
+        if let Some(idx) = self.column_index.get(name)
+            && *idx < self.num_keys as usize
+        {
+            return self.columns.get(*idx);
         }
         None
     }
 
     pub fn key_mut(&mut self, name: &str) -> Option<&mut Column> {
-        if let Some(idx) = self.column_index.get(name) {
-            if *idx < self.num_keys as usize {
-                return self.columns.get_mut(*idx);
-            }
+        if let Some(idx) = self.column_index.get(name)
+            && *idx < self.num_keys as usize
+        {
+            return self.columns.get_mut(*idx);
         }
         None
     }
@@ -527,7 +527,7 @@ impl Index {
             schema,
         }
     }
-
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         id: OId,
         name: &str,
@@ -566,10 +566,10 @@ impl Index {
     }
 
     pub fn range(&self) -> Option<(&[u8], &[u8])> {
-        if let Some(xmin) = self.min_val.as_ref() {
-            if let Some(xmax) = self.max_val.as_ref() {
-                return Some((xmin.as_ref(), xmax.as_ref()));
-            }
+        if let Some(xmin) = self.min_val.as_ref()
+            && let Some(xmax) = self.max_val.as_ref()
+        {
+            return Some((xmin.as_ref(), xmax.as_ref()));
         }
         None
     }

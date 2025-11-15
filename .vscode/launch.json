@@ -6,7 +6,7 @@
       "request": "launch",
       "name": "Debug Rust test (AxmosDB)",
       "program": "${workspaceFolder}/target/debug/deps/axmosdb-b15bfce1b5a6fbd3",
-      "args": ["--nocapture", "test_blocks_buffering"],
+      "args": ["--nocapture", "test_btree_iterator"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {

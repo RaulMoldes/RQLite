@@ -153,27 +153,26 @@ impl<'a> Preparator<'a> {
                     let mut processed_tables = HashSet::new();
 
                     // First, add the main table if it exists and isn't aliased
-                    if let Some(table) = self.ctx.current_table.as_ref() {
-                        if !self
+                    if let Some(table) = self.ctx.current_table.as_ref()
+                        && !self
                             .ctx
                             .table_aliases
                             .iter()
                             .any(|(alias, real)| real == table && alias != table)
-                            && processed_tables.insert(table.clone())
-                        {
-                            let obj = self.get_relation(table);
-                            let schema = obj.schema();
+                        && processed_tables.insert(table.clone())
+                    {
+                        let obj = self.get_relation(table);
+                        let schema = obj.schema();
 
-                            for column in &schema.columns {
-                                out_columns.push(column.clone());
-                                new_items.push(SelectItem::ExprWithAlias {
-                                    expr: Expr::QualifiedIdentifier {
-                                        table: table.clone(),
-                                        column: column.name.clone(),
-                                    },
-                                    alias: None,
-                                });
-                            }
+                        for column in &schema.columns {
+                            out_columns.push(column.clone());
+                            new_items.push(SelectItem::ExprWithAlias {
+                                expr: Expr::QualifiedIdentifier {
+                                    table: table.clone(),
+                                    column: column.name.clone(),
+                                },
+                                alias: None,
+                            });
                         }
                     }
 
@@ -371,10 +370,10 @@ impl<'a> Preparator<'a> {
                             let mut new_row = Vec::with_capacity(row.len());
 
                             for col_name in &new_order {
-                                if let Some(&idx) = index_map.get(col_name) {
-                                    if idx < row.len() {
-                                        new_row.push(row[idx].clone());
-                                    }
+                                if let Some(&idx) = index_map.get(col_name)
+                                    && idx < row.len()
+                                {
+                                    new_row.push(row[idx].clone());
                                 }
                             }
 

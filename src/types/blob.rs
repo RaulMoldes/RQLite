@@ -63,14 +63,14 @@ impl Blob {
             TextEncoding::Utf8 => String::from_utf8(self.content().to_vec()).unwrap(),
             TextEncoding::Utf16be => {
                 assert!(
-                    self.len() % 2 == 0,
+                    self.len().is_power_of_two(),
                     "UTF-16BE blob length must be multiple of 2"
                 );
                 decode_utf16be(self.content())
             }
             TextEncoding::Utf16le => {
                 assert!(
-                    self.len() % 2 == 0,
+                    self.len().is_power_of_two(),
                     "UTF-16LE blob length must be multiple of 2"
                 );
                 decode_utf16le(self.content())
@@ -142,14 +142,14 @@ impl<'a> BlobRef<'a> {
             TextEncoding::Utf8 => String::from_utf8(self.content().to_vec()).unwrap(),
             TextEncoding::Utf16be => {
                 assert!(
-                    self.len() % 2 == 0,
+                    self.len().is_power_of_two(),
                     "UTF-16BE blob length must be multiple of 2"
                 );
                 decode_utf16be(self.content())
             }
             TextEncoding::Utf16le => {
                 assert!(
-                    self.len() % 2 == 0,
+                    self.len().is_power_of_two(),
                     "UTF-16LE blob length must be multiple of 2"
                 );
                 decode_utf16le(self.content())
@@ -232,14 +232,14 @@ impl<'a> BlobRefMut<'a> {
             TextEncoding::Utf8 => String::from_utf8(self.content().to_vec()).unwrap(),
             TextEncoding::Utf16be => {
                 assert!(
-                    self.len() % 2 == 0,
+                    self.len().is_power_of_two(),
                     "UTF-16BE blob length must be multiple of 2"
                 );
                 decode_utf16be(self.content())
             }
             TextEncoding::Utf16le => {
                 assert!(
-                    self.len() % 2 == 0,
+                    self.len().is_power_of_two(),
                     "UTF-16LE blob length must be multiple of 2"
                 );
                 decode_utf16le(self.content())

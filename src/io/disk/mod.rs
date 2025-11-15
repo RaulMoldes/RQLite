@@ -44,30 +44,34 @@ impl Default for OpenOptions {
     }
 }
 
+pub fn allocate_aligned(alignment: usize, size: usize) -> io::Result<Vec<u8>> {
+    let aligned_size = size.next_multiple_of(alignment);
+    unsafe {
+        let layout = Layout::from_size_align(aligned_size, alignment)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+
+        let ptr = alloc_zeroed(layout);
+        if ptr.is_null() {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "Failed to allocate aligned buffer",
+            ));
+        }
+
+        Ok(Vec::from_raw_parts(ptr, aligned_size, aligned_size))
+    }
+}
+
 impl FileSystem {
     pub fn options() -> OpenOptions {
         OpenOptions::default()
     }
 
     /// Allocate an aligned buffer for aligned for [O_DIRECT] operations
+    /// TODO: Decouple from filesystem.
     pub fn alloc_buffer(path: impl AsRef<Path>, size: usize) -> io::Result<Vec<u8>> {
         let block_size = Self::block_size(&path)?;
-        let aligned_size = size.div_ceil(block_size) * block_size;
-
-        unsafe {
-            let layout = Layout::from_size_align(aligned_size, block_size)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-            let ptr = alloc_zeroed(layout);
-            if ptr.is_null() {
-                return Err(io::Error::new(
-                    io::ErrorKind::OutOfMemory,
-                    "Failed to allocate aligned buffer",
-                ));
-            }
-
-            Ok(Vec::from_raw_parts(ptr, aligned_size, aligned_size))
-        }
+        allocate_aligned(block_size, size)
     }
 }
 
@@ -132,33 +136,42 @@ pub(crate) trait FileOperations: Seek + Read + Write {
 }
 
 #[derive(Debug)]
-pub struct DBFile(File);
+pub struct DBFile {
+    f: File,
+    p: std::path::PathBuf,
+}
+
+impl DBFile {
+    pub fn path(&self) -> &Path {
+        self.p.as_path()
+    }
+}
 
 impl Seek for DBFile {
     fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
-        self.0.seek(pos)
+        self.f.seek(pos)
     }
 }
 
 impl Read for DBFile {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buf)
+        self.f.read(buf)
     }
 }
 
 impl Write for DBFile {
     fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
+        self.f.flush()
     }
 
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write(buf)
+        self.f.write(buf)
     }
 }
 
 impl AsRawFd for DBFile {
     fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
-        self.0.as_raw_fd()
+        self.f.as_raw_fd()
     }
 }
 
@@ -175,8 +188,11 @@ impl FileOperations for DBFile {
             .write(true)
             .bypass_cache(true)
             .sync_on_write(false)
-            .open(path)?;
-        Ok(Self(f))
+            .open(&path)?;
+        Ok(Self {
+            f,
+            p: path.as_ref().to_path_buf(),
+        })
     }
 
     fn open(path: impl AsRef<Path>) -> io::Result<Self> {
@@ -185,8 +201,11 @@ impl FileOperations for DBFile {
             .write(true)
             .bypass_cache(true)
             .sync_on_write(false)
-            .open(path)?;
-        Ok(Self(f))
+            .open(&path)?;
+        Ok(Self {
+            f,
+            p: path.as_ref().to_path_buf(),
+        })
     }
 
     fn remove(path: impl AsRef<Path>) -> io::Result<()> {
@@ -194,10 +213,10 @@ impl FileOperations for DBFile {
     }
 
     fn truncate(&mut self) -> io::Result<()> {
-        self.0.set_len(0)
+        self.f.set_len(0)
     }
 
     fn sync_all(&self) -> io::Result<()> {
-        File::sync_all(&self.0)
+        File::sync_all(&self.f)
     }
 }

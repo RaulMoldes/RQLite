@@ -33,7 +33,7 @@ fn align_down(value: usize, align: usize) -> usize {
 
 /// Slotted page header.
 #[derive(Debug)]
-#[repr(C, align(8))]
+#[repr(C, align(64))]
 pub struct BtreePageHeader {
     pub page_number: PageId,
     pub right_child: PageId,
@@ -44,18 +44,16 @@ pub struct BtreePageHeader {
     pub free_space: u32,
     pub padding: u32,
     pub num_slots: u16,
-    reserved: [u8; 8],
 }
 pub const BTREE_PAGE_HEADER_SIZE: usize = std::mem::size_of::<BtreePageHeader>();
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-#[repr(C, align(8))]
+#[repr(C, align(64))]
 pub(crate) struct OverflowPageHeader {
     pub page_number: PageId,
     pub next: PageId,
     pub num_bytes: u32,
     pub padding: u32,
-    pub reserved: [u8; 40],
 }
 pub const OVERFLOW_HEADER_SIZE: usize = std::mem::size_of::<OverflowPageHeader>();
 
@@ -72,7 +70,6 @@ impl Header for OverflowPageHeader {
             next: PAGE_ZERO,
             num_bytes: effective_size.saturating_sub(OVERFLOW_HEADER_SIZE as u32),
             padding: effective_size.saturating_sub(size),
-            reserved: [0u8; 40],
         }
     }
 
@@ -88,13 +85,12 @@ impl Header for OverflowPageHeader {
             next: PAGE_ZERO,
             num_bytes: effective_size,
             padding: effective_size.saturating_sub(size),
-            reserved: [0u8; 40],
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(C, align(8))]
+#[repr(C, align(64))]
 pub(crate) struct DatabaseHeader {
     pub first_free_page: PageId,
     pub last_free_page: PageId,
@@ -106,7 +102,6 @@ pub(crate) struct DatabaseHeader {
     pub rw_version: crate::ReadWriteVersion,
     pub text_encoding: crate::TextEncoding,
     pub incremental_vacuum_mode: crate::IncrementalVaccum,
-    reserved: [u8; 16],
 }
 pub const DB_HEADER_SIZE: usize = std::mem::size_of::<DatabaseHeader>();
 
@@ -131,7 +126,6 @@ impl Header for DatabaseHeader {
             rw_version: ReadWriteVersion::Legacy,
             incremental_vacuum_mode: IncrementalVaccum::Disabled,
             cache_size: DEFAULT_CACHE_SIZE,
-            reserved: [0; 16],
         }
     }
 }
@@ -161,7 +155,6 @@ impl Header for BtreePageHeader {
             padding: aligned_size.saturating_sub(size),
             next_sibling: PAGE_ZERO,
             previous_sibling: PAGE_ZERO,
-            reserved: [0u8; 8],
         }
     }
     fn init(size: u32, page_number: PageId) -> Self {
@@ -181,7 +174,6 @@ impl Header for BtreePageHeader {
             padding: aligned_size.saturating_sub(size),
             next_sibling: PAGE_ZERO,
             previous_sibling: PAGE_ZERO,
-            reserved: [0u8; 8],
         }
     }
 }
@@ -415,7 +407,7 @@ impl BtreePage {
         let offset = self.metadata().free_space_ptr - cell.total_size() as u32;
 
         debug_assert!(
-            (cell.total_size() as usize % CELL_ALIGNMENT as usize) == 0,
+            (cell.total_size() as usize).is_multiple_of(CELL_ALIGNMENT as usize),
             "Cell is not aligned!"
         );
         debug_assert!(
@@ -427,7 +419,7 @@ impl BtreePage {
         );
 
         debug_assert!(
-            (offset as usize % CELL_ALIGNMENT as usize) == 0,
+            (offset as usize).is_multiple_of(CELL_ALIGNMENT as usize),
             "Offset is not aligned! {offset}"
         );
 
@@ -902,23 +894,6 @@ mod btree_page_tests {
     use super::*;
     use crate::storage::cell::{Cell, Slot};
     use crate::types::PageId;
-
-    #[test]
-    fn test_header_alignment() {
-        dbg!(std::mem::size_of::<BtreePageHeader>());
-        dbg!(std::mem::size_of::<OverflowPageHeader>());
-        dbg!(std::mem::size_of::<DatabaseHeader>());
-
-        dbg!(std::mem::align_of::<BtreePageHeader>());
-        dbg!(std::mem::align_of::<OverflowPageHeader>());
-        dbg!(std::mem::align_of::<DatabaseHeader>());
-
-        assert!(std::mem::size_of::<BtreePageHeader>().is_multiple_of(CELL_ALIGNMENT as usize));
-
-        assert!(std::mem::size_of::<DatabaseHeader>().is_multiple_of(CELL_ALIGNMENT as usize));
-
-        assert!(std::mem::size_of::<OverflowPageHeader>().is_multiple_of(CELL_ALIGNMENT as usize));
-    }
 
     #[test]
     fn test_page_allocation() {

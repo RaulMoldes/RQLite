@@ -504,7 +504,7 @@ impl<'a, 'b> std::fmt::Display for TupleRef<'a, 'b> {
             }
         }
 
-        write!(f, "];\n")?;
+        writeln!(f, "];")?;
 
         Ok(())
     }

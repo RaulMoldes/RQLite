@@ -177,7 +177,7 @@ fn test_comparators() -> std::io::Result<()> {
 #[serial]
 fn test_search_empty_tree() -> io::Result<()> {
     let comparator = FixedSizeComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 1, 4, comparator)?;
+    let tree = create_test_btree(4096, 1, 4, comparator)?;
     let root = tree.get_root();
     let start_pos = (root, Slot(0));
     let key = TestKey(42);
@@ -533,7 +533,7 @@ fn test_btree_iterator() -> io::Result<()> {
     let root = tree.get_root();
 
     // Insert test data
-    let test_data: Vec<(TestKey, Vec<u8>)> = (0..100)
+    let test_data: Vec<(TestKey, Vec<u8>)> = (0..1000)
         .map(|i| {
             let key = TestKey(i);
             let value = format!("value_{i}").into_bytes();
@@ -543,6 +543,7 @@ fn test_btree_iterator() -> io::Result<()> {
 
     // Insert key value pairs
     for (key, value) in &test_data {
+        dbg!(key);
         let kv = KeyValuePair::new(key, value);
         tree.insert(root, kv.as_ref())?;
     }
@@ -578,7 +579,7 @@ fn test_btree_iterator_iter_from() -> io::Result<()> {
     let mut collected = Vec::new();
 
     // Insert test data
-    let test_data: Vec<(TestKey, Vec<u8>)> = (0..100)
+    let test_data: Vec<(TestKey, Vec<u8>)> = (0..1000)
         .map(|i| {
             let key = TestKey(i);
             let value = format!("value_{i}").into_bytes();
@@ -622,7 +623,7 @@ fn test_btree_iterator_iter_rev() -> io::Result<()> {
     let root = tree.get_root();
     let mut collected = Vec::new();
 
-    let test_data: Vec<(TestKey, Vec<u8>)> = (0..100)
+    let test_data: Vec<(TestKey, Vec<u8>)> = (0..1000)
         .map(|i| {
             let key = TestKey(i);
             let value = format!("value_{i}").into_bytes();

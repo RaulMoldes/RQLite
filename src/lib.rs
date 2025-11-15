@@ -8,7 +8,6 @@
 #![allow(unused_variables)]
 #![feature(slice_ptr_get)]
 #![feature(concat_bytes)]
-#![feature(let_chains)]
 #![feature(str_from_raw_parts)]
 mod configs;
 mod database;

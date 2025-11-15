@@ -47,7 +47,7 @@ pub fn read_variable_length<R: Read + Seek>(buf: &mut R) -> std::io::Result<Box<
     let (len, offset) = VarInt::from_encoded_bytes(varint.as_ref())?;
     let len_usize: usize = len.try_into().unwrap();
     let mut val_buffer = vec![0u8; len_usize];
-    buf.read_exact(&mut val_buffer);
+    buf.read_exact(&mut val_buffer)?;
     Ok(val_buffer.into_boxed_slice())
 }
 

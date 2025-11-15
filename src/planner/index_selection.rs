@@ -30,17 +30,17 @@ pub fn find_applicable_indexes(
     for column in table.columns() {
         if let Some(index_name) = column.index() {
             // Check if this index is useful for the WHERE clause
-            if let Some(where_expr) = where_clause {
-                if let Ok(index) = db.relation(index_name) {
-                    let score = compute_selectivity_score(where_expr, &index, &table);
-                    if score > 0.0f64 {
-                        candidates.push(Candidate {
-                            index_oid: index.id(),
-                            column_name: column.name.clone(),
-                            selectivity_score: score,
-                        });
-                    };
-                }
+            if let Some(where_expr) = where_clause
+                && let Ok(index) = db.relation(index_name)
+            {
+                let score = compute_selectivity_score(where_expr, &index, &table);
+                if score > 0.0f64 {
+                    candidates.push(Candidate {
+                        index_oid: index.id(),
+                        column_name: column.name.clone(),
+                        selectivity_score: score,
+                    });
+                };
             }
         }
     }
@@ -82,11 +82,13 @@ fn compute_selectivity_score(expr: &Expr, index: &Relation, index_table: &Relati
                     BinaryOperator::Like => {
                         // If it is a prefix match he selectivity score is higher
                         // Index comparisons on variable length data are made from beginning to end (check bplustree.rs for details)
-                        if let Expr::String(pattern) = right.as_ref() {
-                            if pattern.ends_with('%') && !pattern.starts_with('%') {
-                                return 0.7;
-                            }
+                        if let Expr::String(pattern) = right.as_ref()
+                            && pattern.ends_with('%')
+                            && !pattern.starts_with('%')
+                        {
+                            return 0.7;
                         }
+
                         0.2 // Full wildcard
                     }
                     BinaryOperator::In => 0.6,

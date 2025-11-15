@@ -6,7 +6,7 @@ use std::{
     ptr::NonNull,
 };
 
-pub(crate) struct BufferWithMetadata<M> {
+pub struct BufferWithMetadata<M> {
     /// Alignment of the buffer
     alignment: u16,
     /// Length of the used content in the buffer
@@ -135,7 +135,7 @@ impl<M> BufferWithMetadata<M> {
         );
 
         let data = NonNull::slice_from_raw_parts(
-            pointer.byte_add(mem::size_of::<M>()).cast::<u8>(),
+            unsafe { pointer.byte_add(mem::size_of::<M>()).cast::<u8>() },
             Self::usable_space(pointer.len()) as usize,
         );
 
@@ -409,7 +409,7 @@ impl<M> TryFrom<(&[u8], usize)> for BufferWithMetadata<M> {
             return Err("buffer too small for header");
         }
 
-        if bytes.as_ptr() as usize % alignment != 0 {
+        if (bytes.as_ptr() as usize).is_multiple_of(alignment) {
             return Err("buffer not aligned to the required boundary");
         }
 

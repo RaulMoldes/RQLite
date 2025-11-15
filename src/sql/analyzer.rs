@@ -309,10 +309,9 @@ impl<'a> Analyzer<'a> {
                 if matches!(
                     right.as_ref(),
                     &Expr::Number(_) | &Expr::String(_) | &Expr::Boolean(_)
-                ) {
-                    if let ExprResult::Value(dt) = left_result {
-                        self.analyze_value(dt, right)?;
-                    }
+                ) && let ExprResult::Value(dt) = left_result
+                {
+                    self.analyze_value(dt, right)?;
                 };
 
                 let right_result = self.analyze_expr(right)?;
@@ -417,25 +416,25 @@ impl<'a> Analyzer<'a> {
                 low,
                 high,
             } => {
-                if let ExprResult::Value(expr_dtype) = self.analyze_expr(expr)? {
-                    if let ExprResult::Value(left_dtype) = self.analyze_expr(low)? {
-                        if !expr_dtype.can_be_coerced(left_dtype)
-                            && !left_dtype.can_be_coerced(expr_dtype)
-                            && !matches!(left_dtype, DataTypeKind::Null)
+                if let ExprResult::Value(expr_dtype) = self.analyze_expr(expr)?
+                    && let ExprResult::Value(left_dtype) = self.analyze_expr(low)?
+                {
+                    if !expr_dtype.can_be_coerced(left_dtype)
+                        && !left_dtype.can_be_coerced(expr_dtype)
+                        && !matches!(left_dtype, DataTypeKind::Null)
+                    {
+                        return Err(AnalyzerError::InvalidDataType(left_dtype));
+                    }
+
+                    if let ExprResult::Value(right_dtype) = self.analyze_expr(high)? {
+                        if !expr_dtype.can_be_coerced(right_dtype)
+                            && !right_dtype.can_be_coerced(expr_dtype)
+                            && !matches!(right_dtype, DataTypeKind::Null)
                         {
-                            return Err(AnalyzerError::InvalidDataType(left_dtype));
+                            return Err(AnalyzerError::InvalidDataType(right_dtype));
                         }
 
-                        if let ExprResult::Value(right_dtype) = self.analyze_expr(high)? {
-                            if !expr_dtype.can_be_coerced(right_dtype)
-                                && !right_dtype.can_be_coerced(expr_dtype)
-                                && !matches!(right_dtype, DataTypeKind::Null)
-                            {
-                                return Err(AnalyzerError::InvalidDataType(right_dtype));
-                            }
-
-                            return Ok(ExprResult::Value(DataTypeKind::Boolean));
-                        }
+                        return Ok(ExprResult::Value(DataTypeKind::Boolean));
                     }
                 }
                 Err(AnalyzerError::InvalidExpression)
@@ -644,14 +643,14 @@ impl<'a> Analyzer<'a> {
                     let mut processed_tables = HashSet::new();
 
                     // Process main table first if exists
-                    if let Some(current) = &self.ctx.current_table {
-                        if processed_tables.insert(current.clone()) {
-                            let obj = self
-                                .get_relation(current)
-                                .map_err(|e| AnalyzerError::NotFound(current.to_string()))?;
-                            let schema = obj.schema();
-                            out_columns.extend(schema.columns.clone());
-                        }
+                    if let Some(current) = &self.ctx.current_table
+                        && processed_tables.insert(current.clone())
+                    {
+                        let obj = self
+                            .get_relation(current)
+                            .map_err(|e| AnalyzerError::NotFound(current.to_string()))?;
+                        let schema = obj.schema();
+                        out_columns.extend(schema.columns.clone());
                     }
 
                     // Process aliased tables
@@ -1092,13 +1091,12 @@ impl<'a> Analyzer<'a> {
                         | Expr::BinaryOp { .. }
                         | Expr::FunctionCall { .. } => {
                             let result = self.analyze_expr(&column.value)?;
-                            if let ExprResult::Value(value_type) = result {
-                                if !value_type.can_be_coerced(col.dtype)
-                                    && !col.dtype.can_be_coerced(value_type)
-                                    && !matches!(value_type, DataTypeKind::Null)
-                                {
-                                    return Err(AnalyzerError::InvalidDataType(value_type));
-                                }
+                            if let ExprResult::Value(value_type) = result
+                                && !value_type.can_be_coerced(col.dtype)
+                                && !col.dtype.can_be_coerced(value_type)
+                                && !matches!(value_type, DataTypeKind::Null)
+                            {
+                                return Err(AnalyzerError::InvalidDataType(value_type));
                             }
                         }
                         _ => {
