@@ -409,7 +409,7 @@ impl<M> TryFrom<(&[u8], usize)> for BufferWithMetadata<M> {
             return Err("buffer too small for header");
         }
 
-        if (bytes.as_ptr() as usize).is_multiple_of(alignment) {
+        if !(bytes.as_ptr() as usize).is_multiple_of(alignment) {
             return Err("buffer not aligned to the required boundary");
         }
 

@@ -51,6 +51,7 @@ pub fn allocate_aligned(alignment: usize, size: usize) -> io::Result<Vec<u8>> {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
         let ptr = alloc_zeroed(layout);
+        debug_assert!((ptr as usize).is_multiple_of(alignment), "Invalid allocation, layout.from_size_align did not return an aligned buffer");
         if ptr.is_null() {
             return Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,

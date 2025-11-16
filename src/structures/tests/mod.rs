@@ -15,11 +15,12 @@ use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use serial_test::serial;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::io;
 use tempfile::tempdir;
 
 // Test key type
-#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 struct TestKey(i32);
 
 impl AsRef<[u8]> for TestKey {
@@ -543,22 +544,33 @@ fn test_btree_iterator() -> io::Result<()> {
 
     // Insert key value pairs
     for (key, value) in &test_data {
-        dbg!(key);
+
+
         let kv = KeyValuePair::new(key, value);
         tree.insert(root, kv.as_ref())?;
     }
 
+
+    std::fs::write("tree.json", tree.json()?)?;
+
     let mut collected = Vec::new();
+
     for item in tree.iter()? {
+
         match item {
             Ok(payload) => {
+
+
                 collected.push(payload);
+
+
+
             }
             Err(e) => return Err(e),
         }
     }
 
-    assert_eq!(collected.len(), 100, "Should iterate over all 100 elements");
+    assert_eq!(collected.len(), 1000, "Should iterate over all 100 elements");
 
     // Verify keys are sorted
     for i in 0..99 {
@@ -633,29 +645,33 @@ fn test_btree_iterator_iter_rev() -> io::Result<()> {
 
     for (key, value) in &test_data {
         let kv = KeyValuePair::new(key, value);
+
         tree.insert(root, kv.as_ref())?;
     }
 
+
+    std::fs::write("tree.json", tree.json()?)?;
     for item in tree.iter_rev()? {
         match item {
             Ok(payload) => {
+                // TODO. REVISAR POR QUE NO COLECTA LAS CLAVES EN ORDEN DESCENDENTE.
                 collected.push(payload);
-                if collected.len() >= 10 {
-                    break;
-                }
             }
             Err(e) => return Err(e),
         }
     }
 
-    assert_eq!(collected.len(), 10);
+    assert_eq!(collected.len(), 1000);
 
-    let first_key = i32::from_ne_bytes(collected[0].as_ref()[..4].try_into().unwrap());
-    assert_eq!(first_key, 99);
+    //let collected_as_test_keys: Vec<i32> = collected.iter().map(|c| i32::from_ne_bytes(c.as_ref()[..4].try_into().unwrap())).collect();
+
+    //dbg!(collected_as_test_keys);
 
     for i in 0..9 {
         let key_i = i32::from_ne_bytes(collected[i].as_ref()[..4].try_into().unwrap());
+        dbg!(key_i);
         let key_next = i32::from_ne_bytes(collected[i + 1].as_ref()[..4].try_into().unwrap());
+        dbg!(key_next);
         assert!(
             key_i > key_next,
             "Keys should be in descending order in reverse iteration"

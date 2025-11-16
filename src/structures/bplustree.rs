@@ -2,7 +2,7 @@ use crate::CELL_ALIGNMENT;
 use crate::io::frames::MemFrame;
 use crate::io::pager::SharedPager;
 use crate::storage::cell::CELL_HEADER_SIZE;
-use crate::storage::page::{BTREE_PAGE_HEADER_SIZE, BtreePage, MemPage, OverflowPage};
+use crate::storage::page::{BTREE_PAGE_HEADER_SIZE, BtreePage, MemPage, OverflowPage, Page};
 use crate::storage::{
     cell::{Cell, Slot},
     latches::Latch,
@@ -1125,6 +1125,7 @@ where
             };
 
             node.metadata_mut().next_sibling = new_right;
+            node.metadata_mut().previous_sibling = PAGE_ZERO;
             Ok(())
         })?;
 
@@ -1132,9 +1133,45 @@ where
             let node: &mut BtreePage = p.try_into().unwrap();
             right_cells.iter().for_each(|cell| node.push(cell.clone()));
             node.metadata_mut().right_child = old_right_child;
+            node.metadata_mut().next_sibling = PAGE_ZERO;
             node.metadata_mut().previous_sibling = new_left;
             Ok(())
         })?;
+
+
+        // Fix the frontier links.
+        // The right child of the left page must be linked with the left most child of the right page to maintain proper ordering.
+        let left_right_most =  self.with_latched_page(new_left, |p| {
+            let node: &BtreePage = p.try_into().unwrap();
+            Ok(node.metadata().right_child)
+        })?;
+
+
+        let right_left_most =  self.with_latched_page(new_right, |p| {
+            let node: &BtreePage = p.try_into().unwrap();
+            Ok(node.cell(Slot(0)).metadata().left_child())
+        })?;
+
+
+        if left_right_most.is_valid() {
+            self.acquire_latch(left_right_most, NodeAccessMode::Write)?;
+            self.with_latched_page_mut(left_right_most, |p|{
+                let node: &mut BtreePage = p.try_into().unwrap();
+                node.metadata_mut().next_sibling = right_left_most;
+                Ok(())
+            })?;
+        };
+
+
+        if right_left_most.is_valid() {
+            self.acquire_latch(right_left_most, NodeAccessMode::Write)?;
+            self.with_latched_page_mut(right_left_most, |p|{
+                let node: &mut BtreePage = p.try_into().unwrap();
+                node.metadata_mut().previous_sibling = left_right_most;
+                Ok(())
+            })?;
+
+        };
 
         Ok(())
     }
@@ -1179,10 +1216,31 @@ where
             return Ok(());
         };
 
-        let last_parent_slot = self.with_latched_page(parent_page, |p| {
+        let (parent_prev, last_parent_slot, parent_next) = self.with_latched_page(parent_page, |p| {
             let node: &BtreePage = p.try_into().unwrap();
-            Ok(node.max_slot_index())
+            Ok((node.metadata().previous_sibling, node.max_slot_index(), node.metadata().next_sibling))
         })?;
+
+        let parent_prev_last = if parent_prev.is_valid() {
+            self.acquire_latch(parent_prev, NodeAccessMode::Read)?;
+            self.with_latched_page(parent_prev, |p| {
+                let node: &BtreePage = p.try_into().unwrap();
+                Ok(node.metadata().right_child)
+            })?
+        } else {
+            PAGE_ZERO
+        };
+
+
+         let parent_next_first = if parent_next.is_valid() {
+            self.acquire_latch(parent_next, NodeAccessMode::Read)?;
+            self.with_latched_page(parent_next, |p| {
+                let node: &BtreePage = p.try_into().unwrap();
+                Ok(node.cell(Slot(0)).metadata().left_child())
+            })?
+        } else {
+            PAGE_ZERO
+        };
 
         let mut siblings =
             self.load_siblings(page_id, &parent_position, self.num_siblings_per_side)?;
@@ -1424,12 +1482,16 @@ where
                     node.metadata_mut().previous_sibling = siblings[i - 1].pointer;
                 } else if let Some(frontier) = left_frontier {
                     node.metadata_mut().previous_sibling = frontier.pointer;
+                } else {
+                    node.metadata_mut().previous_sibling = parent_prev_last;
                 };
 
                 if i < (siblings.len() - 1) {
                     node.metadata_mut().next_sibling = siblings[i + 1].pointer;
                 } else if let Some(frontier) = right_frontier {
                     node.metadata_mut().next_sibling = frontier.pointer;
+                } else {
+                    node.metadata_mut().next_sibling = parent_next_first;
                 };
 
                 // For leaf nodes, we always propagate the first cell of the next node.
@@ -1475,6 +1537,7 @@ where
                 let node: &mut BtreePage = p.try_into().unwrap();
                 // Maintain linked with the last sibling in the chain
                 node.metadata_mut().previous_sibling = last_sibling.pointer;
+                debug_assert_ne!(node.metadata().next_sibling, siblings[0].pointer, "Found infinite loop in leaf pages linked list");
                 // For leaf nodes, we propagate the first child as a divider.
                 // For interior nodes this is not necessary as we use the last child of the previous sibling instead.
                 if is_leaf {
@@ -1495,6 +1558,8 @@ where
 
                 // Maintain linked with the last sibling in the chain
                 node.metadata_mut().next_sibling = siblings[0].pointer;
+
+                debug_assert_ne!(node.metadata().previous_sibling, last_sibling.pointer, "Found infinite loop in leaf pages linked list");
                 Ok(())
             })?;
         };
@@ -1923,6 +1988,7 @@ where
             self.release_latch(current);
 
             if is_leaf {
+
                 return BPlusTreeIterator::from_position(
                     self,
                     (current, Slot(0)),
@@ -1951,6 +2017,7 @@ where
             self.release_latch(current);
 
             if !last_child.is_valid() {
+
                 return BPlusTreeIterator::from_position(
                     self,
                     (current, last_slot),
@@ -1975,7 +2042,7 @@ where
 {
     tree: &'a BPlusTree<Cmp>,
     current_page: Option<PageId>,
-    current_slot: Slot,
+    current_slot: i16,
     direction: IterDirection,
     _phantom: PhantomData<Cmp>,
 }
@@ -1994,7 +2061,7 @@ where
         Ok(Self {
             tree,
             current_page: Some(position.0),
-            current_slot: position.1,
+            current_slot: position.1.0 as i16, // TODO. ADD THIS TO THE SLOT DATA STRUCTURE.
             direction,
             _phantom: PhantomData,
         })
@@ -2004,14 +2071,17 @@ where
         if let Some(current) = self.current_page {
             let next_page = self.tree.with_latched_page(current, |p| {
                 let btree_page: &BtreePage = p.try_into().unwrap();
+                debug_assert_ne!(btree_page.metadata().next_sibling, btree_page.page_number(), "Btree page that points to itself generates an infinite loop on the bplustree iterator!");
                 Ok(btree_page.metadata().next_sibling)
             })?;
+
+
 
             if next_page.is_valid() {
                 self.current_page = Some(next_page);
                 self.tree.acquire_latch(next_page, NodeAccessMode::Read)?;
                 self.tree.release_latch(current);
-                self.current_slot = Slot(0);
+                self.current_slot = 0;
                 return Ok(true);
             };
 
@@ -2034,7 +2104,7 @@ where
                 self.tree.acquire_latch(prev_page, NodeAccessMode::Read)?;
                 self.current_slot = self.tree.with_latched_page(prev_page, |p| {
                     let btree: &BtreePage = p.try_into().unwrap();
-                    Ok(btree.max_slot_index())
+                    Ok(btree.num_slots() as i16 - 1)
                 })?;
                 self.tree.release_latch(current);
                 return Ok(true);
@@ -2059,16 +2129,16 @@ where
                 IterDirection::Forward => {
                     let num_slots = match self.tree.with_latched_page(page, |p| {
                         let btree: &BtreePage = p.try_into().unwrap();
-                        Ok(btree.num_slots())
+                        Ok(btree.num_slots() as i16)
                     }) {
                         Ok(n) => n,
                         Err(e) => return Some(Err(e)),
                     };
 
-                    if self.current_slot.0 < num_slots {
+                    if self.current_slot < num_slots {
                         let payload = self.tree.with_latched_page(page, |p| {
                             let btree: &BtreePage = p.try_into().unwrap();
-                            let cell = btree.cell(self.current_slot);
+                            let cell = btree.cell(Slot(self.current_slot as u16));
 
                             if cell.metadata().is_overflow() {
                                 self.tree.reassemble_payload(cell, usize::MAX)
@@ -2077,7 +2147,7 @@ where
                             }
                         });
 
-                        self.current_slot += 1usize;
+                        self.current_slot += 1;
                         Some(payload)
                     } else {
                         match self.adv() {
@@ -2088,18 +2158,15 @@ where
                     }
                 }
                 IterDirection::Backward => {
-                    if self.current_slot.0 < u16::MAX {
+
+
+
+
+                    if self.current_slot >= 0 {
                         let payload = self.tree.with_latched_page(page, |p| {
                             let btree: &BtreePage = p.try_into().unwrap();
 
-                            if self.current_slot.0 >= btree.num_slots() {
-                                return Err(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    "Invalid slot position",
-                                ));
-                            }
-
-                            let cell = btree.cell(self.current_slot);
+                            let cell = btree.cell(Slot(self.current_slot as u16));
 
                             if cell.metadata().is_overflow() {
                                 self.tree.reassemble_payload(cell, usize::MAX)
@@ -2108,27 +2175,19 @@ where
                             }
                         });
 
-                        if self.current_slot.0 > 0 {
-                            self.current_slot -= 1usize;
-                            Some(payload)
+
+                        self.current_slot -= 1;
+                        Some(payload)
                         } else {
-                            let result = payload;
+
+
                             match self.rev() {
-                                Ok(true) => Some(result),
-                                Ok(false) => {
-                                    self.current_page = None;
-                                    Some(result)
-                                }
+                                Ok(true) => self.next(),
+                                Ok(false) => None,
                                 Err(e) => Some(Err(e)),
                             }
                         }
-                    } else {
-                        match self.rev() {
-                            Ok(true) => self.next(),
-                            Ok(false) => None,
-                            Err(e) => Some(Err(e)),
-                        }
-                    }
+
                 }
             }
         } else {
