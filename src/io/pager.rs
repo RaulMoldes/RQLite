@@ -308,7 +308,7 @@ mod tests {
     fn pager_creation() -> std::io::Result<()> {
         let mut pager = create_test_pager("test.db", 16)?;
         pager.file.seek(SeekFrom::Start(0))?;
-        let mut buf = FileSystem::alloc_buffer("test.db", pager.page_size() as usize)?;
+        let mut buf = allocate_aligned(PAGE_ALIGNMENT as usize, pager.page_size() as usize)?;
         pager.file.read_exact(&mut buf)?;
         assert_eq!(buf, pager.page_zero.as_ref());
 
@@ -324,7 +324,7 @@ mod tests {
         assert!(page_id != crate::types::PAGE_ZERO, "Invalid page number!");
         let result = pager.write_block_unchecked(page_id, page1.as_mut());
         assert!(result.is_ok(), "Page writing to disk failed!");
-        let mut buf = FileSystem::alloc_buffer("test.db", pager.page_size() as usize)?;
+        let mut buf = allocate_aligned(PAGE_ALIGNMENT as usize, pager.page_size() as usize)?;
         pager.read_block_unchecked(page_id, &mut buf)?;
         assert_eq!(
             buf,
@@ -344,8 +344,9 @@ mod tests {
         let num_pages = 10;
         let total_size = num_pages * page_size;
 
-        // Create a dynamic buffer
-        let mut raw_buffer = allocate_aligned(total_size as usize, page_size as usize)?;
+
+        let mut raw_buffer = allocate_aligned(PAGE_ALIGNMENT as usize, total_size as usize)?;
+
         let mut offset = 0;
         // Accumulate all pages in our buffers.
         for i in 0..num_pages {
@@ -370,7 +371,7 @@ mod tests {
 
         for page in pages {
             // Try to read page 1 back.
-            let mut buf = FileSystem::alloc_buffer("test.db", page.metadata().page_size as usize)?;
+             let mut buf = allocate_aligned(PAGE_ALIGNMENT as usize, page.metadata().page_size as usize)?;
 
             pager.read_block_unchecked(page.metadata().page_number, &mut buf)?;
             assert_eq!(
@@ -443,7 +444,7 @@ mod tests {
         let _id2 = pager.alloc_page::<BtreePage>()?;
 
         // Verify it has been written out to disk.
-        let mut buf = FileSystem::alloc_buffer("test.db", pager.page_size() as usize)?;
+        let mut buf = allocate_aligned(PAGE_ALIGNMENT as usize, pager.page_size() as usize)?;
         pager.read_block_unchecked(id1, &mut buf)?;
 
         Ok(())
