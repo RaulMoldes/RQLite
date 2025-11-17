@@ -4,11 +4,13 @@ use std::collections::HashMap;
 use crate::{
     database::schema::{Constraint, Index, Table},
     storage::tuple::{Tuple, TupleRef},
+    structures::bplustree::NumericComparator,
 };
 
 use crate::io::pager::SharedPager;
 use crate::structures::bplustree::{
-    BPlusTree, DynComparator, FixedSizeComparator, NodeAccessMode, SearchResult, VarlenComparator,
+    BPlusTree, DynComparator, FixedSizeBytesComparator, NodeAccessMode, SearchResult,
+    VarlenComparator,
 };
 
 use crate::storage::page::BtreePage;
@@ -128,8 +130,10 @@ impl Database {
         root: PageId,
         dtype: DataTypeKind,
     ) -> std::io::Result<BPlusTree<DynComparator>> {
-        let comparator = if dtype.is_fixed_size() {
-            DynComparator::Fixed(FixedSizeComparator::for_size(dtype.size().unwrap()))
+        let comparator = if dtype.is_numeric() {
+            DynComparator::StrictNumeric(NumericComparator::for_size(dtype.size().unwrap()))
+        } else if dtype.is_fixed_size() {
+            DynComparator::FixedSizeBytes(FixedSizeBytesComparator::for_size(dtype.size().unwrap()))
         } else {
             DynComparator::Variable(VarlenComparator)
         };
@@ -143,8 +147,8 @@ impl Database {
         ))
     }
 
-    pub fn table_btree(&self, root: PageId) -> std::io::Result<BPlusTree<FixedSizeComparator>> {
-        let comparator = FixedSizeComparator::with_type::<u64>();
+    pub fn table_btree(&self, root: PageId) -> std::io::Result<BPlusTree<NumericComparator>> {
+        let comparator = NumericComparator::with_type::<u64>();
 
         Ok(BPlusTree::from_existent(
             self.pager(),

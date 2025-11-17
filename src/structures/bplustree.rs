@@ -62,28 +62,34 @@ pub(crate) trait Comparator {
 
 pub(crate) enum DynComparator {
     Variable(VarlenComparator),
-    Fixed(FixedSizeComparator),
+    StrictNumeric(NumericComparator),
+    FixedSizeBytes(FixedSizeBytesComparator),
 }
+
+pub(crate) struct NumericComparator(usize);
 
 impl Comparator for DynComparator {
     fn compare(&self, lhs: &[u8], rhs: &[u8]) -> std::io::Result<Ordering> {
         match self {
-            Self::Fixed(c) => c.compare(lhs, rhs),
+            Self::FixedSizeBytes(c) => c.compare(lhs, rhs),
             Self::Variable(c) => c.compare(lhs, rhs),
+            Self::StrictNumeric(c) => c.compare(lhs, rhs),
         }
     }
 
     fn is_fixed_size(&self) -> bool {
         match self {
-            Self::Fixed(c) => c.is_fixed_size(),
+            Self::FixedSizeBytes(c) => c.is_fixed_size(),
             Self::Variable(c) => c.is_fixed_size(),
+            Self::StrictNumeric(c) => c.is_fixed_size(),
         }
     }
 
     fn key_size(&self, data: &[u8]) -> std::io::Result<usize> {
         match self {
-            Self::Fixed(c) => c.key_size(data),
+            Self::FixedSizeBytes(c) => c.key_size(data),
             Self::Variable(c) => c.key_size(data),
+            Self::StrictNumeric(c) => c.key_size(data),
         }
     }
 }
@@ -151,9 +157,9 @@ impl Comparator for VarlenComparator {
     }
 }
 
-pub(crate) struct FixedSizeComparator(usize);
+pub(crate) struct FixedSizeBytesComparator(usize);
 
-impl FixedSizeComparator {
+impl FixedSizeBytesComparator {
     pub fn with_type<T>() -> Self {
         Self(std::mem::size_of::<T>())
     }
@@ -163,9 +169,41 @@ impl FixedSizeComparator {
     }
 }
 
-impl Comparator for FixedSizeComparator {
+impl Comparator for FixedSizeBytesComparator {
     fn compare(&self, lhs: &[u8], rhs: &[u8]) -> std::io::Result<Ordering> {
         Ok(lhs[..self.0].cmp(&rhs[..self.0]))
+    }
+
+    fn key_size(&self, __data: &[u8]) -> std::io::Result<usize> {
+        Ok(self.0)
+    }
+
+    fn is_fixed_size(&self) -> bool {
+        true
+    }
+}
+
+impl NumericComparator {
+    pub fn with_type<T>() -> Self {
+        Self(std::mem::size_of::<T>())
+    }
+
+    pub fn for_size(size: usize) -> Self {
+        Self(size)
+    }
+}
+
+impl Comparator for NumericComparator {
+    fn compare(&self, lhs: &[u8], rhs: &[u8]) -> std::io::Result<Ordering> {
+        let mut a: u32 = 0;
+        let mut b: u32 = 0;
+
+        for i in 0..self.0 {
+            a |= (lhs[i] as u32) << (8 * i);
+            b |= (rhs[i] as u32) << (8 * i);
+        }
+
+        Ok(a.cmp(&b))
     }
 
     fn key_size(&self, __data: &[u8]) -> std::io::Result<usize> {
@@ -1138,39 +1176,34 @@ where
             Ok(())
         })?;
 
-
         // Fix the frontier links.
         // The right child of the left page must be linked with the left most child of the right page to maintain proper ordering.
-        let left_right_most =  self.with_latched_page(new_left, |p| {
+        let left_right_most = self.with_latched_page(new_left, |p| {
             let node: &BtreePage = p.try_into().unwrap();
             Ok(node.metadata().right_child)
         })?;
 
-
-        let right_left_most =  self.with_latched_page(new_right, |p| {
+        let right_left_most = self.with_latched_page(new_right, |p| {
             let node: &BtreePage = p.try_into().unwrap();
             Ok(node.cell(Slot(0)).metadata().left_child())
         })?;
 
-
         if left_right_most.is_valid() {
             self.acquire_latch(left_right_most, NodeAccessMode::Write)?;
-            self.with_latched_page_mut(left_right_most, |p|{
+            self.with_latched_page_mut(left_right_most, |p| {
                 let node: &mut BtreePage = p.try_into().unwrap();
                 node.metadata_mut().next_sibling = right_left_most;
                 Ok(())
             })?;
         };
 
-
         if right_left_most.is_valid() {
             self.acquire_latch(right_left_most, NodeAccessMode::Write)?;
-            self.with_latched_page_mut(right_left_most, |p|{
+            self.with_latched_page_mut(right_left_most, |p| {
                 let node: &mut BtreePage = p.try_into().unwrap();
                 node.metadata_mut().previous_sibling = left_right_most;
                 Ok(())
             })?;
-
         };
 
         Ok(())
@@ -1216,13 +1249,18 @@ where
             return Ok(());
         };
 
-        let (parent_prev, last_parent_slot, parent_next) = self.with_latched_page(parent_page, |p| {
-            let node: &BtreePage = p.try_into().unwrap();
-            Ok((node.metadata().previous_sibling, node.max_slot_index(), node.metadata().next_sibling))
-        })?;
+        let (parent_prev, last_parent_slot, parent_next) =
+            self.with_latched_page(parent_page, |p| {
+                let node: &BtreePage = p.try_into().unwrap();
+                Ok((
+                    node.metadata().previous_sibling,
+                    node.max_slot_index(),
+                    node.metadata().next_sibling,
+                ))
+            })?;
 
         let parent_prev_last = if parent_prev.is_valid() {
-            self.acquire_latch(parent_prev, NodeAccessMode::Read)?;
+            self.acquire_latch(parent_prev, NodeAccessMode::Write)?;
             self.with_latched_page(parent_prev, |p| {
                 let node: &BtreePage = p.try_into().unwrap();
                 Ok(node.metadata().right_child)
@@ -1231,9 +1269,8 @@ where
             PAGE_ZERO
         };
 
-
-         let parent_next_first = if parent_next.is_valid() {
-            self.acquire_latch(parent_next, NodeAccessMode::Read)?;
+        let parent_next_first = if parent_next.is_valid() {
+            self.acquire_latch(parent_next, NodeAccessMode::Write)?;
             self.with_latched_page(parent_next, |p| {
                 let node: &BtreePage = p.try_into().unwrap();
                 Ok(node.cell(Slot(0)).metadata().left_child())
@@ -1537,7 +1574,11 @@ where
                 let node: &mut BtreePage = p.try_into().unwrap();
                 // Maintain linked with the last sibling in the chain
                 node.metadata_mut().previous_sibling = last_sibling.pointer;
-                debug_assert_ne!(node.metadata().next_sibling, siblings[0].pointer, "Found infinite loop in leaf pages linked list");
+                debug_assert_ne!(
+                    node.metadata().next_sibling,
+                    siblings[0].pointer,
+                    "Found infinite loop in leaf pages linked list"
+                );
                 // For leaf nodes, we propagate the first child as a divider.
                 // For interior nodes this is not necessary as we use the last child of the previous sibling instead.
                 if is_leaf {
@@ -1559,7 +1600,11 @@ where
                 // Maintain linked with the last sibling in the chain
                 node.metadata_mut().next_sibling = siblings[0].pointer;
 
-                debug_assert_ne!(node.metadata().previous_sibling, last_sibling.pointer, "Found infinite loop in leaf pages linked list");
+                debug_assert_ne!(
+                    node.metadata().previous_sibling,
+                    last_sibling.pointer,
+                    "Found infinite loop in leaf pages linked list"
+                );
                 Ok(())
             })?;
         };
@@ -1988,7 +2033,6 @@ where
             self.release_latch(current);
 
             if is_leaf {
-
                 return BPlusTreeIterator::from_position(
                     self,
                     (current, Slot(0)),
@@ -2017,7 +2061,6 @@ where
             self.release_latch(current);
 
             if !last_child.is_valid() {
-
                 return BPlusTreeIterator::from_position(
                     self,
                     (current, last_slot),
@@ -2074,8 +2117,6 @@ where
                 debug_assert_ne!(btree_page.metadata().next_sibling, btree_page.page_number(), "Btree page that points to itself generates an infinite loop on the bplustree iterator!");
                 Ok(btree_page.metadata().next_sibling)
             })?;
-
-
 
             if next_page.is_valid() {
                 self.current_page = Some(next_page);
@@ -2158,10 +2199,6 @@ where
                     }
                 }
                 IterDirection::Backward => {
-
-
-
-
                     if self.current_slot >= 0 {
                         let payload = self.tree.with_latched_page(page, |p| {
                             let btree: &BtreePage = p.try_into().unwrap();
@@ -2175,19 +2212,15 @@ where
                             }
                         });
 
-
                         self.current_slot -= 1;
                         Some(payload)
-                        } else {
-
-
-                            match self.rev() {
-                                Ok(true) => self.next(),
-                                Ok(false) => None,
-                                Err(e) => Some(Err(e)),
-                            }
+                    } else {
+                        match self.rev() {
+                            Ok(true) => self.next(),
+                            Ok(false) => None,
+                            Err(e) => Some(Err(e)),
                         }
-
+                    }
                 }
             }
         } else {

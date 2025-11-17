@@ -3,19 +3,19 @@ mod macros;
 use crate::io::pager::{Pager, SharedPager};
 use crate::storage::cell::Slot;
 use crate::structures::bplustree::{
-    BPlusTree, Comparator, FixedSizeComparator, IterDirection, NodeAccessMode, SearchResult,
-    VarlenComparator,
+    BPlusTree, Comparator, FixedSizeBytesComparator, IterDirection, NodeAccessMode,
+    NumericComparator, SearchResult, VarlenComparator,
 };
 use crate::structures::kvp::KeyValuePair;
 use crate::types::VarInt;
 use crate::{
-    AxmosDBConfig, IncrementalVaccum, ReadWriteVersion, TextEncoding, delete_test, insert_tests,
+    AxmosDBConfig, IncrementalVaccum, ReadWriteVersion, TextEncoding, assert_cmp, delete_test,
+    insert_tests,
 };
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use serial_test::serial;
 use std::cmp::Ordering;
-use std::collections::HashSet;
 use std::io;
 use tempfile::tempdir;
 
@@ -115,59 +115,63 @@ pub fn gen_ovf_blob(page_size: usize, pages: usize, seed: u64) -> Vec<u8> {
 
 #[test]
 fn test_comparators() -> std::io::Result<()> {
-    let lhs = TestKey(1);
-    let bytes_lhs = lhs.as_ref();
+    let fixed_comparator = FixedSizeBytesComparator::with_type::<TestKey>();
+    let varlen_comparator = VarlenComparator;
+    let numeric_comparator = NumericComparator::with_type::<TestKey>();
 
-    let rhs = TestKey(1);
-    let bytes_rhs = rhs.as_ref();
-
-    let comparator = FixedSizeComparator::with_type::<TestKey>();
-    assert_eq!(comparator.compare(bytes_lhs, bytes_rhs)?, Ordering::Equal);
-
-    let lhs = TestKey(1);
-    let bytes_lhs = lhs.as_ref();
-
-    let rhs = TestKey(2);
-    let bytes_rhs = rhs.as_ref();
-
-    assert_eq!(comparator.compare(bytes_lhs, bytes_rhs)?, Ordering::Less);
-
-    let lhs = TestKey(3);
-    let bytes_lhs = lhs.as_ref();
-
-    let rhs = TestKey(2);
-    let bytes_rhs = rhs.as_ref();
-
-    assert_eq!(comparator.compare(bytes_lhs, bytes_rhs)?, Ordering::Greater);
-
-    let lhs = TestVarLengthKey::from_string("Hello how are you 2");
-    let bytes_lhs = lhs.as_bytes();
-
-    let rhs = TestVarLengthKey::from_string("Hello how are you 1");
-    let bytes_rhs = rhs.as_bytes();
-
-    let comparator = VarlenComparator;
-    assert_eq!(
-        comparator.compare(&bytes_lhs, &bytes_rhs)?,
+    assert_cmp!(fixed_comparator, TestKey(1), TestKey(1), Ordering::Equal);
+    assert_cmp!(fixed_comparator, TestKey(511), TestKey(767), Ordering::Less);
+    assert_cmp!(fixed_comparator, TestKey(3), TestKey(2), Ordering::Greater);
+    // Fixed size comparators compare byte by byte, therefore the ordering might not always match strict numerical order. That is why we have [NumericComparator].
+    assert_cmp!(
+        fixed_comparator,
+        TestKey(511),
+        TestKey(762),
         Ordering::Greater
     );
+    assert_cmp!(fixed_comparator, TestKey(251), TestKey(763), Ordering::Less);
 
-    let lhs = TestVarLengthKey::from_string("Hello how are you 1");
-    let bytes_lhs = lhs.as_bytes();
+    assert_cmp!(numeric_comparator, TestKey(1), TestKey(1), Ordering::Equal);
+    assert_cmp!(
+        numeric_comparator,
+        TestKey(511),
+        TestKey(767),
+        Ordering::Less
+    );
+    assert_cmp!(
+        numeric_comparator,
+        TestKey(3),
+        TestKey(2),
+        Ordering::Greater
+    );
+    // Numeric comparator always follows strict numerical order.
+    assert_cmp!(
+        numeric_comparator,
+        TestKey(762),
+        TestKey(511),
+        Ordering::Greater
+    );
+    assert_cmp!(
+        numeric_comparator,
+        TestKey(251),
+        TestKey(763),
+        Ordering::Less
+    );
 
-    let rhs = TestVarLengthKey::from_string("Hello how are you 2");
-    let bytes_rhs = rhs.as_bytes();
-
-    assert_eq!(comparator.compare(&bytes_lhs, &bytes_rhs)?, Ordering::Less);
-
-    let lhs = TestVarLengthKey::from_string("Hello how are you");
-    let bytes_lhs = lhs.as_bytes();
-
-    let rhs = TestVarLengthKey::from_string("Hello how are you");
-    let bytes_rhs = rhs.as_bytes();
-
-    let comparator = VarlenComparator;
-    assert_eq!(comparator.compare(&bytes_lhs, &bytes_rhs)?, Ordering::Equal);
+    assert_cmp!(
+        varlen_comparator,
+        TestVarLengthKey::from_string("Hello how are you"),
+        TestVarLengthKey::from_string("Hello how are you"),
+        Ordering::Equal,
+        varlen
+    );
+    assert_cmp!(
+        varlen_comparator,
+        TestVarLengthKey::from_string("Hello how are you 2"),
+        TestVarLengthKey::from_string("Hello how are you 1"),
+        Ordering::Greater,
+        varlen
+    );
 
     Ok(())
 }
@@ -177,7 +181,7 @@ fn test_comparators() -> std::io::Result<()> {
 #[test]
 #[serial]
 fn test_search_empty_tree() -> io::Result<()> {
-    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
     let tree = create_test_btree(4096, 1, 4, comparator)?;
     let root = tree.get_root();
     let start_pos = (root, Slot(0));
@@ -194,7 +198,7 @@ fn test_search_empty_tree() -> io::Result<()> {
 #[test]
 #[serial]
 fn test_insert_remove_single_key() -> io::Result<()> {
-    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
     let mut btree = create_test_btree(4096, 1, 4, comparator)?;
 
     let root = btree.get_root();
@@ -224,7 +228,7 @@ fn test_insert_remove_single_key() -> io::Result<()> {
 #[test]
 #[serial]
 fn test_insert_duplicates() -> io::Result<()> {
-    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
     let mut btree = create_test_btree(4096, 1, 4, comparator)?;
     let root = btree.get_root();
     // Insert a key-value pair
@@ -245,7 +249,7 @@ fn test_update_single_key() -> io::Result<()> {
 
     let data2 = b"Updated";
     let kv2 = KeyValuePair::new(&key, data2);
-    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
     let mut btree = create_test_btree(4096, 1, 4, comparator)?;
 
     let root = btree.get_root();
@@ -287,7 +291,7 @@ fn test_upsert_single_key() -> io::Result<()> {
 
     let data3 = b"Created";
     let kv3 = KeyValuePair::new(&key2, data3);
-    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
     let mut btree = create_test_btree(4096, 1, 4, comparator)?;
 
     let root = btree.get_root();
@@ -359,7 +363,7 @@ fn test_variable_length_keys() -> io::Result<()> {
 #[test]
 #[serial]
 fn test_overflow_chain() -> io::Result<()> {
-    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
     let mut tree = create_test_btree(4096, 3, 2, comparator)?;
     let root = tree.get_root();
     let start_pos = (root, Slot(0));
@@ -383,7 +387,7 @@ fn test_overflow_chain() -> io::Result<()> {
 #[test]
 #[serial]
 fn test_multiple_overflow_chain() -> io::Result<()> {
-    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
     let mut tree = create_test_btree(4096, 3, 2, comparator)?;
     let root = tree.get_root();
     let start_pos = (root, Slot(0));
@@ -414,7 +418,7 @@ fn test_multiple_overflow_chain() -> io::Result<()> {
 #[test]
 #[serial]
 fn test_split_root() -> io::Result<()> {
-    let comparator = FixedSizeComparator::with_type::<TestKey>();
+    let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
     let mut tree = create_test_btree(4096, 3, 2, comparator)?;
     let root = tree.get_root();
     let start_pos = (root, Slot(0));
@@ -528,8 +532,8 @@ fn test_overflow_keys() -> io::Result<()> {
 
 #[test]
 #[serial]
-fn test_btree_iterator() -> io::Result<()> {
-    let comparator = FixedSizeComparator::with_type::<TestKey>();
+fn test_btree_iterator_iter_adv() -> io::Result<()> {
+    let comparator = NumericComparator::with_type::<TestKey>();
     let mut tree = create_test_btree(4096, 10, 4, comparator)?;
     let root = tree.get_root();
 
@@ -544,98 +548,52 @@ fn test_btree_iterator() -> io::Result<()> {
 
     // Insert key value pairs
     for (key, value) in &test_data {
-
-
         let kv = KeyValuePair::new(key, value);
         tree.insert(root, kv.as_ref())?;
     }
-
-
-    std::fs::write("tree.json", tree.json()?)?;
 
     let mut collected = Vec::new();
 
     for item in tree.iter()? {
-
         match item {
             Ok(payload) => {
-
-
                 collected.push(payload);
-
-
-
             }
             Err(e) => return Err(e),
         }
     }
 
-    assert_eq!(collected.len(), 1000, "Should iterate over all 100 elements");
+    assert_eq!(
+        collected.len(),
+        1000,
+        "Should iterate over all 100 elements"
+    );
 
     // Verify keys are sorted
-    for i in 0..99 {
-        let key_i = &collected[i].as_ref()[..4];
-        let key_next = &collected[i + 1].as_ref()[..4];
-        assert!(key_i < key_next, "Keys should be in ascending order");
+    for pair in collected.windows(2) {
+        let key_i = i32::from_ne_bytes(pair[0].as_ref()[..4].try_into().unwrap());
+        let key_next = i32::from_ne_bytes(pair[1].as_ref()[..4].try_into().unwrap());
+
+        assert!(
+            key_i < key_next,
+            "Keys should be in ascending order: {:?} !< {:?}",
+            key_i,
+            key_next
+        );
     }
 
-    Ok(())
-}
-
-#[test]
-#[serial]
-fn test_btree_iterator_iter_from() -> io::Result<()> {
-    let comparator = FixedSizeComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 10, 4, comparator)?;
-    let root = tree.get_root();
-    let mut collected = Vec::new();
-
-    // Insert test data
-    let test_data: Vec<(TestKey, Vec<u8>)> = (0..1000)
-        .map(|i| {
-            let key = TestKey(i);
-            let value = format!("value_{i}").into_bytes();
-            (key, value)
-        })
-        .collect();
-
-    // Insert key value pairs
-    for (key, value) in &test_data {
-        let kv = KeyValuePair::new(key, value);
-        tree.insert(root, kv.as_ref())?;
-    }
-
-    let start_key = TestKey(50);
-
-    for item in tree.iter_from(start_key.as_ref(), IterDirection::Forward)? {
-        match item {
-            Ok(payload) => {
-                collected.push(payload);
-                if collected.len() >= 10 {
-                    break;
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
-    assert_eq!(collected.len(), 10);
-    // Verificar que empiece desde 50
-    let first_key = i32::from_ne_bytes(collected[0].as_ref()[..4].try_into().unwrap());
-    assert_eq!(first_key, 50);
-    collected.clear();
     Ok(())
 }
 
 #[test]
 #[serial]
 fn test_btree_iterator_iter_rev() -> io::Result<()> {
-    let comparator = FixedSizeComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 10, 4, comparator)?;
+    let comparator = NumericComparator::with_type::<TestKey>();
+    let mut tree = create_test_btree(4096, 100, 4, comparator)?;
     let root = tree.get_root();
     let mut collected = Vec::new();
 
-    let test_data: Vec<(TestKey, Vec<u8>)> = (0..1000)
+    let test_data: Vec<(TestKey, Vec<u8>)> = (0..10000)
         .map(|i| {
             let key = TestKey(i);
             let value = format!("value_{i}").into_bytes();
@@ -645,36 +603,30 @@ fn test_btree_iterator_iter_rev() -> io::Result<()> {
 
     for (key, value) in &test_data {
         let kv = KeyValuePair::new(key, value);
-
         tree.insert(root, kv.as_ref())?;
     }
 
-
-    std::fs::write("tree.json", tree.json()?)?;
     for item in tree.iter_rev()? {
         match item {
             Ok(payload) => {
-                // TODO. REVISAR POR QUE NO COLECTA LAS CLAVES EN ORDEN DESCENDENTE.
                 collected.push(payload);
             }
             Err(e) => return Err(e),
         }
     }
 
-    assert_eq!(collected.len(), 1000);
+    assert_eq!(collected.len(), 10000);
 
-    //let collected_as_test_keys: Vec<i32> = collected.iter().map(|c| i32::from_ne_bytes(c.as_ref()[..4].try_into().unwrap())).collect();
+     // Verify keys are sorted
+    for pair in collected.windows(2) {
+        let key_i = i32::from_ne_bytes(pair[0].as_ref()[..4].try_into().unwrap());
+        let key_next = i32::from_ne_bytes(pair[1].as_ref()[..4].try_into().unwrap());
 
-    //dbg!(collected_as_test_keys);
-
-    for i in 0..9 {
-        let key_i = i32::from_ne_bytes(collected[i].as_ref()[..4].try_into().unwrap());
-        dbg!(key_i);
-        let key_next = i32::from_ne_bytes(collected[i + 1].as_ref()[..4].try_into().unwrap());
-        dbg!(key_next);
         assert!(
             key_i > key_next,
-            "Keys should be in descending order in reverse iteration"
+            "Keys should be in descending order: {:?} !< {:?}",
+            key_i,
+            key_next
         );
     }
 

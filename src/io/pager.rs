@@ -71,9 +71,18 @@ impl Pager {
         content: &mut [u8],
     ) -> std::io::Result<()> {
         let offset = page_offset(start_page_number, self.page_zero.metadata().page_size);
-        debug_assert!((offset as usize).is_multiple_of(PAGE_ALIGNMENT as usize), "Invalid content offset. Must be aligned!");
-        debug_assert!((content.as_ptr() as usize).is_multiple_of(PAGE_ALIGNMENT as usize), "Invalid content ptr. Must be aligned!");
-        debug_assert!(content.len().is_multiple_of(PAGE_ALIGNMENT as usize), "Invalid content length. Must at least write a full page !");
+        debug_assert!(
+            (offset as usize).is_multiple_of(PAGE_ALIGNMENT as usize),
+            "Invalid content offset. Must be aligned!"
+        );
+        debug_assert!(
+            (content.as_ptr() as usize).is_multiple_of(PAGE_ALIGNMENT as usize),
+            "Invalid content ptr. Must be aligned!"
+        );
+        debug_assert!(
+            content.len().is_multiple_of(PAGE_ALIGNMENT as usize),
+            "Invalid content length. Must at least write a full page !"
+        );
         self.file.seek(std::io::SeekFrom::Start(offset))?;
         self.file.write_all(content)?;
 
@@ -86,11 +95,19 @@ impl Pager {
         start_page_number: PageId,
         buffer: &mut [u8],
     ) -> std::io::Result<()> {
-
-         debug_assert!((buffer.as_ptr() as usize).is_multiple_of(PAGE_ALIGNMENT as usize), "Invalid content ptr. Must be aligned!");
-         debug_assert!(buffer.len().is_multiple_of(PAGE_ALIGNMENT as usize), "Invalid content length. Must at least read a full page !");
+        debug_assert!(
+            (buffer.as_ptr() as usize).is_multiple_of(PAGE_ALIGNMENT as usize),
+            "Invalid content ptr. Must be aligned!"
+        );
+        debug_assert!(
+            buffer.len().is_multiple_of(PAGE_ALIGNMENT as usize),
+            "Invalid content length. Must at least read a full page !"
+        );
         let offset = page_offset(start_page_number, self.page_zero.metadata().page_size);
-        debug_assert!((offset as usize).is_multiple_of(PAGE_ALIGNMENT as usize), "Invalid content offset. Must be aligned!");
+        debug_assert!(
+            (offset as usize).is_multiple_of(PAGE_ALIGNMENT as usize),
+            "Invalid content offset. Must be aligned!"
+        );
         self.file.seek(std::io::SeekFrom::Start(offset))?;
         self.file.read_exact(buffer)?;
         Ok(())
@@ -344,7 +361,6 @@ mod tests {
         let num_pages = 10;
         let total_size = num_pages * page_size;
 
-
         let mut raw_buffer = allocate_aligned(PAGE_ALIGNMENT as usize, total_size as usize)?;
 
         let mut offset = 0;
@@ -371,7 +387,8 @@ mod tests {
 
         for page in pages {
             // Try to read page 1 back.
-             let mut buf = allocate_aligned(PAGE_ALIGNMENT as usize, page.metadata().page_size as usize)?;
+            let mut buf =
+                allocate_aligned(PAGE_ALIGNMENT as usize, page.metadata().page_size as usize)?;
 
             pager.read_block_unchecked(page.metadata().page_number, &mut buf)?;
             assert_eq!(

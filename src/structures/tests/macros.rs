@@ -14,7 +14,7 @@ macro_rules! insert_tests {
             #[test]
             #[serial]
             fn $name() -> std::io::Result<()> {
-                let comparator = FixedSizeComparator::with_type::<TestKey>();
+                let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
                 let mut tree = create_test_btree($page_size, $capacity, 3, comparator)?;
                 let root = tree.get_root();
                 let start = (root, Slot(0));
@@ -62,7 +62,7 @@ macro_rules! delete_test {
         #[test]
         #[serial]
         fn $name() -> std::io::Result<()> {
-            let comparator = FixedSizeComparator::with_type::<TestKey>();
+            let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
             let mut tree = create_test_btree($page_size, $cache_size, $min_keys, comparator)?;
             let root = tree.get_root();
             let start = (root, Slot(0));
@@ -115,5 +115,21 @@ macro_rules! delete_test {
 
             Ok(())
         }
+    };
+}
+
+#[macro_export]
+macro_rules! assert_cmp {
+    ($comparator:expr, $lhs:expr, $rhs:expr, $expected:expr) => {
+        assert_eq!(
+            $comparator.compare($lhs.as_ref(), $rhs.as_ref())?,
+            $expected
+        );
+    };
+    ($comparator:expr, $lhs:expr, $rhs:expr, $expected:expr, varlen) => {
+        assert_eq!(
+            $comparator.compare(&$lhs.as_bytes(), &$rhs.as_bytes())?,
+            $expected
+        );
     };
 }
