@@ -773,15 +773,6 @@ impl<'a> WalIterator<'a> {
 }
 
 
-#[macro_use]
-macro_rules! push_items {
-    ($wal:expr, $num_rec:expr) => {
-        for i in 2 * $num_rec + 1..=3 * $num_rec {
-            let rec = make_record(i, 1, 1, i, 100, 100);
-            $wal.push(rec).unwrap();
-        }
-    };
-}
 
 
 #[cfg(test)]
