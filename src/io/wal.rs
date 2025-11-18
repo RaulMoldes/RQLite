@@ -1,4 +1,5 @@
-use crate::io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize, allocate_aligned};
+use crate::io::MemBuffer;
+use crate::io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize};
 use crate::storage::buffer::BufferWithMetadata;
 use crate::types::{LogId, OId, TxId, UInt64};
 use std::fs::{self};
@@ -194,93 +195,6 @@ impl LogRecord {
 }
 
 #[derive(Debug)]
-struct MemBuffer(std::io::Cursor<Vec<u8>>);
-
-impl MemBuffer {
-    fn for_size_aligned(size: usize, alignment: usize) -> std::io::Result<Self> {
-        let inner = allocate_aligned(alignment, size)?;
-        let mut cursor = std::io::Cursor::new(inner);
-        cursor.seek(SeekFrom::Start(0))?;
-        Ok(Self(cursor))
-    }
-
-    fn extend_from_slice(&mut self, slice: &[u8]) {
-        self.0.get_mut().extend_from_slice(slice);
-    }
-
-    // This is a workaraound because Rust Vec moves the data around when you [extend from slice], but here what i want to do is to extend it without moving the data.
-    // TODO. I cannot belive there is no other way to do this stuff in rust.
-    fn extend_from_slice_aligned(&mut self, slice: &[u8], alignment: usize) -> std::io::Result<()> {
-        let old_pos = self.position();
-        let required_length = self.position() + slice.len();
-        let mut new_vec = allocate_aligned(alignment, required_length)?;
-        new_vec[..self.position()].copy_from_slice(&self.as_ref()[..self.position()]);
-        new_vec[self.position()..self.position() + slice.len()].copy_from_slice(slice);
-        let mut new_cursor = std::io::Cursor::new(new_vec);
-        new_cursor.set_position(required_length as u64);
-        *self = Self(new_cursor);
-        Ok(())
-    }
-
-    fn empty() -> Self {
-        Self(std::io::Cursor::new(Vec::new()))
-    }
-
-    fn len(&self) -> usize {
-        self.0.get_ref().len()
-    }
-
-    fn position(&self) -> usize {
-        self.0.position() as usize
-    }
-
-    fn is_empty(&self) -> bool {
-        self.0.get_ref().is_empty()
-    }
-
-    fn as_ptr(&self) -> *const u8 {
-        self.0.get_ref().as_ptr()
-    }
-
-    fn mem_alignment(&self) -> usize {
-        self.as_ptr() as usize
-    }
-}
-
-impl Write for MemBuffer {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.0.flush()
-    }
-}
-
-impl Read for MemBuffer {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.0.read(buf)
-    }
-}
-
-impl Seek for MemBuffer {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        self.0.seek(pos)
-    }
-}
-
-impl AsRef<[u8]> for MemBuffer {
-    fn as_ref(&self) -> &[u8] {
-        self.0.get_ref().as_ref()
-    }
-}
-
-impl AsMut<[u8]> for MemBuffer {
-    fn as_mut(&mut self) -> &mut [u8] {
-        self.0.get_mut().as_mut()
-    }
-}
-#[derive(Debug)]
 pub struct WriteAheadLog {
     header: WalHeader,
     journal: MemBuffer, // in memory write buffer
@@ -293,7 +207,7 @@ impl FileOperations for WriteAheadLog {
         let mut file = DBFile::create(&path)?;
         let block_size = FileSystem::block_size(&path)? as u32;
         let mut header = WalHeader::new(block_size);
-        let mut journal = MemBuffer::for_size_aligned(block_size as usize, block_size as usize)?;
+        let mut journal = MemBuffer::alloc(block_size as usize, block_size as usize)?;
         header.padding = 0;
         header.journal_cursor = 0; // The journal starts at zero.
         header.last_flushed_offset = 0;
@@ -376,9 +290,9 @@ impl WriteAheadLog {
         let journal_pos = self.journal.position();
 
         if journal_length < (size + journal_pos) {
-            let alignment = self.header.blk_size;
+          //  let alignment = self.header.blk_size;
             self.journal
-                .extend_from_slice_aligned(record.as_ref(), alignment as usize)?;
+                .extend_from_slice(record.as_ref())?;
         } else {
             self.journal.write_all(record.as_ref())?;
         };
@@ -396,14 +310,13 @@ impl WriteAheadLog {
     }
 
     fn load_header(file: &mut DBFile, block_size: usize) -> std::io::Result<WalHeader> {
-        let mut block = allocate_aligned(block_size, block_size)?;
+        let mut block = MemBuffer::alloc(block_size, block_size)?;
         file.seek(SeekFrom::Start(0))?;
         file.read_exact(&mut block)?;
         Ok(WalHeader::from_buf(&block))
     }
 
     fn load_blks_at(&mut self, offset: usize) -> std::io::Result<()> {
-
         debug_assert!(
             (self.header.last_flushed_offset as usize - offset) == self.journal.len(),
             "Invalid input . Failed to fill whole buffer"
@@ -443,10 +356,8 @@ impl WriteAheadLog {
     }
 
     fn reload_journal_from(&mut self, old_padding: usize) -> std::io::Result<()> {
-        self.journal = MemBuffer::for_size_aligned(
-            self.header.blk_size as usize,
-            self.header.blk_size as usize,
-        )?;
+        self.journal =
+            MemBuffer::alloc(self.header.blk_size as usize, self.header.blk_size as usize)?;
 
         // Si hay padding, el último bloque está a block_size bytes antes de last_flushed_offset
         let read_offset = if old_padding > 0 {
@@ -490,9 +401,9 @@ impl WriteAheadLog {
     fn sync_header(&mut self) -> std::io::Result<()> {
         self.file.seek(SeekFrom::Start(0))?;
         let mut tmp =
-            allocate_aligned(self.header.blk_size as usize, self.header.blk_size as usize)?;
+            MemBuffer::alloc(self.header.blk_size as usize, self.header.blk_size as usize)?;
         self.file.read_exact(&mut tmp)?;
-        tmp[..std::mem::size_of::<WalHeader>()].copy_from_slice(self.header.as_ref());
+        tmp.as_mut()[..std::mem::size_of::<WalHeader>()].copy_from_slice(self.header.as_ref());
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&tmp)?;
         Ok(())
@@ -519,7 +430,7 @@ pub(crate) struct WalIterator<'a> {
     last_lsn: LogId,
     last_flushed_offset: u64,
     read_ahead_size: usize,
-    read_ahead_buffer: Vec<u8>, // We cannot use the mem buffer here because it would require to take mutable references in order to seek it, which would fuck up our zero copy iteration approach.
+    read_ahead_buffer: MemBuffer, // We cannot use the mem buffer here because it would require to take mutable references in order to seek it, which would fuck up our zero copy iteration approach.
     file_cursor: u64,
     mem_cursor: u64,
     current_lsn: LogId,
@@ -570,7 +481,7 @@ impl<'a> WalIterator<'a> {
         let read_ahead_size = std::cmp::min(block_size * 4, last_flushed_offset); // Read 4 blocks at a time
 
         // Create aligned MemBuffer for read-ahead
-        let mut read_ahead_buffer = allocate_aligned(block_size, read_ahead_size)?;
+        let mut read_ahead_buffer = MemBuffer::alloc(read_ahead_size, block_size)?;
         let cursor_start = read_ahead_buffer.len() as usize;
         file.seek(SeekFrom::Start(0))?;
         file.read_exact(&mut read_ahead_buffer)?;
@@ -612,7 +523,7 @@ impl<'a> WalIterator<'a> {
         self.mem_cursor = 0;
 
         // This fails when aligned buffer is larger that the total file size.
-        self.read_ahead_buffer = allocate_aligned(self.block_size as usize, read_size)?;
+        self.read_ahead_buffer = MemBuffer::alloc(read_size, self.block_size as usize)?;
         let metadata = self.file.metadata()?;
 
         if !self.file_cursor.is_multiple_of(self.block_size as u64) {
@@ -772,9 +683,6 @@ impl<'a> WalIterator<'a> {
     }
 }
 
-
-
-
 #[cfg(test)]
 mod wal_tests {
     use super::*;
@@ -782,8 +690,7 @@ mod wal_tests {
     use rand::{Rng, SeedableRng};
     use tempfile::tempdir;
 
-
-    pub fn push_items(wal: &mut WriteAheadLog, start: u64, end: u64 ) {
+    pub fn push_items(wal: &mut WriteAheadLog, start: u64, end: u64) {
         let start_entries = wal.header.num_entries;
         let num_rec = ((end - start) + 1) as u32;
         for i in start..=end {
@@ -791,23 +698,21 @@ mod wal_tests {
             wal.push(rec).unwrap();
         }
 
-
         assert_eq!(wal.header.last_lsn, LogId::from(end));
-        assert_eq!(wal.header.num_entries, start_entries + num_rec );
+        assert_eq!(wal.header.num_entries, start_entries + num_rec);
     }
-
 
     pub fn validate_replay(wal: &mut WriteAheadLog, expected_count: usize) {
         let mut iterator = wal.replay().unwrap();
         let mut count = 0;
 
         iterator
-                .for_each(|record| {
-                    count += 1;
-                    verify_record(&record, count as u64, 1);
-                    Ok(())
-                })
-                .unwrap();
+            .for_each(|record| {
+                count += 1;
+                verify_record(&record, count as u64, 1);
+                Ok(())
+            })
+            .unwrap();
 
         assert_eq!(count, expected_count);
     }
@@ -908,7 +813,6 @@ mod wal_tests {
 
             // Replay and verify records
             validate_replay(&mut wal, num_rec as usize);
-
         }
     }
 
@@ -925,11 +829,11 @@ mod wal_tests {
             // Flush to disk
             wal.flush().unwrap();
 
-            push_items(&mut wal, num_rec +1, 2*num_rec);
+            push_items(&mut wal, num_rec + 1, 2 * num_rec);
 
             wal.flush().unwrap();
 
-            push_items(&mut wal, 2*num_rec +1, 3*num_rec);
+            push_items(&mut wal, 2 * num_rec + 1, 3 * num_rec);
 
             wal.flush().unwrap();
         }
@@ -939,15 +843,13 @@ mod wal_tests {
             let mut wal = WriteAheadLog::open(&path).unwrap();
 
             // Verify header was persisted correctly
-            push_items(&mut wal, 3*num_rec +1, 4*num_rec);
+            push_items(&mut wal, 3 * num_rec + 1, 4 * num_rec);
 
             wal.flush().unwrap();
 
-            validate_replay(&mut wal, 4*num_rec as usize);
+            validate_replay(&mut wal, 4 * num_rec as usize);
         }
     }
-
-
 
     #[test]
     fn test_wal_5() {
@@ -963,9 +865,7 @@ mod wal_tests {
             wal.flush().unwrap();
 
             // These extra items should not be read.
-            push_items(&mut wal, num_rec +1, 2*num_rec);
-
-
+            push_items(&mut wal, num_rec + 1, 2 * num_rec);
         }
 
         // Read phase

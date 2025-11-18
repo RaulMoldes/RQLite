@@ -61,9 +61,18 @@ impl PageCache {
 
     pub fn set_capacity(&mut self, capacity: usize) {
         self.capacity = capacity;
-        self.frames.reserve(self.capacity - self.frames.capacity());
-        self.free_list
-            .reserve(self.capacity - self.free_list.capacity())
+
+        if self.frames.capacity() < capacity {
+            self.frames.reserve(capacity - self.frames.capacity());
+        } else {
+            self.frames.shrink_to(capacity);
+        }
+
+        if self.free_list.capacity() < capacity {
+            self.free_list.reserve(capacity - self.free_list.capacity());
+        } else {
+            self.free_list.shrink_to(capacity);
+        }
     }
 
     /// Add a list of frames to the buffer pool.

@@ -44,38 +44,9 @@ impl Default for OpenOptions {
     }
 }
 
-pub fn allocate_aligned(alignment: usize, size: usize) -> io::Result<Vec<u8>> {
-    let aligned_size = size.next_multiple_of(alignment);
-    unsafe {
-        let layout = Layout::from_size_align(aligned_size, alignment)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-        let ptr = alloc_zeroed(layout);
-        debug_assert!(
-            (ptr as usize).is_multiple_of(alignment),
-            "Invalid allocation, layout.from_size_align did not return an aligned buffer"
-        );
-        if ptr.is_null() {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
-                "Failed to allocate aligned buffer",
-            ));
-        }
-
-        Ok(Vec::from_raw_parts(ptr, aligned_size, aligned_size))
-    }
-}
-
 impl FileSystem {
     pub fn options() -> OpenOptions {
         OpenOptions::default()
-    }
-
-    /// Allocate an aligned buffer for aligned for [O_DIRECT] operations
-    /// TODO: Decouple from filesystem.
-    pub fn alloc_buffer(path: impl AsRef<Path>, size: usize) -> io::Result<Vec<u8>> {
-        let block_size = Self::block_size(&path)?;
-        allocate_aligned(block_size, size)
     }
 }
 
