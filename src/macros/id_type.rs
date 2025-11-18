@@ -21,6 +21,10 @@ macro_rules! id_type {
             pub const fn from_be_bytes(bytes: [u8; 8]) -> Self {
                 Self(u64::from_be_bytes(bytes))
             }
+
+            pub const fn as_u64(&self) -> u64 {
+                self.0
+            }
         }
 
         impl $crate::types::Key for $name {

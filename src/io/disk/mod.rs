@@ -5,7 +5,7 @@ pub mod windows;
 
 use std::{
     alloc::{Layout, alloc_zeroed},
-    fs::{self, File},
+    fs::{self, File, Metadata},
     io::{self, Read, Seek, Write},
     os::fd::AsRawFd,
     path::Path,
@@ -148,6 +148,10 @@ pub struct DBFile {
 impl DBFile {
     pub fn path(&self) -> &Path {
         self.p.as_path()
+    }
+
+    pub fn metadata(&self) -> io::Result<Metadata> {
+        self.f.metadata()
     }
 }
 

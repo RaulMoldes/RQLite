@@ -617,7 +617,7 @@ fn test_btree_iterator_iter_rev() -> io::Result<()> {
 
     assert_eq!(collected.len(), 10000);
 
-     // Verify keys are sorted
+    // Verify keys are sorted
     for pair in collected.windows(2) {
         let key_i = i32::from_ne_bytes(pair[0].as_ref()[..4].try_into().unwrap());
         let key_next = i32::from_ne_bytes(pair[1].as_ref()[..4].try_into().unwrap());
