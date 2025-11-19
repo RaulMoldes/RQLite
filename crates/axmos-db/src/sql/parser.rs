@@ -1,9 +1,8 @@
-use crate::sql::ast::*;
 use crate::database::errors::ParserError;
+use crate::sql::ast::*;
 use crate::sql::lexer::{Lexer, Token};
 use crate::types::DataTypeKind;
 use std::mem;
-
 
 /// Main parser implementation.
 /// Uses a pratt parsing approach to parse sql expressions into AST nodes.

@@ -1,19 +1,17 @@
 use std::{
     fmt::{Display, Formatter, Result as FmtResult},
+    io::Error as IoError,
     num::{ParseFloatError, ParseIntError},
-    io::Error as IoError
 };
 
-use crate::types::DataTypeKind;
 use crate::sql::lexer::Token;
-
+use crate::types::{DataTypeKind, TxId};
 
 #[derive(Debug)]
 pub enum ParsingError {
     Int(ParseIntError),
     Float(ParseFloatError),
 }
-
 
 impl From<ParseIntError> for ParsingError {
     fn from(value: ParseIntError) -> Self {
@@ -26,7 +24,6 @@ impl From<ParseFloatError> for ParsingError {
         Self::Float(value)
     }
 }
-
 
 impl std::error::Error for ParsingError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
@@ -45,8 +42,6 @@ impl Display for ParsingError {
         }
     }
 }
-
-
 
 #[derive(Debug)]
 pub enum TypeError {
@@ -93,9 +88,6 @@ impl std::error::Error for TypeError {
         }
     }
 }
-
-
-
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnalyzerError {
@@ -184,8 +176,6 @@ impl Display for AnalyzerError {
     }
 }
 
-
-
 #[derive(Debug, PartialEq, Clone)]
 pub enum ParserError {
     InvalidExpression(String),
@@ -230,12 +220,11 @@ impl From<AnalyzerError> for SQLError {
     }
 }
 
-
-
 #[derive(Debug)]
 pub enum DatabaseError {
     TypeError(TypeError),
     IOError(IoError),
+    TransactionError(TransactionError),
     Sql(SQLError),
     Other(String),
 }
@@ -258,20 +247,25 @@ impl From<SQLError> for DatabaseError {
     }
 }
 
+impl From<TransactionError> for DatabaseError {
+    fn from(value: TransactionError) -> Self {
+        Self::TransactionError(value)
+    }
+}
+
 impl Display for DatabaseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DatabaseError::TypeError(err) =>
-                write!(f, "Type error: {}", err),
+            DatabaseError::TypeError(err) => write!(f, "Type error: {}", err),
 
-            DatabaseError::IOError(err) =>
-                write!(f, "IO error: {}", err),
+            DatabaseError::IOError(err) => write!(f, "IO error: {}", err),
 
-            DatabaseError::Sql(err) =>
-                write!(f, "SQL error: {}", err),
+            DatabaseError::Sql(err) => write!(f, "SQL error: {}", err),
 
-            DatabaseError::Other(msg) =>
-                write!(f, "Other error: {}", msg),
+            DatabaseError::Other(msg) => write!(f, "Other error: {}", msg),
+            DatabaseError::TransactionError(msg) => {
+                write!(f, "Transaction error {}", msg)
+            }
         }
     }
 }
@@ -281,8 +275,44 @@ impl std::error::Error for DatabaseError {
         match self {
             DatabaseError::TypeError(err) => Some(err),
             DatabaseError::IOError(err) => Some(err),
-            DatabaseError::Sql(err) => None,
+            DatabaseError::TransactionError(err) => Some(err),
+            DatabaseError::Sql(err) => Some(err),
             DatabaseError::Other(_) => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionError {
+    Aborted(TxId),
+    NotRunning(TxId),
+    TimedOut(TxId),
+    Deadlock(TxId, TxId),
+    NotFound(TxId),
+}
+
+impl std::fmt::Display for TransactionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransactionError::Aborted(id) => write!(f, "Transaction with id {id} was aborted"),
+            TransactionError::TimedOut(id) => write!(f, "Transaction with id {id} timed out."),
+            TransactionError::NotRunning(id) => {
+                write!(f, "Transaction with id {id} is not running yet.")
+            }
+            TransactionError::Deadlock(id, other) => write!(
+                f,
+                "Deadlock detected between current transaction {id} and transaction {other}"
+            ),
+            TransactionError::NotFound(id) => write!(f, "Transaction {id} not found"),
+        }
+    }
+}
+
+impl std::error::Error for TransactionError {}
+impl std::error::Error for SQLError {}
+
+impl From<TransactionError> for String {
+    fn from(value: TransactionError) -> Self {
+        value.to_string()
     }
 }

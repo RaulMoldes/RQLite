@@ -58,7 +58,6 @@ impl Blob {
         self.data().len()
     }
 
-
     /// Get the length of the data
     pub fn is_empty(&self) -> bool {
         self.data().is_empty()

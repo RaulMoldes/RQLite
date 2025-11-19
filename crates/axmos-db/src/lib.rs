@@ -17,6 +17,7 @@ mod planner;
 mod sql;
 mod storage;
 mod structures;
+mod transactions;
 pub mod types;
 
 /// Jemalloc apparently has better alignment guarantees than rust's standard allocator.

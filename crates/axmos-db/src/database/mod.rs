@@ -1,5 +1,5 @@
-pub mod schema;
 pub mod errors;
+pub mod schema;
 
 use std::collections::HashMap;
 

@@ -1,7 +1,7 @@
 use crate::database::{
     Database,
-    schema::{Column, Constraint, ForeignKey, Schema, TableConstraint},
     errors::DatabaseError,
+    schema::{Column, Constraint, ForeignKey, Schema, TableConstraint},
 };
 
 use crate::sql::ast::{AlterAction, AlterColumnAction, ColumnConstraintExpr, TableConstraintExpr};
@@ -9,7 +9,7 @@ use crate::sql::ast::{AlterAction, AlterColumnAction, ColumnConstraintExpr, Tabl
 use crate::sql::{Statement, parsing_pipeline};
 use crate::structures::bplustree::SearchResult;
 
-use crate::types::{DataType};
+use crate::types::DataType;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, ErrorKind};
 
@@ -57,8 +57,6 @@ impl ExecutionPlan {
         self.steps.push_back(step);
     }
 }
-
-
 
 fn planify(stmt: Statement, db: &mut Database) -> Result<ExecutionPlan, DatabaseError> {
     match stmt {
@@ -299,7 +297,9 @@ fn planify(stmt: Statement, db: &mut Database) -> Result<ExecutionPlan, Database
                             table.schema_mut().add_constraint(ct);
                         }
                         _ => {
-                            return Err(DatabaseError::Other("Unsupported table constraint type".to_string()));
+                            return Err(DatabaseError::Other(
+                                "Unsupported table constraint type".to_string(),
+                            ));
                         }
                     }
 
@@ -318,7 +318,7 @@ fn planify(stmt: Statement, db: &mut Database) -> Result<ExecutionPlan, Database
                 return Err(DatabaseError::from(io::Error::new(
                     ErrorKind::NotFound,
                     format!("Table {} not found", drop.table),
-                )))?
+                )))?;
             };
 
             Ok(ExecutionPlan::empty())

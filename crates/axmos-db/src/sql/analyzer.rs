@@ -1,7 +1,7 @@
 use crate::database::{
     Database,
-    schema::{Column,Table, Relation, Schema},
-    errors::{AnalyzerError, AlreadyExists}
+    errors::{AlreadyExists, AnalyzerError},
+    schema::{Column, Relation, Schema, Table},
 };
 
 use crate::sql::ast::{
@@ -12,7 +12,7 @@ use crate::sql::ast::{
 use crate::structures::bplustree::SearchResult;
 use crate::types::DataTypeKind;
 use regex::Regex;
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 
 // Common SQL aggregate functions
 pub const AGGREGATE_FUNCTORS: [&str; 5] = ["COUNT", "SUM", "AVG", "MIN", "MAX"];
@@ -30,8 +30,6 @@ fn is_datetime_iso(s: &str) -> bool {
     let re = Regex::new(r"(?i)^\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}$").unwrap();
     re.is_match(s)
 }
-
-
 
 struct AnalyzerCtx {
     table_aliases: HashMap<String, String>,

@@ -4,10 +4,7 @@ pub mod lexer;
 mod parser;
 mod preparator;
 
-use crate::database::{
-    Database,
-    errors::SQLError
-};
+use crate::database::{Database, errors::SQLError};
 
 use crate::sql::ast::Simplify;
 use crate::sql::preparator::Preparator;

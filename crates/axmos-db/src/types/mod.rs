@@ -29,8 +29,6 @@ use crate::database::errors::TypeError;
 #[cfg(test)]
 mod tests;
 
-
-
 pub(crate) trait Key:
     Clone + Copy + Eq + PartialEq + Ord + PartialOrd + std::hash::Hash
 {
@@ -101,7 +99,6 @@ impl TryFrom<(DataTypeKind, Expr)> for DataType {
         use Expr as E;
 
         match value {
-
             (K::Null, _) | (_, E::Null) => Ok(DataType::Null),
             (K::Boolean, E::Boolean(b)) => Ok(DataType::Boolean(UInt8::from(b as u8))),
             (K::Boolean, E::Number(n)) => Ok(DataType::Boolean(UInt8::from((n != 0.0) as u8))),
@@ -138,36 +135,16 @@ impl TryFrom<(DataTypeKind, Expr)> for DataType {
                 Ok(DataType::DateTime(parsed))
             }
             (K::DateTime, E::Number(n)) => Ok(DataType::DateTime(DateTime::from(n as u64))),
-            (K::SmallInt, E::String(s)) => Ok(DataType::SmallInt(Int8::from(
-                s.parse::<i8>()?,
-            ))),
-            (K::HalfInt, E::String(s)) => Ok(DataType::HalfInt(Int16::from(
-                s.parse::<i16>()?,
-            ))),
-            (K::Int, E::String(s)) => Ok(DataType::Int(Int32::from(
-                s.parse::<i32>()?,
-            ))),
-            (K::BigInt, E::String(s)) => Ok(DataType::BigInt(Int64::from(
-                s.parse::<i64>()?,
-            ))),
-            (K::SmallUInt, E::String(s)) => Ok(DataType::SmallUInt(UInt8::from(
-                s.parse::<u8>()?,
-            ))),
-            (K::HalfUInt, E::String(s)) => Ok(DataType::HalfUInt(UInt16::from(
-                s.parse::<u16>()?,
-            ))),
-            (K::UInt, E::String(s)) => Ok(DataType::UInt(UInt32::from(
-                s.parse::<u32>()?,
-            ))),
-            (K::BigUInt, E::String(s)) => Ok(DataType::BigUInt(UInt64::from(
-                s.parse::<u64>()?,
-            ))),
-            (K::Float, E::String(s)) => Ok(DataType::Float(Float32::from(
-                s.parse::<f32>()?,
-            ))),
-            (K::Double, E::String(s)) => Ok(DataType::Double(Float64::from(
-                s.parse::<f64>()?,
-            ))),
+            (K::SmallInt, E::String(s)) => Ok(DataType::SmallInt(Int8::from(s.parse::<i8>()?))),
+            (K::HalfInt, E::String(s)) => Ok(DataType::HalfInt(Int16::from(s.parse::<i16>()?))),
+            (K::Int, E::String(s)) => Ok(DataType::Int(Int32::from(s.parse::<i32>()?))),
+            (K::BigInt, E::String(s)) => Ok(DataType::BigInt(Int64::from(s.parse::<i64>()?))),
+            (K::SmallUInt, E::String(s)) => Ok(DataType::SmallUInt(UInt8::from(s.parse::<u8>()?))),
+            (K::HalfUInt, E::String(s)) => Ok(DataType::HalfUInt(UInt16::from(s.parse::<u16>()?))),
+            (K::UInt, E::String(s)) => Ok(DataType::UInt(UInt32::from(s.parse::<u32>()?))),
+            (K::BigUInt, E::String(s)) => Ok(DataType::BigUInt(UInt64::from(s.parse::<u64>()?))),
+            (K::Float, E::String(s)) => Ok(DataType::Float(Float32::from(s.parse::<f32>()?))),
+            (K::Double, E::String(s)) => Ok(DataType::Double(Float64::from(s.parse::<f64>()?))),
             (kind, expr) => Err(TypeError::UnexpectedDataType(kind)),
         }
     }
@@ -420,10 +397,6 @@ pub fn reinterpret_cast_mut<'a>(
         }
     }
 }
-
-
-
-
 
 // TODO: Maybe we can include this in the derive macro to make all this cleaner overall.
 repr_enum!(

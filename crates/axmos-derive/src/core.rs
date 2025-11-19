@@ -369,9 +369,6 @@ fn make_ref_mut_type(ty: &Type) -> TokenStream {
     quote! { #ref_mut_type<'a> }
 }
 
-
-
-
 pub fn data_type_impl(input: TokenStream) -> TokenStream {
     let input = parse2::<DeriveInput>(input).unwrap();
     let info = EnumInfo::from_input(input).unwrap();
