@@ -5,7 +5,7 @@ use crate::storage::{
 };
 use crate::structures::bplustree::Comparator;
 use crate::types::{
-    Blob, DataType, DataTypeKind, DataTypeRef, Key, LogId, OId, PAGE_ZERO, PageId, UInt8, UInt64,
+    Blob, DataType, DataTypeKind, DataTypeRef, LogId, OId, PAGE_ZERO, PageId, UInt8, UInt64,
     VarInt, varint::MAX_VARINT_LEN,
 };
 use std::io::{Read, Seek, Write};
@@ -440,7 +440,7 @@ pub struct Table {
 impl Table {
     pub fn new(name: &str, root_page: PageId, schema: Schema) -> Self {
         Self {
-            object_id: OId::new_key(),
+            object_id: OId::new(),
             root_page,
             last_lsn: LogId::from(0),
             next_row: UInt64(0),
@@ -510,7 +510,7 @@ pub struct Index {
 impl Index {
     pub fn new(name: &str, root_page: PageId, schema: Schema) -> Self {
         Self {
-            object_id: OId::new_key(),
+            object_id: OId::new(),
             root_page,
             last_lsn: LogId::from(0),
             name: name.to_string(),

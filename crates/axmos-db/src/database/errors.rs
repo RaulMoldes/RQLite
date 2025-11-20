@@ -285,10 +285,11 @@ impl std::error::Error for DatabaseError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransactionError {
     Aborted(TxId),
-    NotRunning(TxId),
+    NotAcquire(TxId),
     TimedOut(TxId),
     Deadlock(TxId, TxId),
     NotFound(TxId),
+    Other(String),
 }
 
 impl std::fmt::Display for TransactionError {
@@ -296,14 +297,18 @@ impl std::fmt::Display for TransactionError {
         match self {
             TransactionError::Aborted(id) => write!(f, "Transaction with id {id} was aborted"),
             TransactionError::TimedOut(id) => write!(f, "Transaction with id {id} timed out."),
-            TransactionError::NotRunning(id) => {
-                write!(f, "Transaction with id {id} is not running yet.")
+            TransactionError::NotAcquire(id) => {
+                write!(
+                    f,
+                    "Transaction with id {id} is not on acquire state and therefore is not allowed to acquire any more locks."
+                )
             }
             TransactionError::Deadlock(id, other) => write!(
                 f,
                 "Deadlock detected between current transaction {id} and transaction {other}"
             ),
             TransactionError::NotFound(id) => write!(f, "Transaction {id} not found"),
+            TransactionError::Other(msg) => write!(f, "Internal error: {msg}"),
         }
     }
 }

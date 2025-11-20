@@ -29,12 +29,6 @@ use crate::database::errors::TypeError;
 #[cfg(test)]
 mod tests;
 
-pub(crate) trait Key:
-    Clone + Copy + Eq + PartialEq + Ord + PartialOrd + std::hash::Hash
-{
-    fn new_key() -> Self;
-}
-
 #[derive(Debug, PartialEq, Clone, DataType)]
 pub enum DataType {
     Null,

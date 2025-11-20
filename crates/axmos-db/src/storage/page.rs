@@ -17,7 +17,7 @@ use crate::{
         cell::{CELL_HEADER_SIZE, Cell, Slot},
         latches::Latch,
     },
-    types::{Key, PAGE_ZERO, PageId},
+    types::{PAGE_ZERO, PageId},
 };
 use std::ops::{Deref, DerefMut};
 
@@ -66,7 +66,7 @@ impl Header for OverflowPageHeader {
         );
 
         Self {
-            page_number: PageId::new_key(),
+            page_number: PageId::new(),
             next: PAGE_ZERO,
             num_bytes: effective_size.saturating_sub(OVERFLOW_HEADER_SIZE as u32),
             padding: effective_size.saturating_sub(size),
@@ -146,7 +146,7 @@ impl Header for BtreePageHeader {
         );
 
         Self {
-            page_number: PageId::new_key(),
+            page_number: PageId::new(),
             num_slots: 0,
             page_size: aligned_size,
             free_space: size.saturating_sub(BTREE_PAGE_HEADER_SIZE as u32),

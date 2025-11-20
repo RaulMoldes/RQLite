@@ -27,8 +27,8 @@ macro_rules! id_type {
             }
         }
 
-        impl $crate::types::Key for $name {
-            fn new_key() -> Self {
+        impl $name {
+            pub fn new() -> Self {
                 Self::__gen_new()
             }
         }

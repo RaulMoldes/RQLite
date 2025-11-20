@@ -5,10 +5,8 @@ use crate::io::{MemBuffer, wal::WriteAheadLog};
 use crate::storage::buffer::BufferWithMetadata;
 use crate::storage::page::{DatabaseHeader, Header, MemPage, OverflowPage, Page, PageZero};
 use crate::types::{PAGE_ZERO, PageId};
-use crate::{AxmosDBConfig, DEFAULT_CACHE_SIZE, DEFAULT_PAGE_SIZE, PAGE_ALIGNMENT};
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use crate::{AxmosDBConfig, DEFAULT_CACHE_SIZE, DEFAULT_PAGE_SIZE, PAGE_ALIGNMENT, make_shared};
 use std::io::{Read, Seek, Write};
-use std::sync::Arc;
 
 /// Implementation of a pager.
 #[derive(Debug)]
@@ -380,44 +378,7 @@ impl Pager {
     }
 }
 
-#[derive(Debug)]
-#[repr(transparent)]
-pub struct SharedPager(Arc<RwLock<Pager>>);
-
-impl From<Arc<RwLock<Pager>>> for SharedPager {
-    fn from(value: Arc<RwLock<Pager>>) -> Self {
-        Self(Arc::clone(&value))
-    }
-}
-
-impl From<Pager> for SharedPager {
-    fn from(value: Pager) -> Self {
-        Self(Arc::new(RwLock::new(value)))
-    }
-}
-
-impl Clone for SharedPager {
-    fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
-    }
-}
-
-impl SharedPager {
-    pub fn read(&self) -> RwLockReadGuard<'_, Pager> {
-        self.0.read()
-    }
-
-    pub fn write(&self) -> RwLockWriteGuard<'_, Pager> {
-        self.0.write()
-    }
-
-    pub fn strong_count(&self) -> usize {
-        Arc::strong_count(&self.0)
-    }
-}
-
-unsafe impl Send for Pager {}
-unsafe impl Sync for Pager {}
+make_shared! {SharedPager, Pager}
 
 #[cfg(test)]
 mod tests {
