@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::{
     database::schema::{Constraint, Index, Table},
-    storage::tuple::{Tuple, TupleRef},
+    storage::tuple::{Tuple, TupleRef, OwnedTuple},
     structures::bplustree::NumericComparator,
 };
 
@@ -50,7 +50,6 @@ pub fn meta_table_schema() -> Schema {
                 Some(META_INDEX.to_string()),
                 Some(key_constraints),
             ),
-            Column::new_unindexed(DataTypeKind::BigUInt, "o_last_lsn", None),
         ]
         .as_ref(),
         1,
@@ -172,7 +171,7 @@ impl Database {
         let tuple = obj.into_boxed_tuple()?;
         btree.clear_stack();
         // Will replace existing relation if it exists.
-        btree.upsert(self.meta_table, &tuple)?;
+        btree.upsert(self.meta_table, tuple.as_ref())?;
 
         Ok(oid)
     }
@@ -181,7 +180,7 @@ impl Database {
         let mut btree = self.table_btree(self.meta_table)?;
         let tuple = obj.into_boxed_tuple()?;
         btree.clear_stack();
-        btree.update(self.meta_table, &tuple)?;
+        btree.update(self.meta_table, tuple.as_ref())?;
         Ok(())
     }
 
@@ -213,7 +212,7 @@ impl Database {
         let mut btree = self.index_btree(self.meta_index, DataTypeKind::Text)?;
 
         let schema = meta_idx_schema();
-        let tuple = Tuple::from_data(
+        let tuple = Tuple::new(
             &[
                 DataType::Text(Blob::from(obj.name())),
                 DataType::BigUInt(UInt64::from(obj.id())),
@@ -222,7 +221,8 @@ impl Database {
         )?;
 
         btree.clear_stack();
-        btree.insert(self.meta_index, tuple.as_ref())?;
+        let boxed: OwnedTuple = tuple.into();
+        btree.insert(self.meta_index, boxed.as_ref())?;
 
         Ok(())
     }

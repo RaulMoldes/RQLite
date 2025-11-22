@@ -133,3 +133,12 @@ impl UInt8 {
         self.0.is_ascii_hexdigit()
     }
 }
+
+impl From<bool> for UInt8 {
+    fn from(value: bool) -> Self {
+        if value {
+            return Self::TRUE;
+        }
+        Self::FALSE
+    }
+}

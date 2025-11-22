@@ -1,11 +1,11 @@
 use crate::io::pager::SharedPager;
 use crate::storage::{
     page::BtreePage,
-    tuple::{Tuple, TupleRef},
+    tuple::{Tuple, TupleRef, OwnedTuple},
 };
 use crate::structures::bplustree::Comparator;
 use crate::types::{
-    Blob, DataType, DataTypeKind, DataTypeRef, LogId, OId, PAGE_ZERO, PageId, UInt8, UInt64,
+    Blob, DataType, DataTypeKind, DataTypeRef,  OId, PAGE_ZERO, PageId, UInt8, UInt64,
     VarInt, varint::MAX_VARINT_LEN,
 };
 use std::io::{Read, Seek, Write};
@@ -431,7 +431,6 @@ impl Schema {
 pub struct Table {
     object_id: OId,
     root_page: PageId,
-    last_lsn: LogId,
     next_row: UInt64,
     name: String,
     schema: Schema,
@@ -442,7 +441,6 @@ impl Table {
         Self {
             object_id: OId::new(),
             root_page,
-            last_lsn: LogId::from(0),
             next_row: UInt64(0),
             name: name.to_string(),
             schema,
@@ -469,18 +467,10 @@ impl Table {
         self.next_row
     }
 
-    pub fn build(
-        id: OId,
-        name: &str,
-        root_page: PageId,
-        schema: Schema,
-        next_row: UInt64,
-        last_lsn: LogId,
-    ) -> Self {
+    pub fn build(id: OId, name: &str, root_page: PageId, schema: Schema, next_row: UInt64) -> Self {
         Self {
             object_id: id,
             root_page,
-            last_lsn,
             name: name.to_string(),
             schema,
             next_row,
@@ -500,7 +490,7 @@ impl Table {
 pub struct Index {
     object_id: OId,
     root_page: PageId,
-    last_lsn: LogId,
+
     name: String,
     min_val: Option<Box<[u8]>>,
     max_val: Option<Box<[u8]>>,
@@ -512,7 +502,7 @@ impl Index {
         Self {
             object_id: OId::new(),
             root_page,
-            last_lsn: LogId::from(0),
+
             name: name.to_string(),
             min_val: None,
             max_val: None,
@@ -524,7 +514,6 @@ impl Index {
         id: OId,
         name: &str,
         root_page: PageId,
-        last_lsn: LogId,
         schema: Schema,
         min_val: Box<[u8]>,
         max_val: Box<[u8]>,
@@ -533,7 +522,7 @@ impl Index {
         Self {
             object_id: id,
             root_page,
-            last_lsn,
+
             name: name.to_string(),
             min_val: Some(min_val),
             max_val: Some(max_val),
@@ -681,13 +670,6 @@ impl Relation {
         }
     }
 
-    pub fn last_lsn(&self) -> LogId {
-        match self {
-            Relation::TableRel(t) => t.last_lsn,
-            Relation::IndexRel(i) => i.last_lsn,
-        }
-    }
-
     pub fn is_allocated(&self) -> bool {
         self.root().is_valid()
     }
@@ -698,7 +680,7 @@ impl Relation {
         Ok(())
     }
 
-    pub fn into_boxed_tuple(self) -> std::io::Result<Box<[u8]>> {
+    pub fn into_boxed_tuple(self) -> std::io::Result<OwnedTuple> {
         let root_page = if self.root() != PAGE_ZERO {
             DataType::BigUInt(UInt64::from(self.root()))
         } else {
@@ -709,19 +691,16 @@ impl Relation {
         let metadata = DataType::Blob(self.metadata_as_blob()?);
 
         let schema = meta_table_schema();
-        let t = Tuple::from_data(
+        let t = Tuple::new(
             &[
                 DataType::BigUInt(UInt64::from(self.id())),
                 root_page,
                 DataType::Byte(UInt8::from(self.object_type() as u8)),
                 metadata,
                 DataType::Text(Blob::from(self.name())),
-                DataType::BigUInt(UInt64::from(self.last_lsn())),
             ],
             &schema,
         )?;
-
-        let tuple_ref = TupleRef::from(&t);
 
         Ok(t.into())
     }
@@ -822,16 +801,6 @@ impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
             }
         };
 
-        let last_lsn = match tuple.value(4)? {
-            DataTypeRef::BigUInt(v) => LogId::from(v.to_owned()),
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid last lsn",
-                ));
-            }
-        };
-
         match tuple.value(2)? {
             DataTypeRef::Blob(metadata) => {
                 let mut metadata_buf = std::io::Cursor::new(metadata.content());
@@ -846,7 +815,7 @@ impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
                         Ok(Relation::TableRel(Table {
                             object_id: o_id,
                             root_page: root,
-                            last_lsn,
+
                             name: name.to_string(),
                             schema,
                             next_row,
@@ -884,7 +853,6 @@ impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
                             object_id: o_id,
                             root_page: root,
                             name: name.to_string(),
-                            last_lsn,
 
                             min_val,
                             max_val,

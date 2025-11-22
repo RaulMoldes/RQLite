@@ -33,6 +33,19 @@ impl<'a> VarInt<'a> {
         ))
     }
 
+     pub fn encoded_size(value: i64) -> usize {
+        let mut v = value as u64;
+        let mut size = 0;
+        loop {
+            size += 1;
+            v >>= 7;
+            if v == 0 {
+                break;
+            }
+        }
+        size
+    }
+
     pub fn read_buf<R: std::io::Read>(reader: &mut R) -> std::io::Result<Box<[u8]>> {
         let mut buf = [0u8; 1];
         let mut bytes = Vec::new();

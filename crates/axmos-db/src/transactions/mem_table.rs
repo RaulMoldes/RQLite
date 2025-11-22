@@ -1,17 +1,18 @@
+use super::Transaction;
+use crate::make_shared;
+use crate::types::TxId;
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::ops::Index;
-use crate::make_shared;
-use std::collections::HashMap;
-use super::Transaction;
-use crate::types::TxId;
 
 // HashMap wrapper.
 // We need it to be able to create the proper shared type on top of it.
 #[derive(Debug)]
-pub(crate) struct MemTable<K,V>
-where K: Hash + Eq
+pub(crate) struct MemTable<K, V>
+where
+    K: Hash + Eq,
 {
-    map: HashMap<K,V>
+    map: HashMap<K, V>,
 }
 
 impl<K, V> Default for MemTable<K, V>
@@ -22,7 +23,6 @@ where
         Self::new()
     }
 }
-
 
 impl<K, V> From<HashMap<K, V>> for MemTable<K, V>
 where
@@ -45,7 +45,6 @@ where
     }
 }
 
-
 impl<'a, K, V> IntoIterator for &'a MemTable<K, V>
 where
     K: Eq + Hash,
@@ -57,7 +56,6 @@ where
         self.map.iter()
     }
 }
-
 
 impl<'a, K, V> IntoIterator for &'a mut MemTable<K, V>
 where

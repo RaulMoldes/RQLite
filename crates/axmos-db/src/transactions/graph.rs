@@ -1,8 +1,7 @@
-
 use crate::types::TxId;
 use std::{
+    collections::{HashMap, HashSet},
     fmt,
-    collections::{HashMap, HashSet}
 };
 
 #[repr(transparent)]
@@ -52,7 +51,10 @@ impl WaitForGraph {
         Self(HashMap::new())
     }
 
-    pub fn entry(&mut self, key: TxId) -> std::collections::hash_map::Entry<'_, TxId, HashSet<TxId>> {
+    pub fn entry(
+        &mut self,
+        key: TxId,
+    ) -> std::collections::hash_map::Entry<'_, TxId, HashSet<TxId>> {
         self.0.entry(key)
     }
 
@@ -131,8 +133,6 @@ impl WaitForGraph {
             .collect()
     }
 }
-
-
 
 impl fmt::Display for WFGCycle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

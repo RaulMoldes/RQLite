@@ -195,12 +195,12 @@ impl NumericComparator {
 
 impl Comparator for NumericComparator {
     fn compare(&self, lhs: &[u8], rhs: &[u8]) -> std::io::Result<Ordering> {
-        let mut a: u32 = 0;
-        let mut b: u32 = 0;
+        let mut a: u64 = 0;
+        let mut b: u64 = 0;
 
         for i in 0..self.0 {
-            a |= (lhs[i] as u32) << (8 * i);
-            b |= (rhs[i] as u32) << (8 * i);
+            a |= (lhs[i] as u64) << (8 * i);
+            b |= (rhs[i] as u64) << (8 * i);
         }
 
         Ok(a.cmp(&b))
