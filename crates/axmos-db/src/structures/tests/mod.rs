@@ -337,7 +337,7 @@ fn test_upsert_single_key() -> io::Result<()> {
 }
 
 #[test]
-#[serial]
+#[serial] // TO REVIEW.
 fn test_variable_length_keys() -> io::Result<()> {
     let comparator = VarlenComparator;
     let mut tree = create_test_btree(4096, 3, 2, comparator)?;
