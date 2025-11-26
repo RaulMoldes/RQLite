@@ -33,7 +33,7 @@ impl<'a> VarInt<'a> {
         ))
     }
 
-     pub fn encoded_size(value: i64) -> usize {
+    pub fn encoded_size(value: i64) -> usize {
         let mut v = value as u64;
         let mut size = 0;
         loop {

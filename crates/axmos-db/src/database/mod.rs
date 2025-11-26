@@ -1,21 +1,25 @@
 pub mod errors;
 pub mod schema;
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    io::{self, Error as IoError, ErrorKind},
+    cell::{Ref, RefMut}
+};
 
 use crate::{
     database::schema::{Constraint, Index, Table},
-    storage::tuple::{Tuple, TupleRef, OwnedTuple},
+    io::pager::{Transaction, Worker},
+    storage::tuple::{OwnedTuple, Tuple, TupleRef},
     structures::bplustree::NumericComparator,
 };
 
+use crate::io::frames::FrameAccessMode;
 use crate::io::pager::SharedPager;
-use crate::structures::bplustree::{
-    BPlusTree, DynComparator, FixedSizeBytesComparator, NodeAccessMode, SearchResult,
-    VarlenComparator,
-};
-
 use crate::storage::page::BtreePage;
+use crate::structures::bplustree::{
+    BPlusTree, DynComparator, FixedSizeBytesComparator, SearchResult, VarlenComparator,
+};
 
 use crate::types::initialize_atomics;
 use crate::types::{Blob, DataType, DataTypeKind, OId, PAGE_ZERO, PageId, UInt64, get_next_object};
@@ -58,6 +62,7 @@ pub fn meta_table_schema() -> Schema {
 
 pub struct Database {
     pager: SharedPager,
+    main_worker: Worker,
     meta_table: PageId,
     meta_index: PageId,
     btree_min_keys: usize,
@@ -66,8 +71,10 @@ pub struct Database {
 
 impl Database {
     pub fn new(pager: SharedPager, min_keys: usize, siblings_per_side: usize) -> Self {
+        let main_worker = Worker::new(pager.clone());
         Self {
             pager,
+            main_worker,
             meta_table: PAGE_ZERO,
             meta_index: PAGE_ZERO,
             btree_min_keys: min_keys,
@@ -75,50 +82,69 @@ impl Database {
         }
     }
 
+    pub fn spawn_worker(&self) -> Worker {
+        Worker::new(self.pager())
+    }
+
+    pub fn main_worker(&self) -> Ref<'_, Transaction> {
+        self.main_worker.borrow()
+    }
+
+
+    pub fn main_worker_mut(&self) -> RefMut<'_, Transaction> {
+        self.main_worker.borrow_mut()
+    }
+
     pub fn pager(&self) -> SharedPager {
         self.pager.clone()
     }
 
-    pub fn init_meta_table(&self, root: PageId) -> Table {
+    pub fn init_meta_table(&mut self, root: PageId) -> io::Result<Table> {
         let meta_schema = meta_table_schema();
         let mut meta_table = Table::new(META_TABLE, root, meta_schema);
         let next = get_next_object();
         meta_table.set_next(next);
-        meta_table
+        self.meta_table = root;
+        Ok(meta_table)
     }
 
-    pub fn init_meta_index(&self, root: PageId) -> Index {
+    pub fn init_meta_index(&mut self, root: PageId) -> io::Result<Index> {
         let meta_schema = meta_idx_schema();
-        Index::new(META_INDEX, root, meta_schema)
+        self.meta_index = root;
+        Ok(Index::new(META_INDEX, root, meta_schema))
     }
 
-    pub fn create_index(&mut self, index_name: &str, schema: Schema) -> std::io::Result<()> {
-        let root_page = self.pager().write().alloc_page::<BtreePage>()?;
+    pub fn create_index(&mut self, index_name: &str, schema: Schema) -> io::Result<()> {
+        let root_page = self.main_worker_mut().alloc_page::<BtreePage>()?;
         let index = Index::new(index_name, root_page, schema);
         self.create_relation(Relation::IndexRel(index))
     }
 
-    pub fn create_table(&mut self, table_name: &str, schema: Schema) -> std::io::Result<()> {
-        let root_page = self.pager().write().alloc_page::<BtreePage>()?;
+    pub fn create_table(&mut self, table_name: &str, schema: Schema) -> io::Result<()> {
+        let root_page = self.main_worker_mut().alloc_page::<BtreePage>()?;
         let table = Table::new(table_name, root_page, schema);
         self.create_relation(Relation::TableRel(table))
     }
 
-    pub fn create_relation(&mut self, relation: Relation) -> std::io::Result<()> {
+    pub fn create_relation(&mut self, relation: Relation) -> io::Result<()> {
         self.index(&relation)?;
         self.store_relation(relation)?;
         Ok(())
     }
 
     // Lazy initialization.
-    pub fn init(&mut self) -> std::io::Result<()> {
+    pub fn init(&mut self) -> io::Result<()> {
         initialize_atomics();
 
-        self.meta_table = self.pager.write().alloc_page::<BtreePage>()?;
-        self.meta_index = self.pager.write().alloc_page::<BtreePage>()?;
+        let (meta_tbl_root, meta_index_root) = {
+                let mut worker = self.main_worker_mut();
+                (worker.alloc_page::<BtreePage>()?, worker.alloc_page::<BtreePage>()?)
+        };
 
-        let meta_table = self.init_meta_table(self.meta_table);
-        let meta_idx = self.init_meta_index(self.meta_index);
+        let meta_table = self.init_meta_table(meta_tbl_root)?;
+        let meta_idx = self.init_meta_index(meta_index_root)?;
+
+
 
         self.create_relation(Relation::TableRel(meta_table))?;
         self.create_relation(Relation::IndexRel(meta_idx))?;
@@ -130,7 +156,8 @@ impl Database {
         &self,
         root: PageId,
         dtype: DataTypeKind,
-    ) -> std::io::Result<BPlusTree<DynComparator>> {
+        tx: Worker,
+    ) -> io::Result<BPlusTree<DynComparator>> {
         let comparator = if dtype.is_numeric() {
             DynComparator::StrictNumeric(NumericComparator::for_size(dtype.size().unwrap()))
         } else if dtype.is_fixed_size() {
@@ -140,51 +167,59 @@ impl Database {
         };
 
         Ok(BPlusTree::from_existent(
-            self.pager(),
             root,
+            tx,
             self.btree_min_keys,
             self.btree_num_siblings_per_side,
             comparator,
         ))
     }
 
-    pub fn table_btree(&self, root: PageId) -> std::io::Result<BPlusTree<NumericComparator>> {
+    pub fn table_btree(
+        &self,
+        root: PageId,
+        tx: Worker,
+    ) -> io::Result<BPlusTree<NumericComparator>> {
         let comparator = NumericComparator::with_type::<u64>();
 
         Ok(BPlusTree::from_existent(
-            self.pager(),
             root,
+            tx,
             self.btree_min_keys,
             self.btree_num_siblings_per_side,
             comparator,
         ))
     }
 
-    pub fn store_relation(&mut self, mut obj: Relation) -> std::io::Result<OId> {
+    pub fn store_relation(&mut self, mut obj: Relation) -> io::Result<OId> {
         let oid = obj.id();
 
         if !obj.is_allocated() {
-            obj.alloc(&mut self.pager)?;
+            let id = self.main_worker_mut().alloc_page::<BtreePage>()?;
+            obj.set_root(id);
         };
 
-        let mut btree = self.table_btree(self.meta_table)?;
+        let mut btree = self.table_btree(self.meta_table, self.main_worker.clone())?; // Increments the worker's ref count
+
         let tuple = obj.into_boxed_tuple()?;
-        btree.clear_stack();
+        self.main_worker_mut().clear_stack();
+
+
         // Will replace existing relation if it exists.
         btree.upsert(self.meta_table, tuple.as_ref())?;
 
         Ok(oid)
     }
 
-    pub fn update_relation(&mut self, obj: Relation) -> std::io::Result<()> {
-        let mut btree = self.table_btree(self.meta_table)?;
+    pub fn update_relation(&mut self, obj: Relation) -> io::Result<()> {
+        let mut btree = self.table_btree(self.meta_table, self.main_worker.clone())?;
         let tuple = obj.into_boxed_tuple()?;
-        btree.clear_stack();
+        self.main_worker_mut().clear_stack();
         btree.update(self.meta_table, tuple.as_ref())?;
         Ok(())
     }
 
-    pub fn remove_relation(&mut self, rel: Relation, cascade: bool) -> std::io::Result<()> {
+    pub fn remove_relation(&mut self, rel: Relation, cascade: bool) -> io::Result<()> {
         if cascade {
             let schema = rel.schema();
             let dependants = schema.get_dependants();
@@ -196,20 +231,21 @@ impl Database {
             }
         };
 
-        let mut meta_table = self.table_btree(self.meta_table)?;
-        let mut meta_index = self.index_btree(self.meta_index, DataTypeKind::Text)?;
+        let mut meta_table = self.table_btree(self.meta_table, self.main_worker.clone())?;
+        let mut meta_index =
+            self.index_btree(self.meta_index, DataTypeKind::Text, self.main_worker.clone())?;
 
         let blob = Blob::from(rel.name());
-        meta_index.clear_stack();
+        self.main_worker_mut().clear_stack();
         meta_index.remove(self.meta_index, blob.as_ref())?;
-        meta_table.clear_stack();
+        self.main_worker_mut().clear_stack();
         meta_table.remove(self.meta_table, rel.id().as_ref())?;
 
         Ok(())
     }
 
-    pub fn index(&mut self, obj: &Relation) -> std::io::Result<()> {
-        let mut btree = self.index_btree(self.meta_index, DataTypeKind::Text)?;
+    pub fn index(&mut self, obj: &Relation) -> io::Result<()> {
+        let mut btree = self.index_btree(self.meta_index, DataTypeKind::Text, self.main_worker.clone())?;
 
         let schema = meta_idx_schema();
         let tuple = Tuple::new(
@@ -220,37 +256,47 @@ impl Database {
             &schema,
         )?;
 
-        btree.clear_stack();
+        self.main_worker_mut().clear_stack();
         let boxed: OwnedTuple = tuple.into();
         btree.insert(self.meta_index, boxed.as_ref())?;
 
         Ok(())
     }
 
-    pub fn lookup(&self, name: &str) -> std::io::Result<SearchResult> {
-        let meta_idx = self.index_btree(self.meta_index, DataTypeKind::Text)?;
+    pub fn lookup(&self, name: &str) -> io::Result<SearchResult> {
+        let meta_idx = self.index_btree(self.meta_index, DataTypeKind::Text, self.main_worker.clone())?;
         let blob = Blob::from(name);
-        meta_idx.search_from_root(blob.as_ref(), NodeAccessMode::Read)
+        meta_idx.search_from_root(blob.as_ref(), FrameAccessMode::Read)
     }
 
-    pub fn relation(&self, name: &str) -> std::io::Result<Relation> {
-        let meta_idx = self.index_btree(self.meta_index, DataTypeKind::Text)?;
+
+
+
+    pub fn relation(&self, name: &str) -> io::Result<Relation> {
+        let meta_idx = self.index_btree(self.meta_index, DataTypeKind::Text, self.main_worker.clone())?;
 
         let blob = Blob::from(name);
 
-        let result = meta_idx.search_from_root(blob.as_ref(), NodeAccessMode::Read)?;
+        let result = meta_idx.search_from_root(blob.as_ref(), FrameAccessMode::Read)?;
 
         let payload = match result {
-            SearchResult::Found(position) => meta_idx.get_content_from_result(result).unwrap(),
+            SearchResult::Found(_) => {
+                meta_idx.get_payload(result)?.ok_or_else(|| {
+                    IoError::new(
+                        ErrorKind::NotFound,
+                        "Object not found in meta table",
+                    )
+                })?
+            }
             SearchResult::NotFound(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
+                return Err(IoError::new(
+                    ErrorKind::NotFound,
                     "Object not found in meta table",
                 ));
             }
         };
 
-        meta_idx.clear_stack();
+        self.main_worker_mut().clear_stack();
         let schema = meta_idx_schema();
         let tuple = TupleRef::read(payload.as_ref(), &schema)?;
         println!("{tuple}");
@@ -259,8 +305,8 @@ impl Database {
             _ => {
                 // DEVUELVE NULL. PARECE UN ERROR EN REINTERPRET CAST.
 
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
+                return Err(IoError::new(
+                    ErrorKind::InvalidData,
                     "Invalid ID type in meta index",
                 ));
             }
@@ -269,23 +315,26 @@ impl Database {
         self.relation_direct(id)
     }
 
-    pub fn relation_direct(&self, id: OId) -> std::io::Result<Relation> {
-        let meta_table = self.table_btree(self.meta_table)?;
+    pub fn relation_direct(&self, id: OId) -> io::Result<Relation> {
+        let meta_table = self.table_btree(self.meta_table, self.main_worker.clone())?;
         let bytes: &[u8] = id.as_ref();
-
-        let payload = match meta_table.search_from_root(id.as_ref(), NodeAccessMode::Read)? {
-            SearchResult::Found(position) => meta_table
-                .get_content_from_result(SearchResult::Found(position))
-                .unwrap(),
+        let result = meta_table.search_from_root(id.as_ref(), FrameAccessMode::Read)?;
+        let payload = match  result {
+            SearchResult::Found(_) =>  meta_table.get_payload(result)?.ok_or_else(|| {
+                    IoError::new(
+                        ErrorKind::NotFound,
+                        "Object not found in meta table",
+                    )
+                })?,
             SearchResult::NotFound(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
+                return Err(IoError::new(
+                    ErrorKind::NotFound,
                     "Object not found in meta table",
                 ));
             }
         };
 
-        meta_table.clear_stack();
+        self.main_worker_mut().clear_stack();
         let schema = meta_table_schema();
         let tuple = TupleRef::read(payload.as_ref(), &schema)?;
         println!("Read: {tuple}");
@@ -302,7 +351,7 @@ mod db_tests {
 
     use crate::types::{DataTypeKind, PAGE_ZERO};
 
-    use crate::{AxmosDBConfig, IncrementalVaccum, ReadWriteVersion, TextEncoding};
+    use crate::{AxmosDBConfig, IncrementalVaccum,  TextEncoding};
     use serial_test::serial;
     use std::path::Path;
 
@@ -310,12 +359,12 @@ mod db_tests {
         page_size: u32,
         capacity: u16,
         path: impl AsRef<Path>,
-    ) -> std::io::Result<Database> {
+    ) -> io::Result<Database> {
         let config = AxmosDBConfig {
             page_size,
             cache_size: Some(capacity),
             incremental_vacuum_mode: IncrementalVaccum::Disabled,
-            read_write_version: ReadWriteVersion::Legacy,
+            min_keys: 3,
             text_encoding: TextEncoding::Utf8,
         };
 

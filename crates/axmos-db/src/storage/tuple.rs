@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-
 use crate::database::schema::Schema;
 use crate::types::{
     DataType, DataTypeKind, DataTypeRef, DataTypeRefMut, Float32RefMut, Float64RefMut, Int8RefMut,
@@ -8,8 +7,6 @@ use crate::types::{
     VarInt, reinterpret_cast, reinterpret_cast_mut,
 };
 use crate::varint::MAX_VARINT_LEN;
-
-
 
 // Macro used to read a tuple view from a byte slice.
 // Can be used with both mutable and immutable views of the tuple.
@@ -110,8 +107,6 @@ macro_rules! read_tuple {
         Ok(tuple)
     }};
 }
-
-
 
 /// Mutable view of a tuple at a specific point in the version chain.
 pub struct TupleRefMut<'a, 'b> {
@@ -399,17 +394,14 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
         self.schema
     }
 
-
     // Creates an owned tuple from the reference
     fn to_owned(&self) -> OwnedTuple {
         OwnedTuple(self.data.to_vec().into_boxed_slice())
     }
 }
 
-
 // Inmutable view of a tuple at a specific point in time.
 pub struct TupleRef<'a, 'b> {
-
     // actual data of the tuple as a slice of bytes
     data: &'a [u8],
 
@@ -433,12 +425,10 @@ pub struct TupleRef<'a, 'b> {
 }
 
 impl<'a, 'b> TupleRef<'a, 'b> {
-
     // Reads the last version of the tuple.
     pub fn read(buffer: &'a [u8], schema: &'b Schema) -> std::io::Result<TupleRef<'a, 'b>> {
         read_tuple!(TupleRef, buffer, schema)
     }
-
 
     // Method to read a specific version of the tuple.
     pub fn read_version(
@@ -448,7 +438,6 @@ impl<'a, 'b> TupleRef<'a, 'b> {
     ) -> std::io::Result<TupleRef<'a, 'b>> {
         read_tuple!(TupleRef, buffer, schema, Some(version))
     }
-
 
     // Returns a reference to the schema
     pub fn schema(&self) -> &'b Schema {
@@ -465,7 +454,6 @@ impl<'a, 'b> TupleRef<'a, 'b> {
         self.target_version
     }
 
-
     // Checks the nullability of a field
     fn is_null(&self, val_idx: usize) -> bool {
         let byte_idx = val_idx / 8;
@@ -474,7 +462,6 @@ impl<'a, 'b> TupleRef<'a, 'b> {
         let bitmap = self.bitmap();
         (bitmap[byte_idx] & (1 << bit_idx)) != 0
     }
-
 
     // Get a value identified by its index.
     pub fn value(&self, index: usize) -> std::io::Result<DataTypeRef<'_>> {
@@ -496,7 +483,6 @@ impl<'a, 'b> TupleRef<'a, 'b> {
         let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[index] as usize..])?;
         Ok(value)
     }
-
 
     // get a reference to the null bitmap
     fn bitmap(&self) -> &[u8] {
@@ -617,7 +603,6 @@ impl<'schema> Tuple<'schema> {
     }
 }
 
-
 pub struct OwnedTuple(Box<[u8]>);
 
 /// Serializes the tuple to a byte array, consuming it.
@@ -694,9 +679,9 @@ impl<'schema> From<Tuple<'schema>> for OwnedTuple {
                 cursor += 1;
 
                 // Precompute the size
-                let delta_data_size = null_bitmap_size +
-                                     diffs.len() +
-                                     diffs.iter().map(|(_, dt)| dt.size()).sum::<usize>();
+                let delta_data_size = null_bitmap_size
+                    + diffs.len()
+                    + diffs.iter().map(|(_, dt)| dt.size()).sum::<usize>();
 
                 // Write the size as varint
                 let mut varint_buffer = [0u8; MAX_VARINT_LEN];
@@ -709,7 +694,7 @@ impl<'schema> From<Tuple<'schema>> for OwnedTuple {
                 std::ptr::copy_nonoverlapping(
                     ptr.add(bitmap_start),
                     ptr.add(cursor),
-                    null_bitmap_size
+                    null_bitmap_size,
                 );
                 cursor += null_bitmap_size;
 
@@ -718,12 +703,11 @@ impl<'schema> From<Tuple<'schema>> for OwnedTuple {
                     let byte_idx = *idx as usize / 8;
                     let bit_idx = *idx as usize % 8;
 
-
                     if let DataType::Null = old_value {
                         *ptr.add(delta_bitmap_start + byte_idx) |= 1 << bit_idx;
                     } else {
-
-                        let current_is_null = (*ptr.add(bitmap_start + byte_idx) & (1 << bit_idx)) != 0;
+                        let current_is_null =
+                            (*ptr.add(bitmap_start + byte_idx) & (1 << bit_idx)) != 0;
                         if current_is_null {
                             *ptr.add(delta_bitmap_start + byte_idx) &= !(1 << bit_idx);
                         }
@@ -748,7 +732,6 @@ impl<'schema> From<Tuple<'schema>> for OwnedTuple {
         }
     }
 }
-
 
 /// Serializes the tuple to a byte array, without consuming
 impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
@@ -820,9 +803,9 @@ impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
                 cursor += 1;
 
                 // Precompute the size
-                let delta_data_size = null_bitmap_size +
-                                     diffs.len() +
-                                     diffs.iter().map(|(_, dt)| dt.size()).sum::<usize>();
+                let delta_data_size = null_bitmap_size
+                    + diffs.len()
+                    + diffs.iter().map(|(_, dt)| dt.size()).sum::<usize>();
 
                 // Write the size as varint
                 let mut varint_buffer = [0u8; MAX_VARINT_LEN];
@@ -835,7 +818,7 @@ impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
                 std::ptr::copy_nonoverlapping(
                     ptr.add(bitmap_start),
                     ptr.add(cursor),
-                    null_bitmap_size
+                    null_bitmap_size,
                 );
                 cursor += null_bitmap_size;
 
@@ -844,12 +827,11 @@ impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
                     let byte_idx = *idx as usize / 8;
                     let bit_idx = *idx as usize % 8;
 
-
                     if let DataType::Null = old_value {
                         *ptr.add(delta_bitmap_start + byte_idx) |= 1 << bit_idx;
                     } else {
-
-                        let current_is_null = (*ptr.add(bitmap_start + byte_idx) & (1 << bit_idx)) != 0;
+                        let current_is_null =
+                            (*ptr.add(bitmap_start + byte_idx) & (1 << bit_idx)) != 0;
                         if current_is_null {
                             *ptr.add(delta_bitmap_start + byte_idx) &= !(1 << bit_idx);
                         }
@@ -875,8 +857,6 @@ impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
     }
 }
 
-
-
 impl AsRef<[u8]> for OwnedTuple {
     fn as_ref(&self) -> &[u8] {
         self.0.as_ref()
@@ -889,12 +869,10 @@ impl AsMut<[u8]> for OwnedTuple {
     }
 }
 
-
 impl<'schema> TryFrom<(&[u8], &'schema Schema)> for Tuple<'schema> {
     type Error = std::io::Error;
 
     fn try_from((buffer, schema): (&[u8], &'schema Schema)) -> Result<Self, Self::Error> {
-
         let tuple_ref = TupleRef::read(buffer, schema)?;
         let mut data = Vec::with_capacity(schema.columns.len());
         for i in 0..schema.num_keys as usize {
@@ -906,7 +884,6 @@ impl<'schema> TryFrom<(&[u8], &'schema Schema)> for Tuple<'schema> {
         }
 
         let current_version = buffer[tuple_ref.key_len as usize];
-
 
         let mut delta_dir = HashMap::new();
         let mut cursor = tuple_ref.last_version_end as usize;
@@ -946,7 +923,6 @@ impl<'schema> TryFrom<(&[u8], &'schema Schema)> for Tuple<'schema> {
         })
     }
 }
-
 
 #[cfg(test)]
 mod tuple_tests {
@@ -1149,14 +1125,12 @@ mod tuple_tests {
         );
     }
 
-
-
-     #[test]
+    #[test]
     fn test_tuple_3() {
         let schema = create_single_key_schema();
 
         let original = Tuple::new(
-             &[
+            &[
                 DataType::Int(123.into()),
                 DataType::Text("Alice".into()),
                 DataType::Boolean(UInt8::TRUE),
@@ -1165,10 +1139,10 @@ mod tuple_tests {
                 DataType::Text("Initial description".into()),
             ],
             &schema,
-        ).unwrap();
+        )
+        .unwrap();
 
         let buffer: OwnedTuple = original.into();
-
 
         let reconstructed = Tuple::try_from((buffer.as_ref(), &schema)).unwrap();
 

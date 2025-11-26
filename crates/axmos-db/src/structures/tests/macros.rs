@@ -17,7 +17,7 @@ macro_rules! insert_tests {
                 let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
                 let mut tree = create_test_btree($page_size, $capacity, 3, comparator)?;
                 let root = tree.get_root();
-                let start = (root, Slot(0));
+                let start = Position::start_pos(root);
                 let keys: Vec<i32> = if $random {
                     // Generate random insertion order
                     use rand::{seq::SliceRandom};
@@ -42,10 +42,10 @@ macro_rules! insert_tests {
                 for (i, k) in keys.iter().enumerate() {
 
                     let key = TestKey(*k);
-                    let retrieved = tree.search(&start, key.as_ref(), NodeAccessMode::Read)?;
+                    let retrieved = tree.search(&start, key.as_ref(), FrameAccessMode::Read)?;
                     assert!(matches!(retrieved, SearchResult::Found(_)));
-                    let cell = tree.get_content_from_result(retrieved);
-                    tree.clear_stack();
+                    let cell = tree.get_payload(retrieved)?;
+                    tree.clear_worker_stack();
                     assert!(cell.is_some());
                     assert_eq!(cell.unwrap().as_ref(), key.as_ref());
                 }
@@ -65,7 +65,7 @@ macro_rules! delete_test {
             let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
             let mut tree = create_test_btree($page_size, $cache_size, $min_keys, comparator)?;
             let root = tree.get_root();
-            let start = (root, Slot(0));
+            let start = Position::start_pos(root);
             // Insert all keys
             for i in 0..$num_keys {
                 let key = TestKey(i as i32);
@@ -75,12 +75,12 @@ macro_rules! delete_test {
             // Check all keys exist
             for i in 0..$num_keys {
                 let key = TestKey(i as i32);
-                let retrieved = tree.search(&start, key.as_ref(), NodeAccessMode::Read)?;
+                let retrieved = tree.search(&start, key.as_ref(), FrameAccessMode::Read)?;
                 assert!(matches!(retrieved, SearchResult::Found(_)));
-                let cell = tree.get_content_from_result(retrieved);
+                let cell = tree.get_payload(retrieved)?;
                 assert!(cell.is_some());
                 assert_eq!(cell.unwrap().as_ref(), key.as_ref());
-                tree.clear_stack();
+                tree.clear_worker_stack();
             }
 
             // Track deleted keys
@@ -100,17 +100,17 @@ macro_rules! delete_test {
                 let key = TestKey(i as i32);
                 if deleted_keys.contains(&i) {
                     // Key should be deleted
-                    let retrieved = tree.search(&start, key.as_ref(), NodeAccessMode::Read)?;
+                    let retrieved = tree.search(&start, key.as_ref(), FrameAccessMode::Read)?;
                     assert!(matches!(retrieved, SearchResult::NotFound(_)));
                 } else {
                     // Key should still exist
-                    let retrieved = tree.search(&start, key.as_ref(), NodeAccessMode::Read)?;
+                    let retrieved = tree.search(&start, key.as_ref(), FrameAccessMode::Read)?;
                     assert!(matches!(retrieved, SearchResult::Found(_)));
-                    let cell = tree.get_content_from_result(retrieved);
+                    let cell = tree.get_payload(retrieved)?;
                     assert!(cell.is_some());
                     assert_eq!(cell.unwrap().as_ref(), key.as_ref());
                 }
-                tree.clear_stack();
+                tree.clear_worker_stack();
             }
 
             Ok(())

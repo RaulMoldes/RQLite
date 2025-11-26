@@ -1,7 +1,49 @@
-use crate::storage::latches::Latch;
+use crate::{
+    as_slice, repr_enum,
+    storage::{cell::Slot, latches::Latch, page::MemPage},
+    types::PageId,
+};
 
 use parking_lot::RwLock;
-use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
+use std::{
+    collections::HashMap,
+    sync::{Arc, atomic::AtomicBool, atomic::Ordering},
+};
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub(crate) struct Position(PageId, Slot);
+
+impl std::fmt::Display for Position {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, " Position: page {}, slot {}", self.page(), self.slot())
+    }
+}
+
+impl Position {
+    pub(crate) fn new(page_id: PageId, slot: Slot) -> Self {
+        Self(page_id, slot)
+    }
+
+    pub(crate) fn start_pos(page_id: PageId) -> Self {
+        Self(page_id, Slot(0))
+    }
+
+    pub(crate) fn page(&self) -> PageId {
+        self.0
+    }
+
+    pub(crate) fn slot(&self) -> Slot {
+        self.1
+    }
+}
+as_slice!(Position);
+
+repr_enum!( pub(crate) enum FrameAccessMode: u8 {
+    Read = 0x00,
+    Write = 0x01,
+    ReadWrite = 0x02,
+});
 
 pub(crate) struct MemFrame<P> {
     // Better [`RwLock`] than [`Mutex`] here, as we want to allow multiple readers to the page, but a single writer at a time to avoid race conditions.
@@ -31,6 +73,14 @@ impl<P> MemFrame<P> {
             inner: Arc::new(RwLock::new(inner)),
             is_dirty: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub(crate) fn deep_copy(&self) -> P
+    where
+        P: Clone,
+    {
+        let guard = self.inner.read();
+        guard.clone()
     }
 }
 
@@ -101,5 +151,85 @@ where
         let mut guard = self.write();
         let variant: &mut V = (&mut guard).try_into()?;
         Ok(f(variant))
+    }
+}
+
+#[derive(Debug)]
+pub struct FrameStack {
+    latches: HashMap<PageId, Latch<MemPage>>,
+    traversal: Vec<Position>,
+}
+
+impl FrameStack {
+    pub fn new() -> Self {
+        FrameStack {
+            latches: HashMap::new(),
+            traversal: Vec::new(),
+        }
+    }
+
+    pub fn acquire(&mut self, key: PageId, value: MemFrame<MemPage>, access_mode: FrameAccessMode) {
+        if let Some(existing_latch) = self.latches.get(&key) {
+            match (existing_latch, access_mode) {
+                (Latch::Upgradable(p), FrameAccessMode::Write) => {
+                    let write_latch = self.latches.remove(&key).unwrap().upgrade();
+                    self.latches.insert(key, write_latch);
+                }
+                (Latch::Write(p), FrameAccessMode::Read) => {
+                    let read_latch = self.latches.remove(&key).unwrap().downgrade();
+                    self.latches.insert(key, read_latch);
+                }
+                (Latch::Read(p), FrameAccessMode::Write) => {
+                    panic!(
+                        "Attempted to acquire a write latch on a node that was borrowed for read. Must use upgradable latches for this use case."
+                    )
+                }
+                _ => {}
+            }
+        } else {
+            self.acquire_unchecked(key, value, access_mode);
+        }
+    }
+
+    pub fn acquire_unchecked(
+        &mut self,
+        key: PageId,
+        mut value: MemFrame<MemPage>,
+        access_mode: FrameAccessMode,
+    ) {
+        match access_mode {
+            FrameAccessMode::Read => self.latches.insert(key, value.read()),
+            FrameAccessMode::Write => self.latches.insert(key, value.write()),
+            FrameAccessMode::ReadWrite => self.latches.insert(key, value.upgradable()),
+        };
+    }
+
+    pub fn release(&mut self, key: PageId) {
+        self.latches.remove(&key);
+    }
+
+    pub fn visit(&mut self, key: Position) {
+        self.traversal.push(key);
+    }
+
+    pub fn get(&self, key: PageId) -> Option<&Latch<MemPage>> {
+        self.latches.get(&key)
+    }
+
+    pub fn get_mut(&mut self, key: PageId) -> Option<&mut Latch<MemPage>> {
+        self.latches.get_mut(&key)
+    }
+
+    pub fn pop(&mut self) -> Option<Position> {
+        self.traversal.pop()
+    }
+
+    pub fn last(&self) -> Option<&Position> {
+        self.traversal.last()
+    }
+
+    pub fn clear(&mut self) {
+        self.latches.clear();
+        self.traversal.clear();
     }
 }

@@ -1,6 +1,7 @@
 use std::{
     collections::BinaryHeap,
     fmt::Debug,
+    io::{Error as IoError, ErrorKind as IoErrorKind},
     iter,
     ops::{Bound, RangeBounds},
     ptr::{self, NonNull},
@@ -9,8 +10,7 @@ use std::{
 use crate::{
     configs::{
         AXMO, AxmosDBConfig, CELL_ALIGNMENT, DEFAULT_CACHE_SIZE, DEFAULT_PAGE_SIZE,
-        IncrementalVaccum, MAX_PAGE_SIZE, MIN_PAGE_SIZE, PAGE_ALIGNMENT, ReadWriteVersion,
-        TextEncoding,
+        IncrementalVaccum, MAX_PAGE_SIZE, MIN_PAGE_SIZE, PAGE_ALIGNMENT, TextEncoding,
     },
     storage::{
         buffer::BufferWithMetadata,
@@ -47,6 +47,7 @@ pub struct BtreePageHeader {
 }
 pub const BTREE_PAGE_HEADER_SIZE: usize = std::mem::size_of::<BtreePageHeader>();
 
+crate::as_slice!(BtreePageHeader);
 #[derive(Debug, PartialEq, Clone, Copy)]
 #[repr(C, align(64))]
 pub(crate) struct OverflowPageHeader {
@@ -57,7 +58,13 @@ pub(crate) struct OverflowPageHeader {
 }
 pub const OVERFLOW_HEADER_SIZE: usize = std::mem::size_of::<OverflowPageHeader>();
 
+crate::as_slice!(OverflowPageHeader);
+
 impl Header for OverflowPageHeader {
+    fn page_number(&self) -> PageId {
+        self.page_number
+    }
+
     fn alloc(size: u32) -> Self {
         let effective_size = size.next_multiple_of(PAGE_ALIGNMENT);
         debug_assert!(
@@ -99,13 +106,19 @@ pub(crate) struct DatabaseHeader {
     pub total_pages: u32,
     pub free_pages: u32,
     pub cache_size: u16,
-    pub rw_version: crate::ReadWriteVersion,
+    pub min_keys: u8,
     pub text_encoding: crate::TextEncoding,
     pub incremental_vacuum_mode: crate::IncrementalVaccum,
 }
 pub const DB_HEADER_SIZE: usize = std::mem::size_of::<DatabaseHeader>();
 
+crate::as_slice!(DatabaseHeader);
+
 impl Header for DatabaseHeader {
+    fn page_number(&self) -> PageId {
+        PAGE_ZERO
+    }
+
     fn alloc(size: u32) -> Self {
         Self::init(size, PAGE_ZERO)
     }
@@ -123,7 +136,7 @@ impl Header for DatabaseHeader {
             first_free_page: PAGE_ZERO,
             last_free_page: PAGE_ZERO,
             text_encoding: TextEncoding::Utf8,
-            rw_version: ReadWriteVersion::Legacy,
+            min_keys: 3, // DEFAULTS TO THREE
             incremental_vacuum_mode: IncrementalVaccum::Disabled,
             cache_size: DEFAULT_CACHE_SIZE,
         }
@@ -137,6 +150,10 @@ impl DatabaseHeader {
 }
 
 impl Header for BtreePageHeader {
+    fn page_number(&self) -> PageId {
+        self.page_number
+    }
+
     fn alloc(size: u32) -> Self {
         let aligned_size = size.next_multiple_of(PAGE_ALIGNMENT);
 
@@ -670,7 +687,8 @@ where
     fn page_number(&self) -> PageId;
 }
 
-pub trait Header {
+pub trait Header: AsRef<[u8]> {
+    fn page_number(&self) -> PageId;
     fn init(size: u32, page_number: PageId) -> Self;
     fn alloc(size: u32) -> Self;
 }
@@ -775,67 +793,85 @@ impl From<PageZero> for MemPage {
 }
 
 impl<'p> TryFrom<&'p Latch<MemPage>> for &'p BtreePage {
-    type Error = String;
+    type Error = IoError;
 
     fn try_from(latch: &'p Latch<MemPage>) -> Result<Self, Self::Error> {
         match latch.deref() {
             MemPage::Btree(page) => Ok(page),
-            other => Err(format!("attempt to convert {other:?} into BtreePage")),
+            other => Err(IoError::new(
+                IoErrorKind::InvalidData,
+                format!("attempt to convert {other:?} into BtreePage"),
+            )),
         }
     }
 }
 
 impl<'p> TryFrom<&'p mut Latch<MemPage>> for &'p mut BtreePage {
-    type Error = String;
+    type Error = IoError;
 
     fn try_from(latch: &'p mut Latch<MemPage>) -> Result<Self, Self::Error> {
         match latch.deref_mut() {
             MemPage::Btree(page) => Ok(page),
-            other => Err(format!("attempt to convert {other:?} into BtreePage")),
+            other => Err(IoError::new(
+                IoErrorKind::InvalidData,
+                format!("attempt to convert {other:?} into BtreePage"),
+            )),
         }
     }
 }
 
 impl<'p> TryFrom<&'p Latch<MemPage>> for &'p PageZero {
-    type Error = String;
+    type Error = IoError;
 
     fn try_from(latch: &'p Latch<MemPage>) -> Result<Self, Self::Error> {
         match latch.deref() {
             MemPage::Zero(page) => Ok(page),
-            other => Err(format!("attempt to convert {other:?} into BtreePage")),
+            other => Err(IoError::new(
+                IoErrorKind::InvalidData,
+                format!("attempt to convert {other:?} into PageZero"),
+            )),
         }
     }
 }
 
 impl<'p> TryFrom<&'p mut Latch<MemPage>> for &'p mut PageZero {
-    type Error = String;
+    type Error = IoError;
 
     fn try_from(latch: &'p mut Latch<MemPage>) -> Result<Self, Self::Error> {
         match latch.deref_mut() {
             MemPage::Zero(page) => Ok(page),
-            other => Err(format!("attempt to convert {other:?} into BtreePage")),
+            other => Err(IoError::new(
+                IoErrorKind::InvalidData,
+                format!("attempt to convert {other:?} into PageZero"),
+            )),
         }
     }
 }
 
 impl<'p> TryFrom<&'p Latch<MemPage>> for &'p OverflowPage {
-    type Error = String;
+    type Error = IoError;
 
     fn try_from(latch: &'p Latch<MemPage>) -> Result<Self, Self::Error> {
         match latch.deref() {
             MemPage::Overflow(page) => Ok(page),
-            other => Err("attempt to convert  into BtreePage".to_string()),
+            other => Err(IoError::new(
+                IoErrorKind::InvalidData,
+                format!("attempt to convert {other:?} into OverflowPage"),
+            )),
         }
     }
 }
 
 impl<'p> TryFrom<&'p mut Latch<MemPage>> for &'p mut OverflowPage {
-    type Error = String;
+    type Error = IoError;
 
     fn try_from(latch: &'p mut Latch<MemPage>) -> Result<Self, Self::Error> {
         match latch.deref_mut() {
             MemPage::Overflow(page) => Ok(page),
-            other => Err("attempt to convert into BtreePage".to_string()),
+            other => Err(IoError::new(
+                IoErrorKind::InvalidData,
+                format!("attempt to convert {other:?} into OverflowPage"),
+            )),
         }
     }
 }

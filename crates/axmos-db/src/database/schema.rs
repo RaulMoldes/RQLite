@@ -1,12 +1,10 @@
-use crate::io::pager::SharedPager;
 use crate::storage::{
-    page::BtreePage,
-    tuple::{Tuple, TupleRef, OwnedTuple},
+    tuple::{OwnedTuple, Tuple, TupleRef},
 };
 use crate::structures::bplustree::Comparator;
 use crate::types::{
-    Blob, DataType, DataTypeKind, DataTypeRef,  OId, PAGE_ZERO, PageId, UInt8, UInt64,
-    VarInt, varint::MAX_VARINT_LEN,
+    Blob, DataType, DataTypeKind, DataTypeRef, OId, PAGE_ZERO, PageId, UInt8, UInt64, VarInt,
+    varint::MAX_VARINT_LEN,
 };
 use std::io::{Read, Seek, Write};
 
@@ -674,11 +672,7 @@ impl Relation {
         self.root().is_valid()
     }
 
-    pub fn alloc(&mut self, pager: &mut SharedPager) -> std::io::Result<()> {
-        let root = pager.write().alloc_page::<BtreePage>()?;
-        self.set_root(root);
-        Ok(())
-    }
+
 
     pub fn into_boxed_tuple(self) -> std::io::Result<OwnedTuple> {
         let root_page = if self.root() != PAGE_ZERO {

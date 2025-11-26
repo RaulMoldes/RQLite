@@ -1,13 +1,221 @@
+use crate::PAGE_ZERO;
 use crate::io::MemBuffer;
 use crate::io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize};
 use crate::storage::buffer::BufferWithMetadata;
-use crate::types::{LogId, OId, TxId, UInt64};
+use crate::storage::page::MemPage;
+use crate::types::{LogId, TxId};
 use std::fs::{self};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::ptr::NonNull;
 
+use crate::types::PageId;
+
 pub const WAL_RECORD_ALIGNMENT: usize = 64;
+
+pub trait Operation {
+    fn op_type(&self) -> LogRecordType;
+    fn page_nb(&self) -> PageId;
+    fn undo(&self) -> &[u8];
+    fn redo(&self) -> &[u8];
+}
+
+#[repr(transparent)]
+pub struct PageAllocation(MemPage);
+
+impl PageAllocation {
+    pub fn new(page: MemPage) -> Self {
+        Self(page)
+    }
+}
+
+impl Operation for PageAllocation {
+    fn op_type(&self) -> LogRecordType {
+        LogRecordType::Alloc
+    }
+
+    fn page_nb(&self) -> PageId {
+        self.0.page_number()
+    }
+
+    fn redo(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+
+    fn undo(&self) -> &[u8] {
+        &[]
+    }
+}
+
+#[repr(transparent)]
+pub struct PageDeallocation(MemPage);
+
+impl PageDeallocation {
+    pub fn new(page: MemPage) -> Self {
+        Self(page)
+    }
+}
+
+impl Operation for PageDeallocation {
+    fn op_type(&self) -> LogRecordType {
+        LogRecordType::Dealloc
+    }
+
+    fn page_nb(&self) -> PageId {
+        self.0.page_number()
+    }
+
+    fn undo(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+
+    fn redo(&self) -> &[u8] {
+        &[]
+    }
+}
+
+pub struct Begin;
+
+impl Operation for Begin {
+    fn op_type(&self) -> LogRecordType {
+        LogRecordType::Begin
+    }
+
+    fn page_nb(&self) -> PageId {
+        PAGE_ZERO
+    }
+
+    fn redo(&self) -> &[u8] {
+        &[]
+    }
+
+    fn undo(&self) -> &[u8] {
+        &[]
+    }
+}
+
+pub struct End;
+
+impl Operation for End {
+    fn op_type(&self) -> LogRecordType {
+        LogRecordType::End
+    }
+
+    fn page_nb(&self) -> PageId {
+        PAGE_ZERO
+    }
+
+    fn redo(&self) -> &[u8] {
+        &[]
+    }
+
+    fn undo(&self) -> &[u8] {
+        &[]
+    }
+}
+pub struct Commit;
+
+impl Operation for Commit {
+    fn op_type(&self) -> LogRecordType {
+        LogRecordType::Commit
+    }
+
+    fn page_nb(&self) -> PageId {
+        PAGE_ZERO
+    }
+
+    fn redo(&self) -> &[u8] {
+        &[]
+    }
+
+    fn undo(&self) -> &[u8] {
+        &[]
+    }
+}
+pub struct Abort;
+
+impl Operation for Abort {
+    fn op_type(&self) -> LogRecordType {
+        LogRecordType::Abort
+    }
+
+    fn page_nb(&self) -> PageId {
+        PAGE_ZERO
+    }
+
+    fn redo(&self) -> &[u8] {
+        &[]
+    }
+
+    fn undo(&self) -> &[u8] {
+        &[]
+    }
+}
+
+#[repr(C)]
+pub struct PageOverwrite {
+    old_content: MemPage,
+    new_content: MemPage,
+}
+
+impl PageOverwrite {
+    pub fn new(old_content: MemPage, new_content: MemPage) -> Self {
+        Self {
+            old_content,
+            new_content,
+        }
+    }
+}
+
+impl Operation for PageOverwrite {
+    fn op_type(&self) -> LogRecordType {
+        LogRecordType::Overwrite
+    }
+
+    fn page_nb(&self) -> PageId {
+        self.old_content.page_number()
+    }
+
+    fn redo(&self) -> &[u8] {
+        self.new_content.as_ref()
+    }
+
+    fn undo(&self) -> &[u8] {
+        self.old_content.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct LogRecordBuilder {
+    tx_id: TxId,
+    last_lsn: Option<LogId>,
+}
+
+impl LogRecordBuilder {
+    pub fn for_transaction(tx_id: TxId) -> Self {
+        Self {
+            tx_id,
+            last_lsn: None,
+        }
+    }
+
+    pub fn build_rec<O>(&mut self, log_record_type: LogRecordType, operation: O) -> LogRecord
+    where
+        O: Operation,
+    {
+        let log = LogRecord::new(
+            self.tx_id,
+            self.last_lsn,
+            operation.page_nb(),
+            operation.op_type(),
+            operation.redo(),
+            operation.undo(),
+        );
+
+        self.last_lsn = Some(log.lsn());
+        log
+    }
+}
 
 // Log type representation.
 // Redo logs store the database state after the transaction.
@@ -15,10 +223,16 @@ pub const WAL_RECORD_ALIGNMENT: usize = 64;
 // Undo logs store the previous database state before the transaction started.
 // Used for rollback of changes.
 crate::repr_enum!(pub enum LogRecordType: u8 {
-    Update = 0x00,
+    Begin = 0x00,
     Commit = 0x01,
     Abort = 0x02,
-    End = 0x03 // Signifies end of commit or abort
+    End = 0x03, // Signifies end of commit or abort
+    Alloc = 0x04,
+    Dealloc = 0x05,
+    // For now the only supported op types are updating the full page and updating the metadata. For efficiency we might want to add more granularity here but it is not a priority right now.
+    Overwrite = 0x06,
+    OverwriteMetadata = 0x07
+
 });
 
 #[derive(Debug)]
@@ -71,8 +285,7 @@ pub struct LogHeader {
     txid: TxId, // Id of the current transaction
     /// Log id of the previous LSN of the current transaction.
     prev_lsn: LogId,
-    table_id: OId,
-    row_id: UInt64,
+    page_id: PageId,
     total_size: u32,
     undo_offset: u16,
     redo_offset: u16,
@@ -83,10 +296,8 @@ pub struct LogHeader {
 impl LogHeader {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        lsn: LogId,
         txid: TxId,
-        table_id: OId,
-        row_id: UInt64,
+        page_id: PageId,
         prev_lsn: Option<LogId>,
         total_size: u32,
         redo_offset: u16,
@@ -95,11 +306,10 @@ impl LogHeader {
         padding: u8,
     ) -> Self {
         Self {
-            lsn,
+            lsn: LogId::new(),
             txid,
             prev_lsn: prev_lsn.unwrap_or(LogId::from(0)),
-            table_id,
-            row_id,
+            page_id,
             total_size,
             undo_offset,
             redo_offset,
@@ -120,11 +330,9 @@ pub type LogRecord = BufferWithMetadata<LogHeader>;
 impl LogRecord {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        id: LogId,
         txid: TxId,
         prev_lsn: Option<LogId>,
-        table_id: OId,
-        row_id: UInt64,
+        page_id: PageId,
         log_type: LogRecordType,
         redo_payload: &[u8],
         undo_payload: &[u8],
@@ -146,10 +354,8 @@ impl LogRecord {
 
         // Initialize header
         let header = LogHeader::new(
-            id,
             txid,
-            table_id,
-            row_id,
+            page_id,
             prev_lsn,
             size as u32,
             redo_offset,
@@ -164,6 +370,10 @@ impl LogRecord {
         buffer.push_bytes(redo_payload);
 
         buffer
+    }
+
+    fn lsn(&self) -> LogId {
+        self.metadata().lsn
     }
 
     fn content_at(&self, offset: u16) -> NonNull<[u8]> {
@@ -283,7 +493,7 @@ impl WriteAheadLog {
         self.header.padding as usize
     }
 
-    fn push(&mut self, record: LogRecord) -> std::io::Result<()> {
+    pub fn push(&mut self, record: LogRecord) -> std::io::Result<()> {
         let size = record.size();
         let lsn = record.metadata().lsn;
         let journal_length = self.journal.len();
@@ -693,7 +903,7 @@ mod wal_tests {
         let start_entries = wal.header.num_entries;
         let num_rec = ((end - start) + 1) as u32;
         for i in start..=end {
-            let rec = make_record(i, 1, 1, i, 100, 100);
+            let rec = make_record(i, 1, 1, i as u16, 100, 100);
             wal.push(rec).unwrap();
         }
 
@@ -719,22 +929,19 @@ mod wal_tests {
     pub fn make_record(
         lsn: u64,
         txid: u64,
-        table: u64,
-        row: u64,
+        page: u64,
+        row: u16,
         redo_len: usize,
         undo_len: usize,
     ) -> LogRecord {
         let mut rng = StdRng::seed_from_u64(lsn);
-        let redo: Vec<u8> = (0..redo_len).map(|_| rng.gen_range(0..=255)).collect();
-        let undo: Vec<u8> = (0..undo_len).map(|_| rng.gen_range(0..=255)).collect();
-
+        let redo: Vec<u8> = (0..redo_len).map(|_| rng.random_range(0..=255)).collect();
+        let undo: Vec<u8> = (0..undo_len).map(|_| rng.random_range(0..=255)).collect();
         LogRecord::new(
-            LogId::from(lsn),
             TxId::from(txid),
             Some(LogId::from(lsn.saturating_sub(1))),
-            OId::from(table),
-            UInt64::from(row),
-            LogRecordType::Update,
+            PageId::from(page),
+            LogRecordType::Overwrite,
             &redo,
             &undo,
         )
@@ -750,11 +957,11 @@ mod wal_tests {
         let undo_data = record_ref.undo_data();
 
         for byte in redo_data {
-            assert_eq!(*byte, rng.gen_range(0..=255));
+            assert_eq!(*byte, rng.random_range(0..=255));
         }
 
         for byte in undo_data {
-            assert_eq!(*byte, rng.gen_range(0..=255));
+            assert_eq!(*byte, rng.random_range(0..=255));
         }
     }
 

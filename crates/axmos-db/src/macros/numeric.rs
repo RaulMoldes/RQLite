@@ -626,6 +626,7 @@ macro_rules! scalar {
 
         $crate::numeric!($name, $inner);
         $crate::arith!($name, $inner);
+        $crate::as_slice!($name);
 
     };
 }

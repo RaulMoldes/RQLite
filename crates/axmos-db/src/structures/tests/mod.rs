@@ -1,15 +1,20 @@
 mod macros;
 
-use crate::io::pager::{Pager, SharedPager};
-use crate::storage::cell::Slot;
+use crate::io::{
+    frames::{
+        FrameAccessMode,
+        Position}, pager::{Pager, SharedPager, Worker}
+};
+
+
 use crate::structures::bplustree::{
-    BPlusTree, Comparator, FixedSizeBytesComparator, NodeAccessMode, NumericComparator,
+    BPlusTree, Comparator, FixedSizeBytesComparator,  NumericComparator,
     SearchResult, VarlenComparator,
 };
 use crate::structures::kvp::KeyValuePair;
 use crate::types::VarInt;
 use crate::{
-    AxmosDBConfig, IncrementalVaccum, ReadWriteVersion, TextEncoding, assert_cmp, delete_test,
+    AxmosDBConfig, IncrementalVaccum, TextEncoding, assert_cmp, delete_test,
     insert_tests,
 };
 use rand::{RngCore, SeedableRng};
@@ -62,17 +67,18 @@ fn create_test_btree<Cmp: Comparator>(
         page_size,
         cache_size: Some(capacity as u16),
         incremental_vacuum_mode: IncrementalVaccum::Disabled,
-        read_write_version: ReadWriteVersion::Legacy,
+        min_keys: 3,
         text_encoding: TextEncoding::Utf8,
     };
 
-    let pager = Pager::from_config(config, &path)?;
-    Ok(BPlusTree::new(
-        SharedPager::from(pager),
+    let shared_pager = SharedPager::from(Pager::from_config(config, &path)?);
+    let worker = Worker::new(shared_pager);
+    BPlusTree::new(
+        worker,
         min_keys,
         2,
         comparator,
-    ))
+    )
 }
 
 pub fn gen_random_bytes(size: usize, seed: u64) -> Vec<u8> {
@@ -184,10 +190,10 @@ fn test_search_empty_tree() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
     let tree = create_test_btree(4096, 1, 4, comparator)?;
     let root = tree.get_root();
-    let start_pos = (root, Slot(0));
+    let start_pos = Position::start_pos(root);
     let key = TestKey(42);
 
-    let result = tree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
+    let result = tree.search(&start_pos, key.as_ref(), FrameAccessMode::Read)?;
     assert!(matches!(result, SearchResult::NotFound(_)));
 
     Ok(())
@@ -202,24 +208,25 @@ fn test_insert_remove_single_key() -> io::Result<()> {
     let mut btree = create_test_btree(4096, 1, 4, comparator)?;
 
     let root = btree.get_root();
-    let start_pos = (root, Slot(0));
+    let start_pos = Position::start_pos(root);
+
     // Insert a key-value pair
     let key = TestKey(42);
     let bytes = key.as_ref();
     btree.insert(root, bytes)?;
 
     // Retrieve it back
-    let retrieved = btree.search(&start_pos, bytes, NodeAccessMode::Read)?;
-    assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
-    let cell = btree.get_content_from_result(retrieved);
+    let retrieved = btree.search(&start_pos, bytes, FrameAccessMode::Read)?;
+    assert!(matches!(retrieved, SearchResult::Found(_)));
+    let cell = btree.get_payload(retrieved)?;
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), bytes);
-    btree.clear_stack();
+    btree.clear_worker_stack();
     btree.remove(root, bytes)?;
 
-    let retrieved = btree.search(&start_pos, bytes, NodeAccessMode::Read)?;
+    let retrieved = btree.search(&start_pos, bytes, FrameAccessMode::Read)?;
     assert!(matches!(retrieved, SearchResult::NotFound(_)));
-    let cell = btree.get_content_from_result(retrieved);
+    let cell = btree.get_payload(retrieved)?;
     assert!(cell.is_none());
 
     Ok(())
@@ -253,26 +260,26 @@ fn test_update_single_key() -> io::Result<()> {
     let mut btree = create_test_btree(4096, 1, 4, comparator)?;
 
     let root = btree.get_root();
-    let start_pos = (root, Slot(0));
+    let start_pos = Position::start_pos(root);
     btree.insert(root, kv.as_ref())?;
 
-    let retrieved = btree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
+    let retrieved = btree.search(&start_pos, key.as_ref(), FrameAccessMode::Read)?;
 
-    assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
-    let cell = btree.get_content_from_result(retrieved);
+    assert!(matches!(retrieved, SearchResult::Found(_)));
+    let cell = btree.get_payload(retrieved)?;
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), kv.as_ref());
-    btree.clear_stack();
+    btree.clear_worker_stack();
 
     btree.update(root, kv2.as_ref())?;
 
-    let retrieved = btree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
+    let retrieved = btree.search(&start_pos, key.as_ref(), FrameAccessMode::Read)?;
 
-    assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
-    let cell = btree.get_content_from_result(retrieved);
+    assert!(matches!(retrieved, SearchResult::Found(_)));
+    let cell = btree.get_payload(retrieved)?;
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), kv2.as_ref());
-    btree.clear_stack();
+    btree.clear_worker_stack();
 
     Ok(())
 }
@@ -295,36 +302,36 @@ fn test_upsert_single_key() -> io::Result<()> {
     let mut btree = create_test_btree(4096, 1, 4, comparator)?;
 
     let root = btree.get_root();
-    let start_pos = (root, Slot(0));
+    let start_pos = Position::start_pos(root);
     btree.insert(root, kv.as_ref())?;
 
-    let retrieved = btree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
+    let retrieved = btree.search(&start_pos, key.as_ref(), FrameAccessMode::Read)?;
 
-    assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
-    let cell = btree.get_content_from_result(retrieved);
+    assert!(matches!(retrieved, SearchResult::Found(_)));
+    let cell = btree.get_payload(retrieved)?;
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), kv.as_ref());
-    btree.clear_stack();
+    btree.clear_worker_stack();
 
     btree.upsert(root, kv2.as_ref())?;
 
-    let retrieved = btree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
+    let retrieved = btree.search(&start_pos, key.as_ref(), FrameAccessMode::Read)?;
 
-    assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
-    let cell = btree.get_content_from_result(retrieved);
+    assert!(matches!(retrieved, SearchResult::Found(_)));
+    let cell = btree.get_payload(retrieved)?;
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), kv2.as_ref());
-    btree.clear_stack();
+    btree.clear_worker_stack();
 
     btree.upsert(root, kv3.as_ref())?;
 
-    let retrieved = btree.search(&start_pos, key2.as_ref(), NodeAccessMode::Read)?;
+    let retrieved = btree.search(&start_pos, key2.as_ref(), FrameAccessMode::Read)?;
 
-    assert!(matches!(retrieved, SearchResult::Found((root, Slot(1)))));
-    let cell = btree.get_content_from_result(retrieved);
+    assert!(matches!(retrieved, SearchResult::Found(_)));
+    let cell = btree.get_payload(retrieved)?;
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), kv3.as_ref());
-    btree.clear_stack();
+    btree.clear_worker_stack();
 
     Ok(())
 }
@@ -335,7 +342,7 @@ fn test_variable_length_keys() -> io::Result<()> {
     let comparator = VarlenComparator;
     let mut tree = create_test_btree(4096, 3, 2, comparator)?;
     let root = tree.get_root();
-    let start_pos = (root, Slot(0));
+    let start_pos = Position::start_pos(root);
 
     // Insert enough keys to force root to split
     for i in 0..50 {
@@ -348,10 +355,10 @@ fn test_variable_length_keys() -> io::Result<()> {
     for i in 0..50 {
         let key = TestVarLengthKey::from_string(&format!("Hello_{i}"));
 
-        let retrieved = tree.search(&start_pos, &key.as_bytes(), NodeAccessMode::Read)?;
+        let retrieved = tree.search(&start_pos, &key.as_bytes(), FrameAccessMode::Read)?;
         // Search does not release the latch on the node so we have to do it ourselves.
-        let cell = tree.get_content_from_result(retrieved);
-        tree.clear_stack();
+        let cell = tree.get_payload(retrieved)?;
+        tree.clear_worker_stack();
         assert!(cell.is_some());
         assert_eq!(cell.unwrap().as_ref(), key.as_bytes());
     }
@@ -366,21 +373,21 @@ fn test_overflow_chain() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
     let mut tree = create_test_btree(4096, 3, 2, comparator)?;
     let root = tree.get_root();
-    let start_pos = (root, Slot(0));
+    let start_pos = Position::start_pos(root);
     let key = TestKey(1);
     let data = gen_ovf_blob(4096, 20, 42);
     let kv = KeyValuePair::new(&key, &data);
 
     tree.insert(root, kv.as_ref())?;
-    let retrieved = tree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
+    let retrieved = tree.search(&start_pos, key.as_ref(), FrameAccessMode::Read)?;
 
-    assert!(matches!(retrieved, SearchResult::Found((root, Slot(0)))));
-    let cell = tree.get_content_from_result(retrieved);
+    assert!(matches!(retrieved, SearchResult::Found(_)));
+    let cell = tree.get_payload(retrieved)?;
     assert!(cell.is_some());
     let cell = cell.unwrap();
     assert_eq!(cell.as_ref().len(), kv.as_ref().len());
     assert_eq!(cell.as_ref(), kv.as_ref());
-    tree.clear_stack();
+    tree.clear_worker_stack();
     Ok(())
 }
 
@@ -390,7 +397,7 @@ fn test_multiple_overflow_chain() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
     let mut tree = create_test_btree(4096, 3, 2, comparator)?;
     let root = tree.get_root();
-    let start_pos = (root, Slot(0));
+    let start_pos = Position::start_pos(root);
 
     // Insert some data first:
     for i in 0..40 {
@@ -403,15 +410,15 @@ fn test_multiple_overflow_chain() -> io::Result<()> {
     let kv = KeyValuePair::new(&key, &data);
 
     tree.insert(root, kv.as_ref())?;
-    let retrieved = tree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
+    let retrieved = tree.search(&start_pos, key.as_ref(), FrameAccessMode::Read)?;
 
     assert!(matches!(retrieved, SearchResult::Found(_)));
-    let cell = tree.get_content_from_result(retrieved);
+    let cell = tree.get_payload(retrieved)?;
     assert!(cell.is_some());
     let cell = cell.unwrap();
     assert_eq!(cell.as_ref().len(), kv.as_ref().len());
     assert_eq!(cell.as_ref(), kv.as_ref());
-    tree.clear_stack();
+    tree.clear_worker_stack();
     Ok(())
 }
 
@@ -421,7 +428,7 @@ fn test_split_root() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
     let mut tree = create_test_btree(4096, 3, 2, comparator)?;
     let root = tree.get_root();
-    let start_pos = (root, Slot(0));
+    let start_pos = Position::start_pos(root);
 
     // Insert enough keys to force root to split
     for i in 0..50 {
@@ -433,10 +440,10 @@ fn test_split_root() -> io::Result<()> {
     for i in 0..50 {
         let key = TestKey(i * 10);
 
-        let retrieved = tree.search(&start_pos, key.as_ref(), NodeAccessMode::Read)?;
+        let retrieved = tree.search(&start_pos, key.as_ref(), FrameAccessMode::Read)?;
         // Search does not release the latch on the node so we have to do it ourselves.
-        let cell = tree.get_content_from_result(retrieved);
-        tree.clear_stack();
+        let cell = tree.get_payload(retrieved)?;
+        tree.clear_worker_stack();
         assert!(cell.is_some());
         assert_eq!(cell.unwrap().as_ref(), key.as_ref());
     }
@@ -489,7 +496,7 @@ fn test_overflow_keys() -> io::Result<()> {
     let comparator = VarlenComparator;
     let mut tree = create_test_btree(4096, 30, 4, comparator)?;
     let root = tree.get_root();
-    let start_pos = (root, Slot(0));
+    let start_pos = Position::start_pos(root);
 
     let large_key_size = 5000;
 
@@ -504,9 +511,9 @@ fn test_overflow_keys() -> io::Result<()> {
         let key_content = format!("KEY_{i:04}_") + &"X".repeat(large_key_size - 10);
         let key = TestVarLengthKey::from_string(&key_content);
 
-        let retrieved = tree.search(&start_pos, &key.as_bytes(), NodeAccessMode::Read)?;
-        let cell = tree.get_content_from_result(retrieved);
-        tree.clear_stack();
+        let retrieved = tree.search(&start_pos, &key.as_bytes(), FrameAccessMode::Read)?;
+        let cell = tree.get_payload(retrieved)?;
+        tree.clear_worker_stack();
 
         assert!(cell.is_some());
         assert_eq!(cell.unwrap().as_ref(), key.as_bytes());
@@ -520,9 +527,9 @@ fn test_overflow_keys() -> io::Result<()> {
 
     tree.insert(root, &combined_data)?;
 
-    let retrieved = tree.search(&start_pos, &huge_key.as_bytes(), NodeAccessMode::Read)?;
-    let cell = tree.get_content_from_result(retrieved);
-    tree.clear_stack();
+    let retrieved = tree.search(&start_pos, &huge_key.as_bytes(), FrameAccessMode::Read)?;
+    let cell = tree.get_payload(retrieved)?;
+    tree.clear_worker_stack();
 
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), &combined_data);

@@ -1267,7 +1267,8 @@ mod sql_analyzer_tests {
     use crate::sql::lexer::Lexer;
     use crate::sql::parser::Parser;
     use crate::types::DataTypeKind;
-    use crate::{AxmosDBConfig, IncrementalVaccum, ReadWriteVersion, TextEncoding};
+    use crate::{AxmosDBConfig, IncrementalVaccum,
+         TextEncoding};
     use serial_test::serial;
     use std::path::Path;
 
@@ -1280,7 +1281,7 @@ mod sql_analyzer_tests {
             page_size,
             cache_size: Some(capacity),
             incremental_vacuum_mode: IncrementalVaccum::Disabled,
-            read_write_version: ReadWriteVersion::Legacy,
+            min_keys: 3,
             text_encoding: TextEncoding::Utf8,
         };
 

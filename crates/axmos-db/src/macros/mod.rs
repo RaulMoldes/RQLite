@@ -1,3 +1,4 @@
+pub mod as_slice;
 pub mod id_type;
 pub mod make_shared;
 pub mod numeric;

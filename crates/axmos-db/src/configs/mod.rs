@@ -33,7 +33,7 @@ crate::repr_enum!(pub(crate) enum IncrementalVaccum: u32 {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AxmosDBConfig {
     pub(crate) incremental_vacuum_mode: IncrementalVaccum,
-    pub(crate) read_write_version: ReadWriteVersion,
+    pub(crate) min_keys: u8,
     pub(crate) text_encoding: TextEncoding,
     pub(crate) cache_size: Option<u16>,
     pub(crate) page_size: u32,
@@ -43,7 +43,7 @@ impl Default for AxmosDBConfig {
     fn default() -> Self {
         Self {
             incremental_vacuum_mode: IncrementalVaccum::Disabled,
-            read_write_version: ReadWriteVersion::Legacy,
+            min_keys: 3,
             text_encoding: TextEncoding::Utf8,
             cache_size: None,
             page_size: DEFAULT_PAGE_SIZE,
@@ -54,7 +54,7 @@ impl Default for AxmosDBConfig {
 impl AxmosDBConfig {
     fn new(
         page_size: u32,
-        read_write_version: ReadWriteVersion,
+        min_keys: u8,
         text_encoding: TextEncoding,
         incremental_vacuum_mode: IncrementalVaccum,
     ) -> Self {
@@ -63,7 +63,7 @@ impl AxmosDBConfig {
             .clamp(MIN_PAGE_SIZE, MAX_PAGE_SIZE);
         Self {
             incremental_vacuum_mode,
-            read_write_version,
+            min_keys,
             text_encoding,
             cache_size: None,
             page_size,
@@ -73,17 +73,12 @@ impl AxmosDBConfig {
     fn with_cache_size(
         page_size: u32,
         cache_size: u16,
-        read_write_version: ReadWriteVersion,
+        min_keys: u8,
         text_encoding: TextEncoding,
         incremental_vacuum_mode: IncrementalVaccum,
     ) -> Self {
         let cache_size = cache_size.next_power_of_two().max(DEFAULT_CACHE_SIZE);
-        let mut config = Self::new(
-            page_size,
-            read_write_version,
-            text_encoding,
-            incremental_vacuum_mode,
-        );
+        let mut config = Self::new(page_size, min_keys, text_encoding, incremental_vacuum_mode);
         config.cache_size = Some(cache_size);
         config
     }
