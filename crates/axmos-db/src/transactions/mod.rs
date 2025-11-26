@@ -1,5 +1,8 @@
 use crate::{
     database::errors::TransactionError,
+
+    // TODO: MUST UPDATE THE TRANSACTION CONTROLLER TO WORK WITH THE TRANSACTION WORKER.
+    transactions::worker::Worker,
     types::{PageId, TxId},
 };
 
@@ -15,8 +18,7 @@ use std::{
 
 mod graph;
 mod mem_table;
-mod pool;
-
+pub mod worker;
 use graph::{WFGCycle, WaitForGraph};
 use mem_table::{MemTable, TransactionTable};
 

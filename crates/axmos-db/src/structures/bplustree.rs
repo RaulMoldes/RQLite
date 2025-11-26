@@ -1,17 +1,21 @@
-use crate::CELL_ALIGNMENT;
-use crate::io::frames::{FrameAccessMode, Position};
-use crate::io::pager::{Transaction, Worker};
-use crate::storage::cell::CELL_HEADER_SIZE;
-use crate::storage::cell::{Cell, Slot};
-use crate::storage::page::{BTREE_PAGE_HEADER_SIZE, BtreePage, OverflowPage, Page};
+use crate::{
+    CELL_ALIGNMENT,
+    io::frames::{FrameAccessMode, Position},
+    storage::{
+        cell::{CELL_HEADER_SIZE, Cell, Slot},
+        page::{BTREE_PAGE_HEADER_SIZE, BtreePage, OverflowPage, Page},
+    },
+    transactions::worker::{TransactionWorker, Worker},
+    types::{PAGE_ZERO, PageId, VarInt},
+};
 
-use crate::types::{PAGE_ZERO, PageId, VarInt};
-use std::cell::{Ref,  RefMut};
-use std::cmp::Ordering;
-use std::cmp::min;
-use std::collections::{BinaryHeap, HashSet, VecDeque};
-use std::io::{self, Error as IoError, ErrorKind};
-use std::marker::PhantomData;
+use std::{
+    cell::{Ref, RefMut},
+    cmp::{Ordering, Reverse, min},
+    collections::{BinaryHeap, HashSet, VecDeque},
+    io::{self, Error as IoError, ErrorKind},
+    marker::PhantomData,
+};
 
 #[derive(Debug)]
 pub(crate) enum SearchResult {
@@ -248,17 +252,20 @@ impl<Cmp> BPlusTree<Cmp>
 where
     Cmp: Comparator,
 {
-
-
-
-     pub(crate) fn new(
+    pub(crate) fn new(
         worker: Worker,
         min_keys: usize,
         num_siblings_per_side: usize,
         comparator: Cmp,
     ) -> io::Result<Self> {
         let root = worker.borrow_mut().alloc_page::<BtreePage>()?;
-        Ok(Self::from_existent(root, worker, min_keys, num_siblings_per_side, comparator))
+        Ok(Self::from_existent(
+            root,
+            worker,
+            min_keys,
+            num_siblings_per_side,
+            comparator,
+        ))
     }
 
     pub(crate) fn from_existent(
@@ -298,14 +305,13 @@ where
         self.root
     }
 
-    fn worker(&self) -> Ref<'_, Transaction> {
+    fn worker(&self) -> Ref<'_, TransactionWorker> {
         self.worker.borrow()
     }
 
-    fn worker_mut(&self) -> RefMut<'_, Transaction> {
+    fn worker_mut(&self) -> RefMut<'_, TransactionWorker> {
         self.worker.borrow_mut()
     }
-
 
     pub fn clear_worker_stack(&self) {
         self.worker_mut().clear_stack();
@@ -630,12 +636,12 @@ where
         let cell = self.build_cell(free_space, data)?;
 
         // Replace the contents of the page.
-        let old_cell =
-            self.worker_mut()
-                .write_page::<BtreePage, _, _>(page_id, |btreepage| {
-                    let index = btreepage.max_slot_index();
-                    btreepage.replace(slot, cell)
-                })?;
+        let old_cell = self
+            .worker_mut()
+            .write_page::<BtreePage, _, _>(page_id, |btreepage| {
+                let index = btreepage.max_slot_index();
+                btreepage.replace(slot, cell)
+            })?;
 
         // Deallocate the cell
         self.free_cell(old_cell)?;
@@ -677,10 +683,9 @@ where
 
         match search_result {
             SearchResult::Found(pos) => self.update_cell(pos, data),
-            SearchResult::NotFound(_) => Err(IoError::new(
-                ErrorKind::NotFound,
-                "The key does not exist.",
-            )),
+            SearchResult::NotFound(_) => {
+                Err(IoError::new(ErrorKind::NotFound, "The key does not exist."))
+            }
         }?;
 
         // Cleanup traversal here.
@@ -847,8 +852,7 @@ where
 
         // Release the child latch and deallocate the page
         self.worker_mut().release_latch(child_page);
-        self.worker_mut()
-            .dealloc_page::<BtreePage>(child_page)?;
+        self.worker_mut().dealloc_page::<BtreePage>(child_page)?;
 
         // Refill the old root.
         self.worker_mut()
@@ -903,13 +907,12 @@ where
         let was_leaf = !old_right_child.is_valid();
         let page_size = self.worker().get_page_size();
 
-        let mut cells =
-            self.worker_mut()
-                .write_page::<BtreePage, _, _>(self.root, |node| {
-                    node.metadata_mut().free_space_ptr =
-                        (page_size - BTREE_PAGE_HEADER_SIZE) as u32;
-                    node.drain(..).collect::<Vec<_>>()
-                })?;
+        let mut cells = self
+            .worker_mut()
+            .write_page::<BtreePage, _, _>(self.root, |node| {
+                node.metadata_mut().free_space_ptr = (page_size - BTREE_PAGE_HEADER_SIZE) as u32;
+                node.drain(..).collect::<Vec<_>>()
+            })?;
 
         let (left_cells, right_cells) = self.split_cells(&mut cells)?;
 
@@ -1129,11 +1132,11 @@ where
                     .acquire::<BtreePage>(next_sibling, FrameAccessMode::Write)?;
 
                 // Obtain the first child
-                let first_child_next =
-                    self.worker()
-                        .read_page::<BtreePage, _, _>(next_sibling, |node| {
-                            node.cell(Slot(0)).metadata().left_child()
-                        })?;
+                let first_child_next = self
+                    .worker()
+                    .read_page::<BtreePage, _, _>(next_sibling, |node| {
+                        node.cell(Slot(0)).metadata().left_child()
+                    })?;
 
                 self.worker_mut()
                     .acquire::<BtreePage>(first_child_next, FrameAccessMode::Write)?;
@@ -1189,8 +1192,7 @@ where
 
             // Iterate backwards, moving cells towards the right.
             for i in (1..=(total_size_in_each_page.len() - 1)).rev() {
-                while total_size_in_each_page[i]
-                    < BtreePage::underflow_threshold(page_size) as u16
+                while total_size_in_each_page[i] < BtreePage::underflow_threshold(page_size) as u16
                 {
                     number_of_cells_per_page[i] += 1;
                     total_size_in_each_page[i] += &cells[divider_cell].storage_size();
@@ -1203,9 +1205,7 @@ where
 
             // Second page has more data than the first one, make a little
             // adjustment to keep it left biased.
-            if total_size_in_each_page[0]
-                < BtreePage::underflow_threshold(page_size) as u16
-            {
+            if total_size_in_each_page[0] < BtreePage::underflow_threshold(page_size) as u16 {
                 number_of_cells_per_page[0] += 1;
                 number_of_cells_per_page[1] -= 1;
             };
@@ -1242,23 +1242,22 @@ where
             let slot = sibling.slot;
             let page = sibling.pointer;
 
-            self.worker()
-                .read_page::<BtreePage, _, _>(page, |node| {
-                    debug_assert!(
-                        node.metadata().num_slots == 0,
-                        "About to deallocated page: {page} is not empty"
-                    );
-                })?;
+            self.worker().read_page::<BtreePage, _, _>(page, |node| {
+                debug_assert!(
+                    node.metadata().num_slots == 0,
+                    "About to deallocated page: {page} is not empty"
+                );
+            })?;
 
             self.worker_mut().release_latch(page);
             self.worker_mut().dealloc_page::<BtreePage>(page)?;
         }
 
         // Put pages in ascending order to favor sequential IO where possible.
-        BinaryHeap::from_iter(siblings.iter().map(|s| std::cmp::Reverse(s.pointer)))
+        BinaryHeap::from_iter(siblings.iter().map(|s| Reverse(s.pointer)))
             .iter()
             .enumerate()
-            .for_each(|(i, std::cmp::Reverse(page))| siblings[i].pointer = *page);
+            .for_each(|(i, Reverse(page))| siblings[i].pointer = *page);
 
         // Fix the last child pointer.
         let last_sibling = siblings[siblings.len() - 1];
@@ -1674,12 +1673,10 @@ where
                                     node.remove(node.max_slot_index())
                                 })?;
 
-                            self.worker_mut().write_page::<BtreePage, _, _>(
-                                page_id,
-                                |node| {
+                            self.worker_mut()
+                                .write_page::<BtreePage, _, _>(page_id, |node| {
                                     node.insert(Slot(0), removed_cell);
-                                },
-                            )?;
+                                })?;
 
                             let separator_index = sibling_left.slot;
                             self.fix_single_pointer(
@@ -1729,12 +1726,10 @@ where
         root: PageId,
         buf: &mut Vec<(PageId, BtreePage)>,
     ) -> io::Result<()> {
-        let children = self
-            .worker()
-            .read_page::<BtreePage, _, _>(root, |node| {
-                buf.push((root, node.clone()));
-                node.iter_children().collect::<Vec<_>>()
-            })?;
+        let children = self.worker().read_page::<BtreePage, _, _>(root, |node| {
+            buf.push((root, node.clone()));
+            node.iter_children().collect::<Vec<_>>()
+        })?;
 
         for page in children {
             self.read_into_mem(page, buf)?;
@@ -1848,7 +1843,6 @@ where
             let (last_child, last_slot) =
                 self.worker()
                     .read_page::<BtreePage, _, _>(current, |btree_page| {
-
                         (
                             btree_page.metadata().right_child,
                             (btree_page.max_slot_index() - 1usize),
@@ -1984,18 +1978,18 @@ where
                     };
 
                     if self.current_slot < num_slots {
-                        let payload = self.tree.worker().try_read_page::<BtreePage, _, _>(
-                            page,
-                            |btree| {
-                                let cell = btree.cell(Slot(self.current_slot as u16));
+                        let payload =
+                            self.tree
+                                .worker()
+                                .try_read_page::<BtreePage, _, _>(page, |btree| {
+                                    let cell = btree.cell(Slot(self.current_slot as u16));
 
-                                if cell.metadata().is_overflow() {
-                                    self.tree.reassemble_payload(cell, usize::MAX)
-                                } else {
-                                    Ok(Payload::Boxed(cell.used().to_vec().into_boxed_slice()))
-                                }
-                            },
-                        );
+                                    if cell.metadata().is_overflow() {
+                                        self.tree.reassemble_payload(cell, usize::MAX)
+                                    } else {
+                                        Ok(Payload::Boxed(cell.used().to_vec().into_boxed_slice()))
+                                    }
+                                });
 
                         self.current_slot += 1;
                         Some(payload)
@@ -2009,18 +2003,18 @@ where
                 }
                 IterDirection::Backward => {
                     if self.current_slot >= 0 {
-                        let payload = self.tree.worker().try_read_page::<BtreePage, _, _>(
-                            page,
-                            |btree| {
-                                let cell = btree.cell(Slot(self.current_slot as u16));
+                        let payload =
+                            self.tree
+                                .worker()
+                                .try_read_page::<BtreePage, _, _>(page, |btree| {
+                                    let cell = btree.cell(Slot(self.current_slot as u16));
 
-                                if cell.metadata().is_overflow() {
-                                    self.tree.reassemble_payload(cell, usize::MAX)
-                                } else {
-                                    Ok(Payload::Boxed(cell.used().to_vec().into_boxed_slice()))
-                                }
-                            },
-                        );
+                                    if cell.metadata().is_overflow() {
+                                        self.tree.reassemble_payload(cell, usize::MAX)
+                                    } else {
+                                        Ok(Payload::Boxed(cell.used().to_vec().into_boxed_slice()))
+                                    }
+                                });
 
                         self.current_slot -= 1;
                         Some(payload)

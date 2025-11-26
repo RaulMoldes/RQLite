@@ -4,8 +4,10 @@ use std::{
     num::{ParseFloatError, ParseIntError},
 };
 
-use crate::sql::lexer::Token;
-use crate::types::{DataTypeKind, TxId};
+use crate::{
+    sql::lexer::Token,
+    types::{DataTypeKind, TxId},
+};
 
 #[derive(Debug)]
 pub enum ParsingError {

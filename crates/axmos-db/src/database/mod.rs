@@ -2,28 +2,28 @@ pub mod errors;
 pub mod schema;
 
 use std::{
+    cell::{Ref, RefMut},
     collections::HashMap,
     io::{self, Error as IoError, ErrorKind},
-    cell::{Ref, RefMut}
 };
 
 use crate::{
-    database::schema::{Constraint, Index, Table},
-    io::pager::{Transaction, Worker},
-    storage::tuple::{OwnedTuple, Tuple, TupleRef},
-    structures::bplustree::NumericComparator,
+    database::schema::{Column, Constraint, Index, Relation, Schema, Table},
+    io::{frames::FrameAccessMode, pager::SharedPager},
+    storage::{
+        page::BtreePage,
+        tuple::{OwnedTuple, Tuple, TupleRef},
+    },
+    structures::bplustree::{
+        BPlusTree, DynComparator, FixedSizeBytesComparator, NumericComparator, SearchResult,
+        VarlenComparator,
+    },
+    transactions::worker::{TransactionWorker, Worker},
+    types::{
+        Blob, DataType, DataTypeKind, OId, PAGE_ZERO, PageId, UInt64, get_next_object,
+        initialize_atomics,
+    },
 };
-
-use crate::io::frames::FrameAccessMode;
-use crate::io::pager::SharedPager;
-use crate::storage::page::BtreePage;
-use crate::structures::bplustree::{
-    BPlusTree, DynComparator, FixedSizeBytesComparator, SearchResult, VarlenComparator,
-};
-
-use crate::types::initialize_atomics;
-use crate::types::{Blob, DataType, DataTypeKind, OId, PAGE_ZERO, PageId, UInt64, get_next_object};
-use schema::{Column, Relation, Schema};
 
 pub const META_TABLE: &str = "rqcatalog";
 pub const META_INDEX: &str = "rqindex";
@@ -86,12 +86,11 @@ impl Database {
         Worker::new(self.pager())
     }
 
-    pub fn main_worker(&self) -> Ref<'_, Transaction> {
+    pub fn main_worker(&self) -> Ref<'_, TransactionWorker> {
         self.main_worker.borrow()
     }
 
-
-    pub fn main_worker_mut(&self) -> RefMut<'_, Transaction> {
+    pub fn main_worker_mut(&self) -> RefMut<'_, TransactionWorker> {
         self.main_worker.borrow_mut()
     }
 
@@ -137,14 +136,15 @@ impl Database {
         initialize_atomics();
 
         let (meta_tbl_root, meta_index_root) = {
-                let mut worker = self.main_worker_mut();
-                (worker.alloc_page::<BtreePage>()?, worker.alloc_page::<BtreePage>()?)
+            let mut worker = self.main_worker_mut();
+            (
+                worker.alloc_page::<BtreePage>()?,
+                worker.alloc_page::<BtreePage>()?,
+            )
         };
 
         let meta_table = self.init_meta_table(meta_tbl_root)?;
         let meta_idx = self.init_meta_index(meta_index_root)?;
-
-
 
         self.create_relation(Relation::TableRel(meta_table))?;
         self.create_relation(Relation::IndexRel(meta_idx))?;
@@ -204,7 +204,6 @@ impl Database {
         let tuple = obj.into_boxed_tuple()?;
         self.main_worker_mut().clear_stack();
 
-
         // Will replace existing relation if it exists.
         btree.upsert(self.meta_table, tuple.as_ref())?;
 
@@ -232,8 +231,11 @@ impl Database {
         };
 
         let mut meta_table = self.table_btree(self.meta_table, self.main_worker.clone())?;
-        let mut meta_index =
-            self.index_btree(self.meta_index, DataTypeKind::Text, self.main_worker.clone())?;
+        let mut meta_index = self.index_btree(
+            self.meta_index,
+            DataTypeKind::Text,
+            self.main_worker.clone(),
+        )?;
 
         let blob = Blob::from(rel.name());
         self.main_worker_mut().clear_stack();
@@ -245,7 +247,11 @@ impl Database {
     }
 
     pub fn index(&mut self, obj: &Relation) -> io::Result<()> {
-        let mut btree = self.index_btree(self.meta_index, DataTypeKind::Text, self.main_worker.clone())?;
+        let mut btree = self.index_btree(
+            self.meta_index,
+            DataTypeKind::Text,
+            self.main_worker.clone(),
+        )?;
 
         let schema = meta_idx_schema();
         let tuple = Tuple::new(
@@ -264,30 +270,30 @@ impl Database {
     }
 
     pub fn lookup(&self, name: &str) -> io::Result<SearchResult> {
-        let meta_idx = self.index_btree(self.meta_index, DataTypeKind::Text, self.main_worker.clone())?;
+        let meta_idx = self.index_btree(
+            self.meta_index,
+            DataTypeKind::Text,
+            self.main_worker.clone(),
+        )?;
         let blob = Blob::from(name);
         meta_idx.search_from_root(blob.as_ref(), FrameAccessMode::Read)
     }
 
-
-
-
     pub fn relation(&self, name: &str) -> io::Result<Relation> {
-        let meta_idx = self.index_btree(self.meta_index, DataTypeKind::Text, self.main_worker.clone())?;
+        let meta_idx = self.index_btree(
+            self.meta_index,
+            DataTypeKind::Text,
+            self.main_worker.clone(),
+        )?;
 
         let blob = Blob::from(name);
 
         let result = meta_idx.search_from_root(blob.as_ref(), FrameAccessMode::Read)?;
 
         let payload = match result {
-            SearchResult::Found(_) => {
-                meta_idx.get_payload(result)?.ok_or_else(|| {
-                    IoError::new(
-                        ErrorKind::NotFound,
-                        "Object not found in meta table",
-                    )
-                })?
-            }
+            SearchResult::Found(_) => meta_idx.get_payload(result)?.ok_or_else(|| {
+                IoError::new(ErrorKind::NotFound, "Object not found in meta table")
+            })?,
             SearchResult::NotFound(_) => {
                 return Err(IoError::new(
                     ErrorKind::NotFound,
@@ -319,13 +325,10 @@ impl Database {
         let meta_table = self.table_btree(self.meta_table, self.main_worker.clone())?;
         let bytes: &[u8] = id.as_ref();
         let result = meta_table.search_from_root(id.as_ref(), FrameAccessMode::Read)?;
-        let payload = match  result {
-            SearchResult::Found(_) =>  meta_table.get_payload(result)?.ok_or_else(|| {
-                    IoError::new(
-                        ErrorKind::NotFound,
-                        "Object not found in meta table",
-                    )
-                })?,
+        let payload = match result {
+            SearchResult::Found(_) => meta_table.get_payload(result)?.ok_or_else(|| {
+                IoError::new(ErrorKind::NotFound, "Object not found in meta table")
+            })?,
             SearchResult::NotFound(_) => {
                 return Err(IoError::new(
                     ErrorKind::NotFound,
@@ -351,15 +354,11 @@ mod db_tests {
 
     use crate::types::{DataTypeKind, PAGE_ZERO};
 
-    use crate::{AxmosDBConfig, IncrementalVaccum,  TextEncoding};
+    use crate::{AxmosDBConfig, IncrementalVaccum, TextEncoding};
     use serial_test::serial;
     use std::path::Path;
 
-    fn create_db(
-        page_size: u32,
-        capacity: u16,
-        path: impl AsRef<Path>,
-    ) -> io::Result<Database> {
+    fn create_db(page_size: u32, capacity: u16, path: impl AsRef<Path>) -> io::Result<Database> {
         let config = AxmosDBConfig {
             page_size,
             cache_size: Some(capacity),

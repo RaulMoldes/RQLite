@@ -8,7 +8,7 @@ pub mod frames;
 
 //pub mod journal;
 pub mod pager;
-mod wal;
+pub mod wal;
 
 use crate::types::{DataType, DataTypeKind, VarInt, reinterpret_cast, varint::MAX_VARINT_LEN};
 use std::alloc::{Layout, alloc_zeroed};

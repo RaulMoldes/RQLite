@@ -1,27 +1,27 @@
 mod macros;
 
-use crate::io::{
-    frames::{
-        FrameAccessMode,
-        Position}, pager::{Pager, SharedPager, Worker}
-};
-
-
-use crate::structures::bplustree::{
-    BPlusTree, Comparator, FixedSizeBytesComparator,  NumericComparator,
-    SearchResult, VarlenComparator,
-};
-use crate::structures::kvp::KeyValuePair;
-use crate::types::VarInt;
 use crate::{
-    AxmosDBConfig, IncrementalVaccum, TextEncoding, assert_cmp, delete_test,
-    insert_tests,
+    AxmosDBConfig, IncrementalVaccum, TextEncoding, assert_cmp, delete_test, insert_tests,
+    io::{
+        frames::{FrameAccessMode, Position},
+        pager::{Pager, SharedPager},
+    },
+    structures::{
+        bplustree::{
+            BPlusTree, Comparator, FixedSizeBytesComparator, NumericComparator, SearchResult,
+            VarlenComparator,
+        },
+        kvp::KeyValuePair,
+    },
+    transactions::worker::Worker,
+    types::VarInt,
 };
+
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use serial_test::serial;
-use std::cmp::Ordering;
-use std::io;
+use std::{cmp::Ordering, io};
+
 use tempfile::tempdir;
 
 // Test key type
@@ -73,12 +73,7 @@ fn create_test_btree<Cmp: Comparator>(
 
     let shared_pager = SharedPager::from(Pager::from_config(config, &path)?);
     let worker = Worker::new(shared_pager);
-    BPlusTree::new(
-        worker,
-        min_keys,
-        2,
-        comparator,
-    )
+    BPlusTree::new(worker, min_keys, 2, comparator)
 }
 
 pub fn gen_random_bytes(size: usize, seed: u64) -> Vec<u8> {

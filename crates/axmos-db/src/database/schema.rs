@@ -1,21 +1,24 @@
-use crate::storage::{
-    tuple::{OwnedTuple, Tuple, TupleRef},
+use crate::{
+    TextEncoding,
+    database::meta_table_schema,
+    io::{
+        AsBytes, read_string_unchecked, read_type_from_buf, read_variable_length,
+        write_string_unchecked,
+    },
+    repr_enum,
+    storage::tuple::{OwnedTuple, Tuple, TupleRef},
+    structures::bplustree::Comparator,
+    types::{
+        Blob, DataType, DataTypeKind, DataTypeRef, OId, PAGE_ZERO, PageId, UInt8, UInt64, VarInt,
+        varint::MAX_VARINT_LEN,
+    },
 };
-use crate::structures::bplustree::Comparator;
-use crate::types::{
-    Blob, DataType, DataTypeKind, DataTypeRef, OId, PAGE_ZERO, PageId, UInt8, UInt64, VarInt,
-    varint::MAX_VARINT_LEN,
-};
-use std::io::{Read, Seek, Write};
 
-use super::meta_table_schema;
-use crate::io::{
-    AsBytes, read_string_unchecked, read_type_from_buf, read_variable_length,
-    write_string_unchecked,
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    io::{Read, Seek, Write},
 };
-use crate::{TextEncoding, repr_enum};
-use std::cmp::Ordering;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Schema {
@@ -671,8 +674,6 @@ impl Relation {
     pub fn is_allocated(&self) -> bool {
         self.root().is_valid()
     }
-
-
 
     pub fn into_boxed_tuple(self) -> std::io::Result<OwnedTuple> {
         let root_page = if self.root() != PAGE_ZERO {

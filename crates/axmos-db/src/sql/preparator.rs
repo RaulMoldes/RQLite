@@ -437,7 +437,7 @@ mod sql_prepare_tests {
     use crate::sql::preparator::Preparator;
     use crate::types::DataTypeKind;
 
-    use crate::{AxmosDBConfig, IncrementalVaccum,  TextEncoding};
+    use crate::{AxmosDBConfig, IncrementalVaccum, TextEncoding};
     use serial_test::serial;
     use std::path::Path;
 

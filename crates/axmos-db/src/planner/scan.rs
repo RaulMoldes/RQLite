@@ -18,14 +18,11 @@ pub(crate) enum Scan {
 
 impl ExecutionPlanStep for Scan {
     fn exec(&mut self, db: &mut Database) -> std::io::Result<()> {
-
-            // todo: implement scans
-            Ok(())
-
+        // todo: implement scans
+        Ok(())
     }
 
     fn take_result_set(&mut self) -> Option<ResultSet> {
-       None
+        None
     }
-
 }
