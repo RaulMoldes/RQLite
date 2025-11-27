@@ -1,7 +1,7 @@
 use std::{
+    error::Error,
     fmt::{Display, Formatter, Result as FmtResult},
     io::Error as IoError,
-    error::Error,
     num::{ParseFloatError, ParseIntError},
 };
 

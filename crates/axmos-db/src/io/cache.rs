@@ -1,13 +1,8 @@
-use crate::{
-    io::frames::MemFrame,
-    storage::page::MemPage,
-    types::PageId
-};
-
+use crate::{io::frames::MemFrame, storage::page::MemPage, types::PageId};
 
 use std::{
     clone::Clone,
-    collections::{HashMap, VecDeque}
+    collections::{HashMap, VecDeque},
 };
 
 #[derive(Debug, Default)]

@@ -5,10 +5,15 @@ use std::{
     cell::{Ref, RefMut},
     collections::HashMap,
     io::{self, Error as IoError, ErrorKind},
+    sync::mpsc::Sender,
+    thread,
 };
 
 use crate::{
-    database::schema::{Column, Constraint, Index, Relation, Schema, Table},
+    database::{
+        errors::TransactionError,
+        schema::{Column, Constraint, Index, Relation, Schema, Table},
+    },
     io::{frames::FrameAccessMode, pager::SharedPager},
     storage::{
         page::BtreePage,
@@ -18,7 +23,10 @@ use crate::{
         BPlusTree, DynComparator, FixedSizeBytesComparator, NumericComparator, SearchResult,
         VarlenComparator,
     },
-    transactions::worker::{TransactionWorker, Worker},
+    transactions::{
+        LockRequest, TransactionController, TransactionManager,
+        worker::{TransactionWorker, Worker},
+    },
     types::{
         Blob, DataType, DataTypeKind, ObjectId, PAGE_ZERO, PageId, UInt64, get_next_object,
         initialize_atomics,
@@ -62,6 +70,7 @@ pub fn meta_table_schema() -> Schema {
 
 pub struct Database {
     pager: SharedPager,
+    controller: TransactionController,
     main_worker: Worker,
     meta_table: PageId,
     meta_index: PageId,
@@ -72,8 +81,10 @@ pub struct Database {
 impl Database {
     pub fn new(pager: SharedPager, min_keys: usize, siblings_per_side: usize) -> Self {
         let main_worker = Worker::new(pager.clone());
+        let controller = TransactionController::new();
         Self {
             pager,
+            controller,
             main_worker,
             meta_table: PAGE_ZERO,
             meta_index: PAGE_ZERO,
@@ -131,9 +142,23 @@ impl Database {
         Ok(())
     }
 
+    pub fn run_transaction_async<F, T>(
+        &self,
+        stmt: F,
+    ) -> thread::JoinHandle<Result<T, TransactionError>>
+    where
+        F: FnOnce(Worker, &TransactionManager, Sender<LockRequest>) -> Result<T, TransactionError>
+            + Send
+            + 'static,
+        T: Send + 'static,
+    {
+        self.controller.run_transaction_async(self.pager(), stmt)
+    }
+
     // Lazy initialization.
     pub fn init(&mut self) -> io::Result<()> {
         initialize_atomics();
+        self.controller.spawn();
 
         let (meta_tbl_root, meta_index_root) = {
             let mut worker = self.main_worker_mut();
@@ -192,8 +217,6 @@ impl Database {
     }
 
     pub fn store_relation(&mut self, mut obj: Relation) -> io::Result<ObjectId> {
-
-
         if !obj.is_allocated() {
             let id = self.main_worker_mut().alloc_page::<BtreePage>()?;
             obj.set_root(id);
@@ -380,7 +403,12 @@ mod db_tests {
         users_schema.add_column("age", DataTypeKind::Int, false, false, true);
         users_schema.add_column("created_at", DataTypeKind::DateTime, false, false, false);
 
+        // Needed to put this here in order to perform the multiworker tests. Will find a better way to set this on the schema.
+        users_schema.set_num_keys(1);
         db.create_table("users", users_schema)?;
+
+
+
 
         let mut posts_schema = Schema::new();
         posts_schema.add_column("id", DataTypeKind::Int, true, true, false);
@@ -411,5 +439,214 @@ mod db_tests {
 
         let meta_index_rel = db.relation(META_INDEX);
         assert!(meta_index_rel.is_ok(), "Should find meta index");
+    }
+
+    #[test]
+    #[serial]
+    fn test_multiworker_1() {
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 100, &path).unwrap();
+
+        // Retrieve the users table relation to get root page and schema
+        let users_rel = db.relation("users").unwrap();
+        let users_root = users_rel.root();
+        let users_schema = users_rel.schema().clone();
+
+       // First transaction inserts a new tuple in the users table
+        let schema_for_insert = users_schema.clone();
+
+        let insert_handle = db.run_transaction_async(move |worker, _tm, _lock_tx| {
+            // Create a B+Tree handle for the users table
+            let mut btree = BPlusTree::from_existent(
+                users_root,
+                worker.clone(),
+                3,                                     // min_keys
+                2,                                     // siblings_per_side
+                NumericComparator::with_type::<u64>(), // users.id is Int (i32)
+            );
+
+            // Create a new user tuple matching the users schema:
+            // Keys: id (Int)
+            // Values: name (Text), email (Text), age (Int, nullable), created_at (DateTime)
+            let tuple = Tuple::new(
+                &[
+                    DataType::Int(1.into()),                    // id (key)
+                    DataType::Text("Alice".into()),             // name
+                    DataType::Text("alice@example.com".into()), // email
+                    DataType::Int(25.into()),                   // age
+                    DataType::DateTime(1700000000u64.into()),   // created_at
+                ],
+                &schema_for_insert,
+            )
+            .map_err(|e| TransactionError::Other(e.to_string()))?;
+
+            // Verify initial version is 0
+            assert_eq!(tuple.version(), 0);
+
+            // Serialize the tuple to bytes
+            let buffer: OwnedTuple = tuple.into();
+
+            dbg!(buffer.as_ref());
+
+            // Insert into the B+Tree
+            btree
+                .insert(users_root, buffer.as_ref())
+                .map_err(|e| TransactionError::Other(e.to_string()))?;
+
+            Ok(())
+        });
+
+        // Wait for insert transaction to complete
+        insert_handle
+            .join()
+            .unwrap()
+            .expect("Insert transaction failed");
+
+        // Transaction 2 reads and modifies the tuple
+        let schema_for_update = users_schema.clone();
+
+        let update_handle = db.run_transaction_async(move |worker, _tm, _lock_tx| {
+            let mut btree = BPlusTree::from_existent(
+                users_root,
+                worker.clone(),
+                3,
+                2,
+                NumericComparator::with_type::<i32>(),
+            );
+
+
+            std::fs::write("users.json", btree.json()?)?;
+            btree.clear_worker_stack();
+
+            // Search for the user with id = 1
+            let search_key = DataType::Int(1.into());
+            let search_result = btree
+                .search_from_root(search_key.as_ref(), FrameAccessMode::Write)
+                .map_err(|e| TransactionError::Other(e.to_string()))?;
+
+            // Get the payload from the search result
+            let payload = btree
+                .get_payload(search_result)
+                .map_err(|e| TransactionError::Other(e.to_string()))?
+                .ok_or_else(|| TransactionError::Other("User not found".into()))?;
+
+            // Deserialize into a mutable Tuple
+            let mut tuple = Tuple::try_from((payload.as_ref(), &schema_for_update))
+                .map_err(|e| TransactionError::Other(e.to_string()))?;
+
+            // Verify we're at version 0
+            assert_eq!(tuple.version(), 0);
+
+            // Add a new version with updated values:
+            // Update name (index 0 in values) from "Alice" to "Alice Smith"
+            // Update age (index 2 in values) from 25 to 26
+            tuple
+                .add_version(vec![
+                    (0, DataType::Text("Alice Smith".into())), // name updated
+                    (2, DataType::Int(26.into())),             // age updated (birthday!)
+                ])
+                .map_err(|e| TransactionError::Other(e.to_string()))?;
+
+            // Verify version incremented to 1
+            assert_eq!(tuple.version(), 1);
+
+            // Serialize the updated tuple
+            let updated_buffer: OwnedTuple = tuple.into();
+
+            // Clear the worker's latch stack before the next operation
+            worker.borrow_mut().clear_stack();
+
+            // Update the tuple in the B+Tree (upsert replaces existing)
+            btree
+                .upsert(users_root, updated_buffer.as_ref())
+                .map_err(|e| TransactionError::Other(e.to_string()))?;
+
+            Ok(())
+        });
+
+        // Wait for update transaction to complete
+        update_handle
+            .join()
+            .unwrap()
+            .expect("Update transaction failed");
+
+        // Transaction 3 verifies the changes have been properly persisted
+        let schema_for_verify = users_schema.clone();
+
+        let verify_handle = db.run_transaction_async(move |worker, _tm, _lock_tx| {
+            let btree = BPlusTree::from_existent(
+                users_root,
+                worker.clone(),
+                3,
+                2,
+                NumericComparator::with_type::<i32>(),
+            );
+
+            // Search for the user again
+            let search_key = DataType::Int(1.into());
+            let search_result = btree
+                .search_from_root(search_key.as_ref(), FrameAccessMode::Read)
+                .map_err(|e| TransactionError::Other(e.to_string()))?;
+
+            let payload = btree
+                .get_payload(search_result)
+                .map_err(|e| TransactionError::Other(e.to_string()))?
+                .ok_or_else(|| TransactionError::Other("User not found".into()))?;
+
+            // Verify the version matches the current (latest) version
+            let tuple_v1 = TupleRef::read(payload.as_ref(), &schema_for_verify)
+                .map_err(|e| TransactionError::Other(e.to_string()))?;
+
+            assert_eq!(tuple_v1.version(), 1, "Should be at version 1");
+
+            // Check updated values
+            let name_v1 = tuple_v1
+                .value(0)
+                .map_err(|e| TransactionError::Other(e.to_string()))?
+                .to_owned();
+            assert_eq!(name_v1, DataType::Text("Alice Smith".into()));
+
+            let age_v1 = tuple_v1
+                .value(2)
+                .map_err(|e| TransactionError::Other(e.to_string()))?
+                .to_owned();
+            assert_eq!(age_v1, DataType::Int(26.into()));
+
+            // Email should remain unchanged
+            let email_v1 = tuple_v1
+                .value(1)
+                .map_err(|e| TransactionError::Other(e.to_string()))?
+                .to_owned();
+            assert_eq!(email_v1, DataType::Text("alice@example.com".into()));
+
+            // Verify we can time travel to version 0
+            let tuple_v0 = TupleRef::read_version(payload.as_ref(), &schema_for_verify, 0)
+                .map_err(|e| TransactionError::Other(e.to_string()))?;
+
+            assert_eq!(tuple_v0.version(), 0, "Should read version 0");
+
+            // Check original values are preserved in version 0
+            let name_v0 = tuple_v0
+                .value(0)
+                .map_err(|e| TransactionError::Other(e.to_string()))?
+                .to_owned();
+            assert_eq!(name_v0, DataType::Text("Alice".into()));
+
+            let age_v0 = tuple_v0
+                .value(2)
+                .map_err(|e| TransactionError::Other(e.to_string()))?
+                .to_owned();
+            assert_eq!(age_v0, DataType::Int(25.into()));
+
+            Ok(())
+        });
+
+        // Wait for verify transaction to complete
+        verify_handle
+            .join()
+            .unwrap()
+            .expect("Verify transaction failed");
     }
 }

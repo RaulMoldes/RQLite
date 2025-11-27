@@ -1,5 +1,6 @@
 use crate::{
-     ObjectId, UInt64, database::errors::TransactionError, io::pager::SharedPager, transactions::worker::Worker, types::TransactionId
+    ObjectId, UInt64, database::errors::TransactionError, io::pager::SharedPager,
+    transactions::worker::Worker, types::TransactionId,
 };
 
 use std::{
@@ -223,7 +224,7 @@ impl TupleHandle {
 /// [LOCK MANAGER]: loop that waits for [LockRequest] and sends [LockResponse] back to the [STM]. Might also send [ControlMessage]  to a control loop to indicate when a deadlock has happened and a transaction needs to kill its thread in order to resolve it.
 ///
 /// [TRANSACTION CONTROLLER]: Executes the listener of the control loop (aka listens for [ControlMessage] from the LOCK MANAGER) and indicates the TM that a tx needs to be aborted in order for others to make progress when necessary.
-struct LockManager;
+pub struct LockManager;
 impl LockManager {
     /// spawn the Lock Manager on its private thread
     /// lock_rx: LockRequest receiver channel
@@ -237,12 +238,7 @@ impl LockManager {
                 // Waits for messages with a timeout to execute deadlock detection periodically.
                 match lock_rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(msg) => match msg {
-                        LockRequest::Acquire {
-                            tx,
-                            id,
-                            typ,
-                            reply,
-                        } => {
+                        LockRequest::Acquire { tx, id, typ, reply } => {
                             let entry = locks.entry(id).or_insert_with(|| LockEntry::new(id));
 
                             if entry.can_grant(typ, tx) {
@@ -629,13 +625,13 @@ impl Clone for TransactionManager {
 }
 
 // The transaction controller is just a tiny loop that non-blockingly checks  for messages from the lock manager.
-struct TransactionController {
+pub struct TransactionController {
     lock_sender: Sender<LockRequest>,
     manager: TransactionManager,
 }
 
 impl TransactionController {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let (control_tx, control_rx) = channel::<ControlMessage>();
         let (lock_tx, lock_rx) = channel::<LockRequest>();
         let manager = TransactionManager::new(control_rx);
