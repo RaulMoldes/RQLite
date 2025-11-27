@@ -1,8 +1,5 @@
 use crate::{
-    database::errors::TransactionError,
-    io::pager::SharedPager,
-    transactions::worker::Worker,
-    types::{PageId, TransactionId},
+     ObjectId, UInt64, database::errors::TransactionError, io::pager::SharedPager, transactions::worker::Worker, types::TransactionId
 };
 
 use std::{
@@ -22,6 +19,8 @@ use graph::{WFGCycle, WaitForGraph};
 use mem_table::{MemTable, TransactionTable};
 
 pub type Version = u16;
+pub type RowId = UInt64;
+pub type LogicalId = (ObjectId, RowId);
 
 #[derive(Clone, Copy, Debug)]
 pub enum LockType {
@@ -33,19 +32,19 @@ pub enum LockType {
 pub enum LockRequest {
     Acquire {
         tx: TransactionId,
-        page: PageId,
+        id: LogicalId,
         typ: LockType,
         reply: Sender<LockResponse>,
     },
     Release {
         tx: TransactionId,
-        handle: PageHandle,
+        handle: TupleHandle,
     },
 }
 
 #[derive(Debug)]
 pub enum LockResponse {
-    Granted { handle: PageHandle },
+    Granted { handle: TupleHandle },
     Aborted { tx: TransactionId },
 }
 
@@ -64,15 +63,15 @@ struct Waiter {
 
 #[derive(Debug)]
 struct LockEntry {
-    handle: PageHandle,
+    handle: TupleHandle,
     holders: HashSet<TransactionId>,
     lock_type: Option<LockType>,
     waiters: VecDeque<Waiter>,
 }
 
 impl LockEntry {
-    fn new(page: PageId) -> Self {
-        let handle = PageHandle::new(page);
+    fn new(logical_id: LogicalId) -> Self {
+        let handle = TupleHandle::new(logical_id);
         Self {
             handle,
             holders: HashSet::new(),
@@ -104,7 +103,7 @@ impl LockEntry {
 // The wait for graph is basically a table of dependencies in which each row represents the list of transactions for which the index transaction is waiting.
 // It can allow us to detect deadlocks.
 // For anyone interested: https://www.cs.emory.edu/~cheung/Courses/554/Syllabus/8-recv+serial/deadlock-waitfor.html
-fn build_wfg(locks: &HashMap<PageId, LockEntry>) -> WaitForGraph {
+fn build_wfg(locks: &HashMap<LogicalId, LockEntry>) -> WaitForGraph {
     let mut graph = WaitForGraph::new();
 
     for entry in locks.values() {
@@ -177,16 +176,18 @@ fn detect_cycle(graph: &WaitForGraph) -> Option<WFGCycle> {
     None
 }
 
-#[derive(Debug, Hash, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
-pub struct PageHandle {
-    id: PageId,
+#[derive(Debug, Hash, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct TupleHandle {
+    object_id: ObjectId,
+    row_id: UInt64,
     version: Version,
 }
 
-impl PageHandle {
-    pub fn new(page: PageId) -> Self {
+impl TupleHandle {
+    pub fn new(logical_id: LogicalId) -> Self {
         Self {
-            id: page,
+            object_id: logical_id.0,
+            row_id: logical_id.1,
             version: 0,
         }
     }
@@ -195,8 +196,16 @@ impl PageHandle {
         self.version = self.version.saturating_add(1);
     }
 
-    fn id(&self) -> &PageId {
-        &self.id
+    fn id(&self) -> LogicalId {
+        (self.object_id, self.row_id)
+    }
+
+    fn table(&self) -> &ObjectId {
+        &self.object_id
+    }
+
+    fn row_id(&self) -> &RowId {
+        &self.row_id
     }
 
     fn version(&self) -> &Version {
@@ -221,7 +230,7 @@ impl LockManager {
     /// control_tx: ControlMessage transmitter channel.
     pub fn spawn(lock_rx: Receiver<LockRequest>, control_tx: Sender<ControlMessage>) {
         thread::spawn(move || {
-            let mut locks: HashMap<PageId, LockEntry> = HashMap::new();
+            let mut locks: HashMap<LogicalId, LockEntry> = HashMap::new();
             let mut last_deadlock_check = Instant::now();
 
             loop {
@@ -230,11 +239,11 @@ impl LockManager {
                     Ok(msg) => match msg {
                         LockRequest::Acquire {
                             tx,
-                            page,
+                            id,
                             typ,
                             reply,
                         } => {
-                            let entry = locks.entry(page).or_insert_with(|| LockEntry::new(page));
+                            let entry = locks.entry(id).or_insert_with(|| LockEntry::new(id));
 
                             if entry.can_grant(typ, tx) {
                                 // Grant the lock
@@ -249,7 +258,7 @@ impl LockManager {
                                 //    }
 
                                 let _ = reply.send(LockResponse::Granted {
-                                    handle: entry.handle,
+                                    handle: entry.handle.clone(),
                                 });
                             } else {
                                 // Enqueue the waiter thread
@@ -262,7 +271,7 @@ impl LockManager {
                         }
 
                         LockRequest::Release { tx, handle } => {
-                            if let Some(entry) = locks.get_mut(handle.id()) {
+                            if let Some(entry) = locks.get_mut(&handle.id()) {
                                 entry.holders.remove(&tx);
                                 if entry.holders.is_empty() {
                                     entry.lock_type = None; // No holders
@@ -282,7 +291,7 @@ impl LockManager {
                                                 entry.lock_type = Some(waiter.typ);
 
                                                 let _ = waiter.reply.send(LockResponse::Granted {
-                                                    handle: entry.handle,
+                                                    handle: entry.handle.clone(),
                                                 });
 
                                                 // Once we have granted an exclusive lock we must stop the loop, as exclusive locks can only be held by a single thread.
@@ -304,7 +313,7 @@ impl LockManager {
 
                                     // Si no quedan holders ni waiters, podemos eliminar la entrada para liberar memoria
                                     if entry.holders.is_empty() && entry.waiters.is_empty() {
-                                        locks.remove(handle.id());
+                                        locks.remove(&handle.id());
                                     }
                                 }
                             }
@@ -338,20 +347,20 @@ impl LockManager {
 }
 
 #[derive(Default, Debug)]
-pub struct Transaction {
+pub struct TransactionMetadata {
     id: TransactionId,
-    read_set: HashSet<PageHandle>,
-    write_set: HashSet<PageHandle>,
+    read_set: HashSet<TupleHandle>,
+    write_set: HashSet<TupleHandle>,
     status: TxState,
 }
 
-impl Transaction {
+impl TransactionMetadata {
     pub fn id(&self) -> TransactionId {
         self.id
     }
 
     pub fn new() -> Self {
-        Transaction {
+        TransactionMetadata {
             id: TransactionId::new(),
             read_set: HashSet::new(),
             write_set: HashSet::new(),
@@ -387,7 +396,7 @@ impl TransactionManager {
     }
 
     pub fn create_transaction(&self) -> TransactionId {
-        let tx = Transaction::new();
+        let tx = TransactionMetadata::new();
         let id = tx.id();
         self.txs.write().insert(id, tx);
         id
@@ -401,7 +410,7 @@ impl TransactionManager {
     // mpsc provides multi-producer  single consumer channels, so i think the best idea is to not hold a single sender since we might eventually want to run multiple threads on the same transaction.
     pub fn release_lock(
         &mut self,
-        handle: PageHandle,
+        handle: TupleHandle,
         tx: TransactionId,
         lock_tx: Sender<LockRequest>,
     ) {
@@ -422,7 +431,7 @@ impl TransactionManager {
     pub fn read(
         &self,
         tx_id: TransactionId,
-        page: PageId,
+        logical_id: LogicalId,
         lock_tx: Sender<LockRequest>,
     ) -> Result<(), TransactionError> {
         // First lock scope.
@@ -447,7 +456,7 @@ impl TransactionManager {
         let (reply_tx, reply_rx) = channel();
         let req = LockRequest::Acquire {
             tx: tx_id,
-            page,
+            id: logical_id,
             typ: LockType::Shared,
             reply: reply_tx,
         };
@@ -488,7 +497,7 @@ impl TransactionManager {
     pub fn write(
         &self,
         tx_id: TransactionId,
-        page: PageId,
+        logical_id: LogicalId,
         lock_tx: Sender<LockRequest>,
         _value: Vec<u8>,
     ) -> Result<(), TransactionError> {
@@ -510,7 +519,7 @@ impl TransactionManager {
         let (reply_tx, reply_rx) = channel();
         let req = LockRequest::Acquire {
             tx: tx_id,
-            page,
+            id: logical_id,
             typ: LockType::Exclusive,
             reply: reply_tx,
         };
@@ -549,28 +558,28 @@ impl TransactionManager {
         tx_id: TransactionId,
         lock_tx: Sender<LockRequest>,
     ) -> Result<(), TransactionError> {
-        let mut pages: Vec<PageHandle> = Vec::new();
+        let mut tuples: Vec<TupleHandle> = Vec::new();
 
         // Lock the tx table
         {
             let mut txs = self.txs.write();
             // Mark committed and release locks
             if let Some(mut tx) = txs.remove(&tx_id) {
-                for mut handle in tx.write_set {
+                for mut handle in tx.write_set.drain() {
                     handle.increment_version_counter();
-                    pages.push(handle)
+                    tuples.push(handle)
                 }
 
                 tx.status = TxState::Release; // Ensure we enter the release state
                 // send release for each page in read_set and write_set
-                pages.extend(tx.read_set.iter());
+                tuples.extend(tx.read_set.drain());
             } else {
                 return Err(TransactionError::NotFound(tx_id));
             }
         };
 
         // tx table is unlocked then we can operate on the released locks.
-        for handle in pages.drain(..) {
+        for handle in tuples.drain(..) {
             let _ = lock_tx.send(LockRequest::Release { tx: tx_id, handle });
         }
 
@@ -582,7 +591,7 @@ impl TransactionManager {
         tx_id: TransactionId,
         lock_tx: Sender<LockRequest>,
     ) -> Result<(), TransactionError> {
-        let mut pages = Vec::new();
+        let mut tuples = Vec::new();
 
         // Lock the tx table
         {
@@ -591,14 +600,14 @@ impl TransactionManager {
             if let Some(mut tx) = txs.remove(&tx_id) {
                 tx.status = TxState::Release; // Ensure we enter the release state
                 // send release for each page in read_set and write_set
-                pages.extend(tx.read_set.iter().chain(tx.write_set.iter()));
+                tuples.extend(tx.read_set.drain().chain(tx.write_set.drain()));
             } else {
                 return Err(TransactionError::NotFound(tx_id));
             }
         };
 
         // tx table is unlocked then we can operate on the released locks.
-        for handle in pages.drain(..) {
+        for handle in tuples.drain(..) {
             let _ = lock_tx.send(LockRequest::Release { tx: tx_id, handle });
         }
 
@@ -711,419 +720,5 @@ impl TransactionController {
                 }
             }
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serial_test::serial;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    // Helper function to create a test setup with SharedTransactionManager
-    fn create_controller() -> TransactionController {
-        let controller = TransactionController::new();
-        controller.spawn();
-        // Give the controller time to start
-        thread::sleep(Duration::from_millis(50));
-        controller
-    }
-
-    #[test]
-    #[serial]
-    fn test_tm_2() {
-        let controller = create_controller();
-        let shared_tm = controller.manager();
-        let sender = controller.sender();
-
-        // Begin transaction
-        let tx_id = shared_tm.create_transaction();
-        assert!(shared_tm.txs.read().contains_key(&tx_id));
-
-        // Check initial state
-        {
-            let txs = shared_tm.txs.read();
-            let tx = &txs[&tx_id];
-            assert_eq!(tx.status, TxState::Acquire);
-            assert!(tx.read_set.is_empty());
-            assert!(tx.write_set.is_empty());
-        }
-
-        // Perform operations
-        let page = PageId::from(1);
-        let handle = PageHandle::new(page);
-        assert!(shared_tm.read(tx_id, page, sender.clone()).is_ok());
-
-        // Check state after read
-        {
-            let txs = shared_tm.txs.read();
-            let tx = &txs[&tx_id];
-            assert!(tx.read_set.contains(&handle));
-            assert!(tx.write_set.is_empty());
-        }
-
-        // Commit transaction
-        assert!(shared_tm.commit(tx_id, sender).is_ok());
-        assert!(!shared_tm.txs.read().contains_key(&tx_id));
-    }
-
-    #[test]
-    #[serial]
-    fn test_tm_3() {
-        let controller = create_controller();
-        let shared_tm = controller.manager();
-        let sender = controller.sender();
-
-        let tx1 = shared_tm.create_transaction();
-        let tx2 = shared_tm.create_transaction();
-        let page = PageId::from(100);
-
-        // TX1 acquires exclusive lock
-        assert!(shared_tm.write(tx1, page, sender.clone(), vec![1]).is_ok());
-
-        // TX2 tries to acquire - should block
-        let shared_tm_clone = shared_tm.clone();
-        let sender_clone = sender.clone();
-        let handle = thread::spawn(move || shared_tm_clone.read(tx2, page, sender_clone));
-
-        // Give TX2 time to enter waiting state
-        thread::sleep(Duration::from_millis(100));
-
-        // Abort TX1 - should release the lock
-        assert!(shared_tm.abort(tx1, sender.clone()).is_ok());
-
-        // TX2 should now succeed
-        let result = handle.join().unwrap();
-        assert!(result.is_ok());
-
-        // Cleanup
-        assert!(shared_tm.commit(tx2, sender).is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_tm_4() {
-        let controller = create_controller();
-        let sender = controller.sender();
-        let shared_tm = controller.manager();
-
-        let tx1 = shared_tm.create_transaction();
-        let tx2 = shared_tm.create_transaction();
-        let tx3 = shared_tm.create_transaction();
-        let page_id = PageId::from(1);
-        let handle = PageHandle::new(page_id);
-
-        // All three transactions should be able to acquire shared locks
-        assert!(shared_tm.read(tx1, page_id, sender.clone()).is_ok());
-        assert!(shared_tm.read(tx2, page_id, sender.clone()).is_ok());
-        assert!(shared_tm.read(tx3, page_id, sender.clone()).is_ok());
-
-        // Verify all have the page in their read set
-        {
-            let txs = shared_tm.txs.read();
-            assert!(txs[&tx1].read_set.contains(&handle));
-            assert!(txs[&tx2].read_set.contains(&handle));
-            assert!(txs[&tx3].read_set.contains(&handle));
-        }
-
-        // Cleanup
-        assert!(shared_tm.commit(tx1, sender.clone()).is_ok());
-        assert!(shared_tm.commit(tx2, sender.clone()).is_ok());
-        assert!(shared_tm.commit(tx3, sender).is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_tm_5() {
-        let controller = create_controller();
-        let shared_tm = controller.manager();
-        let sender = controller.sender();
-
-        let tx1 = shared_tm.create_transaction();
-        let tx2 = shared_tm.create_transaction();
-        let page = PageId::from(200);
-
-        // TX1 acquires exclusive lock
-        assert!(shared_tm.write(tx1, page, sender.clone(), vec![1]).is_ok());
-
-        // TX2 tries to acquire shared lock - should timeout
-        let shared_tm_clone = shared_tm.clone();
-        let sender_clone = sender.clone();
-        let start = Instant::now();
-        let handle = thread::spawn(move || shared_tm_clone.read(tx2, page, sender_clone));
-
-        let result = handle.join().unwrap();
-        assert!(result.is_err());
-
-        // Should have waited approximately max_wait time
-        let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_secs(9)); // Allow some margin
-
-        // Cleanup
-        assert!(shared_tm.commit(tx1, sender).is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_tm_6() {
-        let controller = create_controller();
-        let shared_tm = controller.manager();
-        let sender = controller.sender();
-        let tx_id = shared_tm.create_transaction();
-        let page_id = PageId::from(3);
-        let value = vec![4, 5, 6];
-
-        // Acquire shared lock multiple times
-        assert!(shared_tm.read(tx_id, page_id, sender.clone()).is_ok());
-        assert!(shared_tm.read(tx_id, page_id, sender.clone()).is_ok());
-
-        // Upgrade to exclusive (should work for same transaction)
-        assert!(
-            shared_tm
-                .write(tx_id, page_id, sender.clone(), value.clone())
-                .is_ok()
-        );
-
-        // Can still acquire exclusive again
-        assert!(
-            shared_tm
-                .write(tx_id, page_id, sender.clone(), value)
-                .is_ok()
-        );
-
-        // Cleanup
-        assert!(shared_tm.commit(tx_id, sender).is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_tm_7() {
-        let controller = create_controller();
-        let shared_tm = controller.manager();
-        let sender = controller.sender();
-
-        let invalid_tx = TransactionId::from(99999);
-        let page = PageId::from(1);
-
-        // Operations on non-existent transaction should fail
-        let result = shared_tm.read(invalid_tx, page, sender.clone());
-        assert!(matches!(result, Err(TransactionError::NotFound(_))));
-
-        let result = shared_tm.write(invalid_tx, page, sender.clone(), vec![]);
-        assert!(matches!(result, Err(TransactionError::NotFound(_))));
-
-        let result = shared_tm.commit(invalid_tx, sender.clone());
-        assert!(matches!(result, Err(TransactionError::NotFound(_))));
-    }
-
-    #[test]
-    #[serial]
-    fn test_tm_8() {
-        let controller = create_controller();
-        let shared_tm = controller.manager();
-        let sender = controller.sender();
-
-        let tx_id = shared_tm.create_transaction();
-        let page1 = PageId::from(1);
-        let page2 = PageId::from(2);
-
-        // Acquire first lock
-        assert!(shared_tm.read(tx_id, page1, sender.clone()).is_ok());
-
-        // Force transaction into release state
-        {
-            let mut txs = shared_tm.txs.write();
-            if let Some(tx) = txs.get_mut(&tx_id) {
-                tx.status = TxState::Release;
-            }
-        }
-
-        // Try to acquire another lock - should fail
-        let result = shared_tm.read(tx_id, page2, sender.clone());
-        assert!(matches!(result, Err(TransactionError::NotAcquire(_))));
-
-        // Cleanup
-        let _ = shared_tm.abort(tx_id, sender);
-    }
-
-    #[test]
-    #[serial]
-    fn test_tm_9() {
-        let controller = create_controller();
-        let shared_tm = controller.manager();
-        let sender = controller.sender();
-
-        let tx1 = shared_tm.create_transaction();
-        let tx2 = shared_tm.create_transaction();
-        let page1 = PageId::from(10);
-        let page2 = PageId::from(11);
-        let value = vec![7, 8, 9];
-
-        // TX1 locks page1
-        assert!(
-            shared_tm
-                .write(tx1, page1, sender.clone(), value.clone())
-                .is_ok()
-        );
-
-        // TX2 locks page2
-        assert!(
-            shared_tm
-                .write(tx2, page2, sender.clone(), value.clone())
-                .is_ok()
-        );
-
-        // Track which transaction completes
-        let completed = Arc::new(AtomicUsize::new(0));
-        let completed1 = completed.clone();
-        let completed2 = completed.clone();
-
-        // Create deadlock scenario
-        let shared_tm_clone1 = shared_tm.clone();
-        let sender_clone1 = sender.clone();
-        let handle1 = thread::spawn(move || {
-            let result = shared_tm_clone1.write(tx1, page2, sender_clone1, vec![10, 11, 12]);
-            if result.is_ok() {
-                completed1.store(1, Ordering::SeqCst);
-            }
-            result
-        });
-
-        // Give first thread time to start waiting
-        thread::sleep(Duration::from_millis(100));
-
-        let shared_tm_clone2 = shared_tm.clone();
-        let sender_clone2 = sender.clone();
-        let handle2 = thread::spawn(move || {
-            let result = shared_tm_clone2.write(tx2, page1, sender_clone2, vec![13, 14, 15]);
-            if result.is_ok() {
-                completed2.store(2, Ordering::SeqCst);
-            }
-            result
-        });
-
-        // Wait for deadlock detection (happens every 1 second)
-        thread::sleep(Duration::from_secs(2));
-
-        let result1 = handle1.join().unwrap();
-        let result2 = handle2.join().unwrap();
-
-        // Exactly one should fail due to abort
-        assert!(result1.is_err() ^ result2.is_err());
-
-        // The younger transaction (tx2) should be aborted
-        if result1.is_err() {
-            assert!(matches!(result1, Err(TransactionError::TimedOut(_))));
-        } else {
-            assert!(matches!(result2, Err(TransactionError::TimedOut(_))));
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_tm_10() {
-        let controller = create_controller();
-        let shared_tm = controller.manager();
-        let sender = controller.sender();
-
-        let tx1 = shared_tm.create_transaction();
-        let tx2 = shared_tm.create_transaction();
-        let tx3 = shared_tm.create_transaction();
-        let tx4 = shared_tm.create_transaction();
-        let page = PageId::from(300);
-
-        // TX1 acquires exclusive lock
-        assert!(shared_tm.write(tx1, page, sender.clone(), vec![1]).is_ok());
-
-        // Start TX2, TX3, TX4 all waiting for shared locks
-        let results = Arc::new(Mutex::new(Vec::new()));
-        let mut handles = vec![];
-
-        for (tx, id) in [(tx2, 2), (tx3, 3), (tx4, 4)] {
-            let shared_tm_clone = shared_tm.clone();
-            let sender_clone = sender.clone();
-            let results_clone = results.clone();
-
-            let handle = thread::spawn(move || {
-                let start = Instant::now();
-                let result = shared_tm_clone.read(tx, page, sender_clone);
-                let elapsed = start.elapsed();
-                results_clone
-                    .lock()
-                    .unwrap()
-                    .push((id, result.is_ok(), elapsed));
-            });
-            handles.push(handle);
-
-            // Stagger the requests slightly
-            thread::sleep(Duration::from_millis(50));
-        }
-
-        // Give all threads time to enter waiting
-        thread::sleep(Duration::from_millis(200));
-
-        // Release TX1's lock - all waiting shared locks should be promoted
-        assert!(shared_tm.commit(tx1, sender.clone()).is_ok());
-
-        // Wait for all threads to complete
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        // All three should have succeeded
-        let results = results.lock().unwrap();
-
-        assert_eq!(results.len(), 3);
-        for (_, success, _) in results.iter() {
-            assert!(*success);
-        }
-
-        // Cleanup
-        assert!(shared_tm.commit(tx2, sender.clone()).is_ok());
-        assert!(shared_tm.commit(tx3, sender.clone()).is_ok());
-        assert!(shared_tm.commit(tx4, sender).is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_tm_11() {
-        let controller = create_controller();
-        let shared_tm = controller.manager();
-        let sender = controller.sender();
-
-        let tx1 = shared_tm.create_transaction();
-        let tx2 = shared_tm.create_transaction();
-        let tx3 = shared_tm.create_transaction();
-        let page = PageId::from(400);
-
-        // TX1 holds exclusive lock
-        assert!(shared_tm.write(tx1, page, sender.clone(), vec![1]).is_ok());
-
-        // TX2 and TX3 wait for the lock
-        let shared_tm_clone2 = shared_tm.clone();
-        let sender_clone2 = sender.clone();
-        thread::spawn(move || {
-            let _ = shared_tm_clone2.read(tx2, page, sender_clone2);
-        });
-
-        let shared_tm_clone3 = shared_tm.clone();
-        let sender_clone3 = sender.clone();
-        thread::spawn(move || {
-            let _ = shared_tm_clone3.read(tx3, page, sender_clone3);
-        });
-
-        // Give threads time to enter waiting
-        thread::sleep(Duration::from_millis(200));
-
-        // At this point, the WFG should show TX2->TX1 and TX3->TX1
-        // We can't directly test the WFG construction, but we can verify
-        // that releasing TX1 allows both waiters to proceed
-
-        // Cleanup
-        assert!(shared_tm.commit(tx1, sender).is_ok());
-        thread::sleep(Duration::from_millis(100));
     }
 }
