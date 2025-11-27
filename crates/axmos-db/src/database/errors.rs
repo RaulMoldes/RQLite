@@ -1,6 +1,7 @@
 use std::{
     fmt::{Display, Formatter, Result as FmtResult},
     io::Error as IoError,
+    error::Error,
     num::{ParseFloatError, ParseIntError},
 };
 
@@ -27,8 +28,8 @@ impl From<ParseFloatError> for ParsingError {
     }
 }
 
-impl std::error::Error for ParsingError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl Error for ParsingError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Int(err) => Some(err),
             Self::Float(err) => Some(err),
@@ -82,8 +83,8 @@ impl Display for TypeError {
     }
 }
 
-impl std::error::Error for TypeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl Error for TypeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             TypeError::ParseError(err) => Some(err),
             _ => None,
@@ -272,8 +273,8 @@ impl Display for DatabaseError {
     }
 }
 
-impl std::error::Error for DatabaseError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl Error for DatabaseError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             DatabaseError::TypeError(err) => Some(err),
             DatabaseError::IOError(err) => Some(err),
@@ -317,8 +318,8 @@ impl std::fmt::Display for TransactionError {
     }
 }
 
-impl std::error::Error for TransactionError {}
-impl std::error::Error for SQLError {}
+impl Error for TransactionError {}
+impl Error for SQLError {}
 
 impl From<TransactionError> for String {
     fn from(value: TransactionError) -> Self {
