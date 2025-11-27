@@ -46,7 +46,7 @@ repr_enum!( pub(crate) enum FrameAccessMode: u8 {
 });
 
 pub(crate) struct MemFrame<P> {
-    // Better [`RwLock`] than [`Mutex`] here, as we want to allow multiple readers to the page, but a single writer at a time to avoid race conditions.
+    // Better [`RwLock`] than [`Mutex`] here, as we want to allow multiple readers to the page, but a single writer at a time to avObjectId race conditions.
     pub inner: Arc<RwLock<P>>,
     // dirty flag
     is_dirty: Arc<AtomicBool>,

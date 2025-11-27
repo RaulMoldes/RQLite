@@ -608,7 +608,7 @@ fn test_btree_iterator_iter_rev() -> io::Result<()> {
 
     for (key, value) in &test_data {
         let kv = KeyValuePair::new(key, value);
-      
+
         tree.insert(root, kv.as_ref())?;
     }
 

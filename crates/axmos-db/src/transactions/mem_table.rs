@@ -1,6 +1,6 @@
 use super::Transaction;
 use crate::make_shared;
-use crate::types::TxId;
+use crate::types::TransactionId;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::ops::Index;
@@ -137,4 +137,4 @@ where
     }
 }
 
-make_shared!(TransactionTable, MemTable<TxId, Transaction>);
+make_shared!(TransactionTable, MemTable<TransactionId, Transaction>);

@@ -1,15 +1,15 @@
 use crate::database::Database;
 use crate::planner::{ExecutionPlanStep, ResultSet};
-use crate::types::OId;
+use crate::types::ObjectId;
 
 pub(crate) enum Scan {
     SeqScan {
-        table_oid: OId,
+        table_id: ObjectId,
         cached_resultset: Option<ResultSet>,
     },
     IndexScan {
-        table_oid: OId,
-        index_oid: OId,
+        table_id: ObjectId,
+        index_id: ObjectId,
         start_key: Option<Box<[u8]>>,
         end_key: Option<Box<[u8]>>,
         cached_resultset: Option<ResultSet>,

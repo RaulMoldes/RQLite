@@ -1,9 +1,8 @@
 use crate::{
     database::errors::TransactionError,
-
-    // TODO: MUST UPDATE THE TRANSACTION CONTROLLER TO WORK WITH THE TRANSACTION WORKER.
-    //transactions::worker::Worker,
-    types::{PageId, TxId},
+    io::pager::SharedPager,
+    transactions::worker::Worker,
+    types::{PageId, TransactionId},
 };
 
 use std::{
@@ -33,13 +32,13 @@ pub enum LockType {
 #[derive(Debug)]
 pub enum LockRequest {
     Acquire {
-        tx: TxId,
+        tx: TransactionId,
         page: PageId,
         typ: LockType,
         reply: Sender<LockResponse>,
     },
     Release {
-        tx: TxId,
+        tx: TransactionId,
         handle: PageHandle,
     },
 }
@@ -47,18 +46,18 @@ pub enum LockRequest {
 #[derive(Debug)]
 pub enum LockResponse {
     Granted { handle: PageHandle },
-    Aborted { tx: TxId },
+    Aborted { tx: TransactionId },
 }
 
 // Control channel between the lock manager and the transaction manager.
 #[derive(Debug)]
 pub enum ControlMessage {
-    AbortTx(TxId),
+    AbortTx(TransactionId),
 }
 
 #[derive(Debug)]
 struct Waiter {
-    tx_id: TxId,
+    tx_id: TransactionId,
     typ: LockType,
     reply: Sender<LockResponse>,
 }
@@ -66,7 +65,7 @@ struct Waiter {
 #[derive(Debug)]
 struct LockEntry {
     handle: PageHandle,
-    holders: HashSet<TxId>,
+    holders: HashSet<TransactionId>,
     lock_type: Option<LockType>,
     waiters: VecDeque<Waiter>,
 }
@@ -82,7 +81,7 @@ impl LockEntry {
         }
     }
 
-    fn can_grant(&self, typ: LockType, tx_id: TxId) -> bool {
+    fn can_grant(&self, typ: LockType, tx_id: TransactionId) -> bool {
         // All axmos database locks are reentrant.
         if self.holders.contains(&tx_id) {
             return true;
@@ -132,13 +131,13 @@ fn build_wfg(locks: &HashMap<PageId, LockEntry>) -> WaitForGraph {
 // We first insert Tx1 into the stack, and check for all the transactions that Tx2, Tx3 and tx4 are waiting for.
 //
 // If eventually, we reach to a point where we find Tx1 again, we have found a cycle.
-// Once all the depend-on transactions are visited, we can pop Tx1 from the [rec-stack], which will avoid identifying situations which do not happen to be a deadlock as so.
+// Once all the depend-on transactions are visited, we can pop Tx1 from the [rec-stack], which will avObjectId identifying situations which do not happen to be a deadlock as so.
 fn dfs(
-    node: TxId,
+    node: TransactionId,
     graph: &WaitForGraph,
-    visited: &mut HashSet<TxId>,
-    rec: &mut HashSet<TxId>,
-    path: &mut Vec<TxId>,
+    visited: &mut HashSet<TransactionId>,
+    rec: &mut HashSet<TransactionId>,
+    path: &mut Vec<TransactionId>,
 ) -> Option<WFGCycle> {
     visited.insert(node);
     rec.insert(node);
@@ -340,20 +339,20 @@ impl LockManager {
 
 #[derive(Default, Debug)]
 pub struct Transaction {
-    id: TxId,
+    id: TransactionId,
     read_set: HashSet<PageHandle>,
     write_set: HashSet<PageHandle>,
     status: TxState,
 }
 
 impl Transaction {
-    pub fn id(&self) -> TxId {
+    pub fn id(&self) -> TransactionId {
         self.id
     }
 
     pub fn new() -> Self {
         Transaction {
-            id: TxId::new(),
+            id: TransactionId::new(),
             read_set: HashSet::new(),
             write_set: HashSet::new(),
             status: TxState::default(),
@@ -387,16 +386,25 @@ impl TransactionManager {
         }
     }
 
-    pub fn begin_transaction(&self) -> TxId {
+    pub fn create_transaction(&self) -> TransactionId {
         let tx = Transaction::new();
         let id = tx.id();
         self.txs.write().insert(id, tx);
         id
     }
 
+    pub fn create_worker(&self, id: TransactionId, pager: SharedPager) -> Worker {
+        Worker::for_transaction(id, pager)
+    }
+
     // Releases the lock on the provided sender channel.
     // mpsc provides multi-producer  single consumer channels, so i think the best idea is to not hold a single sender since we might eventually want to run multiple threads on the same transaction.
-    pub fn release_lock(&mut self, handle: PageHandle, tx: TxId, lock_tx: Sender<LockRequest>) {
+    pub fn release_lock(
+        &mut self,
+        handle: PageHandle,
+        tx: TransactionId,
+        lock_tx: Sender<LockRequest>,
+    ) {
         {
             let mut txs = self.txs.write();
             if let Some(transaction) = txs.get_mut(&tx) {
@@ -413,7 +421,7 @@ impl TransactionManager {
     // For each client, an additional channel is created to
     pub fn read(
         &self,
-        tx_id: TxId,
+        tx_id: TransactionId,
         page: PageId,
         lock_tx: Sender<LockRequest>,
     ) -> Result<(), TransactionError> {
@@ -479,7 +487,7 @@ impl TransactionManager {
 
     pub fn write(
         &self,
-        tx_id: TxId,
+        tx_id: TransactionId,
         page: PageId,
         lock_tx: Sender<LockRequest>,
         _value: Vec<u8>,
@@ -538,7 +546,7 @@ impl TransactionManager {
 
     pub fn commit(
         &self,
-        tx_id: TxId,
+        tx_id: TransactionId,
         lock_tx: Sender<LockRequest>,
     ) -> Result<(), TransactionError> {
         let mut pages: Vec<PageHandle> = Vec::new();
@@ -569,7 +577,11 @@ impl TransactionManager {
         Ok(())
     }
 
-    pub fn abort(&self, tx_id: TxId, lock_tx: Sender<LockRequest>) -> Result<(), TransactionError> {
+    pub fn abort(
+        &self,
+        tx_id: TransactionId,
+        lock_tx: Sender<LockRequest>,
+    ) -> Result<(), TransactionError> {
         let mut pages = Vec::new();
 
         // Lock the tx table
@@ -638,7 +650,7 @@ impl TransactionController {
     pub fn spawn(&self) {
         let mgr = self.manager.clone();
         let sender = self.sender();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             loop {
                 // Only acquire write lock when we actually need to process a message
 
@@ -657,8 +669,8 @@ impl TransactionController {
                     }
                 }
 
-                // Sleep briefly to avoid spinning
-                std::thread::sleep(Duration::from_millis(1));
+                // Sleep briefly to avObjectId spinning
+                thread::sleep(Duration::from_millis(1));
             }
         });
     }
@@ -666,10 +678,11 @@ impl TransactionController {
     /// Starts a transaction on a new thread.
     pub fn run_transaction_async<F, T>(
         &self,
+        pager: SharedPager,
         payload: F,
     ) -> thread::JoinHandle<Result<T, TransactionError>>
     where
-        F: FnOnce(TxId, &TransactionManager, Sender<LockRequest>) -> Result<T, TransactionError>
+        F: FnOnce(Worker, &TransactionManager, Sender<LockRequest>) -> Result<T, TransactionError>
             + Send
             + 'static,
         T: Send + 'static,
@@ -678,16 +691,22 @@ impl TransactionController {
         let sender = self.sender();
 
         thread::spawn(move || {
-            let tx_id = mgr.begin_transaction();
-            let res = payload(tx_id, &mgr, sender.clone());
+            let tx_id = mgr.create_transaction();
+            let worker = mgr.create_worker(tx_id, pager);
+            worker.borrow_mut().begin()?;
+            let res = payload(worker.clone(), &mgr, sender.clone());
 
             match res {
                 Ok(val) => {
+                    worker.borrow_mut().commit()?;
                     let _ = mgr.commit(tx_id, sender);
+                    worker.borrow_mut().end()?;
                     Ok(val)
                 }
                 Err(e) => {
+                    worker.borrow_mut().rollback()?;
                     let _ = mgr.abort(tx_id, sender);
+                    worker.borrow_mut().end()?;
                     Err(e)
                 }
             }
@@ -700,7 +719,7 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -715,38 +734,13 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_tm_1() {
-        let controller = create_controller();
-        let result = Arc::new(AtomicBool::new(false));
-        let result_clone = result.clone();
-
-        let handle = controller.run_transaction_async(move |tid, mgr, s| {
-            let page = PageId::from(42);
-
-            // Write to a page
-            mgr.write(tid, page, s.clone(), vec![1, 2, 3])?;
-
-            // Read from the same page (should work - reentrant)
-            mgr.read(tid, page, s)?;
-
-            result_clone.store(true, Ordering::SeqCst);
-            Ok("Transaction completed successfully")
-        });
-
-        let res = handle.join().unwrap();
-        assert!(res.is_ok());
-        assert!(result.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    #[serial]
     fn test_tm_2() {
         let controller = create_controller();
         let shared_tm = controller.manager();
         let sender = controller.sender();
 
         // Begin transaction
-        let tx_id = shared_tm.begin_transaction();
+        let tx_id = shared_tm.create_transaction();
         assert!(shared_tm.txs.read().contains_key(&tx_id));
 
         // Check initial state
@@ -783,8 +777,8 @@ mod tests {
         let shared_tm = controller.manager();
         let sender = controller.sender();
 
-        let tx1 = shared_tm.begin_transaction();
-        let tx2 = shared_tm.begin_transaction();
+        let tx1 = shared_tm.create_transaction();
+        let tx2 = shared_tm.create_transaction();
         let page = PageId::from(100);
 
         // TX1 acquires exclusive lock
@@ -816,9 +810,9 @@ mod tests {
         let sender = controller.sender();
         let shared_tm = controller.manager();
 
-        let tx1 = shared_tm.begin_transaction();
-        let tx2 = shared_tm.begin_transaction();
-        let tx3 = shared_tm.begin_transaction();
+        let tx1 = shared_tm.create_transaction();
+        let tx2 = shared_tm.create_transaction();
+        let tx3 = shared_tm.create_transaction();
         let page_id = PageId::from(1);
         let handle = PageHandle::new(page_id);
 
@@ -848,8 +842,8 @@ mod tests {
         let shared_tm = controller.manager();
         let sender = controller.sender();
 
-        let tx1 = shared_tm.begin_transaction();
-        let tx2 = shared_tm.begin_transaction();
+        let tx1 = shared_tm.create_transaction();
+        let tx2 = shared_tm.create_transaction();
         let page = PageId::from(200);
 
         // TX1 acquires exclusive lock
@@ -878,7 +872,7 @@ mod tests {
         let controller = create_controller();
         let shared_tm = controller.manager();
         let sender = controller.sender();
-        let tx_id = shared_tm.begin_transaction();
+        let tx_id = shared_tm.create_transaction();
         let page_id = PageId::from(3);
         let value = vec![4, 5, 6];
 
@@ -911,7 +905,7 @@ mod tests {
         let shared_tm = controller.manager();
         let sender = controller.sender();
 
-        let invalid_tx = TxId::from(99999);
+        let invalid_tx = TransactionId::from(99999);
         let page = PageId::from(1);
 
         // Operations on non-existent transaction should fail
@@ -932,7 +926,7 @@ mod tests {
         let shared_tm = controller.manager();
         let sender = controller.sender();
 
-        let tx_id = shared_tm.begin_transaction();
+        let tx_id = shared_tm.create_transaction();
         let page1 = PageId::from(1);
         let page2 = PageId::from(2);
 
@@ -962,8 +956,8 @@ mod tests {
         let shared_tm = controller.manager();
         let sender = controller.sender();
 
-        let tx1 = shared_tm.begin_transaction();
-        let tx2 = shared_tm.begin_transaction();
+        let tx1 = shared_tm.create_transaction();
+        let tx2 = shared_tm.create_transaction();
         let page1 = PageId::from(10);
         let page2 = PageId::from(11);
         let value = vec![7, 8, 9];
@@ -1035,10 +1029,10 @@ mod tests {
         let shared_tm = controller.manager();
         let sender = controller.sender();
 
-        let tx1 = shared_tm.begin_transaction();
-        let tx2 = shared_tm.begin_transaction();
-        let tx3 = shared_tm.begin_transaction();
-        let tx4 = shared_tm.begin_transaction();
+        let tx1 = shared_tm.create_transaction();
+        let tx2 = shared_tm.create_transaction();
+        let tx3 = shared_tm.create_transaction();
+        let tx4 = shared_tm.create_transaction();
         let page = PageId::from(300);
 
         // TX1 acquires exclusive lock
@@ -1100,9 +1094,9 @@ mod tests {
         let shared_tm = controller.manager();
         let sender = controller.sender();
 
-        let tx1 = shared_tm.begin_transaction();
-        let tx2 = shared_tm.begin_transaction();
-        let tx3 = shared_tm.begin_transaction();
+        let tx1 = shared_tm.create_transaction();
+        let tx2 = shared_tm.create_transaction();
+        let tx3 = shared_tm.create_transaction();
         let page = PageId::from(400);
 
         // TX1 holds exclusive lock

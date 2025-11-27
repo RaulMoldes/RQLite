@@ -20,7 +20,7 @@ use crate::{
     },
     transactions::worker::{TransactionWorker, Worker},
     types::{
-        Blob, DataType, DataTypeKind, OId, PAGE_ZERO, PageId, UInt64, get_next_object,
+        Blob, DataType, DataTypeKind, ObjectId, PAGE_ZERO, PageId, UInt64, get_next_object,
         initialize_atomics,
     },
 };
@@ -191,8 +191,8 @@ impl Database {
         ))
     }
 
-    pub fn store_relation(&mut self, mut obj: Relation) -> io::Result<OId> {
-        let oid = obj.id();
+    pub fn store_relation(&mut self, mut obj: Relation) -> io::Result<ObjectId> {
+
 
         if !obj.is_allocated() {
             let id = self.main_worker_mut().alloc_page::<BtreePage>()?;
@@ -200,14 +200,14 @@ impl Database {
         };
 
         let mut btree = self.table_btree(self.meta_table, self.main_worker.clone())?; // Increments the worker's ref count
-
+        let obj_id = obj.id();
         let tuple = obj.into_boxed_tuple()?;
         self.main_worker_mut().clear_stack();
 
         // Will replace existing relation if it exists.
         btree.upsert(self.meta_table, tuple.as_ref())?;
 
-        Ok(oid)
+        Ok(obj_id)
     }
 
     pub fn update_relation(&mut self, obj: Relation) -> io::Result<()> {
@@ -307,7 +307,7 @@ impl Database {
         let tuple = TupleRef::read(payload.as_ref(), &schema)?;
         println!("{tuple}");
         let id = match tuple.value(0)? {
-            crate::types::DataTypeRef::BigUInt(v) => OId::from(v.to_owned()),
+            crate::types::DataTypeRef::BigUInt(v) => ObjectId::from(v.to_owned()),
             _ => {
                 // DEVUELVE NULL. PARECE UN ERROR EN REINTERPRET CAST.
 
@@ -321,7 +321,7 @@ impl Database {
         self.relation_direct(id)
     }
 
-    pub fn relation_direct(&self, id: OId) -> io::Result<Relation> {
+    pub fn relation_direct(&self, id: ObjectId) -> io::Result<Relation> {
         let meta_table = self.table_btree(self.meta_table, self.main_worker.clone())?;
         let bytes: &[u8] = id.as_ref();
         let result = meta_table.search_from_root(id.as_ref(), FrameAccessMode::Read)?;

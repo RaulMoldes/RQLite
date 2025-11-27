@@ -2,31 +2,39 @@ use crate::{
     io::{
         frames::{FrameAccessMode, FrameStack, Position},
         pager::SharedPager,
-        wal::{
-            Abort, Begin, Commit, End, LogRecordBuilder, LogRecordType, PageAllocation,
-            PageDeallocation, PageOverwrite,
-        },
+        wal::{Abort, Begin, Commit, End, LogRecordBuilder, LogRecordType},
     },
     storage::{
         buffer::BufferWithMetadata,
         latches::Latch,
         page::{MemPage, Page},
     },
-    types::{PageId, TxId},
+    types::{PageId, TransactionId},
 };
 
 use std::{
     cell::{Ref, RefCell, RefMut},
     io::{self, Error as IoError, ErrorKind as IoErrorKind},
     rc::Rc,
+    thread::{self, ThreadId},
 };
 
 // TODO: FOR NOW, EACH TRANSACTION WILL MANAGE A SINGLE THREAD. IN THE FUTURE , WE SHOULD FIGURE OUT HOW TO DO THIS PROPERLY WITH THREAD POOLS
 #[derive(Debug)]
 pub struct TransactionWorker {
-    id: TxId,
+    /// Thread id.
+    thread_id: ThreadId,
+
+    /// The transaction that this thread is bound to
+    transaction_id: TransactionId,
+
+    /// Thread private types.
     log_builder: LogRecordBuilder,
+
+    /// Shared access to the pager
     pager: SharedPager,
+
+    /// Private stack for transactions
     stack: FrameStack,
 }
 
@@ -37,6 +45,12 @@ impl Worker {
     pub fn new(pager: SharedPager) -> Self {
         Self(Rc::new(RefCell::new(TransactionWorker::new(pager))))
     }
+
+    pub fn for_transaction(id: TransactionId, pager: SharedPager) -> Self {
+        Self(Rc::new(RefCell::new(TransactionWorker::for_transaction(
+            id, pager,
+        ))))
+    }
     pub fn borrow(&self) -> Ref<'_, TransactionWorker> {
         self.0.borrow()
     }
@@ -45,6 +59,7 @@ impl Worker {
         self.0.borrow_mut()
     }
 }
+
 impl Clone for Worker {
     fn clone(&self) -> Self {
         Self(Rc::clone(&self.0))
@@ -53,19 +68,24 @@ impl Clone for Worker {
 
 impl TransactionWorker {
     pub fn new(pager: SharedPager) -> Self {
-        let tx_id = TxId::new();
+        let tx_id = TransactionId::new();
         Self::for_transaction(tx_id, pager)
     }
 
-    pub fn id(&self) -> TxId {
-        self.id
+    pub fn transaction_id(&self) -> TransactionId {
+        self.transaction_id
     }
 
-    fn for_transaction(tx_id: TxId, pager: SharedPager) -> Self {
+    pub fn thread_id(&self) -> ThreadId {
+        self.thread_id
+    }
+
+    fn for_transaction(tx_id: TransactionId, pager: SharedPager) -> Self {
         let log_builder = LogRecordBuilder::for_transaction(tx_id);
         let stack = FrameStack::new();
         Self {
-            id: tx_id,
+            transaction_id: tx_id,
+            thread_id: thread::current().id(),
             log_builder,
             pager,
             stack,
@@ -152,7 +172,7 @@ impl TransactionWorker {
         self.pager.write().push_to_log(rec)
     }
 
-    pub fn end(mut self) -> std::io::Result<()> {
+    pub fn end(&mut self) -> std::io::Result<()> {
         let operation = End;
         let rec = self.builder_mut().build_rec(LogRecordType::End, operation);
         self.pager.write().push_to_log(rec)

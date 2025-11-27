@@ -9,8 +9,8 @@ use crate::{
     storage::tuple::{OwnedTuple, Tuple, TupleRef},
     structures::bplustree::Comparator,
     types::{
-        Blob, DataType, DataTypeKind, DataTypeRef, OId, PAGE_ZERO, PageId, UInt8, UInt64, VarInt,
-        varint::MAX_VARINT_LEN,
+        Blob, DataType, DataTypeKind, DataTypeRef, ObjectId, PAGE_ZERO, PageId, UInt8, UInt64,
+        VarInt, varint::MAX_VARINT_LEN,
     },
 };
 
@@ -430,7 +430,7 @@ impl Schema {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Table {
-    object_id: OId,
+    object_id: ObjectId,
     root_page: PageId,
     next_row: UInt64,
     name: String,
@@ -440,7 +440,7 @@ pub struct Table {
 impl Table {
     pub fn new(name: &str, root_page: PageId, schema: Schema) -> Self {
         Self {
-            object_id: OId::new(),
+            object_id: ObjectId::new(),
             root_page,
             next_row: UInt64(0),
             name: name.to_string(),
@@ -448,7 +448,7 @@ impl Table {
         }
     }
 
-    pub fn id(&self) -> OId {
+    pub fn id(&self) -> ObjectId {
         self.object_id
     }
 
@@ -468,7 +468,13 @@ impl Table {
         self.next_row
     }
 
-    pub fn build(id: OId, name: &str, root_page: PageId, schema: Schema, next_row: UInt64) -> Self {
+    pub fn build(
+        id: ObjectId,
+        name: &str,
+        root_page: PageId,
+        schema: Schema,
+        next_row: UInt64,
+    ) -> Self {
         Self {
             object_id: id,
             root_page,
@@ -489,7 +495,7 @@ impl Table {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Index {
-    object_id: OId,
+    object_id: ObjectId,
     root_page: PageId,
 
     name: String,
@@ -501,7 +507,7 @@ pub struct Index {
 impl Index {
     pub fn new(name: &str, root_page: PageId, schema: Schema) -> Self {
         Self {
-            object_id: OId::new(),
+            object_id: ObjectId::new(),
             root_page,
 
             name: name.to_string(),
@@ -512,7 +518,7 @@ impl Index {
     }
     #[allow(clippy::too_many_arguments)]
     pub fn build(
-        id: OId,
+        id: ObjectId,
         name: &str,
         root_page: PageId,
         schema: Schema,
@@ -531,7 +537,7 @@ impl Index {
         }
     }
 
-    pub fn id(&self) -> OId {
+    pub fn id(&self) -> ObjectId {
         self.object_id
     }
 
@@ -582,7 +588,7 @@ pub enum Relation {
 }
 
 impl Relation {
-    pub fn id(&self) -> OId {
+    pub fn id(&self) -> ObjectId {
         match self {
             Relation::TableRel(t) => t.object_id,
             Relation::IndexRel(i) => i.object_id,
@@ -756,7 +762,7 @@ impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
         }
 
         let o_id = match tuple.key(0)? {
-            DataTypeRef::BigUInt(v) => OId::from(v.to_owned()),
+            DataTypeRef::BigUInt(v) => ObjectId::from(v.to_owned()),
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,

@@ -2,17 +2,17 @@ use crate::database::Database;
 use crate::database::schema::Relation;
 use crate::sql::ast::BinaryOperator;
 use crate::sql::ast::Expr;
-use crate::types::OId;
+use crate::types::ObjectId;
 
 pub struct Candidate {
-    index_oid: OId,
+    index_id: ObjectId,
     column_name: String,
     selectivity_score: f64,
 }
 
 impl Candidate {
-    pub fn get(&self) -> OId {
-        self.index_oid
+    pub fn get(&self) -> ObjectId {
+        self.index_id
     }
 }
 
@@ -36,7 +36,7 @@ pub fn find_applicable_indexes(
                 let score = compute_selectivity_score(where_expr, &index, &table);
                 if score > 0.0f64 {
                     candidates.push(Candidate {
-                        index_oid: index.id(),
+                        index_id: index.id(),
                         column_name: column.name.clone(),
                         selectivity_score: score,
                     });

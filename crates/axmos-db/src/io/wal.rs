@@ -1,79 +1,33 @@
-use crate::PAGE_ZERO;
-use crate::io::MemBuffer;
-use crate::io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize};
-use crate::storage::buffer::BufferWithMetadata;
-use crate::storage::page::MemPage;
-use crate::types::{LogId, TxId};
-use std::fs::{self};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
-use std::ptr::NonNull;
+use crate::{
+    io::{
+        MemBuffer,
+        disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
+    },
+    storage::{buffer::BufferWithMetadata, tuple::OwnedTuple},
+    types::{LogId, OBJECT_ZERO, ObjectId, TransactionId},
+};
 
-use crate::types::PageId;
-
+use std::{
+    fs::{self},
+    io::{Read, Seek, SeekFrom, Write},
+    path::Path,
+    ptr::NonNull,
+};
 pub const WAL_RECORD_ALIGNMENT: usize = 64;
 
+/// My logging structure is physiological.
+///
+/// As I am using the index-organized storage approach, pages can move around all over the place during transactions.
+///
+/// To use a fully physical logging approach, I would have to append entries to the log every time a page is modified, which can happen pretty often due to the Bplustree balancing algorithms. This could easily become a bottleneck in that sense.
+///
+/// Therefore, the solution has been to use a physiological logging (not fully logical) architecture, where I log actual changes to tuples and tables instead of the physical changes to the pages.
 pub trait Operation {
     fn op_type(&self) -> LogRecordType;
-    fn page_nb(&self) -> PageId;
+    fn object_id(&self) -> ObjectId;
     fn undo(&self) -> &[u8];
     fn redo(&self) -> &[u8];
 }
-
-#[repr(transparent)]
-pub struct PageAllocation(MemPage);
-
-impl PageAllocation {
-    pub fn new(page: MemPage) -> Self {
-        Self(page)
-    }
-}
-
-impl Operation for PageAllocation {
-    fn op_type(&self) -> LogRecordType {
-        LogRecordType::Alloc
-    }
-
-    fn page_nb(&self) -> PageId {
-        self.0.page_number()
-    }
-
-    fn redo(&self) -> &[u8] {
-        self.0.as_ref()
-    }
-
-    fn undo(&self) -> &[u8] {
-        &[]
-    }
-}
-
-#[repr(transparent)]
-pub struct PageDeallocation(MemPage);
-
-impl PageDeallocation {
-    pub fn new(page: MemPage) -> Self {
-        Self(page)
-    }
-}
-
-impl Operation for PageDeallocation {
-    fn op_type(&self) -> LogRecordType {
-        LogRecordType::Dealloc
-    }
-
-    fn page_nb(&self) -> PageId {
-        self.0.page_number()
-    }
-
-    fn undo(&self) -> &[u8] {
-        self.0.as_ref()
-    }
-
-    fn redo(&self) -> &[u8] {
-        &[]
-    }
-}
-
 pub struct Begin;
 
 impl Operation for Begin {
@@ -81,8 +35,8 @@ impl Operation for Begin {
         LogRecordType::Begin
     }
 
-    fn page_nb(&self) -> PageId {
-        PAGE_ZERO
+    fn object_id(&self) -> ObjectId {
+        OBJECT_ZERO
     }
 
     fn redo(&self) -> &[u8] {
@@ -101,8 +55,8 @@ impl Operation for End {
         LogRecordType::End
     }
 
-    fn page_nb(&self) -> PageId {
-        PAGE_ZERO
+    fn object_id(&self) -> ObjectId {
+        OBJECT_ZERO
     }
 
     fn redo(&self) -> &[u8] {
@@ -120,8 +74,8 @@ impl Operation for Commit {
         LogRecordType::Commit
     }
 
-    fn page_nb(&self) -> PageId {
-        PAGE_ZERO
+    fn object_id(&self) -> ObjectId {
+        OBJECT_ZERO
     }
 
     fn redo(&self) -> &[u8] {
@@ -139,8 +93,8 @@ impl Operation for Abort {
         LogRecordType::Abort
     }
 
-    fn page_nb(&self) -> PageId {
-        PAGE_ZERO
+    fn object_id(&self) -> ObjectId {
+        OBJECT_ZERO
     }
 
     fn redo(&self) -> &[u8] {
@@ -153,46 +107,86 @@ impl Operation for Abort {
 }
 
 #[repr(C)]
-pub struct PageOverwrite {
-    old_content: MemPage,
-    new_content: MemPage,
+struct Update {
+    oid: ObjectId,
+    old: OwnedTuple,
+    new: OwnedTuple,
 }
 
-impl PageOverwrite {
-    pub fn new(old_content: MemPage, new_content: MemPage) -> Self {
-        Self {
-            old_content,
-            new_content,
-        }
-    }
-}
-
-impl Operation for PageOverwrite {
+impl Operation for Update {
     fn op_type(&self) -> LogRecordType {
-        LogRecordType::Overwrite
+        LogRecordType::Update
     }
 
-    fn page_nb(&self) -> PageId {
-        self.old_content.page_number()
+    fn object_id(&self) -> ObjectId {
+        self.oid
     }
 
     fn redo(&self) -> &[u8] {
-        self.new_content.as_ref()
+        self.new.as_ref()
     }
 
     fn undo(&self) -> &[u8] {
-        self.old_content.as_ref()
+        self.old.as_ref()
+    }
+}
+
+#[repr(C)]
+struct Insert {
+    oid: ObjectId,
+    new: OwnedTuple,
+}
+
+impl Operation for Insert {
+    fn op_type(&self) -> LogRecordType {
+        LogRecordType::Insert
+    }
+
+    fn object_id(&self) -> ObjectId {
+        self.oid
+    }
+
+    fn redo(&self) -> &[u8] {
+        self.new.as_ref()
+    }
+
+    fn undo(&self) -> &[u8] {
+        &[]
+    }
+}
+
+#[repr(C)]
+struct Delete {
+    oid: ObjectId,
+    old: OwnedTuple,
+}
+
+impl Operation for Delete {
+    fn op_type(&self) -> LogRecordType {
+        LogRecordType::Delete
+    }
+
+    fn object_id(&self) -> ObjectId {
+        self.oid
+    }
+
+    fn redo(&self) -> &[u8] {
+        &[]
+    }
+
+    fn undo(&self) -> &[u8] {
+        self.old.as_ref()
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct LogRecordBuilder {
-    tx_id: TxId,
+    tx_id: TransactionId,
     last_lsn: Option<LogId>,
 }
 
 impl LogRecordBuilder {
-    pub fn for_transaction(tx_id: TxId) -> Self {
+    pub fn for_transaction(tx_id: TransactionId) -> Self {
         Self {
             tx_id,
             last_lsn: None,
@@ -206,7 +200,7 @@ impl LogRecordBuilder {
         let log = LogRecord::new(
             self.tx_id,
             self.last_lsn,
-            operation.page_nb(),
+            operation.object_id(),
             operation.op_type(),
             operation.redo(),
             operation.undo(),
@@ -229,9 +223,9 @@ crate::repr_enum!(pub enum LogRecordType: u8 {
     End = 0x03, // Signifies end of commit or abort
     Alloc = 0x04,
     Dealloc = 0x05,
-    // For now the only supported op types are updating the full page and updating the metadata. For efficiency we might want to add more granularity here but it is not a priority right now.
-    Overwrite = 0x06,
-    OverwriteMetadata = 0x07
+    Update = 0x06,
+    Delete = 0x07,
+    Insert = 0x08
 
 });
 
@@ -282,10 +276,10 @@ impl AsRef<[u8]> for WalHeader {
 pub struct LogHeader {
     /// Auto-incrementing log sequence number
     lsn: LogId,
-    txid: TxId, // Id of the current transaction
+    tid: TransactionId, // Id of the current transaction
     /// Log id of the previous LSN of the current transaction.
     prev_lsn: LogId,
-    page_id: PageId,
+    object_id: ObjectId,
     total_size: u32,
     undo_offset: u16,
     redo_offset: u16,
@@ -296,8 +290,8 @@ pub struct LogHeader {
 impl LogHeader {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        txid: TxId,
-        page_id: PageId,
+        tid: TransactionId,
+        object_id: ObjectId,
         prev_lsn: Option<LogId>,
         total_size: u32,
         redo_offset: u16,
@@ -307,9 +301,9 @@ impl LogHeader {
     ) -> Self {
         Self {
             lsn: LogId::new(),
-            txid,
+            tid,
             prev_lsn: prev_lsn.unwrap_or(LogId::from(0)),
-            page_id,
+            object_id,
             total_size,
             undo_offset,
             redo_offset,
@@ -330,9 +324,9 @@ pub type LogRecord = BufferWithMetadata<LogHeader>;
 impl LogRecord {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        txid: TxId,
+        tid: TransactionId,
         prev_lsn: Option<LogId>,
-        page_id: PageId,
+        object_id: ObjectId,
         log_type: LogRecordType,
         redo_payload: &[u8],
         undo_payload: &[u8],
@@ -354,8 +348,8 @@ impl LogRecord {
 
         // Initialize header
         let header = LogHeader::new(
-            txid,
-            page_id,
+            tid,
+            object_id,
             prev_lsn,
             size as u32,
             redo_offset,
@@ -928,8 +922,8 @@ mod wal_tests {
 
     pub fn make_record(
         lsn: u64,
-        txid: u64,
-        page: u64,
+        tid: u64,
+        oid: u64,
         row: u16,
         redo_len: usize,
         undo_len: usize,
@@ -938,18 +932,18 @@ mod wal_tests {
         let redo: Vec<u8> = (0..redo_len).map(|_| rng.random_range(0..=255)).collect();
         let undo: Vec<u8> = (0..undo_len).map(|_| rng.random_range(0..=255)).collect();
         LogRecord::new(
-            TxId::from(txid),
+            TransactionId::from(tid),
             Some(LogId::from(lsn.saturating_sub(1))),
-            PageId::from(page),
-            LogRecordType::Overwrite,
+            ObjectId::from(oid),
+            LogRecordType::Update,
             &redo,
             &undo,
         )
     }
 
-    fn verify_record(record_ref: &LogRecordRef, expected_lsn: u64, expected_txid: u64) {
+    fn verify_record(record_ref: &LogRecordRef, expected_lsn: u64, expected_tid: u64) {
         assert_eq!(record_ref.metadata().lsn, LogId::from(expected_lsn));
-        assert_eq!(record_ref.metadata().txid, TxId::from(expected_txid));
+        assert_eq!(record_ref.metadata().tid, TransactionId::from(expected_tid));
 
         // Verify data integrity
         let mut rng = StdRng::seed_from_u64(expected_lsn);

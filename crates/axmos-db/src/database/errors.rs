@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     sql::lexer::Token,
-    types::{DataTypeKind, TxId},
+    types::{DataTypeKind, TransactionId},
 };
 
 #[derive(Debug)]
@@ -284,13 +284,14 @@ impl std::error::Error for DatabaseError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum TransactionError {
-    Aborted(TxId),
-    NotAcquire(TxId),
-    TimedOut(TxId),
-    Deadlock(TxId, TxId),
-    NotFound(TxId),
+    Aborted(TransactionId),
+    NotAcquire(TransactionId),
+    TimedOut(TransactionId),
+    Deadlock(TransactionId, TransactionId),
+    NotFound(TransactionId),
+    Io(IoError),
     Other(String),
 }
 
@@ -305,6 +306,7 @@ impl std::fmt::Display for TransactionError {
                     "Transaction with id {id} is not on acquire state and therefore is not allowed to acquire any more locks."
                 )
             }
+            TransactionError::Io(e) => write!(f, "IO Error: {e}"),
             TransactionError::Deadlock(id, other) => write!(
                 f,
                 "Deadlock detected between current transaction {id} and transaction {other}"
@@ -321,5 +323,11 @@ impl std::error::Error for SQLError {}
 impl From<TransactionError> for String {
     fn from(value: TransactionError) -> Self {
         value.to_string()
+    }
+}
+
+impl From<IoError> for TransactionError {
+    fn from(value: IoError) -> Self {
+        Self::Io(value)
     }
 }
