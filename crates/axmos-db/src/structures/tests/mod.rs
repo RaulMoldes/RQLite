@@ -67,7 +67,7 @@ fn create_test_btree<Cmp: Comparator>(
         page_size,
         cache_size: Some(capacity as u16),
         incremental_vacuum_mode: IncrementalVaccum::Disabled,
-        min_keys: 3,
+        min_keys: min_keys as u8,
         text_encoding: TextEncoding::Utf8,
     };
 
@@ -335,14 +335,13 @@ fn test_upsert_single_key() -> io::Result<()> {
 #[serial] // TO REVIEW.
 fn test_variable_length_keys() -> io::Result<()> {
     let comparator = VarlenComparator;
-    let mut tree = create_test_btree(4096, 3, 2, comparator)?;
+    let mut tree = create_test_btree(4096, 3, 3, comparator)?;
     let root = tree.get_root();
     let start_pos = Position::start_pos(root);
 
     // Insert enough keys to force root to split
     for i in 0..50 {
         let key = TestVarLengthKey::from_string(&format!("Hello_{i}"));
-
         tree.insert(root, &key.as_bytes())?;
     }
     println!("{}", tree.json()?);
@@ -366,7 +365,9 @@ fn test_variable_length_keys() -> io::Result<()> {
 #[serial]
 fn test_overflow_chain() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 3, 2, comparator)?;
+
+    // Overflow chains are very memory wasteful. Therefore we prefer to allocate the tree wih a larger cache size.
+    let mut tree = create_test_btree(4096, 100, 3, comparator)?;
     let root = tree.get_root();
     let start_pos = Position::start_pos(root);
     let key = TestKey(1);
@@ -390,7 +391,8 @@ fn test_overflow_chain() -> io::Result<()> {
 #[serial]
 fn test_multiple_overflow_chain() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 3, 2, comparator)?;
+    // Overflow chains are very memory wasteful. Therefore we prefer to allocate the tree wih a larger cache size.
+    let mut tree = create_test_btree(4096, 100, 3, comparator)?;
     let root = tree.get_root();
     let start_pos = Position::start_pos(root);
 
@@ -485,6 +487,7 @@ insert_tests! {
     },
 }
 
+// REVISAR!
 #[test]
 #[serial]
 fn test_overflow_keys() -> io::Result<()> {
@@ -605,6 +608,7 @@ fn test_btree_iterator_iter_rev() -> io::Result<()> {
 
     for (key, value) in &test_data {
         let kv = KeyValuePair::new(key, value);
+      
         tree.insert(root, kv.as_ref())?;
     }
 

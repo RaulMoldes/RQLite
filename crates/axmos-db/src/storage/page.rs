@@ -285,7 +285,7 @@ impl BtreePage {
     }
 
     /// Returns a pointer to the [`Cell`] located at the given slot.
-    fn get_cell_at(&self, index: Slot) -> NonNull<Cell> {
+    pub fn get_cell_at(&self, index: Slot) -> NonNull<Cell> {
         debug_assert!(
             index.0 <= self.num_slots(),
             "slot index {index} out of bounds for slot array of length {}",

@@ -164,12 +164,6 @@ impl TransactionWorker {
         BufferWithMetadata<P::Header>: Into<MemPage>,
     {
         let page = self.pager.write().alloc_frame()?;
-        let cloned = page.deep_copy();
-        let operation = PageAllocation::new(cloned);
-        let rec = self
-            .builder_mut()
-            .build_rec(LogRecordType::Alloc, operation);
-        self.pager.write().push_to_log(rec)?;
         self.pager.write().cache_frame(page)
     }
 
@@ -182,11 +176,6 @@ impl TransactionWorker {
             cloned.page_number() == id,
             "MEMORY CORRUPTION. ID IN CACHE DOES NOT MATCH PHYSICAL ID"
         );
-        let operation = PageDeallocation::new(cloned);
-        let rec = self
-            .builder_mut()
-            .build_rec(LogRecordType::Dealloc, operation);
-        self.pager.write().push_to_log(rec)?;
         self.pager.write().dealloc_page(id)?;
 
         Ok(())
@@ -202,17 +191,9 @@ impl TransactionWorker {
         MemPage: From<P>,
     {
         if let Some(guard) = self.stack_mut().get_mut(id) {
-            let before = guard.clone(); // First we create a copy that will be inserted on the log for undo
             let page_mut: &mut P = guard.try_into()?;
             // Execute the callback
             let result = callback(page_mut);
-            let after = guard.clone();
-            let operation = PageOverwrite::new(before, after);
-            let rec = self
-                .builder_mut()
-                .build_rec(LogRecordType::Overwrite, operation);
-
-            self.pager.write().push_to_log(rec)?;
             return Ok(result);
         }
         Err(IoError::new(
@@ -251,17 +232,10 @@ impl TransactionWorker {
         MemPage: From<P>,
     {
         if let Some(guard) = self.stack_mut().get_mut(id) {
-            let before = guard.clone(); // First we create a copy that will be inserted on the log for undo
             let page_mut: &mut P = guard.try_into()?;
             // Execute the callback
             let result = callback(page_mut);
-            let after = guard.clone();
-            let operation = PageOverwrite::new(before, after);
-            let rec = self
-                .builder_mut()
-                .build_rec(LogRecordType::Overwrite, operation);
 
-            self.pager.write().push_to_log(rec)?;
             return result;
         }
         Err(IoError::new(

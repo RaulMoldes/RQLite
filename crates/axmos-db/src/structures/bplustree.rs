@@ -275,7 +275,7 @@ where
         num_siblings_per_side: usize,
         comparator: Cmp,
     ) -> Self {
-        debug_assert!(min_keys > 2, "Invalid argument. Minimum allowed keys is 2");
+        debug_assert!(min_keys >= 3, "Invalid argument. Minimum allowed keys is 3");
         Self {
             root,
             worker,
@@ -359,8 +359,9 @@ where
         self.worker_mut()
             .acquire::<BtreePage>(start_page, access_mode)?;
 
+        let last = self.worker().last().cloned();
         // As we are reading, we can safely release the latch on the parent.
-        if let Some(parent_node) = self.worker().last()
+        if let Some(parent_node) = last
             && matches!(access_mode, FrameAccessMode::Read)
         {
             self.worker_mut().release_latch(parent_node.page());
@@ -386,86 +387,97 @@ where
     }
 
     fn find_child(&self, page_id: PageId, search_key: &[u8]) -> io::Result<SearchResult> {
-        self.worker()
-            .try_read_page::<BtreePage, _, _>(page_id, |btreepage| {
-                let mut result = SearchResult::NotFound(Position::new(
-                    btreepage.metadata().right_child,
-                    btreepage.max_slot_index(),
-                ));
+        let (num_slots, right_child) = self
+            .worker()
+            .read_page::<BtreePage, _, _>(page_id, |p| (p.num_slots(), p.metadata().right_child))?;
 
-                for (i, cell) in btreepage.iter_cells().enumerate() {
-                    let content: Payload = if cell.metadata().is_overflow() {
-                        let required_size = if (cell.used().len() - std::mem::size_of::<PageId>())
-                            >= std::mem::size_of::<VarInt>()
-                            || self.comparator.is_fixed_size()
-                        {
-                            self.comparator.key_size(cell.used())?
-                        } else {
-                            usize::MAX
-                        };
+        let mut result = SearchResult::NotFound(Position::new(right_child, Slot(num_slots)));
 
-                        self.reassemble_payload(cell, required_size)?
-                    } else {
-                        Payload::Reference(cell.used())
-                    };
+        for i in 0..num_slots {
+            // TODO! CLONING THE CELL HERE IS INEFFICIENT.
+            // MUST FIND A WAY TO DO THIS WITHOUT CLONING.
+            // THE PROBLEM IS THAT WE CURRENTLY NEED TO GRAB A MUTABLE REFERENCE TO THE WORKER AGAIN AT THE [reassemble_payload] CALL AND THAT FORCES US TO RELEASE IT FIRST.
+            let cell = self
+                .worker()
+                .read_page::<BtreePage, _, _>(page_id, |btreepage| {
+                    let cell = btreepage.cell(Slot(i));
+                    cell.clone()
+                })?;
 
-                    if self.comparator.compare(search_key, content.as_ref())? == Ordering::Less {
-                        result = SearchResult::Found(Position::new(
-                            cell.metadata().left_child(),
-                            Slot(i as u16),
-                        ));
-                        break;
-                    };
-                }
+            let content: Payload = if cell.metadata().is_overflow() {
+                let required_size = if (cell.used().len() - std::mem::size_of::<PageId>())
+                    >= std::mem::size_of::<VarInt>()
+                    || self.comparator.is_fixed_size()
+                {
+                    self.comparator.key_size(cell.used())?
+                } else {
+                    usize::MAX
+                };
 
-                Ok(result)
-            })
+                self.reassemble_payload(&cell, required_size)?
+            } else {
+                Payload::Reference(cell.used())
+            };
+
+            if self.comparator.compare(search_key, content.as_ref())? == Ordering::Less {
+                result = SearchResult::Found(Position::new(cell.metadata().left_child(), Slot(i)));
+                break;
+            };
+        }
+
+        Ok(result)
     }
 
     fn find_slot(&self, page_id: PageId, search_key: &[u8]) -> io::Result<SlotSearchResult> {
-        self.worker()
-            .try_read_page::<BtreePage, _, _>(page_id, |btreepage| {
-                if btreepage.num_slots() == 0 {
-                    return Ok(SlotSearchResult::NotFound);
+        let num_slots = self
+            .worker()
+            .read_page::<BtreePage, _, _>(page_id, |p| p.num_slots())?;
+
+        if num_slots == 0 {
+            return Ok(SlotSearchResult::NotFound);
+        }
+
+        let mut result = SlotSearchResult::NotFound;
+        for i in 0..num_slots {
+            // TODO! CLONING THE CELL HERE IS INEFFICIENT.
+            // MUST FIND A WAY TO DO THIS WITHOUT CLONING.
+            // THE PROBLEM IS THAT WE CURRENTLY NEED TO GRAB A MUTABLE REFERENCE TO THE WORKER AGAIN AT THE [reassemble_payload] CALL AND THAT FORCES US TO RELEASE IT FIRST.
+            let cell = self
+                .worker()
+                .read_page::<BtreePage, _, _>(page_id, |btreepage| {
+                    let cell = btreepage.cell(Slot(i));
+                    cell.clone()
+                })?;
+
+            // Reassemble the payload if needed only.
+            let content: Payload = if cell.metadata().is_overflow() {
+                let required_size = if (cell.used().len() - std::mem::size_of::<PageId>())
+                    >= std::mem::size_of::<VarInt>()
+                    || self.comparator.is_fixed_size()
+                {
+                    self.comparator.key_size(cell.used())?
+                } else {
+                    usize::MAX
                 };
+                self.reassemble_payload(&cell, required_size)?
+            } else {
+                Payload::Reference(cell.used())
+            };
 
-                let mut result = SlotSearchResult::NotFound;
-                for (i, cell) in btreepage.iter_cells().enumerate() {
-                    let content: Payload = if cell.metadata().is_overflow() {
-                        let required_size = if (cell.used().len() - std::mem::size_of::<PageId>())
-                            >= std::mem::size_of::<VarInt>()
-                            || self.comparator.is_fixed_size()
-                        {
-                            self.comparator.key_size(cell.used())?
-                        } else {
-                            usize::MAX
-                        };
-                        self.reassemble_payload(cell, required_size)?
-                    } else {
-                        Payload::Reference(cell.used())
-                    };
-
-                    match self.comparator.compare(search_key, content.as_ref())? {
-                        Ordering::Less => {
-                            result = SlotSearchResult::FoundBetween(Position::new(
-                                page_id,
-                                Slot(i as u16),
-                            ));
-                            break;
-                        }
-                        Ordering::Equal => {
-                            result = SlotSearchResult::FoundInplace(Position::new(
-                                page_id,
-                                Slot(i as u16),
-                            ));
-                            break;
-                        }
-                        _ => {}
-                    }
+            match self.comparator.compare(search_key, content.as_ref())? {
+                Ordering::Less => {
+                    result = SlotSearchResult::FoundBetween(Position::new(page_id, Slot(i)));
+                    break;
                 }
+                Ordering::Equal => {
+                    result = SlotSearchResult::FoundInplace(Position::new(page_id, Slot(i)));
+                    break;
+                }
+                _ => {}
+            }
+        }
 
-                Ok(result)
-            })
+        Ok(result)
     }
 
     /// Reassembles the payload contained in an overflow chain
@@ -505,48 +517,52 @@ where
     ///
     /// - [SearchResult::NotFound] if it does not find the key it is looking for.  The position will include the last slot index in the page.
     fn binary_search_key(&self, page_id: PageId, search_key: &[u8]) -> io::Result<SearchResult> {
-        // Now get the btree page.
-        self.worker()
-            .try_read_page::<BtreePage, _, _>(page_id, |btreepage| {
-                let mut slot_count = Slot(btreepage.num_slots());
-                let mut left = Slot(0);
-                let mut right = slot_count;
+        let mut slot_count: Slot = self
+            .worker()
+            .read_page::<BtreePage, _, _>(page_id, |p| p.num_slots())?
+            .into();
 
-                while left < right {
-                    let mid = left + slot_count / Slot(2);
+        // store the last slot in a register
+        let last_slot = slot_count;
+        let mut left = Slot(0);
+        let mut right = slot_count;
+
+        while left < right {
+            let mid = left + slot_count / Slot(2);
+            let cell = self
+                .worker()
+                .read_page::<BtreePage, _, _>(page_id, |btreepage| {
                     let cell = btreepage.cell(mid);
+                    cell.clone()
+                })?;
 
-                    // Asks the comparator if we need more bytes in order to find the correct path.
-                    let content: Payload = if cell.metadata().is_overflow() {
-                        let required_size = if (cell.used().len() - std::mem::size_of::<PageId>())
-                            >= std::mem::size_of::<VarInt>()
-                            || self.comparator.is_fixed_size()
-                        {
-                            self.comparator.key_size(cell.used())?
-                        } else {
-                            usize::MAX
-                        };
-                        self.reassemble_payload(cell, required_size)?
-                    } else {
-                        Payload::Reference(cell.used())
-                    };
+            // Asks the comparator if we need more bytes in order to find the correct path.
+            let content: Payload = if cell.metadata().is_overflow() {
+                let required_size = if (cell.used().len() - std::mem::size_of::<PageId>())
+                    >= std::mem::size_of::<VarInt>()
+                    || self.comparator.is_fixed_size()
+                {
+                    self.comparator.key_size(cell.used())?
+                } else {
+                    usize::MAX
+                };
+                self.reassemble_payload(&cell, required_size)?
+            } else {
+                Payload::Reference(cell.used())
+            };
 
-                    // The key content is always the first bytes of the cell
-                    match self.comparator.compare(search_key, content.as_ref())? {
-                        Ordering::Equal => {
-                            return Ok(SearchResult::Found(Position::new(page_id, mid)));
-                        }
-                        Ordering::Greater => left = mid + 1usize,
-                        Ordering::Less => right = mid,
-                    };
-
-                    slot_count = right - left;
+            // The key content is always the first bytes of the cell
+            match self.comparator.compare(search_key, content.as_ref())? {
+                Ordering::Equal => {
+                    return Ok(SearchResult::Found(Position::new(page_id, mid)));
                 }
-                Ok(SearchResult::NotFound(Position::new(
-                    page_id,
-                    btreepage.max_slot_index(),
-                )))
-            })
+                Ordering::Greater => left = mid + 1usize,
+                Ordering::Less => right = mid,
+            };
+
+            slot_count = right - left;
+        }
+        Ok(SearchResult::NotFound(Position::new(page_id, last_slot)))
     }
 
     /// Inserts a key at the corresponding position in the Btree.
@@ -784,7 +800,11 @@ where
 
         let mut stored_bytes = max_payload_size;
 
+        // Note that here we cannot release the latch on an overflow page until all the chain is written. This might waste a lot of memory  as it will keep overflow pages pinned. It is a tradeoff between correctness and efficiency, and for a database, we prefer to play the correctness side of the story.
         loop {
+            self.worker_mut()
+                .acquire::<OverflowPage>(overflow_page_number, FrameAccessMode::Write)?;
+
             let overflow_bytes = min(
                 OverflowPage::usable_space(page_size) as usize,
                 payload[stored_bytes..].len(),
@@ -901,8 +921,8 @@ where
             .acquire::<BtreePage>(new_right, FrameAccessMode::Write)?;
 
         let old_right_child = self
-            .worker_mut()
-            .write_page::<BtreePage, _, _>(self.root, |node| node.metadata().right_child)?;
+            .worker()
+            .read_page::<BtreePage, _, _>(self.root, |node| node.metadata().right_child)?;
 
         let was_leaf = !old_right_child.is_valid();
         let page_size = self.worker().get_page_size();
@@ -976,7 +996,7 @@ where
 
         if right_left_most.is_valid() {
             self.worker_mut()
-                .acquire::<BtreePage>(left_right_most, FrameAccessMode::Write)?;
+                .acquire::<BtreePage>(right_left_most, FrameAccessMode::Write)?;
             self.worker_mut()
                 .write_page::<BtreePage, _, _>(right_left_most, |node| {
                     node.metadata_mut().previous_sibling = left_right_most;
@@ -1726,6 +1746,9 @@ where
         root: PageId,
         buf: &mut Vec<(PageId, BtreePage)>,
     ) -> io::Result<()> {
+        // Must acquire the page in read mode in order to read it
+        self.worker_mut()
+            .acquire::<BtreePage>(root, FrameAccessMode::Read)?;
         let children = self.worker().read_page::<BtreePage, _, _>(root, |node| {
             buf.push((root, node.clone()));
             node.iter_children().collect::<Vec<_>>()
@@ -1741,6 +1764,7 @@ where
     /// Utility to print a bplustree as json.
     pub fn json(&mut self) -> io::Result<String> {
         let mut nodes = Vec::new();
+
         self.read_into_mem(self.root, &mut nodes)?;
 
         nodes.sort_by(|(page_num1, _), (page_num2, _)| page_num1.cmp(page_num2));
