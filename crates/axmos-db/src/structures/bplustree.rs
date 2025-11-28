@@ -5,7 +5,7 @@ use crate::{
         cell::{CELL_HEADER_SIZE, Cell, Slot},
         page::{BTREE_PAGE_HEADER_SIZE, BtreePage, OverflowPage, Page},
     },
-    transactions::worker::{TransactionWorker, Worker},
+    transactions::worker::{ThreadWorker, Worker},
     types::{PAGE_ZERO, PageId, VarInt},
 };
 
@@ -305,11 +305,11 @@ where
         self.root
     }
 
-    fn worker(&self) -> Ref<'_, TransactionWorker> {
+    fn worker(&self) -> Ref<'_, ThreadWorker> {
         self.worker.borrow()
     }
 
-    fn worker_mut(&self) -> RefMut<'_, TransactionWorker> {
+    fn worker_mut(&self) -> RefMut<'_, ThreadWorker> {
         self.worker.borrow_mut()
     }
 

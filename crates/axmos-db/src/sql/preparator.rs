@@ -420,7 +420,7 @@ impl<'a> Preparator<'a> {
             return subquery.clone();
         };
 
-        self.db.relation(obj_name).unwrap()
+        self.db.get_relation(obj_name).unwrap()
     }
 }
 

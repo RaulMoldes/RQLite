@@ -744,7 +744,7 @@ impl<'a> Analyzer<'a> {
                 }
             }
             Statement::CreateTable(stmt) => {
-                if let Ok(SearchResult::Found(_)) = self.db.lookup(&stmt.table) {
+                if let Ok(SearchResult::Found(_)) = self.db.lookup_relation(&stmt.table) {
                     return Err(AnalyzerError::AlreadyExists(AlreadyExists::Table(
                         stmt.table.clone(),
                     )));
@@ -1254,7 +1254,7 @@ impl<'a> Analyzer<'a> {
         };
 
         self.db
-            .relation(name)
+            .get_relation(name)
             .map_err(|e| AnalyzerError::NotFound(name.to_string()))
     }
 }

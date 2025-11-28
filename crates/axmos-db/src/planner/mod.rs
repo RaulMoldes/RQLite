@@ -15,7 +15,7 @@ use std::io::{self, ErrorKind};
 
 mod filter;
 mod groupby;
-mod index_selection;
+
 mod join;
 mod orderby;
 mod project;

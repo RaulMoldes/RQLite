@@ -1,13 +1,16 @@
 use crate::{
-    ObjectId, UInt64, database::errors::TransactionError, io::pager::SharedPager,
-    transactions::worker::Worker, types::TransactionId,
+    ObjectId, UInt64,
+    database::{SharedCatalog, errors::TransactionError},
+    io::pager::SharedPager,
+    transactions::worker::WorkerPool,
+    types::TransactionId,
 };
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, Mutex,
-        mpsc::{Receiver, Sender, channel},
+        mpsc::{Receiver, RecvTimeoutError, Sender, channel},
     },
     thread,
     time::{Duration, Instant},
@@ -398,10 +401,6 @@ impl TransactionManager {
         id
     }
 
-    pub fn create_worker(&self, id: TransactionId, pager: SharedPager) -> Worker {
-        Worker::for_transaction(id, pager)
-    }
-
     // Releases the lock on the provided sender channel.
     // mpsc provides multi-producer  single consumer channels, so i think the best idea is to not hold a single sender since we might eventually want to run multiple threads on the same transaction.
     pub fn release_lock(
@@ -424,7 +423,7 @@ impl TransactionManager {
     // The idea is to have multiple Lock Requestors and a single Lock Responder. The Transaction manager becomes kind of a "bottleneck" here
     // since is the main entry point that holds metadata about transactions and we need to grab it mutably in order to acquire the lock.
     // For each client, an additional channel is created to
-    pub fn read(
+    pub fn get_tuple_handle(
         &self,
         tx_id: TransactionId,
         logical_id: LogicalId,
@@ -479,7 +478,7 @@ impl TransactionManager {
                 self.abort(tx_id, lock_tx)?;
                 Err(TransactionError::Aborted(tx_id))
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(RecvTimeoutError::Timeout) => {
                 // Another thread had the lock so we have to wait.
                 Err(TransactionError::TimedOut(tx_id))
             }
@@ -490,12 +489,21 @@ impl TransactionManager {
         }
     }
 
-    pub fn write(
+    fn create_worker_pool(
+        &self,
+        id: TransactionId,
+        pager: SharedPager,
+        sender: Sender<LockRequest>,
+        catalog: SharedCatalog,
+    ) -> WorkerPool {
+        WorkerPool::for_transaction(id, pager, sender, self.clone(), catalog)
+    }
+
+    pub fn get_tuple_handle_mut(
         &self,
         tx_id: TransactionId,
         logical_id: LogicalId,
         lock_tx: Sender<LockRequest>,
-        _value: Vec<u8>,
     ) -> Result<(), TransactionError> {
         {
             let mut txs = self.txs.write();
@@ -539,9 +547,7 @@ impl TransactionManager {
                 self.abort(tx_id, lock_tx)?;
                 Err(TransactionError::Aborted(tx_id))
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                Err(TransactionError::TimedOut(tx_id))
-            }
+            Err(RecvTimeoutError::Timeout) => Err(TransactionError::TimedOut(tx_id)),
             Err(_) => {
                 self.abort(tx_id, lock_tx)?;
                 Err(TransactionError::Other("reply channel closed".into()))
@@ -652,6 +658,12 @@ impl TransactionController {
         self.lock_sender.clone()
     }
 
+    pub fn create_worker_pool(&self, pager: SharedPager, catalog: SharedCatalog) -> WorkerPool {
+        let id = TransactionId::new();
+        self.manager
+            .create_worker_pool(id, pager, self.sender(), catalog)
+    }
+
     pub fn spawn(&self) {
         let mgr = self.manager.clone();
         let sender = self.sender();
@@ -674,32 +686,34 @@ impl TransactionController {
                     }
                 }
 
-                // Sleep briefly to avObjectId spinning
+                // Sleep briefly to avoid spinning
                 thread::sleep(Duration::from_millis(1));
             }
         });
     }
 
-    /// Starts a transaction on a new thread.
-    pub fn run_transaction_async<F, T>(
+    // Starts a transaction on a new thread.
+    // TODO: Think how can we do this with multiple threads.
+    /*pub fn run_transaction_async<F, T>(
         &self,
         pager: SharedPager,
         payload: F,
     ) -> thread::JoinHandle<Result<T, TransactionError>>
     where
-        F: FnOnce(Worker, &TransactionManager, Sender<LockRequest>) -> Result<T, TransactionError>
+        F: FnOnce(WorkerPool) -> Result<T, TransactionError>
             + Send
             + 'static,
         T: Send + 'static,
     {
-        let mgr = self.manager.clone();
+        let mgr = self.manager();
         let sender = self.sender();
 
-        thread::spawn(move || {
-            let tx_id = mgr.create_transaction();
-            let worker = mgr.create_worker(tx_id, pager);
-            worker.borrow_mut().begin()?;
-            let res = payload(worker.clone(), &mgr, sender.clone());
+
+        let tx_id = mgr.create_transaction();
+        let worker = mgr.create_worker_pool(tx_id, pager, sender.clone());
+
+           worker.begin()?;
+            let res = payload(worker.clone());
 
             match res {
                 Ok(val) => {
@@ -715,6 +729,6 @@ impl TransactionController {
                     Err(e)
                 }
             }
-        })
-    }
+
+    }*/
 }

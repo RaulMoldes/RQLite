@@ -9,11 +9,12 @@
 #![feature(slice_ptr_get)]
 #![feature(concat_bytes)]
 #![feature(str_from_raw_parts)]
+#![feature(current_thread_id)]
 mod configs;
 mod database;
 mod io;
 mod macros;
-mod planner;
+//mod planner;
 mod sql;
 mod storage;
 mod structures;
