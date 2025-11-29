@@ -107,10 +107,16 @@ impl Operation for Abort {
 }
 
 #[repr(C)]
-struct Update {
+pub struct Update {
     oid: ObjectId,
     old: OwnedTuple,
     new: OwnedTuple,
+}
+
+impl Update {
+    pub fn new(oid: ObjectId, old: OwnedTuple, new: OwnedTuple) -> Self {
+        Self { oid, old, new }
+    }
 }
 
 impl Operation for Update {
@@ -132,11 +138,16 @@ impl Operation for Update {
 }
 
 #[repr(C)]
-struct Insert {
+pub struct Insert {
     oid: ObjectId,
     new: OwnedTuple,
 }
 
+impl Insert {
+    pub fn new(oid: ObjectId, new: OwnedTuple) -> Self {
+        Self { oid, new }
+    }
+}
 impl Operation for Insert {
     fn op_type(&self) -> LogRecordType {
         LogRecordType::Insert
@@ -156,9 +167,15 @@ impl Operation for Insert {
 }
 
 #[repr(C)]
-struct Delete {
+pub struct Delete {
     oid: ObjectId,
     old: OwnedTuple,
+}
+
+impl Delete {
+    pub fn new(oid: ObjectId, old: OwnedTuple) -> Self {
+        Self { oid, old }
+    }
 }
 
 impl Operation for Delete {

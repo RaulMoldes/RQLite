@@ -33,8 +33,8 @@ pub(crate) fn parsing_pipeline(sql: &str, db: &Database) -> Result<Statement, SQ
     let mut parser = Parser::new(lexer);
     let mut stmt = parser.parse()?;
     stmt.simplify();
-    let mut analyzer = Analyzer::new(db);
-    let mut preparator = Preparator::new(db);
+    let mut analyzer = Analyzer::new(db.catalog(), db.main_worker_cloned());
+    let mut preparator = Preparator::new(db.catalog(), db.main_worker_cloned());
     analyzer.analyze(&stmt)?;
     preparator.prepare_stmt(&mut stmt);
     Ok(stmt)

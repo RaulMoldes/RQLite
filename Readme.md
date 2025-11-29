@@ -12,3 +12,4 @@ MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test
 
 3. The [run_transaction_async] function does not perform any form of Write Ahead Logging. The basic structure setup for write ahead logging is done but we need to also control it at the transaction level in some way.
 
+4. Añadir marcadores tombstone a las tuplas.

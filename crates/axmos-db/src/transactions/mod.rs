@@ -24,7 +24,23 @@ use mem_table::{MemTable, TransactionTable};
 
 pub type Version = u16;
 pub type RowId = UInt64;
-pub type LogicalId = (ObjectId, RowId);
+
+#[derive(Debug, PartialEq, Eq, Ord, PartialOrd, Hash, Clone, Copy)]
+pub struct LogicalId(ObjectId, RowId);
+
+impl LogicalId {
+    pub fn new(table: ObjectId, row: RowId) -> Self {
+        Self(table, row)
+    }
+
+    pub fn table(&self) -> ObjectId {
+        self.0
+    }
+
+    pub fn row(&self) -> RowId {
+        self.1
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum LockType {
@@ -182,16 +198,14 @@ fn detect_cycle(graph: &WaitForGraph) -> Option<WFGCycle> {
 
 #[derive(Debug, Hash, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct TupleHandle {
-    object_id: ObjectId,
-    row_id: UInt64,
+    logical_id: LogicalId,
     version: Version,
 }
 
 impl TupleHandle {
     pub fn new(logical_id: LogicalId) -> Self {
         Self {
-            object_id: logical_id.0,
-            row_id: logical_id.1,
+            logical_id,
             version: 0,
         }
     }
@@ -201,19 +215,19 @@ impl TupleHandle {
     }
 
     fn id(&self) -> LogicalId {
-        (self.object_id, self.row_id)
+        self.logical_id
     }
 
-    fn table(&self) -> &ObjectId {
-        &self.object_id
+    fn table(&self) -> ObjectId {
+        self.logical_id.table()
     }
 
-    fn row_id(&self) -> &RowId {
-        &self.row_id
+    fn row_id(&self) -> RowId {
+        self.logical_id.row()
     }
 
-    fn version(&self) -> &Version {
-        &self.version
+    fn version(&self) -> Version {
+        self.version
     }
 }
 

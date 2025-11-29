@@ -1,12 +1,23 @@
-use std::collections::HashMap;
-
-use crate::database::schema::Schema;
-use crate::types::{
-    DataType, DataTypeKind, DataTypeRef, DataTypeRefMut, Float32RefMut, Float64RefMut, Int8RefMut,
-    Int16RefMut, Int32RefMut, Int64RefMut, UInt8RefMut, UInt16RefMut, UInt32RefMut, UInt64RefMut,
-    VarInt, reinterpret_cast, reinterpret_cast_mut,
+use crate::{
+    TRANSACTION_ZERO,
+    database::schema::Schema,
+    types::{
+        DataType, DataTypeKind, DataTypeRef, DataTypeRefMut, Float32RefMut, Float64RefMut,
+        Int8RefMut, Int16RefMut, Int32RefMut, Int64RefMut, TransactionId, UInt8RefMut,
+        UInt16RefMut, UInt32RefMut, UInt64RefMut, VarInt, reinterpret_cast, reinterpret_cast_mut,
+    },
+    varint::MAX_VARINT_LEN,
 };
-use crate::varint::MAX_VARINT_LEN;
+use std::{
+    mem,
+    ptr::{
+        write,
+        write_bytes,
+        copy_nonoverlapping
+    },
+    collections::HashMap
+
+};
 
 // Macro used to read a tuple view from a byte slice.
 // Can be used with both mutable and immutable views of the tuple.
@@ -22,6 +33,8 @@ macro_rules! read_tuple {
             last_version_end: 0,
             target_version: 0,
             null_bitmap_offset: 0,
+            xmin: TRANSACTION_ZERO,
+            xmax: TRANSACTION_ZERO,
         };
 
         let mut cursor = 0usize;
@@ -34,12 +47,19 @@ macro_rules! read_tuple {
             cursor += read_bytes;
         }
 
-        // Skip version byte
-
+        // Skip version byte:
         tuple.target_version = tuple.data[cursor];
         cursor += 1;
 
-        // Skip null bitmap
+        // Skip xmin and xmax:
+        let transaction_id_size = mem::size_of::<TransactionId>();
+        tuple.xmin = TransactionId::try_from(&tuple.data[cursor..cursor + transaction_id_size])?;
+        cursor += transaction_id_size;
+
+        tuple.xmax = TransactionId::try_from(&tuple.data[cursor..cursor +transaction_id_size])?;
+        cursor += transaction_id_size;
+
+        // Skip null bitmap:
         tuple.null_bitmap_offset = cursor as u16;
         let null_bitmap_size = $schema.values().len().div_ceil(8);
         cursor += null_bitmap_size;
@@ -76,6 +96,9 @@ macro_rules! read_tuple {
                 let version_start = cursor;
                 cursor += 1;
 
+                tuple.xmin = TransactionId::try_from(&tuple.data[cursor..cursor + transaction_id_size])?;
+                cursor += transaction_id_size;
+
                 let (size_varint, varint_bytes) =
                     VarInt::from_encoded_bytes(&tuple.data[cursor..])?;
 
@@ -89,6 +112,7 @@ macro_rules! read_tuple {
                 while cursor < delta_end {
                     let offset_idx = tuple.data[cursor];
                     cursor += 1;
+
 
                     let dtype = tuple.schema.values()[offset_idx as usize].dtype;
                     tuple.offsets[offset_idx as usize + tuple.schema.num_keys as usize] =
@@ -125,6 +149,10 @@ pub struct TupleRefMut<'a, 'b> {
 
     // Version of the data this view is targeting
     target_version: u8,
+
+    // This is metadata about the tuple it self, not the view.
+    xmin: TransactionId, // Min transaction id that can see the tuple
+    xmax: TransactionId, // Max transaction id that can see the tuple.
 }
 
 /// Mutable reference to a tuple buffer.
@@ -398,6 +426,32 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
     fn to_owned(&self) -> OwnedTuple {
         OwnedTuple(self.data.to_vec().into_boxed_slice())
     }
+
+    /// Returns true if the tuple has been deleted.
+    pub fn is_deleted(&self) -> bool {
+        self.xmax != TRANSACTION_ZERO
+    }
+
+    /// Returns true if the tuple is visible to the given transaction.
+    pub fn is_visible(&self, xid: TransactionId) -> bool {
+        self.xmin <= xid && (self.xmax == TRANSACTION_ZERO || self.xmax > xid)
+    }
+
+    /// Marks the tuple as deleted in the buffer.
+    /// xmax offset: key_len + 1 (version) + 8 (xmin)
+    pub fn delete(&mut self, xid: TransactionId) -> std::io::Result<()> {
+        if self.xmax != TRANSACTION_ZERO {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Tuple is already deleted",
+            ));
+        }
+        let xmax_offset = self.key_len as usize + 1 + mem::size_of::<TransactionId>();
+        let xid_bytes = xid.as_ref();
+        self.data[xmax_offset..xmax_offset + xid_bytes.len()].copy_from_slice(xid_bytes);
+        self.xmax = xid;
+        Ok(())
+    }
 }
 
 // Inmutable view of a tuple at a specific point in time.
@@ -422,6 +476,10 @@ pub struct TupleRef<'a, 'b> {
 
     // version of the data this tuple is targeting
     target_version: u8,
+
+    // Metadata about the underlying tuple.
+    xmin: TransactionId,// Min transaction id that can see the tuple
+    xmax: TransactionId,// Max transaction id that can see the tuple
 }
 
 impl<'a, 'b> TupleRef<'a, 'b> {
@@ -495,6 +553,16 @@ impl<'a, 'b> TupleRef<'a, 'b> {
     fn to_owned(&self) -> OwnedTuple {
         OwnedTuple(self.data.to_vec().into_boxed_slice())
     }
+
+    /// Returns true if the tuple has been deleted.
+    pub fn is_deleted(&self) -> bool {
+        self.xmax != TRANSACTION_ZERO
+    }
+
+    /// Returns true if the tuple is visible to the given transaction.
+    pub fn is_visible(&self, xid: TransactionId) -> bool {
+        self.xmin <= xid && (self.xmax == TRANSACTION_ZERO || self.xmax > xid)
+    }
 }
 
 /// Owned tuple structure.
@@ -502,6 +570,7 @@ impl<'a, 'b> TupleRef<'a, 'b> {
 /// I am using only one byte to store both the version and also the index to fields, and I am not concerned about that, given that one byte is enough to store up to 255 versions and 255 columns, which is pretty uncommon.
 ///
 /// Also, the vaccum workers will take care of resetting the version to zero every time they visit a tuple, and clean it up, so for the version to overflow, we would need more than 255 active transactions modifying the same tuple which I think is unrealistic.
+#[derive(Clone)]
 pub struct Tuple<'schema> {
     // Last version data.
     data: Vec<DataType>,
@@ -509,12 +578,58 @@ pub struct Tuple<'schema> {
     schema: &'schema Schema,
     // Current version
     version: u8, // Current version of the tuple.
+    /// Transaction that created the tuple:
+    xmin: TransactionId,
+    /// Transaction that deleted the tuple:
+    xmax: TransactionId,
     // Directory of versions of the tuple.
-    delta_dir: HashMap<u8, Vec<(u8, DataType)>>,
+    delta_dir: HashMap<u8, Delta>,
+}
+
+#[derive(Debug, Clone)]
+struct Delta {
+    xmin: TransactionId,
+    changes: Vec<(u8, DataType)>,
+}
+
+
+impl Delta {
+    fn new(xmin: TransactionId) -> Self {
+        Self { xmin, changes: Vec::new() }
+    }
+
+
+    fn with_capacity(xmin: TransactionId, capacity: usize) -> Self {
+        Self { xmin, changes: Vec::with_capacity(capacity) }
+    }
+
+    fn iter_changes(&self) -> impl Iterator<Item = &(u8, DataType)> {
+        self.changes.iter()
+    }
+
+    fn push(&mut self, value: (u8, DataType)) {
+        self.changes.push(value);
+    }
+
+    fn extend<I: IntoIterator<Item = (u8, DataType)>>(&mut self, iter: I) {
+        self.changes.extend(iter);
+    }
+
+    fn len(&self) -> usize {
+        self.changes.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
 }
 
 impl<'schema> Tuple<'schema> {
-    pub(crate) fn new(values: &[DataType], schema: &'schema Schema) -> std::io::Result<Self> {
+    pub(crate) fn new(
+        values: &[DataType],
+        schema: &'schema Schema,
+        xmin: TransactionId,
+    ) -> std::io::Result<Self> {
         // Validate the data first.
         if values.len() > schema.columns.len() {
             return Err(std::io::Error::new(
@@ -544,6 +659,8 @@ impl<'schema> Tuple<'schema> {
             schema,
             version: 0,
             delta_dir: HashMap::new(),
+            xmin,
+            xmax: TRANSACTION_ZERO,
         })
     }
 
@@ -574,20 +691,24 @@ impl<'schema> Tuple<'schema> {
     pub fn set_value(&mut self, index: usize, new: DataType) -> Option<DataType> {
         self.values_mut()
             .get_mut(index)
-            .map(|slot| std::mem::replace(slot, new))
+            .map(|slot| mem::replace(slot, new))
     }
 
-    pub fn add_version(&mut self, modified: Vec<(usize, DataType)>) -> std::io::Result<()> {
+    pub fn add_version(
+        &mut self,
+        modified: &[(usize, DataType)],
+        xmin: TransactionId,
+    ) -> std::io::Result<()> {
         let old_version = self.version;
         self.version += 1;
-        let mut diffs = Vec::with_capacity(modified.len());
+        let mut diffs = Delta::with_capacity(xmin, modified.len());
 
         for (i, value) in modified {
-            if let Some(val) = self.schema.values().get(i)
+            if let Some(val) = self.schema.values().get(*i)
                 && value.matches(val.dtype)
             {
-                if let Some(old) = self.set_value(i, value) {
-                    diffs.push((i as u8, old));
+                if let Some(old) = self.set_value(*i, value.clone()) {
+                    diffs.push((*i as u8, old));
                 }
             } else {
                 return Err(std::io::Error::new(
@@ -601,8 +722,35 @@ impl<'schema> Tuple<'schema> {
 
         Ok(())
     }
+
+    /// Marks the tuple as deleted by the given transaction.
+    /// After deletion, the tuple is invisible to transactions >= xid.
+    pub fn delete(&mut self, xid: TransactionId) -> std::io::Result<()> {
+        if self.xmax != TRANSACTION_ZERO {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Tuple is already deleted",
+            ));
+        }
+        self.xmax = xid;
+        Ok(())
+    }
+
+    /// Returns true if the tuple has been deleted.
+    pub fn is_deleted(&self) -> bool {
+        self.xmax != TRANSACTION_ZERO
+    }
+
+    /// Returns true if the tuple is visible to the given transaction.
+    /// Visible if: xmin <= xid AND (xmax == 0 OR xmax > xid)
+    pub fn is_visible(&self, xid: TransactionId) -> bool {
+        self.xmin <= xid && (self.xmax == TRANSACTION_ZERO || self.xmax > xid)
+    }
+
+
 }
 
+#[derive(Clone, Debug)]
 pub struct OwnedTuple(Box<[u8]>);
 
 /// Serializes the tuple to a byte array, consuming it.
@@ -612,124 +760,7 @@ pub struct OwnedTuple(Box<[u8]>);
 /// Note that at each version level the bitmap is different: each version keeps its private bitmap data to be able to set values to null at a specific version level.
 impl<'schema> From<Tuple<'schema>> for OwnedTuple {
     fn from(value: Tuple<'schema>) -> OwnedTuple {
-        // Compute the exact required size for the tuple data
-        let null_bitmap_size = value.values().len().div_ceil(8);
-
-        // Size of the current version
-        let current_version_data_size: usize = value.data.iter().map(|dt| dt.size()).sum();
-
-        // Total size of the deltas (must take into accout the encoded length of each diff)
-        let mut total_delta_size = 0usize;
-        for (_, diffs) in value.delta_dir.iter() {
-            // Each delta contains: version(1) + varint_size + bitmap + data
-            let delta_data_size = null_bitmap_size +
-                                  diffs.len() + // size of the indexes
-                                  diffs.iter().map(|(_, dt)| dt.size()).sum::<usize>();
-
-            // Compute the total size of a varint
-            let varint_size = VarInt::encoded_size(delta_data_size as i64);
-            total_delta_size += 1 + varint_size + delta_data_size;
-        }
-
-        // Total size
-        let total_size = current_version_data_size + 1 + null_bitmap_size + total_delta_size;
-
-        // Alocate once with the exact required size
-        let mut buffer: Box<[std::mem::MaybeUninit<u8>]> = Box::new_uninit_slice(total_size);
-
-        unsafe {
-            let ptr = buffer.as_mut_ptr() as *mut u8;
-            let mut cursor = 0;
-
-            // Write keys
-            for key in value.keys() {
-                let data = key.as_ref();
-                std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
-                cursor += data.len();
-            }
-
-            let keys_len = cursor;
-
-            // Write the version
-            std::ptr::write(ptr.add(cursor), value.version);
-            cursor += 1;
-
-            // Initialize the bitmap with zeroes
-            let bitmap_start = cursor;
-            std::ptr::write_bytes(ptr.add(cursor), 0, null_bitmap_size);
-            cursor += null_bitmap_size;
-
-            // Write the values and update the bitmap if nulls are found
-            for (i, val) in value.values().iter().enumerate() {
-                if let DataType::Null = val {
-                    let byte_idx = i / 8;
-                    let bit_idx = i % 8;
-                    *ptr.add(bitmap_start + byte_idx) |= 1 << bit_idx;
-                } else {
-                    let data = val.as_ref();
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
-                    cursor += data.len();
-                }
-            }
-
-            // Write the delta directory
-            for (version, diffs) in value.delta_dir.iter() {
-                // Version
-                std::ptr::write(ptr.add(cursor), *version);
-                cursor += 1;
-
-                // Precompute the size
-                let delta_data_size = null_bitmap_size
-                    + diffs.len()
-                    + diffs.iter().map(|(_, dt)| dt.size()).sum::<usize>();
-
-                // Write the size as varint
-                let mut varint_buffer = [0u8; MAX_VARINT_LEN];
-                let encoded = VarInt::encode(delta_data_size as i64, &mut varint_buffer);
-                std::ptr::copy_nonoverlapping(encoded.as_ptr(), ptr.add(cursor), encoded.len());
-                cursor += encoded.len();
-
-                // Copy the bitmap and modify in place
-                let delta_bitmap_start = cursor;
-                std::ptr::copy_nonoverlapping(
-                    ptr.add(bitmap_start),
-                    ptr.add(cursor),
-                    null_bitmap_size,
-                );
-                cursor += null_bitmap_size;
-
-                // Update the bitmap of the delta
-                for (idx, old_value) in diffs {
-                    let byte_idx = *idx as usize / 8;
-                    let bit_idx = *idx as usize % 8;
-
-                    if let DataType::Null = old_value {
-                        *ptr.add(delta_bitmap_start + byte_idx) |= 1 << bit_idx;
-                    } else {
-                        let current_is_null =
-                            (*ptr.add(bitmap_start + byte_idx) & (1 << bit_idx)) != 0;
-                        if current_is_null {
-                            *ptr.add(delta_bitmap_start + byte_idx) &= !(1 << bit_idx);
-                        }
-                    }
-
-                    // write the index
-                    std::ptr::write(ptr.add(cursor), *idx);
-                    cursor += 1;
-
-                    // write the data
-                    let data = old_value.as_ref();
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
-                    cursor += data.len();
-                }
-            }
-
-            // Verify we used exactly the allocated space
-            debug_assert_eq!(cursor, total_size, "Size calculation mismatch");
-
-            // Transmute from maybeuninit to u8
-            OwnedTuple(Box::from_raw(Box::into_raw(buffer) as *mut [u8]))
-        }
+        OwnedTuple::from(&value)
     }
 }
 
@@ -738,6 +769,8 @@ impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
     fn from(value: &Tuple<'schema>) -> OwnedTuple {
         // Compute the exact required size for the tuple data
         let null_bitmap_size = value.values().len().div_ceil(8);
+        // Take into account xmin and xmax sizes (8 bytes each)
+        let header_size = 2 * mem::size_of::<TransactionId>();
 
         // Size of the current version
         let current_version_data_size: usize = value.data.iter().map(|dt| dt.size()).sum();
@@ -745,21 +778,24 @@ impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
         // Total size of the deltas (must take into accout the encoded length of each diff)
         let mut total_delta_size = 0usize;
         for (_, diffs) in value.delta_dir.iter() {
+            // First, take into account the xmin value:
+            let xmin_size = mem::size_of::<TransactionId>();
             // Each delta contains: version(1) + varint_size + bitmap + data
             let delta_data_size = null_bitmap_size +
                                   diffs.len() + // size of the indexes
-                                  diffs.iter().map(|(_, dt)| dt.size()).sum::<usize>();
+                                  diffs.iter_changes().map(|(_, dt)| dt.size()).sum::<usize>();
 
             // Compute the total size of a varint
             let varint_size = VarInt::encoded_size(delta_data_size as i64);
-            total_delta_size += 1 + varint_size + delta_data_size;
+            total_delta_size += 1 + varint_size + delta_data_size + xmin_size;
         }
 
         // Total size
-        let total_size = current_version_data_size + 1 + null_bitmap_size + total_delta_size;
+        let total_size =
+            current_version_data_size + 1 + null_bitmap_size + total_delta_size + header_size;
 
         // Alocate once with the exact required size
-        let mut buffer: Box<[std::mem::MaybeUninit<u8>]> = Box::new_uninit_slice(total_size);
+        let mut buffer: Box<[mem::MaybeUninit<u8>]> = Box::new_uninit_slice(total_size);
 
         unsafe {
             let ptr = buffer.as_mut_ptr() as *mut u8;
@@ -768,19 +804,28 @@ impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
             // Write keys
             for key in value.keys() {
                 let data = key.as_ref();
-                std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
+                copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
                 cursor += data.len();
             }
 
             let keys_len = cursor;
 
             // Write the version
-            std::ptr::write(ptr.add(cursor), value.version);
+            write(ptr.add(cursor), value.version);
             cursor += 1;
+
+            // Write xmin and xmax:
+            let data = value.xmin.as_ref();
+            copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
+            cursor += data.len();
+
+            let data = value.xmax.as_ref();
+            copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
+            cursor += data.len();
 
             // Initialize the bitmap with zeroes
             let bitmap_start = cursor;
-            std::ptr::write_bytes(ptr.add(cursor), 0, null_bitmap_size);
+            write_bytes(ptr.add(cursor), 0, null_bitmap_size);
             cursor += null_bitmap_size;
 
             // Write the values and update the bitmap if nulls are found
@@ -791,31 +836,36 @@ impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
                     *ptr.add(bitmap_start + byte_idx) |= 1 << bit_idx;
                 } else {
                     let data = val.as_ref();
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
+                    copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
                     cursor += data.len();
                 }
             }
 
             // Write the delta directory
             for (version, diffs) in value.delta_dir.iter() {
-                // Version
-                std::ptr::write(ptr.add(cursor), *version);
+                // Version:
+                write(ptr.add(cursor), *version);
                 cursor += 1;
+
+                // Xmin:
+                let data = diffs.xmin.as_ref();
+                copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
+                cursor += data.len();
 
                 // Precompute the size
                 let delta_data_size = null_bitmap_size
                     + diffs.len()
-                    + diffs.iter().map(|(_, dt)| dt.size()).sum::<usize>();
+                    + diffs.iter_changes().map(|(_, dt)| dt.size()).sum::<usize>();
 
                 // Write the size as varint
                 let mut varint_buffer = [0u8; MAX_VARINT_LEN];
                 let encoded = VarInt::encode(delta_data_size as i64, &mut varint_buffer);
-                std::ptr::copy_nonoverlapping(encoded.as_ptr(), ptr.add(cursor), encoded.len());
+                copy_nonoverlapping(encoded.as_ptr(), ptr.add(cursor), encoded.len());
                 cursor += encoded.len();
 
                 // Copy the bitmap and modify in place
                 let delta_bitmap_start = cursor;
-                std::ptr::copy_nonoverlapping(
+                copy_nonoverlapping(
                     ptr.add(bitmap_start),
                     ptr.add(cursor),
                     null_bitmap_size,
@@ -823,7 +873,7 @@ impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
                 cursor += null_bitmap_size;
 
                 // Update the bitmap of the delta
-                for (idx, old_value) in diffs {
+                for (idx, old_value) in diffs.iter_changes() {
                     let byte_idx = *idx as usize / 8;
                     let bit_idx = *idx as usize % 8;
 
@@ -838,12 +888,12 @@ impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
                     }
 
                     // write the index
-                    std::ptr::write(ptr.add(cursor), *idx);
+                    write(ptr.add(cursor), *idx);
                     cursor += 1;
 
                     // write the data
                     let data = old_value.as_ref();
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
+                    copy_nonoverlapping(data.as_ptr(), ptr.add(cursor), data.len());
                     cursor += data.len();
                 }
             }
@@ -884,7 +934,8 @@ impl<'schema> TryFrom<(&[u8], &'schema Schema)> for Tuple<'schema> {
         }
 
         let current_version = buffer[tuple_ref.key_len as usize];
-
+        let xmin = tuple_ref.xmin;
+        let xmax = tuple_ref.xmax;
         let mut delta_dir = HashMap::new();
         let mut cursor = tuple_ref.last_version_end as usize;
         let null_bitmap_size = schema.values().len().div_ceil(8);
@@ -892,6 +943,9 @@ impl<'schema> TryFrom<(&[u8], &'schema Schema)> for Tuple<'schema> {
         while cursor < buffer.len() {
             let version = buffer[cursor];
             cursor += 1;
+            let transaction_id_size = mem::size_of::<TransactionId>();
+            let version_xmin = TransactionId::try_from(&buffer[cursor..cursor + transaction_id_size])?;
+            cursor += transaction_id_size;
 
             let (size_varint, varint_bytes) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
             let delta_size: usize = size_varint.try_into()?;
@@ -900,7 +954,7 @@ impl<'schema> TryFrom<(&[u8], &'schema Schema)> for Tuple<'schema> {
             let delta_end = cursor + delta_size;
             cursor += null_bitmap_size; // Skip bitmap
 
-            let mut version_changes = Vec::new();
+            let mut delta = Delta::new(version_xmin);
 
             while cursor < delta_end {
                 let field_index = buffer[cursor];
@@ -908,16 +962,19 @@ impl<'schema> TryFrom<(&[u8], &'schema Schema)> for Tuple<'schema> {
 
                 let dtype = schema.values()[field_index as usize].dtype;
                 let (value, read_bytes) = reinterpret_cast(dtype, &buffer[cursor..])?;
-                version_changes.push((field_index, value.to_owned()));
+                delta.push((field_index, value.to_owned()));
                 cursor += read_bytes;
             }
 
-            delta_dir.insert(version, version_changes);
+
+            delta_dir.insert(version, delta);
         }
 
         Ok(Self {
             data,
             schema,
+            xmin,
+            xmax,
             version: current_version,
             delta_dir,
         })
@@ -974,6 +1031,7 @@ mod tuple_tests {
                 DataType::Text("Initial description".into()),
             ],
             &schema,
+            TransactionId::from(1),
         );
 
         assert!(result.is_ok());
@@ -986,10 +1044,14 @@ mod tuple_tests {
         let alice = &tup.values()[0];
         assert_eq!(alice, &DataType::Text("Alice".into()));
 
-        let result = tup.add_version(vec![
-            (0, DataType::Text("Alice Updated".into())),
-            (2, DataType::Double(999.0.into())),
-        ]);
+        let result = tup.add_version(
+            vec![
+                (0, DataType::Text("Alice Updated".into())),
+                (2, DataType::Double(999.0.into())),
+            ]
+            .as_slice(),
+            TransactionId::from(2),
+        );
 
         assert!(result.is_ok());
 
@@ -1051,6 +1113,7 @@ mod tuple_tests {
                 DataType::Text("Initial description".into()), // value 3
             ],
             &schema,
+            TransactionId::from(1),
         );
 
         assert!(result.is_ok());
@@ -1071,10 +1134,14 @@ mod tuple_tests {
             DataType::Text("Initial description".into())
         );
 
-        let result = tup.add_version(vec![
-            (0, DataType::Boolean(UInt8::FALSE)),
-            (3, DataType::Text("Updated description".into())),
-        ]);
+        let result = tup.add_version(
+            vec![
+                (0, DataType::Boolean(UInt8::FALSE)),
+                (3, DataType::Text("Updated description".into())),
+            ]
+            .as_slice(),
+            TransactionId::from(2),
+        );
 
         assert!(result.is_ok());
         assert_eq!(tup.version(), 1);
@@ -1139,6 +1206,7 @@ mod tuple_tests {
                 DataType::Text("Initial description".into()),
             ],
             &schema,
+            TransactionId::from(1),
         )
         .unwrap();
 
@@ -1151,5 +1219,133 @@ mod tuple_tests {
         assert_eq!(reconstructed.values()[0], DataType::Text("Alice".into()));
         assert_eq!(reconstructed.values()[1], DataType::Boolean(UInt8::TRUE));
         assert_eq!(reconstructed.values()[2], DataType::Double(100.5.into()));
+    }
+
+    #[test]
+    fn test_tuple_4() {
+        let schema = create_single_key_schema();
+        let xid_100 = TransactionId::from(100u64);
+        let xid_150 = TransactionId::from(150u64);
+        let xid_200 = TransactionId::from(200u64);
+
+        let mut tup = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("Alice".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_100,
+        )
+        .unwrap();
+
+        assert!(!tup.is_deleted());
+        assert!(tup.is_visible(xid_100));
+        assert!(tup.is_visible(xid_150));
+
+        // Delete at xid 200
+        tup.delete(xid_200).unwrap();
+
+        assert!(tup.is_deleted());
+        assert!(tup.is_visible(xid_150)); // Before delete: visible
+        assert!(!tup.is_visible(xid_200)); // At delete: not visible
+        assert!(!tup.is_visible(TransactionId::from(250u64))); // After delete: not visible
+
+        // Cannot delete twice
+        assert!(tup.delete(TransactionId::from(300u64)).is_err());
+    }
+
+    #[test]
+    fn test_tuple_5() {
+        let schema = create_single_key_schema();
+        let xid_100 = TransactionId::from(100u64);
+        let xid_200 = TransactionId::from(200u64);
+
+        let mut tup = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("Alice".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_100,
+        )
+        .unwrap();
+
+        tup.delete(xid_200).unwrap();
+
+        let buf: OwnedTuple = tup.into();
+        let t = TupleRef::read(buf.as_ref(), &schema).unwrap();
+
+        assert!(t.is_deleted());
+        assert!(t.is_visible(TransactionId::from(150u64)));
+        assert!(!t.is_visible(xid_200));
+    }
+
+    #[test]
+    fn test_tuple_6() {
+        let schema = create_single_key_schema();
+        let xid_100 = TransactionId::from(100u64);
+        let xid_200 = TransactionId::from(200u64);
+
+        let tup = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("Alice".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_100,
+        )
+        .unwrap();
+
+        let mut buf: OwnedTuple = tup.into();
+
+        {
+            let mut t = TupleRefMut::read(buf.as_mut(), &schema).unwrap();
+            assert!(!t.is_deleted());
+            t.delete(xid_200).unwrap();
+            assert!(t.is_deleted());
+        }
+
+        // Verify persisted
+        let t = TupleRef::read(buf.as_ref(), &schema).unwrap();
+        assert!(t.is_deleted());
+        assert!(t.is_visible(TransactionId::from(150u64)));
+        assert!(!t.is_visible(xid_200));
+    }
+
+    #[test]
+    fn test_tuple_7() {
+        let schema = create_single_key_schema();
+        let xid_100 = TransactionId::from(100u64);
+        let xid_50 = TransactionId::from(50u64);
+
+        let tup = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("Alice".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_100,
+        )
+        .unwrap();
+
+        // Transaction 50 started before tuple was created
+        assert!(!tup.is_visible(xid_50));
+        assert!(tup.is_visible(xid_100));
     }
 }

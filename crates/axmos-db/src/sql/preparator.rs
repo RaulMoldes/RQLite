@@ -1,9 +1,12 @@
-use crate::database::{
-    Database,
-    schema::{Column, Relation, Schema, Table},
+use crate::{
+    database::{
+        SharedCatalog,
+        schema::{Column, Relation, Schema, Table},
+    },
+    sql::ast::{Expr, SelectItem, SelectStatement, Statement, TableReference, Values},
+    transactions::worker::Worker,
+    types::DataTypeKind,
 };
-use crate::sql::ast::{Expr, SelectItem, SelectStatement, Statement, TableReference, Values};
-use crate::types::DataTypeKind;
 use std::collections::{HashMap, HashSet};
 
 struct PreparatorCtx {
@@ -12,15 +15,17 @@ struct PreparatorCtx {
     current_table: Option<String>,
 }
 
-pub struct Preparator<'a> {
-    db: &'a Database,
+pub struct Preparator {
+    catalog: SharedCatalog,
+    worker: Worker,
     ctx: PreparatorCtx,
 }
 
-impl<'a> Preparator<'a> {
-    pub fn new(db: &'a Database) -> Self {
+impl Preparator {
+    pub fn new(catalog: SharedCatalog, worker: Worker) -> Self {
         Self {
-            db,
+            catalog,
+            worker,
             ctx: PreparatorCtx {
                 table_aliases: HashMap::new(),
                 subqueries: HashMap::new(),
@@ -420,7 +425,9 @@ impl<'a> Preparator<'a> {
             return subquery.clone();
         };
 
-        self.db.get_relation(obj_name).unwrap()
+        self.catalog
+            .get_relation(obj_name, self.worker.clone())
+            .unwrap()
     }
 }
 
@@ -456,8 +463,7 @@ mod sql_prepare_tests {
 
         let pager = Pager::from_config(config, &path).unwrap();
 
-        let mut db = Database::new(SharedPager::from(pager), 3, 2);
-        db.init()?;
+        let db = Database::new(SharedPager::from(pager), 3, 2)?;
 
         // Create a users table
         let mut users_schema = Schema::new();
@@ -466,8 +472,9 @@ mod sql_prepare_tests {
         users_schema.add_column("email", DataTypeKind::Text, false, true, false);
         users_schema.add_column("age", DataTypeKind::Int, false, false, true);
         users_schema.add_column("created_at", DataTypeKind::DateTime, false, false, false);
-
-        db.create_table("users", users_schema)?;
+        let worker = db.main_worker_cloned();
+        db.catalog()
+            .create_table("users", users_schema, worker.clone())?;
 
         let mut posts_schema = Schema::new();
         posts_schema.add_column("id", DataTypeKind::Int, true, true, false);
@@ -476,7 +483,7 @@ mod sql_prepare_tests {
         posts_schema.add_column("content", DataTypeKind::Blob, false, false, true);
         posts_schema.add_column("published", DataTypeKind::Boolean, false, false, false);
 
-        db.create_table("posts", posts_schema)?;
+        db.catalog().create_table("posts", posts_schema, worker)?;
 
         Ok(db)
     }
@@ -486,7 +493,7 @@ mod sql_prepare_tests {
         let mut parser = Parser::new(lexer);
         let mut statement = parser.parse().unwrap();
 
-        let mut analyzer = Preparator::new(db);
+        let mut analyzer = Preparator::new(db.catalog(), db.main_worker_cloned());
         analyzer.prepare_stmt(&mut statement);
         statement
     }

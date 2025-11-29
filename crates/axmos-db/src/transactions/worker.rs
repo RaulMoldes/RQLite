@@ -1,18 +1,19 @@
 use crate::{
-    database::{SharedCatalog, errors::TransactionError},
+    DataType,
+    database::{SharedCatalog, errors::TransactionError, schema::Relation},
     io::{
         frames::{FrameAccessMode, FrameStack, Position},
         pager::SharedPager,
-        wal::{Abort, Begin, Commit, End, LogRecordBuilder, LogRecordType},
+        wal::{Abort, Begin, Commit, Delete, End, Insert, LogRecordBuilder, LogRecordType, Update},
     },
     storage::{
         buffer::BufferWithMetadata,
         latches::Latch,
         page::{MemPage, Page},
-        tuple::Tuple,
+        tuple::{OwnedTuple, Tuple},
     },
     transactions::{LockRequest, LogicalId, TransactionManager},
-    types::{PageId, TransactionId},
+    types::{ObjectId, PageId, TransactionId},
 };
 
 use std::{
@@ -232,8 +233,6 @@ pub struct WorkerPool {
     transaction_id: TransactionId,
     /// Workers assigned to this pool
     workers: Vec<Worker>,
-    /// Thread private types.
-    log_builder: LogRecordBuilder,
     /// Shared access to the pager
     pager: SharedPager,
     /// lock sender to access the lock manager:
@@ -242,6 +241,8 @@ pub struct WorkerPool {
     manager: TransactionManager,
     /// Shared catalog.
     catalog: SharedCatalog,
+    /// Log builder to build records for the write ahead log
+    builder: LogRecordBuilder,
 }
 
 impl WorkerPool {
@@ -262,11 +263,11 @@ impl WorkerPool {
         manager: TransactionManager,
         catalog: SharedCatalog,
     ) -> Self {
-        let log_builder = LogRecordBuilder::for_transaction(tx_id);
+        let builder = LogRecordBuilder::for_transaction(tx_id);
         Self {
             transaction_id: tx_id,
             workers: Vec::new(),
-            log_builder,
+            builder,
             pager,
             lock_requestor,
             manager,
@@ -274,19 +275,13 @@ impl WorkerPool {
         }
     }
 
-    fn builder_mut(&mut self) -> &mut LogRecordBuilder {
-        &mut self.log_builder
+    fn builder(&self) -> LogRecordBuilder {
+        self.builder
     }
 
-    fn builder_ref(&self) -> &LogRecordBuilder {
-        &self.log_builder
-    }
-
-    pub fn begin(&mut self) -> io::Result<()> {
+    pub fn begin(&self) -> io::Result<()> {
         let operation = Begin;
-        let rec = self
-            .builder_mut()
-            .build_rec(LogRecordType::Begin, operation);
+        let rec = self.builder().build_rec(LogRecordType::Begin, operation);
         self.pager.write().push_to_log(rec)
     }
 
@@ -294,25 +289,21 @@ impl WorkerPool {
         self.transaction_id
     }
 
-    pub fn commit(&mut self) -> io::Result<()> {
+    pub fn commit(&self) -> io::Result<()> {
         let operation = Commit;
-        let rec = self
-            .builder_mut()
-            .build_rec(LogRecordType::Commit, operation);
+        let rec = self.builder().build_rec(LogRecordType::Commit, operation);
         self.pager.write().push_to_log(rec)
     }
 
-    pub fn rollback(&mut self) -> io::Result<()> {
+    pub fn rollback(&self) -> io::Result<()> {
         let operation = Abort;
-        let rec = self
-            .builder_mut()
-            .build_rec(LogRecordType::Abort, operation);
+        let rec = self.builder().build_rec(LogRecordType::Abort, operation);
         self.pager.write().push_to_log(rec)
     }
 
-    pub fn end(&mut self) -> std::io::Result<()> {
+    pub fn end(&self) -> std::io::Result<()> {
         let operation = End;
-        let rec = self.builder_mut().build_rec(LogRecordType::End, operation);
+        let rec = self.builder().build_rec(LogRecordType::End, operation);
         self.pager.write().push_to_log(rec)
     }
 
@@ -324,27 +315,128 @@ impl WorkerPool {
         }
     }
 
-    pub fn write_tuple<F, R>(
-        &self,
-        logical_id: LogicalId,
-        callback: F,
-    ) -> Result<R, TransactionError>
-    where
-        F: FnOnce(&mut Tuple<'_>) -> R,
-    {
-        self.manager.get_tuple_handle_mut(
+    pub fn insert_one(&self, table: ObjectId, values: &[DataType]) -> Result<(), TransactionError> {
+        let worker = self.get_or_create_worker();
+        let mut relation = self.catalog.get_relation_unchecked(table, worker.clone())?;
+
+        let mut btree = self.catalog.table_btree(relation.root(), worker.clone())?;
+
+        let next_row = if let Relation::TableRel(tab) = &mut relation {
+            let next = tab.get_next();
+            tab.add_row(); // Increment the row count
+            next
+        } else {
+            return Err(TransactionError::Other(
+                "Transaction attempted to access an invalid object".to_string(),
+            ));
+        };
+
+        let schema = relation.schema();
+        let logical_id = LogicalId::new(table, next_row);
+
+        // Lock until the tuple handle is valid.
+        self.manager.get_tuple_handle(
             self.transaction_id,
             logical_id,
             self.lock_requestor.clone(),
         )?;
 
-        let worker = self.get_or_create_worker();
+        let tuple = Tuple::new(values, schema, self.transaction_id)?;
+        let bytes: OwnedTuple = tuple.into();
+        let op = Insert::new(table, bytes.clone());
+        let record = self.builder().build_rec(LogRecordType::Insert, op);
 
-        todo!("Implement btree factory to create tables easily and decouple from DB")
-
+        self.pager.write().push_to_log(record)?;
+        btree.insert(relation.root(), bytes.as_ref())?;
         // Create btree, search for the tuple, write a new version.
-        // Clear the worker stack.
+        btree.clear_worker_stack();
 
-        // Build the UPDATE/INSERT LOG
+        Ok(())
+    }
+
+    pub fn update_one(
+        &self,
+        logical_id: LogicalId,
+        values: &[(usize, DataType)],
+    ) -> Result<(), TransactionError> {
+        let worker = self.get_or_create_worker();
+        let table = logical_id.table();
+        let relation = self.catalog.get_relation_unchecked(table, worker.clone())?;
+
+        let mut btree = self.catalog.table_btree(relation.root(), worker.clone())?;
+
+        let schema = relation.schema();
+
+        // Lock until the tuple handle is valid.
+        self.manager.get_tuple_handle(
+            self.transaction_id,
+            logical_id,
+            self.lock_requestor.clone(),
+        )?;
+
+        let current_position =
+            btree.search_from_root(logical_id.row().as_ref(), FrameAccessMode::Read)?;
+
+        // Try to read the tuple from the payload.
+        let mut tuple: Tuple = if let Some(payload) = btree.get_payload(current_position)? {
+            Tuple::try_from((payload.as_ref(), schema))?
+        } else {
+            return Err(TransactionError::Other("Tuple not found".to_string()));
+        };
+
+        let old: OwnedTuple = tuple.clone().into();
+
+        tuple.add_version(values, self.transaction_id)?;
+        let new: OwnedTuple = tuple.into();
+        let op = Update::new(table, old, new.clone());
+        let record = self.builder().build_rec(LogRecordType::Update, op);
+
+        self.pager.write().push_to_log(record)?;
+        btree.update(relation.root(), new.as_ref())?;
+        // Create btree, search for the tuple, write a new version.
+        btree.clear_worker_stack();
+
+        Ok(())
+    }
+
+    pub fn delete_one(&self, logical_id: LogicalId) -> Result<(), TransactionError> {
+        let worker = self.get_or_create_worker();
+        let table = logical_id.table();
+        let relation = self.catalog.get_relation_unchecked(table, worker.clone())?;
+
+        let mut btree = self.catalog.table_btree(relation.root(), worker.clone())?;
+
+        let schema = relation.schema();
+
+        // Lock until the tuple handle is valid.
+        self.manager.get_tuple_handle(
+            self.transaction_id,
+            logical_id,
+            self.lock_requestor.clone(),
+        )?;
+
+        let current_position =
+            btree.search_from_root(logical_id.row().as_ref(), FrameAccessMode::Read)?;
+
+        // Try to read the tuple from the payload.
+        let mut tuple: Tuple = if let Some(payload) = btree.get_payload(current_position)? {
+            Tuple::try_from((payload.as_ref(), schema))?
+        } else {
+            return Err(TransactionError::Other("Tuple not found".to_string()));
+        };
+
+        let old: OwnedTuple = tuple.clone().into();
+        tuple.delete(self.transaction_id)?;
+        let new: OwnedTuple = tuple.into();
+
+        let op = Delete::new(table, old);
+        let record = self.builder().build_rec(LogRecordType::Delete, op);
+
+        self.pager.write().push_to_log(record)?;
+        btree.update(relation.root(), new.as_ref())?;
+        // Create btree, search for the tuple, write a new version.
+        btree.clear_worker_stack();
+
+        Ok(())
     }
 }

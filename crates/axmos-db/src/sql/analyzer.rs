@@ -1,16 +1,19 @@
-use crate::database::{
-    Database,
-    errors::{AlreadyExists, AnalyzerError},
-    schema::{Column, Relation, Schema, Table},
+use crate::{
+    database::{
+        SharedCatalog,
+        errors::{AlreadyExists, AnalyzerError},
+        schema::{Column, Relation, Schema, Table},
+    },
+    sql::ast::{
+        AlterAction, AlterColumnAction, BinaryOperator, ColumnConstraintExpr, Expr, SelectItem,
+        SelectStatement, Statement, TableConstraintExpr, TableReference, TransactionStatement,
+        Values,
+    },
+    structures::bplustree::SearchResult,
+    transactions::worker::Worker,
+    types::DataTypeKind,
 };
 
-use crate::sql::ast::{
-    AlterAction, AlterColumnAction, BinaryOperator, ColumnConstraintExpr, Expr, SelectItem,
-    SelectStatement, Statement, TableConstraintExpr, TableReference, TransactionStatement, Values,
-};
-
-use crate::structures::bplustree::SearchResult;
-use crate::types::DataTypeKind;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 
@@ -88,15 +91,17 @@ enum ExprResult {
     Value(DataTypeKind),
 }
 
-pub(crate) struct Analyzer<'a> {
-    db: &'a Database,
+pub(crate) struct Analyzer {
+    catalog: SharedCatalog,
+    worker: Worker,
     ctx: AnalyzerCtx,
 }
 
-impl<'a> Analyzer<'a> {
-    pub fn new(db: &'a Database) -> Self {
+impl Analyzer {
+    pub fn new(catalog: SharedCatalog, worker: Worker) -> Self {
         Self {
-            db,
+            catalog,
+            worker,
             ctx: AnalyzerCtx::new(),
         }
     }
@@ -744,7 +749,10 @@ impl<'a> Analyzer<'a> {
                 }
             }
             Statement::CreateTable(stmt) => {
-                if let Ok(SearchResult::Found(_)) = self.db.lookup_relation(&stmt.table) {
+                if let Ok(SearchResult::Found(_)) = self
+                    .catalog
+                    .lookup_relation(&stmt.table, self.worker.clone())
+                {
                     return Err(AnalyzerError::AlreadyExists(AlreadyExists::Table(
                         stmt.table.clone(),
                     )));
@@ -1253,8 +1261,8 @@ impl<'a> Analyzer<'a> {
             return Ok(subquery.clone());
         };
 
-        self.db
-            .get_relation(name)
+        self.catalog
+            .get_relation(name, self.worker.clone())
             .map_err(|e| AnalyzerError::NotFound(name.to_string()))
     }
 }
@@ -1286,8 +1294,7 @@ mod sql_analyzer_tests {
 
         let pager = Pager::from_config(config, &path).unwrap();
 
-        let mut db = Database::new(SharedPager::from(pager), 3, 2);
-        db.init()?;
+        let db = Database::new(SharedPager::from(pager), 3, 2)?;
 
         // Create a users table
         let mut users_schema = Schema::new();
@@ -1296,8 +1303,9 @@ mod sql_analyzer_tests {
         users_schema.add_column("email", DataTypeKind::Text, false, true, false);
         users_schema.add_column("age", DataTypeKind::Int, false, false, true);
         users_schema.add_column("created_at", DataTypeKind::DateTime, false, false, false);
-
-        db.create_table("users", users_schema)?;
+        let worker = db.main_worker_cloned();
+        db.catalog()
+            .create_table("users", users_schema, worker.clone())?;
 
         let mut posts_schema = Schema::new();
         posts_schema.add_column("id", DataTypeKind::Int, true, true, false);
@@ -1306,7 +1314,7 @@ mod sql_analyzer_tests {
         posts_schema.add_column("content", DataTypeKind::Blob, false, false, true);
         posts_schema.add_column("published", DataTypeKind::Boolean, false, false, false);
 
-        db.create_table("posts", posts_schema)?;
+        db.catalog().create_table("posts", posts_schema, worker)?;
 
         Ok(db)
     }
@@ -1315,8 +1323,7 @@ mod sql_analyzer_tests {
         let lexer = Lexer::new(sql);
         let mut parser = Parser::new(lexer);
         let statement = parser.parse().expect("Failed to parse SQL");
-
-        let mut analyzer = Analyzer::new(db);
+        let mut analyzer = Analyzer::new(db.catalog(), db.main_worker_cloned());
         analyzer.analyze(&statement)
     }
 
@@ -1742,7 +1749,7 @@ mod sql_analyzer_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
         let db = create_db(4096, 10, &path).unwrap();
-        let mut analyzer = Analyzer::new(&db);
+        let mut analyzer = Analyzer::new(db.catalog(), db.main_worker_cloned());
 
         // Start a transaction
         let lexer = Lexer::new("BEGIN");
