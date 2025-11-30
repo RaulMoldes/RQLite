@@ -43,6 +43,15 @@ pub enum Payload<'b> {
     Reference(&'b [u8]),
 }
 
+impl<'b> AsMut<[u8]> for Payload<'b> {
+    fn as_mut(&mut self) -> &mut [u8] {
+        match self {
+            Self::Boxed(a) => a.as_mut(),
+            Self::Reference(a) => panic!("Cannot mutate a read only payload"),
+        }
+    }
+}
+
 impl From<Payload<'_>> for Box<[u8]> {
     fn from(value: Payload<'_>) -> Self {
         match value {

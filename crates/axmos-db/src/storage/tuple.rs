@@ -9,14 +9,10 @@ use crate::{
     varint::MAX_VARINT_LEN,
 };
 use std::{
+    collections::BTreeMap,
+    io::{self, Error as IoError, ErrorKind},
     mem,
-    ptr::{
-        write,
-        write_bytes,
-        copy_nonoverlapping
-    },
-    collections::HashMap
-
+    ptr::{copy_nonoverlapping, write, write_bytes},
 };
 
 // Macro used to read a tuple view from a byte slice.
@@ -56,7 +52,7 @@ macro_rules! read_tuple {
         tuple.xmin = TransactionId::try_from(&tuple.data[cursor..cursor + transaction_id_size])?;
         cursor += transaction_id_size;
 
-        tuple.xmax = TransactionId::try_from(&tuple.data[cursor..cursor +transaction_id_size])?;
+        tuple.xmax = TransactionId::try_from(&tuple.data[cursor..cursor + transaction_id_size])?;
         cursor += transaction_id_size;
 
         // Skip null bitmap:
@@ -70,6 +66,7 @@ macro_rules! read_tuple {
             let is_null = tuple.is_null(i);
             if !is_null {
                 let (_value, read_bytes) = reinterpret_cast(col.dtype, &tuple.data[cursor..])?;
+
                 cursor += read_bytes;
             }
         }
@@ -77,53 +74,59 @@ macro_rules! read_tuple {
         tuple.last_version_end = cursor as u16;
 
         if let Some(target_ver) = $target_version {
+            let header_version = tuple.target_version;
             if target_ver > tuple.target_version {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
+                return Err(IoError::new(
+                    ErrorKind::InvalidInput,
                     format!(
                         "Version {} doesn't exist yet (current: {})",
                         target_ver, tuple.target_version
                     ),
                 ));
             }
+
             tuple.target_version = target_ver;
+
             let num_keys = tuple.schema.num_keys as usize;
 
             let mut current_version = 0;
+            if target_ver < header_version {
+                while cursor < tuple.data.len() {
+                    current_version = tuple.data[cursor];
 
-            while cursor < tuple.data.len() {
-                current_version = tuple.data[cursor];
-                let version_start = cursor;
-                cursor += 1;
-
-                tuple.xmin = TransactionId::try_from(&tuple.data[cursor..cursor + transaction_id_size])?;
-                cursor += transaction_id_size;
-
-                let (size_varint, varint_bytes) =
-                    VarInt::from_encoded_bytes(&tuple.data[cursor..])?;
-
-                let delta_size: usize = size_varint.try_into()?;
-                cursor += varint_bytes;
-
-                let delta_end = cursor + delta_size;
-                tuple.null_bitmap_offset = cursor as u16;
-                cursor += null_bitmap_size;
-
-                while cursor < delta_end {
-                    let offset_idx = tuple.data[cursor];
+                    let version_start = cursor;
                     cursor += 1;
 
+                    tuple.xmin =
+                        TransactionId::try_from(&tuple.data[cursor..cursor + transaction_id_size])?;
 
-                    let dtype = tuple.schema.values()[offset_idx as usize].dtype;
-                    tuple.offsets[offset_idx as usize + tuple.schema.num_keys as usize] =
-                        cursor as u16;
-                    let (data, read_bytes) = reinterpret_cast(dtype, &tuple.data[cursor..])?;
+                    cursor += transaction_id_size;
 
-                    cursor += read_bytes;
-                }
+                    let (size_varint, varint_bytes) =
+                        VarInt::from_encoded_bytes(&tuple.data[cursor..])?;
 
-                if current_version == tuple.target_version {
-                    break;
+                    let delta_size: usize = size_varint.try_into()?;
+                    cursor += varint_bytes;
+
+                    let delta_end = cursor + delta_size;
+                    tuple.null_bitmap_offset = cursor as u16;
+                    cursor += null_bitmap_size;
+
+                    while cursor < delta_end {
+                        let offset_idx = tuple.data[cursor];
+                        cursor += 1;
+
+                        let dtype = tuple.schema.values()[offset_idx as usize].dtype;
+                        tuple.offsets[offset_idx as usize + tuple.schema.num_keys as usize] =
+                            cursor as u16;
+                        let (data, read_bytes) = reinterpret_cast(dtype, &tuple.data[cursor..])?;
+
+                        cursor += read_bytes;
+                    }
+
+                    if current_version == tuple.target_version {
+                        break;
+                    }
                 }
             }
         }
@@ -159,7 +162,7 @@ pub struct TupleRefMut<'a, 'b> {
 /// Allows to make modifications to the values in place (zero copy).
 impl<'a, 'b> TupleRefMut<'a, 'b> {
     // Reads the last version of the tuple.
-    pub fn read(buffer: &'a mut [u8], schema: &'b Schema) -> std::io::Result<TupleRefMut<'a, 'b>> {
+    pub fn read(buffer: &'a mut [u8], schema: &'b Schema) -> io::Result<TupleRefMut<'a, 'b>> {
         read_tuple!(TupleRefMut, buffer, schema)
     }
 
@@ -168,7 +171,7 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
         buffer: &'a mut [u8],
         schema: &'b Schema,
         version: u8,
-    ) -> std::io::Result<TupleRefMut<'a, 'b>> {
+    ) -> io::Result<TupleRefMut<'a, 'b>> {
         read_tuple!(TupleRefMut, buffer, schema, Some(version))
     }
 
@@ -198,7 +201,7 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
         (bitmap[byte_idx] & (1 << bit_idx)) != 0
     }
 
-    pub fn value(&self, index: usize) -> std::io::Result<DataTypeRef<'_>> {
+    pub fn value(&self, index: usize) -> io::Result<DataTypeRef<'_>> {
         let dtype = self.schema.values()[index].dtype;
         let is_null = self.is_null(index);
         let offset_idx = index + self.schema.num_keys as usize;
@@ -211,7 +214,7 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
         }
     }
 
-    fn value_mut(&mut self, index: usize) -> std::io::Result<DataTypeRefMut<'_>> {
+    fn value_mut(&mut self, index: usize) -> io::Result<DataTypeRefMut<'_>> {
         let dtype = self.schema.values()[index].dtype;
         let is_null = self.is_null(index);
         let offset_idx = index + self.schema.num_keys as usize;
@@ -225,13 +228,13 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
         }
     }
 
-    pub fn key(&self, index: usize) -> std::io::Result<DataTypeRef<'_>> {
+    pub fn key(&self, index: usize) -> io::Result<DataTypeRef<'_>> {
         let dtype = self.schema.keys()[index].dtype;
         let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[index] as usize..])?;
         Ok(value)
     }
 
-    fn key_mut(&mut self, index: usize) -> std::io::Result<DataTypeRefMut<'_>> {
+    fn key_mut(&mut self, index: usize) -> io::Result<DataTypeRefMut<'_>> {
         let dtype = self.schema.keys()[index].dtype;
         let (value, _) =
             reinterpret_cast_mut(dtype, &mut self.data[self.offsets[index] as usize..])?;
@@ -253,12 +256,7 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
     }
 
     /// Update a value in place
-    pub fn update_value<F>(
-        &mut self,
-        schema: &Schema,
-        index: usize,
-        updater: F,
-    ) -> std::io::Result<()>
+    pub fn update_value<F>(&mut self, schema: &Schema, index: usize, updater: F) -> io::Result<()>
     where
         F: FnOnce(DataTypeRefMut<'_>),
     {
@@ -268,7 +266,7 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
     }
 
     // Sets the item found at a specified index to the corresponding value.
-    pub fn set_value(&mut self, index: usize, value: DataType) -> std::io::Result<()> {
+    pub fn set_value(&mut self, index: usize, value: DataType) -> io::Result<()> {
         let dtype = self.schema.columns[index].dtype;
         let offset = self.offsets[index] as usize;
 
@@ -353,8 +351,8 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
                     }
                 } else {
                     // New value is too large for the allocated space
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
+                    return Err(IoError::new(
+                        ErrorKind::InvalidInput,
                         format!(
                             "New text value ({} bytes) exceeds allocated space ({} bytes)",
                             v.len(),
@@ -380,8 +378,8 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
                     }
                 } else {
                     // New value is too large for the allocated space
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
+                    return Err(IoError::new(
+                        ErrorKind::InvalidInput,
                         format!(
                             "New text value ({} bytes) exceeds allocated space ({} bytes)",
                             v.len(),
@@ -392,10 +390,7 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
             }
 
             _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Type mismatch",
-                ));
+                return Err(IoError::new(ErrorKind::InvalidInput, "Type mismatch"));
             }
         }
         Ok(())
@@ -439,10 +434,10 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
 
     /// Marks the tuple as deleted in the buffer.
     /// xmax offset: key_len + 1 (version) + 8 (xmin)
-    pub fn delete(&mut self, xid: TransactionId) -> std::io::Result<()> {
+    pub fn delete(&mut self, xid: TransactionId) -> io::Result<()> {
         if self.xmax != TRANSACTION_ZERO {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
+            return Err(IoError::new(
+                ErrorKind::InvalidInput,
                 "Tuple is already deleted",
             ));
         }
@@ -451,6 +446,120 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
         self.data[xmax_offset..xmax_offset + xid_bytes.len()].copy_from_slice(xid_bytes);
         self.xmax = xid;
         Ok(())
+    }
+
+    /// Returns the xmin (creating transaction ID) of this tuple
+    pub fn xmin(&self) -> TransactionId {
+        self.xmin
+    }
+
+    /// Returns the xmax (deleting transaction ID) of this tuple
+    /// Returns TRANSACTION_ZERO if not deleted
+    pub fn xmax(&self) -> TransactionId {
+        self.xmax
+    }
+
+    /// Reads the visible version of the tuple for the provided snapshot.
+    pub fn read_for_snapshot(
+        buffer: &'a mut [u8],
+        schema: &'b Schema,
+        snapshot: &crate::transactions::Snapshot,
+    ) -> std::io::Result<Option<TupleRefMut<'a, 'b>>> {
+        let visible_version = Self::find_visible_version(buffer, schema, snapshot)?;
+        let tuple = Self::read_version(buffer, schema, visible_version)?;
+
+        if !snapshot.is_tuple_visible(tuple.xmin, tuple.xmax) {
+            return Ok(None);
+        }
+
+        Ok(Some(tuple))
+    }
+
+    /// Finds the visible version number for a given snapshot.
+    fn find_visible_version(
+        buffer: &[u8],
+        schema: &Schema,
+        snapshot: &crate::transactions::Snapshot,
+    ) -> std::io::Result<u8> {
+        // Read as immutable to find version
+        let latest = TupleRef::read(buffer, schema)?;
+        let current_version = latest.target_version;
+
+        // Single version - no deltas to check
+        if current_version == 0 {
+            return Ok(0);
+        }
+
+        // If our transaction created this version, it's visible
+        if latest.xmin() == snapshot.xid() {
+            return Ok(current_version);
+        }
+
+        // Check if latest version is visible
+        if snapshot.is_committed_before_snapshot(latest.xmin()) {
+            return Ok(current_version);
+        }
+
+        // Parse deltas in order (already sorted descending from serialization)
+        let transaction_id_size = mem::size_of::<TransactionId>();
+        let mut cursor = latest.last_version_end as usize;
+
+        while cursor < buffer.len() {
+            let version = buffer[cursor];
+            cursor += 1;
+
+            let delta_xmin =
+                TransactionId::try_from(&buffer[cursor..cursor + transaction_id_size])?;
+            cursor += transaction_id_size;
+
+            // Check visibility immediately
+            if snapshot.is_committed_before_snapshot(delta_xmin) || delta_xmin == snapshot.xid() {
+                return Ok(version);
+            }
+
+            // Skip delta content
+            let (size_varint, varint_bytes) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
+            let delta_size: usize = size_varint.try_into()?;
+            cursor += varint_bytes + delta_size;
+        }
+
+        // No visible version found
+        Ok(0)
+    }
+
+    /// Gets the xmin for a specific version
+    pub fn version_xmin(&self, version: u8) -> std::io::Result<TransactionId> {
+        // If it's the current version, return it
+        if version == self.target_version {
+            return Ok(self.xmin);
+        }
+
+        // Look in the deltas directory
+        let transaction_id_size = mem::size_of::<TransactionId>();
+        let mut cursor = self.last_version_end as usize;
+
+        while cursor < self.data.len() {
+            let delta_version = self.data[cursor];
+            cursor += 1;
+
+            let delta_xmin =
+                TransactionId::try_from(&self.data[cursor..cursor + transaction_id_size])?;
+            cursor += transaction_id_size;
+
+            if delta_version == version {
+                return Ok(delta_xmin);
+            }
+
+            // Skip the rest
+            let (size_varint, varint_bytes) = VarInt::from_encoded_bytes(&self.data[cursor..])?;
+            let delta_size: usize = size_varint.try_into()?;
+            cursor += varint_bytes + delta_size;
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Version {} not found in delta chain", version),
+        ))
     }
 }
 
@@ -478,13 +587,13 @@ pub struct TupleRef<'a, 'b> {
     target_version: u8,
 
     // Metadata about the underlying tuple.
-    xmin: TransactionId,// Min transaction id that can see the tuple
-    xmax: TransactionId,// Max transaction id that can see the tuple
+    xmin: TransactionId, // Min transaction id that can see the tuple
+    xmax: TransactionId, // Max transaction id that can see the tuple
 }
 
 impl<'a, 'b> TupleRef<'a, 'b> {
     // Reads the last version of the tuple.
-    pub fn read(buffer: &'a [u8], schema: &'b Schema) -> std::io::Result<TupleRef<'a, 'b>> {
+    pub fn read(buffer: &'a [u8], schema: &'b Schema) -> io::Result<TupleRef<'a, 'b>> {
         read_tuple!(TupleRef, buffer, schema)
     }
 
@@ -493,7 +602,7 @@ impl<'a, 'b> TupleRef<'a, 'b> {
         buffer: &'a [u8],
         schema: &'b Schema,
         version: u8,
-    ) -> std::io::Result<TupleRef<'a, 'b>> {
+    ) -> io::Result<TupleRef<'a, 'b>> {
         read_tuple!(TupleRef, buffer, schema, Some(version))
     }
 
@@ -522,7 +631,7 @@ impl<'a, 'b> TupleRef<'a, 'b> {
     }
 
     // Get a value identified by its index.
-    pub fn value(&self, index: usize) -> std::io::Result<DataTypeRef<'_>> {
+    pub fn value(&self, index: usize) -> io::Result<DataTypeRef<'_>> {
         let dtype = self.schema.values()[index].dtype;
         let is_null = self.is_null(index);
         let offset_idx = index + self.schema.num_keys as usize;
@@ -536,7 +645,7 @@ impl<'a, 'b> TupleRef<'a, 'b> {
     }
 
     // get a key identified by its index
-    pub fn key(&self, index: usize) -> std::io::Result<DataTypeRef<'_>> {
+    pub fn key(&self, index: usize) -> io::Result<DataTypeRef<'_>> {
         let dtype = self.schema.keys()[index].dtype;
         let (value, _) = reinterpret_cast(dtype, &self.data[self.offsets[index] as usize..])?;
         Ok(value)
@@ -563,6 +672,122 @@ impl<'a, 'b> TupleRef<'a, 'b> {
     pub fn is_visible(&self, xid: TransactionId) -> bool {
         self.xmin <= xid && (self.xmax == TRANSACTION_ZERO || self.xmax > xid)
     }
+
+    /// Returns the xmin (creating transaction ID) of this tuple
+    pub fn xmin(&self) -> TransactionId {
+        self.xmin
+    }
+
+    /// Returns the xmax (deleting transaction ID) of this tuple
+    /// Returns TRANSACTION_ZERO if not deleted
+    pub fn xmax(&self) -> TransactionId {
+        self.xmax
+    }
+
+    /// Reads the visible version of the tuple by the provided snapshots.
+    /// Traverses the tuple version chain backwards until it finds the one where the creating [TransactionId] (xmin) is visible by the [Snapshot]
+    pub fn read_for_snapshot(
+        buffer: &'a [u8],
+        schema: &'b Schema,
+        snapshot: &crate::transactions::Snapshot,
+    ) -> io::Result<Option<TupleRef<'a, 'b>>> {
+        let visible_version = Self::find_visible_version(buffer, schema, snapshot)?;
+        let tuple = Self::read_version(buffer, schema, visible_version)?;
+
+        if !snapshot.is_tuple_visible(tuple.xmin, tuple.xmax) {
+            return Ok(None);
+        }
+
+        Ok(Some(tuple))
+    }
+
+    /// Finds the valid version nb for a given snapshot in a single loop pass.
+    /// Traverses the tuple version chain backwards until it finds the one where the creating [TransactionId] (xmin) is visible by the [Snapshot]
+    fn find_visible_version(
+        buffer: &'a [u8],
+        schema: &'b Schema,
+        snapshot: &crate::transactions::Snapshot,
+    ) -> io::Result<u8> {
+        let latest = Self::read(buffer, schema)?;
+        let current_version = latest.target_version;
+
+        // Single version - no deltas to check
+        if current_version == 0 {
+            return Ok(0);
+        }
+
+        // If our transaction created this version, it's visible
+        if latest.xmin() == snapshot.xid() {
+            return Ok(current_version);
+        }
+
+        // Check if latest version is visible
+        if snapshot.is_committed_before_snapshot(latest.xmin()) {
+            return Ok(current_version);
+        }
+
+        // Parse deltas in order (already sorted descending from serialization)
+        let transaction_id_size = mem::size_of::<TransactionId>();
+        let mut cursor = latest.last_version_end as usize;
+
+        while cursor < buffer.len() {
+            let version = buffer[cursor];
+            cursor += 1;
+
+            let delta_xmin =
+                TransactionId::try_from(&buffer[cursor..cursor + transaction_id_size])?;
+            cursor += transaction_id_size;
+
+            // Check visibility immediately
+            if snapshot.is_committed_before_snapshot(delta_xmin) || delta_xmin == snapshot.xid() {
+                return Ok(version);
+            }
+
+            // Skip delta content
+            let (size_varint, varint_bytes) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
+            let delta_size: usize = size_varint.try_into()?;
+            cursor += varint_bytes + delta_size;
+        }
+
+        // No visible version found
+        Ok(0)
+    }
+
+    /// Gets the xmin for a specific version
+    pub fn version_xmin(&self, version: u8) -> io::Result<TransactionId> {
+        // If its the current version, return it
+        if version == self.target_version {
+            return Ok(self.xmin);
+        }
+
+        // Look in the deltas directory
+        let transaction_id_size = mem::size_of::<TransactionId>();
+        let null_bitmap_size = self.schema.values().len().div_ceil(8);
+        let mut cursor = self.last_version_end as usize;
+
+        while cursor < self.data.len() {
+            let delta_version = self.data[cursor];
+            cursor += 1;
+
+            let delta_xmin =
+                TransactionId::try_from(&self.data[cursor..cursor + transaction_id_size])?;
+            cursor += transaction_id_size;
+
+            if delta_version == version {
+                return Ok(delta_xmin);
+            }
+
+            // Skip the rest.
+            let (size_varint, varint_bytes) = VarInt::from_encoded_bytes(&self.data[cursor..])?;
+            let delta_size: usize = size_varint.try_into()?;
+            cursor += varint_bytes + delta_size;
+        }
+
+        Err(IoError::new(
+            ErrorKind::NotFound,
+            format!("Version {} not found in delta chain", version),
+        ))
+    }
 }
 
 /// Owned tuple structure.
@@ -583,7 +808,7 @@ pub struct Tuple<'schema> {
     /// Transaction that deleted the tuple:
     xmax: TransactionId,
     // Directory of versions of the tuple.
-    delta_dir: HashMap<u8, Delta>,
+    delta_dir: BTreeMap<u8, Delta>,
 }
 
 #[derive(Debug, Clone)]
@@ -592,15 +817,19 @@ struct Delta {
     changes: Vec<(u8, DataType)>,
 }
 
-
 impl Delta {
     fn new(xmin: TransactionId) -> Self {
-        Self { xmin, changes: Vec::new() }
+        Self {
+            xmin,
+            changes: Vec::new(),
+        }
     }
 
-
     fn with_capacity(xmin: TransactionId, capacity: usize) -> Self {
-        Self { xmin, changes: Vec::with_capacity(capacity) }
+        Self {
+            xmin,
+            changes: Vec::with_capacity(capacity),
+        }
     }
 
     fn iter_changes(&self) -> impl Iterator<Item = &(u8, DataType)> {
@@ -629,11 +858,11 @@ impl<'schema> Tuple<'schema> {
         values: &[DataType],
         schema: &'schema Schema,
         xmin: TransactionId,
-    ) -> std::io::Result<Self> {
+    ) -> io::Result<Self> {
         // Validate the data first.
         if values.len() > schema.columns.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
+            return Err(IoError::new(
+                ErrorKind::InvalidInput,
                 format!(
                     "Too many values: {} values for {} columns",
                     values.len(),
@@ -644,8 +873,8 @@ impl<'schema> Tuple<'schema> {
 
         for (i, (value, col_def)) in values.iter().zip(schema.iter_columns()).enumerate() {
             if !value.matches(col_def.dtype) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
+                return Err(IoError::new(
+                    ErrorKind::InvalidInput,
                     format!(
                         "Type mismatch at column {}: expected {:?}, got {:?}",
                         i, col_def.dtype, value
@@ -658,7 +887,7 @@ impl<'schema> Tuple<'schema> {
             data: values.to_vec(),
             schema,
             version: 0,
-            delta_dir: HashMap::new(),
+            delta_dir: BTreeMap::new(),
             xmin,
             xmax: TRANSACTION_ZERO,
         })
@@ -694,14 +923,28 @@ impl<'schema> Tuple<'schema> {
             .map(|slot| mem::replace(slot, new))
     }
 
+    /// Returns the xmin (creating transaction ID) of this tuple
+    pub fn xmin(&self) -> TransactionId {
+        self.xmin
+    }
+
+    /// Returns the xmax (deleting transaction ID) of this tuple
+    /// Returns TRANSACTION_ZERO if not deleted
+    pub fn xmax(&self) -> TransactionId {
+        self.xmax
+    }
+
     pub fn add_version(
         &mut self,
         modified: &[(usize, DataType)],
         xmin: TransactionId,
-    ) -> std::io::Result<()> {
+    ) -> io::Result<()> {
         let old_version = self.version;
+        let old_xmin = self.xmin;
+
         self.version += 1;
-        let mut diffs = Delta::with_capacity(xmin, modified.len());
+        self.xmin = xmin;
+        let mut diffs = Delta::with_capacity(old_xmin, modified.len());
 
         for (i, value) in modified {
             if let Some(val) = self.schema.values().get(*i)
@@ -711,8 +954,8 @@ impl<'schema> Tuple<'schema> {
                     diffs.push((*i as u8, old));
                 }
             } else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
+                return Err(IoError::new(
+                    ErrorKind::InvalidData,
                     format!("Invalid tuple data type for field {i}"),
                 ));
             }
@@ -725,10 +968,10 @@ impl<'schema> Tuple<'schema> {
 
     /// Marks the tuple as deleted by the given transaction.
     /// After deletion, the tuple is invisible to transactions >= xid.
-    pub fn delete(&mut self, xid: TransactionId) -> std::io::Result<()> {
+    pub fn delete(&mut self, xid: TransactionId) -> io::Result<()> {
         if self.xmax != TRANSACTION_ZERO {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
+            return Err(IoError::new(
+                ErrorKind::InvalidInput,
                 "Tuple is already deleted",
             ));
         }
@@ -746,12 +989,32 @@ impl<'schema> Tuple<'schema> {
     pub fn is_visible(&self, xid: TransactionId) -> bool {
         self.xmin <= xid && (self.xmax == TRANSACTION_ZERO || self.xmax > xid)
     }
-
-
 }
 
 #[derive(Clone, Debug)]
 pub struct OwnedTuple(Box<[u8]>);
+
+impl OwnedTuple {
+    /// Create an OwnedTuple from a byte vector
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes.into_boxed_slice())
+    }
+
+    /// Returns the underlying bytes as a slice
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Returns the length of the tuple data
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns true if the tuple is empty
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
 
 /// Serializes the tuple to a byte array, consuming it.
 /// The layout in memory of a tuple is the following:
@@ -778,6 +1041,7 @@ impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
         // Total size of the deltas (must take into accout the encoded length of each diff)
         let mut total_delta_size = 0usize;
         for (_, diffs) in value.delta_dir.iter() {
+            // Should iterate in  reverse order
             // First, take into account the xmin value:
             let xmin_size = mem::size_of::<TransactionId>();
             // Each delta contains: version(1) + varint_size + bitmap + data
@@ -842,7 +1106,7 @@ impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
             }
 
             // Write the delta directory
-            for (version, diffs) in value.delta_dir.iter() {
+            for (version, diffs) in value.delta_dir.iter().rev() {
                 // Version:
                 write(ptr.add(cursor), *version);
                 cursor += 1;
@@ -865,11 +1129,7 @@ impl<'schema> From<&Tuple<'schema>> for OwnedTuple {
 
                 // Copy the bitmap and modify in place
                 let delta_bitmap_start = cursor;
-                copy_nonoverlapping(
-                    ptr.add(bitmap_start),
-                    ptr.add(cursor),
-                    null_bitmap_size,
-                );
+                copy_nonoverlapping(ptr.add(bitmap_start), ptr.add(cursor), null_bitmap_size);
                 cursor += null_bitmap_size;
 
                 // Update the bitmap of the delta
@@ -920,7 +1180,7 @@ impl AsMut<[u8]> for OwnedTuple {
 }
 
 impl<'schema> TryFrom<(&[u8], &'schema Schema)> for Tuple<'schema> {
-    type Error = std::io::Error;
+    type Error = IoError;
 
     fn try_from((buffer, schema): (&[u8], &'schema Schema)) -> Result<Self, Self::Error> {
         let tuple_ref = TupleRef::read(buffer, schema)?;
@@ -936,7 +1196,7 @@ impl<'schema> TryFrom<(&[u8], &'schema Schema)> for Tuple<'schema> {
         let current_version = buffer[tuple_ref.key_len as usize];
         let xmin = tuple_ref.xmin;
         let xmax = tuple_ref.xmax;
-        let mut delta_dir = HashMap::new();
+        let mut delta_dir = BTreeMap::new();
         let mut cursor = tuple_ref.last_version_end as usize;
         let null_bitmap_size = schema.values().len().div_ceil(8);
 
@@ -944,7 +1204,8 @@ impl<'schema> TryFrom<(&[u8], &'schema Schema)> for Tuple<'schema> {
             let version = buffer[cursor];
             cursor += 1;
             let transaction_id_size = mem::size_of::<TransactionId>();
-            let version_xmin = TransactionId::try_from(&buffer[cursor..cursor + transaction_id_size])?;
+            let version_xmin =
+                TransactionId::try_from(&buffer[cursor..cursor + transaction_id_size])?;
             cursor += transaction_id_size;
 
             let (size_varint, varint_bytes) = VarInt::from_encoded_bytes(&buffer[cursor..])?;
@@ -966,7 +1227,6 @@ impl<'schema> TryFrom<(&[u8], &'schema Schema)> for Tuple<'schema> {
                 cursor += read_bytes;
             }
 
-
             delta_dir.insert(version, delta);
         }
 
@@ -986,7 +1246,9 @@ mod tuple_tests {
 
     use super::*;
     use crate::database::schema::{Column, Schema};
+    use crate::transactions::Snapshot;
     use crate::types::{DataType, DataTypeKind, UInt8};
+    use std::collections::HashSet;
 
     fn create_single_key_schema() -> Schema {
         Schema::from_columns(
@@ -1347,5 +1609,400 @@ mod tuple_tests {
         // Transaction 50 started before tuple was created
         assert!(!tup.is_visible(xid_50));
         assert!(tup.is_visible(xid_100));
+    }
+
+    #[test]
+    fn test_tuple_8() {
+        let schema = create_single_key_schema();
+        let xid_10 = TransactionId::from(10u64);
+
+        let tuple = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("Alice".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_10,
+        )
+        .unwrap();
+
+        let buf: OwnedTuple = tuple.into();
+        let tuple_ref = TupleRef::read(buf.as_ref(), &schema).unwrap();
+
+        assert_eq!(tuple_ref.version(), 0);
+        assert_eq!(tuple_ref.version_xmin(0).unwrap(), xid_10);
+    }
+
+    #[test]
+    fn test_tuple_9() {
+        let schema = create_single_key_schema();
+        let xid_10 = TransactionId::from(10u64);
+        let xid_20 = TransactionId::from(20u64);
+        let xid_30 = TransactionId::from(30u64);
+
+        let mut tuple = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("V0".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_10,
+        )
+        .unwrap();
+
+        tuple
+            .add_version(&[(0, DataType::Text("V1".into()))], xid_20)
+            .unwrap();
+
+        tuple
+            .add_version(&[(0, DataType::Text("V2".into()))], xid_30)
+            .unwrap();
+
+        let buf: OwnedTuple = tuple.into();
+        let tuple_ref = TupleRef::read(buf.as_ref(), &schema).unwrap();
+
+        assert_eq!(tuple_ref.version(), 2);
+        assert_eq!(tuple_ref.version_xmin(2).unwrap(), xid_30);
+        assert_eq!(tuple_ref.version_xmin(1).unwrap(), xid_20);
+        assert_eq!(tuple_ref.version_xmin(0).unwrap(), xid_10);
+    }
+
+    #[test]
+    fn test_tuple_10() {
+        let schema = create_single_key_schema();
+        let xid_10 = TransactionId::from(10u64);
+
+        let tuple = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("Alice".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_10,
+        )
+        .unwrap();
+
+        let buf: OwnedTuple = tuple.into();
+        let tuple_ref = TupleRef::read(buf.as_ref(), &schema).unwrap();
+
+        // Version 5 does not exist
+        assert!(tuple_ref.version_xmin(5).is_err());
+    }
+
+    #[test]
+    fn test_tuple_11() {
+        let schema = create_single_key_schema();
+        let xid_10 = TransactionId::from(10u64);
+        let xid_20 = TransactionId::from(20u64);
+
+        let mut tuple = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("Original".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_10,
+        )
+        .unwrap();
+
+        tuple
+            .add_version(&[(0, DataType::Text("Modified".into()))], xid_20)
+            .unwrap();
+
+        let buf: OwnedTuple = tuple.into();
+
+        // Snapshot de tx 20 debería ver sus propios cambios (version 1)
+        let snapshot_20 = Snapshot::new(xid_20, xid_10, TransactionId::from(21u64), HashSet::new());
+
+        let version = TupleRef::find_visible_version(buf.as_ref(), &schema, &snapshot_20).unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn test_tuple_12() {
+        let schema = create_single_key_schema();
+        let xid_10 = TransactionId::from(10u64);
+        let xid_20 = TransactionId::from(20u64);
+        let xid_30 = TransactionId::from(30u64);
+
+        let mut tuple = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("V0".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_10,
+        )
+        .unwrap();
+
+        tuple
+            .add_version(&[(0, DataType::Text("V1".into()))], xid_20)
+            .unwrap();
+
+        let buf: OwnedTuple = tuple.into();
+
+        // Tx 30 started before tx 20 committed
+        let snapshot_30 = Snapshot::new(xid_30, xid_30, TransactionId::from(31u64), HashSet::new());
+
+        let version = TupleRef::find_visible_version(buf.as_ref(), &schema, &snapshot_30).unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn test_tuple_14() {
+        let schema = create_single_key_schema();
+        let xid_10 = TransactionId::from(10u64);
+        let xid_20 = TransactionId::from(20u64);
+        let xid_15 = TransactionId::from(15u64);
+
+        let mut tuple = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("V0".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_10,
+        )
+        .unwrap();
+
+        // Tx 20 modifies but has not committed yet
+        tuple
+            .add_version(&[(0, DataType::Text("V1".into()))], xid_20)
+            .unwrap();
+
+        let buf: OwnedTuple = tuple.into();
+
+        // Snapshot of tx 15 with tx 20 active.
+        let mut active = HashSet::new();
+        active.insert(xid_20);
+
+        let snapshot_15 = Snapshot::new(xid_15, xid_10, TransactionId::from(21u64), active);
+
+        let version = TupleRef::find_visible_version(buf.as_ref(), &schema, &snapshot_15).unwrap();
+        assert_eq!(version, 0);
+    }
+
+    #[test]
+    fn test_tuple_15() {
+        let schema = create_single_key_schema();
+        let xid_10 = TransactionId::from(10u64);
+        let xid_20 = TransactionId::from(20u64);
+        let xid_30 = TransactionId::from(30u64);
+
+        let mut tuple = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("Original".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_10,
+        )
+        .unwrap();
+
+        tuple
+            .add_version(&[(0, DataType::Text("Updated".into()))], xid_20)
+            .unwrap();
+
+        let buf: OwnedTuple = tuple.into();
+
+        // Snapshot after tx 20 reads 'Updated'
+        let snapshot_30 = Snapshot::new(xid_30, xid_30, TransactionId::from(31u64), HashSet::new());
+
+        let tuple_ref = TupleRef::read_for_snapshot(buf.as_ref(), &schema, &snapshot_30)
+            .unwrap()
+            .expect("Should find a visible tuple");
+
+        assert_eq!(
+            tuple_ref.value(0).unwrap().to_owned(),
+            DataType::Text("Updated".into())
+        );
+    }
+
+    #[test]
+    fn test_tuple_16() {
+        let schema = create_single_key_schema();
+        let xid_10 = TransactionId::from(10u64);
+        let xid_20 = TransactionId::from(20u64);
+        let xid_15 = TransactionId::from(15u64);
+
+        let mut tuple = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("Original".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_10,
+        )
+        .unwrap();
+
+        tuple
+            .add_version(&[(0, DataType::Text("Updated".into()))], xid_20)
+            .unwrap();
+
+        let buf: OwnedTuple = tuple.into();
+
+        // Snapshot with tx being active sees 'Original'
+        let mut active = HashSet::new();
+        active.insert(xid_20);
+
+        let snapshot_15 = Snapshot::new(xid_15, xid_10, TransactionId::from(21u64), active);
+
+        let tuple_ref = TupleRef::read_for_snapshot(buf.as_ref(), &schema, &snapshot_15)
+            .unwrap()
+            .expect("Should find a visible tuple");
+
+        assert_eq!(
+            tuple_ref.value(0).unwrap().to_owned(),
+            DataType::Text("Original".into())
+        );
+    }
+
+    #[test]
+    fn test_tuple_17() {
+        let schema = create_single_key_schema();
+        let xid_10 = TransactionId::from(10u64);
+        let xid_5 = TransactionId::from(5u64);
+
+        let tuple = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("Data".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_10,
+        )
+        .unwrap();
+
+        let buf: OwnedTuple = tuple.into();
+
+        // Snapshot before the tuple existed
+        let snapshot_5 = Snapshot::new(xid_5, xid_5, TransactionId::from(6u64), HashSet::new());
+
+        let result = TupleRef::read_for_snapshot(buf.as_ref(), &schema, &snapshot_5).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_tuple_18() {
+        let schema = create_single_key_schema();
+        let xid_10 = TransactionId::from(10u64);
+        let xid_20 = TransactionId::from(20u64);
+        let xid_15 = TransactionId::from(15u64);
+        let xid_30 = TransactionId::from(30u64);
+
+        let mut tuple = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("Data".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_10,
+        )
+        .unwrap();
+
+        tuple.delete(xid_20).unwrap();
+
+        let buf: OwnedTuple = tuple.into();
+
+        // Snapshot was taken before delete so tuple should be visible
+        let snapshot_15 = Snapshot::new(xid_15, xid_10, TransactionId::from(16u64), HashSet::new());
+
+        let result = TupleRef::read_for_snapshot(buf.as_ref(), &schema, &snapshot_15).unwrap();
+        assert!(result.is_some());
+
+        // Snapshot taken after delete should not be visible
+        let snapshot_30 = Snapshot::new(xid_30, xid_30, TransactionId::from(31u64), HashSet::new());
+
+        let result = TupleRef::read_for_snapshot(buf.as_ref(), &schema, &snapshot_30).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_tuple_19() {
+        let schema = create_single_key_schema();
+        let xid_10 = TransactionId::from(10u64);
+        let xid_20 = TransactionId::from(20u64);
+        let xid_30 = TransactionId::from(30u64);
+        let xid_25 = TransactionId::from(25u64);
+
+        let mut tuple = Tuple::new(
+            &[
+                DataType::Int(1.into()),
+                DataType::Text("V0".into()),
+                DataType::Boolean(UInt8::TRUE),
+                DataType::Double(100.0.into()),
+                DataType::Double(5.0.into()),
+                DataType::Text("Test".into()),
+            ],
+            &schema,
+            xid_10,
+        )
+        .unwrap();
+
+        tuple
+            .add_version(&[(0, DataType::Text("V1".into()))], xid_20)
+            .unwrap();
+
+        tuple
+            .add_version(&[(0, DataType::Text("V2".into()))], xid_30)
+            .unwrap();
+
+        let buf: OwnedTuple = tuple.into();
+
+        // Snapshot with tx active should not see data modified by it
+        let mut active = HashSet::new();
+        active.insert(xid_30);
+
+        let snapshot_25 = Snapshot::new(xid_25, xid_10, TransactionId::from(31u64), active);
+
+        let tuple_ref = TupleRef::read_for_snapshot(buf.as_ref(), &schema, &snapshot_25)
+            .unwrap()
+            .expect("Should find a visible tuple");
+        println!("{tuple_ref}");
+        assert_eq!(tuple_ref.version(), 1);
+        assert_eq!(
+            tuple_ref.value(0).unwrap().to_owned(),
+            DataType::Text("V1".into())
+        );
     }
 }

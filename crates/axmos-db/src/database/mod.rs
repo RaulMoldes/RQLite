@@ -10,19 +10,25 @@ use std::{
 };
 
 use crate::{
-    TRANSACTION_ZERO, database::schema::{Column, Constraint, Index, Relation, Schema, Table}, io::{frames::FrameAccessMode, pager::SharedPager}, storage::{
+    TRANSACTION_ZERO,
+    database::schema::{Column, Constraint, Index, Relation, Schema, Table},
+    io::{frames::FrameAccessMode, pager::SharedPager},
+    storage::{
         page::BtreePage,
         tuple::{OwnedTuple, Tuple, TupleRef},
-    }, structures::bplustree::{
+    },
+    structures::bplustree::{
         BPlusTree, DynComparator, FixedSizeBytesComparator, NumericComparator, SearchResult,
         VarlenComparator,
-    }, transactions::{
-        TransactionController,
+    },
+    transactions::{
+        TransactionCoordinator,
         worker::{ThreadWorker, Worker},
-    }, types::{
+    },
+    types::{
         Blob, DataType, DataTypeKind, ObjectId, PAGE_ZERO, PageId, UInt64, get_next_object,
         initialize_atomics,
-    }
+    },
 };
 
 pub const META_TABLE: &str = "rqcatalog";
@@ -62,7 +68,7 @@ pub fn meta_table_schema() -> Schema {
 
 pub struct Database {
     pager: SharedPager,
-    controller: TransactionController,
+    controller: TransactionCoordinator,
     main_worker: Worker,
     catalog: SharedCatalog,
 }
@@ -75,6 +81,7 @@ pub struct Catalog {
     btree_num_siblings_per_side: usize,
 }
 
+#[derive(Debug)]
 pub struct SharedCatalog(Arc<Catalog>);
 
 impl Clone for SharedCatalog {
@@ -272,7 +279,7 @@ impl Catalog {
                 DataType::BigUInt(UInt64::from(obj.id())),
             ],
             &schema,
-            TRANSACTION_ZERO // PLaceholder. MUST DO THIS INSIDE A TRANSACTION
+            TRANSACTION_ZERO, // PLaceholder. MUST DO THIS INSIDE A TRANSACTION
         )?;
 
         btree.clear_worker_stack();
@@ -364,14 +371,13 @@ impl Database {
     pub fn new(pager: SharedPager, min_keys: usize, siblings_per_side: usize) -> io::Result<Self> {
         initialize_atomics();
 
-        let controller = TransactionController::new();
-        controller.spawn();
         let main_worker = Worker::new(pager.clone());
         let catalog = SharedCatalog::from(Catalog::new_init(
             min_keys,
             siblings_per_side,
             main_worker.clone(),
         )?);
+        let controller = TransactionCoordinator::new(pager.clone(), catalog.clone());
 
         Ok(Self {
             pager,

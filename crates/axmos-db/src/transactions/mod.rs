@@ -1,32 +1,36 @@
+//! MVCC Transaction System for AxmosDB
 use crate::{
-    ObjectId, UInt64,
+    ObjectId, TRANSACTION_ZERO, UInt64,
     database::{SharedCatalog, errors::TransactionError},
     io::pager::SharedPager,
-    transactions::worker::WorkerPool,
     types::TransactionId,
 };
-
+use parking_lot::RwLock;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     sync::{
-        Arc, Mutex,
-        mpsc::{Receiver, RecvTimeoutError, Sender, channel},
+        Arc,
+        atomic::{AtomicU64, Ordering},
     },
-    thread,
-    time::{Duration, Instant},
 };
 
-mod graph;
-mod mem_table;
 pub mod worker;
-use graph::{WFGCycle, WaitForGraph};
-use mem_table::{MemTable, TransactionTable};
 
 pub type Version = u16;
 pub type RowId = UInt64;
 
+/// Last commit timestamp per tuple
+type TupleCommitLog = Arc<RwLock<HashMap<LogicalId, u64>>>;
+
+/// Logical identifier for a tuple (table + row)
 #[derive(Debug, PartialEq, Eq, Ord, PartialOrd, Hash, Clone, Copy)]
 pub struct LogicalId(ObjectId, RowId);
+
+impl std::fmt::Display for LogicalId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Table {}, row {}", self.0, self.1)
+    }
+}
 
 impl LogicalId {
     pub fn new(table: ObjectId, row: RowId) -> Self {
@@ -42,707 +46,765 @@ impl LogicalId {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum LockType {
-    Shared,
-    Exclusive,
+/// Snapshot of the database state at transaction start time.
+/// Used to determine tuple visibility under snapshot isolation.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    /// Transaction ID that owns this snapshot
+    xid: TransactionId,
+    /// Lowest active transaction ID when snapshot was taken
+    xmin: TransactionId,
+    /// Next transaction ID to be assigned when snapshot was taken
+    xmax: TransactionId,
+    /// Set of transaction IDs that were active (uncommitted) at snapshot time
+    active_txs: HashSet<TransactionId>,
 }
 
-#[derive(Debug)]
-pub enum LockRequest {
-    Acquire {
-        tx: TransactionId,
-        id: LogicalId,
-        typ: LockType,
-        reply: Sender<LockResponse>,
-    },
-    Release {
-        tx: TransactionId,
-        handle: TupleHandle,
-    },
-}
-
-#[derive(Debug)]
-pub enum LockResponse {
-    Granted { handle: TupleHandle },
-    Aborted { tx: TransactionId },
-}
-
-// Control channel between the lock manager and the transaction manager.
-#[derive(Debug)]
-pub enum ControlMessage {
-    AbortTx(TransactionId),
-}
-
-#[derive(Debug)]
-struct Waiter {
-    tx_id: TransactionId,
-    typ: LockType,
-    reply: Sender<LockResponse>,
-}
-
-#[derive(Debug)]
-struct LockEntry {
-    handle: TupleHandle,
-    holders: HashSet<TransactionId>,
-    lock_type: Option<LockType>,
-    waiters: VecDeque<Waiter>,
-}
-
-impl LockEntry {
-    fn new(logical_id: LogicalId) -> Self {
-        let handle = TupleHandle::new(logical_id);
+impl Snapshot {
+    pub fn new(
+        xid: TransactionId,
+        xmin: TransactionId,
+        xmax: TransactionId,
+        active: HashSet<TransactionId>,
+    ) -> Self {
         Self {
-            handle,
-            holders: HashSet::new(),
-            lock_type: None,
-            waiters: VecDeque::new(),
+            xid,
+            xmin,
+            xmax,
+            active_txs: active,
         }
     }
 
-    fn can_grant(&self, typ: LockType, tx_id: TransactionId) -> bool {
-        // All axmos database locks are reentrant.
-        if self.holders.contains(&tx_id) {
+    /// Returns the transaction ID that owns this snapshot
+    pub fn xid(&self) -> TransactionId {
+        self.xid
+    }
+
+    /// Check if a tuple with given xmin/xmax is visible to this snapshot.
+    pub fn is_tuple_visible(&self, tuple_xmin: TransactionId, tuple_xmax: TransactionId) -> bool {
+        // Case 1: The tuple was created by our own transaction, then it should be visible to us unless we also deleted it.
+        if tuple_xmin == self.xid {
+            // Visible unless we also deleted it
+            return tuple_xmax != self.xid;
+        }
+
+        // Case 2: If the creating transaction had not committed before our snapshot, we should not be able to see the tuple.
+        if !self.is_committed_before_snapshot(tuple_xmin) {
+            return false;
+        }
+
+        // Check if the tuple has been deleted
+        if tuple_xmax == TRANSACTION_ZERO {
+            // Not deleted
             return true;
         }
 
-        match typ {
-            LockType::Shared => {
-                // We allow shared if there is no exclusive holder.
-                match self.lock_type {
-                    None => true,
-                    Some(LockType::Shared) => true,
-                    Some(LockType::Exclusive) => false,
-                }
-            }
-            LockType::Exclusive => self.holders.is_empty(),
+        // Deletion is visible only if deleter committed before our snapshot
+        // So tuple is visible if deleter has NOT committed before our snapshot
+        !self.is_committed_before_snapshot(tuple_xmax)
+    }
+
+    /// Check if a transaction was committed before this snapshot was taken
+    pub fn is_committed_before_snapshot(&self, txid: TransactionId) -> bool {
+        // Transaction started after our snapshot,
+        // Then it is impossible it committed before the snapshot was taken
+        // Transaction was active when we took snapshot (had not commited)
+        if txid >= self.xmax || self.active_txs.contains(&txid) {
+            return false;
         }
+        // Transaction ID is below our snapshot's xmax and wasn't active
+        // This means it must have committed before our snapshot
+        true
     }
 }
 
-// The wait for graph is basically a table of dependencies in which each row represents the list of transactions for which the index transaction is waiting.
-// It can allow us to detect deadlocks.
-// For anyone interested: https://www.cs.emory.edu/~cheung/Courses/554/Syllabus/8-recv+serial/deadlock-waitfor.html
-fn build_wfg(locks: &HashMap<LogicalId, LockEntry>) -> WaitForGraph {
-    let mut graph = WaitForGraph::new();
-
-    for entry in locks.values() {
-        let holders = entry.holders.clone();
-        for waiter in &entry.waiters {
-            graph
-                .entry(waiter.tx_id)
-                .or_default()
-                .extend(holders.iter().copied());
-        }
-    }
-
-    graph
+/// State of a transaction in the system
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionState {
+    /// Transaction is actively running
+    Active,
+    /// Transaction is in the process of committing
+    Committing,
+    /// Transaction has been committed
+    Committed,
+    /// Transaction has been aborted
+    Aborted,
 }
 
-// Depth first search order for graph traversal.
-// Traversing WFG must be done in depth-first order:
-//
-// Example WFG entry:
-//
-// [TX1] -> [TX2, TX3, TX4]
-//
-// Here, Tx1 is waiting for Tx2, Tx3 and Tx4.
-// We first insert Tx1 into the stack, and check for all the transactions that Tx2, Tx3 and tx4 are waiting for.
-//
-// If eventually, we reach to a point where we find Tx1 again, we have found a cycle.
-// Once all the depend-on transactions are visited, we can pop Tx1 from the [rec-stack], which will avObjectId identifying situations which do not happen to be a deadlock as so.
-fn dfs(
-    node: TransactionId,
-    graph: &WaitForGraph,
-    visited: &mut HashSet<TransactionId>,
-    rec: &mut HashSet<TransactionId>,
-    path: &mut Vec<TransactionId>,
-) -> Option<WFGCycle> {
-    visited.insert(node);
-    rec.insert(node);
-    path.push(node);
-
-    if let Some(neighbors) = graph.get(&node) {
-        for &n in neighbors {
-            if !visited.contains(&n) {
-                if let Some(c) = dfs(n, graph, visited, rec, path) {
-                    return Some(c);
-                }
-            } else if rec.contains(&n) {
-                let pos = path.iter().position(|&x| x == n).unwrap();
-                return Some(WFGCycle::from(&path[pos..]));
-            }
-        }
-    }
-
-    rec.remove(&node);
-    path.pop();
-    None
-}
-
-fn detect_cycle(graph: &WaitForGraph) -> Option<WFGCycle> {
-    let mut visited = HashSet::new();
-    let mut rec = HashSet::new();
-    let mut path = Vec::new();
-
-    for &node in graph.keys() {
-        if !visited.contains(&node)
-            && let Some(cycle) = dfs(node, graph, &mut visited, &mut rec, &mut path)
-        {
-            return Some(cycle);
-        }
-    }
-
-    None
-}
-
-#[derive(Debug, Hash, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct TupleHandle {
-    logical_id: LogicalId,
-    version: Version,
-}
-
-impl TupleHandle {
-    pub fn new(logical_id: LogicalId) -> Self {
-        Self {
-            logical_id,
-            version: 0,
-        }
-    }
-
-    fn increment_version_counter(&mut self) {
-        self.version = self.version.saturating_add(1);
-    }
-
-    fn id(&self) -> LogicalId {
-        self.logical_id
-    }
-
-    fn table(&self) -> ObjectId {
-        self.logical_id.table()
-    }
-
-    fn row_id(&self) -> RowId {
-        self.logical_id.row()
-    }
-
-    fn version(&self) -> Version {
-        self.version
-    }
-}
-
-/// The lock manager communicates with running threads that ask for locks at the Transaction Manager level. It is a loop that grants/denies access to resources and periodically checks for deadlocks when a request times out.
-/// The architecture is the following:
-///
-/// [CLIENTS] : threads that execute stuff on the database. They need to access the transaction manager in order to grab locks for these resources.
-///
-/// [SHARED TRANSACTION MANAGER (STM)] : main transaction tracker. Keeps track of each existing transaction and its state. It is wrapped over an Arc<> and protected with RwLock to ensure that state is common to all threads. Asks the lock manager for locks when a client needs by sending a [LockRequest].
-///
-/// [LOCK MANAGER]: loop that waits for [LockRequest] and sends [LockResponse] back to the [STM]. Might also send [ControlMessage]  to a control loop to indicate when a deadlock has happened and a transaction needs to kill its thread in order to resolve it.
-///
-/// [TRANSACTION CONTROLLER]: Executes the listener of the control loop (aka listens for [ControlMessage] from the LOCK MANAGER) and indicates the TM that a tx needs to be aborted in order for others to make progress when necessary.
-pub struct LockManager;
-impl LockManager {
-    /// spawn the Lock Manager on its private thread
-    /// lock_rx: LockRequest receiver channel
-    /// control_tx: ControlMessage transmitter channel.
-    pub fn spawn(lock_rx: Receiver<LockRequest>, control_tx: Sender<ControlMessage>) {
-        thread::spawn(move || {
-            let mut locks: HashMap<LogicalId, LockEntry> = HashMap::new();
-            let mut last_deadlock_check = Instant::now();
-
-            loop {
-                // Waits for messages with a timeout to execute deadlock detection periodically.
-                match lock_rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(msg) => match msg {
-                        LockRequest::Acquire { tx, id, typ, reply } => {
-                            let entry = locks.entry(id).or_insert_with(|| LockEntry::new(id));
-
-                            if entry.can_grant(typ, tx) {
-                                // Grant the lock
-                                entry.holders.insert(tx);
-                                entry.lock_type = Some(typ);
-
-                                // TODO: Add MVCC To improve this system.
-                                // This should not be done here.
-                                // We should do it at commit time for transactions that have modified items.
-                                //   if matches!(typ, LockType::Exclusive) {
-                                //        entry.increment_version_counter();
-                                //    }
-
-                                let _ = reply.send(LockResponse::Granted {
-                                    handle: entry.handle.clone(),
-                                });
-                            } else {
-                                // Enqueue the waiter thread
-                                entry.waiters.push_back(Waiter {
-                                    tx_id: tx,
-                                    typ,
-                                    reply,
-                                });
-                            }
-                        }
-
-                        LockRequest::Release { tx, handle } => {
-                            if let Some(entry) = locks.get_mut(&handle.id()) {
-                                entry.holders.remove(&tx);
-                                if entry.holders.is_empty() {
-                                    entry.lock_type = None; // No holders
-
-                                    // Promote waiters on FIFO order.
-                                    // For shared locks we can promote multiple waiters as long as they are all shared
-                                    loop {
-                                        if entry.waiters.is_empty() {
-                                            break;
-                                        }
-
-                                        // Peeks the first waiter in the queue without consuming
-                                        if let Some(waiter) = entry.waiters.pop_front() {
-                                            if entry.can_grant(waiter.typ, waiter.tx_id) {
-                                                // pop the waiter and grant the lock
-                                                entry.holders.insert(waiter.tx_id);
-                                                entry.lock_type = Some(waiter.typ);
-
-                                                let _ = waiter.reply.send(LockResponse::Granted {
-                                                    handle: entry.handle.clone(),
-                                                });
-
-                                                // Once we have granted an exclusive lock we must stop the loop, as exclusive locks can only be held by a single thread.
-                                                if matches!(waiter.typ, LockType::Exclusive) {
-                                                    break;
-                                                } else {
-                                                    // For shared locks the loop can continue promoting waiters
-                                                    continue;
-                                                }
-                                            } else {
-                                                entry.waiters.push_front(waiter);
-                                                // The waiter could not acquire the lock so we stop.
-                                                break;
-                                            }
-                                        } else {
-                                            break;
-                                        }
-                                    }
-
-                                    // Si no quedan holders ni waiters, podemos eliminar la entrada para liberar memoria
-                                    if entry.holders.is_empty() && entry.waiters.is_empty() {
-                                        locks.remove(&handle.id());
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        // If the waiting time is reached, we can execute the deadlock detection.
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        // Channel closed. Terminate gracefully
-                        break;
-                    }
-                }
-
-                // Deadlock detection logic.
-                if last_deadlock_check.elapsed() > Duration::from_secs(1) {
-                    last_deadlock_check = Instant::now();
-                    let wfg = build_wfg(&locks);
-
-                    if let Some(cycle) = detect_cycle(&wfg) {
-                        // The current policy is to always abort the youngest transaction.
-                        // If transaction has been running for less time, it is more likely that it be cheaper to abort it and restart it since it might not have performed so much work.
-                        if let Some(&youngest) = cycle.iter().max() {
-                            let _ = control_tx.send(ControlMessage::AbortTx(youngest));
-                        }
-                    }
-                }
-            }
-        });
-    }
-}
-
-#[derive(Default, Debug)]
+/// Metadata for a single transaction
+#[derive(Debug)]
 pub struct TransactionMetadata {
     id: TransactionId,
-    read_set: HashSet<TupleHandle>,
-    write_set: HashSet<TupleHandle>,
-    status: TxState,
+    state: TransactionState,
+    snapshot: Snapshot,
+    /// Tuples read by this transaction
+    read_set: HashSet<LogicalId>,
+    /// Tuples written by this transaction with their original version
+    write_set: HashMap<LogicalId, Version>,
+    /// Tracks the timestamp when the transaction actually started.
+    start_ts: u64,
 }
 
 impl TransactionMetadata {
+    pub fn new(id: TransactionId, snapshot: Snapshot, start_ts: u64) -> Self {
+        Self {
+            id,
+            state: TransactionState::Active,
+            snapshot,
+            read_set: HashSet::new(),
+            write_set: HashMap::new(),
+            start_ts,
+        }
+    }
+
     pub fn id(&self) -> TransactionId {
         self.id
     }
 
-    pub fn new() -> Self {
-        TransactionMetadata {
-            id: TransactionId::new(),
-            read_set: HashSet::new(),
-            write_set: HashSet::new(),
-            status: TxState::default(),
-        }
+    pub fn state(&self) -> TransactionState {
+        self.state
+    }
+
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
+    pub fn start_ts(&self) -> u64 {
+        self.start_ts
+    }
+
+    pub fn add_to_read_set(&mut self, id: LogicalId) {
+        self.read_set.insert(id);
+    }
+
+    pub fn add_to_write_set(&mut self, id: LogicalId, version: Version) {
+        self.write_set.insert(id, version);
+    }
+
+    pub fn write_set(&self) -> &HashMap<LogicalId, Version> {
+        &self.write_set
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
-pub enum TxState {
-    #[default]
-    Acquire, // Transaction incrementally acquiring locks
-    Release, // Transaction on release state, will not be allowed to aquire any more locks.
-    Waiting, // Transaction locked on another lock
+/// Shared transaction table protected by RwLock
+type SharedTransactionTable = Arc<RwLock<HashMap<TransactionId, TransactionMetadata>>>;
+
+/// Central coordinator for all transactions in the system.
+///
+///  Creates transactions, snapshots, tracks active transactions, validates commits and maintains commit order.
+#[derive(Debug, Clone)]
+pub struct TransactionCoordinator {
+    /// All active and recently committed transactions
+    transactions: SharedTransactionTable,
+    /// Shared pager for I/O operations
+    pager: SharedPager,
+    /// Shared catalog for schema access
+    catalog: SharedCatalog,
+    /// Last committed transaction to create snapshots
+    last_committed: TransactionId,
+    /// Global commit timestamp counter
+    commit_counter: Arc<AtomicU64>,
+    /// Last commit timestamp per tuple - tracks when each tuple was last modified
+    tuple_commits: TupleCommitLog,
 }
 
-#[derive(Debug)]
-pub struct TransactionManager {
-    // The transaction manager holds the receiver of the control channel.
-    control_rx: Arc<Mutex<Receiver<ControlMessage>>>, // Receiver control channel mutex
-    txs: TransactionTable,
-    // configuration field
-    max_wait: Duration,
+enum ValidationResult {
+    Conflict(LogicalId),
+    Allowed,
 }
 
-impl TransactionManager {
-    pub fn new(control_rx: Receiver<ControlMessage>) -> Self {
+impl TransactionCoordinator {
+    pub fn new(pager: SharedPager, catalog: SharedCatalog) -> Self {
         Self {
-            control_rx: Arc::new(Mutex::new(control_rx)),
-            txs: TransactionTable::from(MemTable::new()),
-            max_wait: Duration::from_secs(10),
+            transactions: Arc::new(RwLock::new(HashMap::new())),
+            pager,
+            catalog,
+            last_committed: TRANSACTION_ZERO,
+            commit_counter: Arc::new(AtomicU64::new(1)),
+            tuple_commits: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    pub fn create_transaction(&self) -> TransactionId {
-        let tx = TransactionMetadata::new();
-        let id = tx.id();
-        self.txs.write().insert(id, tx);
-        id
+    /// Create a snapshot of the database state for a given transaction id.
+    pub fn snapshot(&self, txid: TransactionId) -> Result<Snapshot, TransactionError> {
+        let txs = self.transactions.read();
+
+        // Collect active transaction IDs
+        let active: HashSet<TransactionId> = txs
+            .iter()
+            .filter(|(_, entry)| entry.state == TransactionState::Active)
+            .map(|(id, _)| *id)
+            .collect();
+
+        // xmin is the smallest active transaction ID (or our ID if none active)
+        let xmin = active.iter().min().copied().unwrap_or(txid);
+
+        // xmax is the next transaction ID to be assigned
+        let xmax = self.last_committed;
+
+        Ok(Snapshot::new(txid, xmin, xmax, active))
     }
 
-    // Releases the lock on the provided sender channel.
-    // mpsc provides multi-producer  single consumer channels, so i think the best idea is to not hold a single sender since we might eventually want to run multiple threads on the same transaction.
-    pub fn release_lock(
-        &mut self,
-        handle: TupleHandle,
-        tx: TransactionId,
-        lock_tx: Sender<LockRequest>,
-    ) {
+    /// Begin a new transaction.
+    /// Returns a [TransactionHandle] to the thread that requested the begin operation.
+    pub fn begin(&self) -> Result<TransactionHandle, TransactionError> {
+        let txid = TransactionId::new();
+
+        // Create snapshot under read lock
+        let snapshot = self.snapshot(txid)?;
+        let start_ts = self.commit_counter.load(Ordering::SeqCst);
+
+        // Insert new transaction entry
         {
-            let mut txs = self.txs.write();
-            if let Some(transaction) = txs.get_mut(&tx) {
-                transaction.status = TxState::Release;
-            };
+            let mut txs = self.transactions.write();
+
+            let entry = TransactionMetadata::new(txid, snapshot.clone(), start_ts);
+            txs.insert(txid, entry);
         }
 
-        let _ = lock_tx.send(LockRequest::Release { tx, handle });
+        Ok(TransactionHandle {
+            id: txid,
+            snapshot,
+            coordinator: self.clone(),
+        })
     }
 
-    // This and the [write()] functions are the most important ones in the lock manager.
-    // The idea is to have multiple Lock Requestors and a single Lock Responder. The Transaction manager becomes kind of a "bottleneck" here
-    // since is the main entry point that holds metadata about transactions and we need to grab it mutably in order to acquire the lock.
-    // For each client, an additional channel is created to
-    pub fn get_tuple_handle(
-        &self,
-        tx_id: TransactionId,
-        logical_id: LogicalId,
-        lock_tx: Sender<LockRequest>,
-    ) -> Result<(), TransactionError> {
-        // First lock scope.
-        {
-            let mut txs = self.txs.write();
-            // Verify transaction exists and running
-            let tx = txs
-                .get_mut(&tx_id)
-                .ok_or(TransactionError::NotFound(tx_id))?;
-
-            // If the transaction is not running, notify.
-            if tx.status == TxState::Release {
-                return Err(TransactionError::NotAcquire(tx_id));
-            };
-
-            // Put the tx to wait.
-            tx.status = TxState::Waiting;
-        }
-
-        // Create a channel for sending the lock.
-        // This channel is not sync because we want to allow multiple threads to request for locks.
-        let (reply_tx, reply_rx) = channel();
-        let req = LockRequest::Acquire {
-            tx: tx_id,
-            id: logical_id,
-            typ: LockType::Shared,
-            reply: reply_tx,
-        };
-        lock_tx
-            .send(req)
-            .map_err(|_| TransactionError::Other("lock manager is unavailable".into()))?;
-
-        match reply_rx.recv_timeout(self.max_wait) {
-            Ok(LockResponse::Granted {
-                handle: page_handle,
-            }) => {
-                // Acquire the lock to mutate the transaction
-                let mut txs = self.txs.write();
-                // Verify transaction exists and running
-                let tx = txs
-                    .get_mut(&tx_id)
-                    .ok_or(TransactionError::NotFound(tx_id))?;
-                tx.status = TxState::Acquire; // Woken up
-
-                tx.read_set.insert(page_handle);
+    /// Validate and commit a transaction
+    ///
+    /// This performs optimistic concurrency control validation:
+    /// Checks that no tuple in write set was modified by another committed transaction
+    /// If validation passes, marks the transaction as committed
+    pub fn commit(&self, txid: TransactionId) -> Result<(), TransactionError> {
+        // Perform validation
+        match self.validate_write_set(txid)? {
+            ValidationResult::Allowed => {
+                self.set_transaction_state(txid, TransactionState::Committed)?;
                 Ok(())
             }
-            Ok(LockResponse::Aborted { tx: _ }) => {
-                self.abort(tx_id, lock_tx)?;
-                Err(TransactionError::Aborted(tx_id))
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                // Another thread had the lock so we have to wait.
-                Err(TransactionError::TimedOut(tx_id))
-            }
-            Err(_) => {
-                self.abort(tx_id, lock_tx)?;
-                Err(TransactionError::Other("reply channel closed".into()))
+
+            ValidationResult::Conflict(id) => {
+                self.set_transaction_state(txid, TransactionState::Aborted)?;
+                Err(TransactionError::WriteWriteConflict(txid, id))
             }
         }
     }
 
-    fn create_worker_pool(
-        &self,
-        id: TransactionId,
-        pager: SharedPager,
-        sender: Sender<LockRequest>,
-        catalog: SharedCatalog,
-    ) -> WorkerPool {
-        WorkerPool::for_transaction(id, pager, sender, self.clone(), catalog)
-    }
+    /// Abort a transaction
+    pub fn abort(&self, txid: TransactionId) -> Result<(), TransactionError> {
+        let mut txs = self.transactions.write();
 
-    pub fn get_tuple_handle_mut(
-        &self,
-        tx_id: TransactionId,
-        logical_id: LogicalId,
-        lock_tx: Sender<LockRequest>,
-    ) -> Result<(), TransactionError> {
-        {
-            let mut txs = self.txs.write();
-            let tx = txs
-                .get_mut(&tx_id)
-                .ok_or(TransactionError::NotFound(tx_id))?;
+        let entry = txs.get_mut(&txid).ok_or(TransactionError::NotFound(txid))?;
 
-            if tx.status == TxState::Release {
-                return Err(TransactionError::NotAcquire(tx_id));
-            };
-
-            // Put the tx to wait.
-            tx.status = TxState::Waiting;
-        }
-
-        // Create a reply channel to gen the response back from the Lock Manager
-        let (reply_tx, reply_rx) = channel();
-        let req = LockRequest::Acquire {
-            tx: tx_id,
-            id: logical_id,
-            typ: LockType::Exclusive,
-            reply: reply_tx,
-        };
-        lock_tx
-            .send(req)
-            .map_err(|_| TransactionError::Other("lock manager gone".into()))?;
-
-        match reply_rx.recv_timeout(self.max_wait) {
-            Ok(LockResponse::Granted {
-                handle: page_handle,
-            }) => {
-                let mut txs = self.txs.write();
-                let tx = txs
-                    .get_mut(&tx_id)
-                    .ok_or(TransactionError::NotFound(tx_id))?;
-                tx.status = TxState::Acquire;
-                tx.write_set.insert(page_handle);
-                Ok(())
-            }
-            Ok(LockResponse::Aborted { tx: _ }) => {
-                self.abort(tx_id, lock_tx)?;
-                Err(TransactionError::Aborted(tx_id))
-            }
-            Err(RecvTimeoutError::Timeout) => Err(TransactionError::TimedOut(tx_id)),
-            Err(_) => {
-                self.abort(tx_id, lock_tx)?;
-                Err(TransactionError::Other("reply channel closed".into()))
-            }
-        }
-    }
-
-    pub fn commit(
-        &self,
-        tx_id: TransactionId,
-        lock_tx: Sender<LockRequest>,
-    ) -> Result<(), TransactionError> {
-        let mut tuples: Vec<TupleHandle> = Vec::new();
-
-        // Lock the tx table
-        {
-            let mut txs = self.txs.write();
-            // Mark committed and release locks
-            if let Some(mut tx) = txs.remove(&tx_id) {
-                for mut handle in tx.write_set.drain() {
-                    handle.increment_version_counter();
-                    tuples.push(handle)
-                }
-
-                tx.status = TxState::Release; // Ensure we enter the release state
-                // send release for each page in read_set and write_set
-                tuples.extend(tx.read_set.drain());
-            } else {
-                return Err(TransactionError::NotFound(tx_id));
-            }
-        };
-
-        // tx table is unlocked then we can operate on the released locks.
-        for handle in tuples.drain(..) {
-            let _ = lock_tx.send(LockRequest::Release { tx: tx_id, handle });
-        }
-
+        entry.state = TransactionState::Aborted;
         Ok(())
     }
 
-    pub fn abort(
+    /// Get a transaction's snapshot for visibility checks
+    pub fn get_snapshot(&self, txid: TransactionId) -> Result<Snapshot, TransactionError> {
+        let txs = self.transactions.read();
+
+        let entry = txs.get(&txid).ok_or(TransactionError::NotFound(txid))?;
+
+        Ok(entry.snapshot.clone())
+    }
+
+    /// Record a read operation for a transaction
+    pub fn record_read(
         &self,
-        tx_id: TransactionId,
-        lock_tx: Sender<LockRequest>,
+        txid: TransactionId,
+        logical_id: LogicalId,
     ) -> Result<(), TransactionError> {
-        let mut tuples = Vec::new();
+        let mut txs = self.transactions.write();
 
-        // Lock the tx table
-        {
-            let mut txs = self.txs.write();
-            // Mark committed and release locks
-            if let Some(mut tx) = txs.remove(&tx_id) {
-                tx.status = TxState::Release; // Ensure we enter the release state
-                // send release for each page in read_set and write_set
-                tuples.extend(tx.read_set.drain().chain(tx.write_set.drain()));
-            } else {
-                return Err(TransactionError::NotFound(tx_id));
-            }
-        };
+        let entry = txs.get_mut(&txid).ok_or(TransactionError::NotFound(txid))?;
 
-        // tx table is unlocked then we can operate on the released locks.
-        for handle in tuples.drain(..) {
-            let _ = lock_tx.send(LockRequest::Release { tx: tx_id, handle });
+        if entry.state != TransactionState::Active {
+            return Err(TransactionError::Other(format!(
+                "Transaction {} is not active",
+                txid
+            )));
         }
 
+        entry.add_to_read_set(logical_id);
         Ok(())
     }
-}
 
-unsafe impl Send for TransactionManager {}
-unsafe impl Sync for TransactionManager {}
+    /// Record a write operation for a transaction
+    pub fn record_write(
+        &self,
+        txid: TransactionId,
+        logical_id: LogicalId,
+        version: Version,
+    ) -> Result<(), TransactionError> {
+        let mut txs = self.transactions.write();
 
-impl Clone for TransactionManager {
-    fn clone(&self) -> Self {
-        Self {
-            control_rx: Arc::clone(&self.control_rx),
-            txs: self.txs.clone(),
-            max_wait: self.max_wait,
+        let entry = txs.get_mut(&txid).ok_or(TransactionError::NotFound(txid))?;
+
+        if entry.state != TransactionState::Active {
+            return Err(TransactionError::Other(format!(
+                "Transaction {} is not active",
+                txid
+            )));
         }
+
+        entry.add_to_write_set(logical_id, version);
+        Ok(())
     }
-}
 
-// The transaction controller is just a tiny loop that non-blockingly checks  for messages from the lock manager.
-pub struct TransactionController {
-    lock_sender: Sender<LockRequest>,
-    manager: TransactionManager,
-}
+    fn set_transaction_state(
+        &self,
+        txid: TransactionId,
+        state: TransactionState,
+    ) -> Result<(), TransactionError> {
+        let mut txs = self.transactions.write();
+        let entry = txs.get_mut(&txid).ok_or(TransactionError::NotFound(txid))?;
 
-impl TransactionController {
-    pub fn new() -> Self {
-        let (control_tx, control_rx) = channel::<ControlMessage>();
-        let (lock_tx, lock_rx) = channel::<LockRequest>();
-        let manager = TransactionManager::new(control_rx);
+        let valid_transition = matches!((entry.state, state), (TransactionState::Active, _) | (TransactionState::Committing, TransactionState::Committed) | (TransactionState::Committing, TransactionState::Aborted));
 
-        // Spawn the lock manager at startup
-        LockManager::spawn(lock_rx, control_tx);
-        Self {
-            manager,
-            lock_sender: lock_tx,
+        if !valid_transition {
+            return Err(TransactionError::Other(format!(
+                "Invalid state transition for {}: {:?} → {:?}",
+                txid, entry.state, state
+            )));
         }
+
+        entry.state = state;
+        Ok(())
     }
 
-    fn manager(&self) -> TransactionManager {
-        self.manager.clone()
-    }
+    /// Validate write set for conflicts
+    /// Returns [CommitResult::Allowed] if no conflicts detected
+    fn validate_write_set(
+        &self,
+        txid: TransactionId,
+    ) -> Result<ValidationResult, TransactionError> {
+        self.set_transaction_state(txid, TransactionState::Committing)?;
 
-    fn sender(&self) -> Sender<LockRequest> {
-        self.lock_sender.clone()
-    }
+        let txs = self.transactions.read();
+        let entry = txs.get(&txid).ok_or(TransactionError::NotFound(txid))?;
 
-    pub fn create_worker_pool(&self, pager: SharedPager, catalog: SharedCatalog) -> WorkerPool {
-        let id = TransactionId::new();
-        self.manager
-            .create_worker_pool(id, pager, self.sender(), catalog)
-    }
+        let start_ts = entry.start_ts();
+        let write_set: Vec<LogicalId> = entry.write_set().keys().copied().collect();
 
-    pub fn spawn(&self) {
-        let mgr = self.manager.clone();
-        let sender = self.sender();
-        thread::spawn(move || {
-            loop {
-                // Only acquire write lock when we actually need to process a message
-
-                while let Ok(msg) = {
-                    if let Ok(mtx) = mgr.control_rx.lock() {
-                        mtx.try_recv()
-                    } else {
-                        Err(std::sync::mpsc::TryRecvError::Disconnected)
-                    }
-                } {
-                    match msg {
-                        ControlMessage::AbortTx(tx) => {
-                            let _ = mgr.abort(tx, sender.clone());
-                            println!("Transaction {} aborted by deadlock detector", tx);
-                        }
-                    }
+        // Check if any tuple we wrote was committed after we started
+        {
+            let tuple_commits = self.tuple_commits.read();
+            for logical_id in &write_set {
+                if let Some(&last_commit_ts) = tuple_commits.get(logical_id)
+                    && last_commit_ts >= start_ts
+                {
+                    return Ok(ValidationResult::Conflict(*logical_id));
                 }
-
-                // Sleep briefly to avoid spinning
-                thread::sleep(Duration::from_millis(1));
             }
+        }
+
+        // Validation passed, assign commit timestamp and record tuple commits
+        let commit_ts = self.commit_counter.fetch_add(1, Ordering::SeqCst);
+
+        {
+            let mut tuple_commits = self.tuple_commits.write();
+            for logical_id in write_set {
+                tuple_commits.insert(logical_id, commit_ts);
+            }
+        }
+
+        Ok(ValidationResult::Allowed)
+    }
+
+    /// Cleanup old entries from tuple_commits (call periodically)
+    pub fn cleanup_tuple_commits(&self, min_active_start_ts: u64) {
+        let mut tuple_commits = self.tuple_commits.write();
+        tuple_commits.retain(|_, &mut commit_ts| commit_ts >= min_active_start_ts);
+    }
+
+    /// Clean up old committed/aborted transactions
+    /// Should be called periodically by a background vacuum process
+    pub fn cleanup_old_transactions(&self, min_active_xid: TransactionId) {
+        self.transactions.write().retain(|id, entry| {
+            // Keep active transactions
+            if entry.state == TransactionState::Active {
+                return true;
+            }
+            // Keep transactions that might still be needed for visibility
+            *id >= min_active_xid
         });
     }
 
-    // Starts a transaction on a new thread.
-    // TODO: Think how can we do this with multiple threads.
-    /*pub fn run_transaction_async<F, T>(
-        &self,
-        pager: SharedPager,
-        payload: F,
-    ) -> thread::JoinHandle<Result<T, TransactionError>>
-    where
-        F: FnOnce(WorkerPool) -> Result<T, TransactionError>
-            + Send
-            + 'static,
-        T: Send + 'static,
-    {
-        let mgr = self.manager();
-        let sender = self.sender();
+    pub fn pager(&self) -> SharedPager {
+        self.pager.clone()
+    }
 
+    pub fn catalog(&self) -> SharedCatalog {
+        self.catalog.clone()
+    }
+}
 
-        let tx_id = mgr.create_transaction();
-        let worker = mgr.create_worker_pool(tx_id, pager, sender.clone());
+/// Handle to an active transaction
+/// Provides a safe interface for transaction operations
+#[derive(Debug)]
+pub struct TransactionHandle {
+    id: TransactionId,
+    snapshot: Snapshot,
+    coordinator: TransactionCoordinator,
+}
 
-           worker.begin()?;
-            let res = payload(worker.clone());
+impl TransactionHandle {
+    pub fn id(&self) -> TransactionId {
+        self.id
+    }
 
-            match res {
-                Ok(val) => {
-                    worker.borrow_mut().commit()?;
-                    let _ = mgr.commit(tx_id, sender);
-                    worker.borrow_mut().end()?;
-                    Ok(val)
-                }
-                Err(e) => {
-                    worker.borrow_mut().rollback()?;
-                    let _ = mgr.abort(tx_id, sender);
-                    worker.borrow_mut().end()?;
-                    Err(e)
-                }
-            }
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
 
-    }*/
+    /// Commit this transaction
+    pub fn commit(self) -> Result<(), TransactionError> {
+        self.coordinator.commit(self.id)
+    }
+
+    /// Abort this transaction
+    pub fn abort(self) -> Result<(), TransactionError> {
+        self.coordinator.abort(self.id)
+    }
+}
+
+#[cfg(test)]
+mod coordinator_tests {
+    use super::*;
+    use crate::{
+        IncrementalVaccum, TextEncoding, configs::AxmosDBConfig, database::Database,
+        io::pager::Pager,
+    };
+    use std::{collections::HashSet, io, path::Path};
+
+    /// Creates mock fixtures for testing.
+    fn create_db(
+        page_size: usize,
+        capacity: usize,
+        path: impl AsRef<Path>,
+    ) -> io::Result<Database> {
+        let config = AxmosDBConfig {
+            page_size: page_size as u32,
+            cache_size: Some(capacity as u16),
+            incremental_vacuum_mode: IncrementalVaccum::Disabled,
+            min_keys: 3,
+            text_encoding: TextEncoding::Utf8,
+        };
+
+        let pager = Pager::from_config(config, &path).unwrap();
+
+        Database::new(SharedPager::from(pager), 3, 2)
+    }
+
+    /// Test: A transaction can see tuples it created itself.
+    ///
+    /// Scenario:
+    /// - Transaction 10 creates a tuple (xmin=10, xmax=0)
+    /// - Transaction 10's snapshot should see this tuple as visible
+    #[test]
+    fn test_coordinator_1() {
+        let xid = TransactionId::from(10u64);
+        let snapshot = Snapshot::new(xid, xid, TransactionId::from(11u64), HashSet::new());
+
+        // Tuple created by our transaction, not deleted
+        let tuple_xmin = xid;
+        let tuple_xmax = TRANSACTION_ZERO;
+
+        assert!(
+            snapshot.is_tuple_visible(tuple_xmin, tuple_xmax),
+            "Transaction should see its own uncommitted writes"
+        );
+    }
+
+    /// Test: A transaction cannot see tuples created by active (uncommitted) transactions.
+    ///
+    /// Scenario:
+    /// - Transaction 7 is active (uncommitted) when transaction 10 takes its snapshot
+    /// - Transaction 7 creates a tuple (xmin=7, xmax=0)
+    /// - Transaction 10 should NOT see this tuple
+    #[test]
+    fn test_coordinator_2() {
+        let xid_10 = TransactionId::from(10u64);
+        let xid_7 = TransactionId::from(7u64);
+
+        let mut active = HashSet::new();
+        active.insert(xid_7);
+
+        let snapshot = Snapshot::new(
+            xid_10,
+            TransactionId::from(5u64),
+            TransactionId::from(11u64),
+            active,
+        );
+
+        // Tuple created by active transaction 7
+        let tuple_xmin = xid_7;
+        let tuple_xmax = TRANSACTION_ZERO;
+
+        assert!(
+            !snapshot.is_tuple_visible(tuple_xmin, tuple_xmax),
+            "Transaction should NOT see writes from active (uncommitted) transactions"
+        );
+    }
+
+    /// Test: A transaction can see tuples from transactions that committed before the snapshot.
+    ///
+    /// Scenario:
+    /// - Transaction 5 committed before transaction 10 started
+    /// - Transaction 5 created a tuple (xmin=5, xmax=0)
+    /// - Transaction 10 should see this tuple
+    #[test]
+    fn test_coordinator_3() {
+        let xid_10 = TransactionId::from(10u64);
+        let xid_5 = TransactionId::from(5u64);
+
+        let snapshot = Snapshot::new(
+            xid_10,
+            xid_5,
+            TransactionId::from(11u64),
+            HashSet::new(), // No active transactions - xid_5 already committed
+        );
+
+        // Tuple created by committed transaction 5
+        let tuple_xmin = xid_5;
+        let tuple_xmax = TRANSACTION_ZERO;
+
+        assert!(
+            snapshot.is_tuple_visible(tuple_xmin, tuple_xmax),
+            "Transaction should see writes from committed transactions"
+        );
+    }
+
+    /// Test: A deleted tuple is not visible if the deletion was committed before the snapshot.
+    ///
+    /// Scenario:
+    /// - Transaction 3 created a tuple
+    /// - Transaction 5 deleted the tuple (both committed before snapshot)
+    /// - Transaction 10 should NOT see the tuple
+    #[test]
+    fn test_coordinator_4() {
+        let xid_10 = TransactionId::from(10u64);
+        let xid_3 = TransactionId::from(3u64);
+        let xid_5 = TransactionId::from(5u64);
+
+        let snapshot = Snapshot::new(xid_10, xid_3, TransactionId::from(11u64), HashSet::new());
+
+        // Tuple created by tx3, deleted by tx5 (both committed)
+        let tuple_xmin = xid_3;
+        let tuple_xmax = xid_5;
+
+        assert!(
+            !snapshot.is_tuple_visible(tuple_xmin, tuple_xmax),
+            "Transaction should NOT see tuples deleted before its snapshot"
+        );
+    }
+
+    /// Test: A deleted tuple IS visible if the deleting transaction is still active.
+    ///
+    /// Scenario:
+    /// - Transaction 3 created a tuple (committed)
+    /// - Transaction 7 deleted the tuple but hasn't committed yet
+    /// - Transaction 10 should still see the tuple
+    #[test]
+    fn test_coordinator_5() {
+        let xid_10 = TransactionId::from(10u64);
+        let xid_3 = TransactionId::from(3u64);
+        let xid_7 = TransactionId::from(7u64);
+
+        let mut active = HashSet::new();
+        active.insert(xid_7);
+
+        let snapshot = Snapshot::new(xid_10, xid_3, TransactionId::from(11u64), active);
+
+        // Tuple created by tx3 (committed), deleted by tx7 (active)
+        let tuple_xmin = xid_3;
+        let tuple_xmax = xid_7;
+
+        assert!(
+            snapshot.is_tuple_visible(tuple_xmin, tuple_xmax),
+            "Transaction should see tuples with uncommitted deletes"
+        );
+    }
+
+    /// Test: First-committer-wins - concurrent transactions writing to the same tuple.
+    ///
+    /// Scenario:
+    /// 1. Transaction A starts (start_ts=1)
+    /// 2. Transaction B starts (start_ts=1)
+    /// 3. Both write to tuple X
+    /// 4. Transaction A commits first -> succeeds, records commit_ts=2 for tuple X
+    /// 5. Transaction B tries to commit -> fails because tuple X was modified after B started
+    #[test]
+    fn test_coordinator_6() -> io::Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 100, &path)?;
+        let pager = db.pager();
+        let catalog = db.catalog();
+        let coordinator = TransactionCoordinator::new(pager, catalog);
+
+        let tuple_id = LogicalId::new(ObjectId::from(1u64), UInt64::from(1u64));
+
+        // Step 1 & 2: Both transactions start
+        let handle_a = coordinator.begin().expect("Failed to begin transaction A");
+        let txid_a = handle_a.id();
+
+        let handle_b = coordinator.begin().expect("Failed to begin transaction B");
+        let txid_b = handle_b.id();
+
+        // Step 3: Both write to the same tuple
+        coordinator
+            .record_write(txid_a, tuple_id, 0)
+            .expect("Failed to record write for A");
+        coordinator
+            .record_write(txid_b, tuple_id, 0)
+            .expect("Failed to record write for B");
+
+        // Step 4: Transaction A commits first - should succeed
+        let result_a = handle_a.commit();
+        assert!(
+            result_a.is_ok(),
+            "First committer should succeed, got: {:?}",
+            result_a
+        );
+
+        // Step 5: Transaction B tries to commit - should fail with conflict
+        let result_b = handle_b.commit();
+        assert!(
+            matches!(result_b, Err(TransactionError::WriteWriteConflict(_, _))),
+            "Second committer should fail with WriteWriteConflict, got: {:?}",
+            result_b
+        );
+        Ok(())
+    }
+
+    /// Test: No conflict when transactions write to different tuples.
+    ///
+    /// Scenario:
+    /// 1. Transaction A writes to tuple X
+    /// 2. Transaction B writes to tuple Y
+    /// 3. Both commit successfully (no conflict)
+    #[test]
+    fn test_coordinator_7() -> io::Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 100, &path)?;
+        let pager = db.pager();
+        let catalog = db.catalog();
+
+        let coordinator = TransactionCoordinator::new(pager, catalog);
+
+        let tuple_x = LogicalId::new(ObjectId::from(1u64), UInt64::from(1u64));
+        let tuple_y = LogicalId::new(ObjectId::from(1u64), UInt64::from(2u64));
+
+        let handle_a = coordinator.begin().expect("Failed to begin transaction A");
+        let txid_a = handle_a.id();
+
+        let handle_b = coordinator.begin().expect("Failed to begin transaction B");
+        let txid_b = handle_b.id();
+
+        // Write to different tuples
+        coordinator
+            .record_write(txid_a, tuple_x, 0)
+            .expect("Failed to record write for A");
+        coordinator
+            .record_write(txid_b, tuple_y, 0)
+            .expect("Failed to record write for B");
+
+        // Both should commit successfully
+        assert!(
+            handle_a.commit().is_ok(),
+            "Transaction A should commit successfully"
+        );
+        assert!(
+            handle_b.commit().is_ok(),
+            "Transaction B should commit successfully"
+        );
+        Ok(())
+    }
+
+    /// Test: Serial transactions don't conflict even on the same tuple.
+    ///
+    /// Scenario:
+    /// 1. Transaction A writes to tuple X and commits
+    /// 2. Transaction B starts AFTER A committed
+    /// 3. Transaction B writes to tuple X and commits successfully
+    ///
+    /// This works because B's start_ts is after A's commit_ts.
+    #[test]
+    fn test_coordinator_8() -> io::Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 100, &path)?;
+        let pager = db.pager();
+        let catalog = db.catalog();
+        let coordinator = TransactionCoordinator::new(pager, catalog);
+
+        let tuple_x = LogicalId::new(ObjectId::from(1u64), UInt64::from(1u64));
+
+        // Transaction A: write and commit
+        let handle_a = coordinator.begin().expect("Failed to begin transaction A");
+        let txid_a = handle_a.id();
+        coordinator
+            .record_write(txid_a, tuple_x, 0)
+            .expect("Failed to record write for A");
+        handle_a.commit().expect("Transaction A should commit");
+
+        // Transaction B: starts after A committed
+        let handle_b = coordinator.begin().expect("Failed to begin transaction B");
+        let txid_b = handle_b.id();
+        coordinator
+            .record_write(txid_b, tuple_x, 1)
+            .expect("Failed to record write for B");
+
+        // B should succeed - A's commit happened before B started
+        assert!(
+            handle_b.commit().is_ok(),
+            "Transaction B should commit successfully after A finished"
+        );
+
+        Ok(())
+    }
+
+    /// Test: Aborted transactions release their resources properly.
+    ///
+    /// Scenario:
+    /// 1. Transaction A writes to tuple X and aborts
+    /// 2. Transaction B writes to tuple X and commits successfully
+    ///
+    /// Aborted transactions should not cause conflicts.
+    #[test]
+    fn test_coordinator_9() -> io::Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = create_db(4096, 100, &path)?;
+        let pager = db.pager();
+        let catalog = db.catalog();
+        let coordinator = TransactionCoordinator::new(pager, catalog);
+
+        let tuple_x = LogicalId::new(ObjectId::from(1u64), UInt64::from(1u64));
+
+        // Transaction A: write and abort
+        let handle_a = coordinator.begin().expect("Failed to begin transaction A");
+        let txid_a = handle_a.id();
+        coordinator
+            .record_write(txid_a, tuple_x, 0)
+            .expect("Failed to record write for A");
+        handle_a.abort().expect("Transaction A should abort");
+
+        // Transaction B: write to same tuple
+        let handle_b = coordinator.begin().expect("Failed to begin transaction B");
+        let txid_b = handle_b.id();
+        coordinator
+            .record_write(txid_b, tuple_x, 0)
+            .expect("Failed to record write for B");
+
+        // B should succeed - A was aborted, not committed
+        assert!(
+            handle_b.commit().is_ok(),
+            "Transaction B should commit after A aborted"
+        );
+
+        Ok(())
+    }
 }

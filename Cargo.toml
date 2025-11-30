@@ -4,3 +4,7 @@ members = [
     "crates/axmos-db",
     "crates/axmos-derive",
 ]
+
+
+[profile.dev]
+debug = true

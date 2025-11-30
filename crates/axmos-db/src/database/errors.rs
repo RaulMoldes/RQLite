@@ -7,6 +7,7 @@ use std::{
 
 use crate::{
     sql::lexer::Token,
+    transactions::LogicalId,
     types::{DataTypeKind, TransactionId},
 };
 
@@ -288,10 +289,11 @@ impl Error for DatabaseError {
 #[derive(Debug)]
 pub enum TransactionError {
     Aborted(TransactionId),
-    NotAcquire(TransactionId),
-    TimedOut(TransactionId),
-    Deadlock(TransactionId, TransactionId),
+    NotActive(TransactionId),
+    AlreadyDeleted(LogicalId),
+    WriteWriteConflict(TransactionId, LogicalId),
     NotFound(TransactionId),
+    TupleNotVisible(TransactionId, LogicalId),
     Io(IoError),
     Other(String),
 }
@@ -300,19 +302,26 @@ impl std::fmt::Display for TransactionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TransactionError::Aborted(id) => write!(f, "Transaction with id {id} was aborted"),
-            TransactionError::TimedOut(id) => write!(f, "Transaction with id {id} timed out."),
-            TransactionError::NotAcquire(id) => {
-                write!(
-                    f,
-                    "Transaction with id {id} is not on acquire state and therefore is not allowed to acquire any more locks."
-                )
+
+            TransactionError::NotActive(id) => {
+                write!(f, "Transaction with id {id} is not on active state")
+            }
+            TransactionError::AlreadyDeleted(logical) => {
+                write!(f, "Tuple {logical} is already deleted")
             }
             TransactionError::Io(e) => write!(f, "IO Error: {e}"),
-            TransactionError::Deadlock(id, other) => write!(
-                f,
-                "Deadlock detected between current transaction {id} and transaction {other}"
-            ),
+            Self::WriteWriteConflict(txid, tuple) => {
+                write!(
+                    f,
+                    "Transaction {} conflict: tuple {} was modified by another committed transaction",
+                    txid, tuple
+                )
+            }
             TransactionError::NotFound(id) => write!(f, "Transaction {id} not found"),
+            TransactionError::TupleNotVisible(id, logical) => write!(
+                f,
+                "Tuple with id {logical} cannot be seen by transaction {id}."
+            ),
             TransactionError::Other(msg) => write!(f, "Internal error: {msg}"),
         }
     }

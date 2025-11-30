@@ -1,11 +1,17 @@
 use crate::{
-    TRANSACTION_ZERO, TextEncoding, database::meta_table_schema, io::{
+    TRANSACTION_ZERO, TextEncoding,
+    database::meta_table_schema,
+    io::{
         AsBytes, read_string_unchecked, read_type_from_buf, read_variable_length,
         write_string_unchecked,
-    }, repr_enum, storage::tuple::{OwnedTuple, Tuple, TupleRef}, structures::bplustree::Comparator, types::{
+    },
+    repr_enum,
+    storage::tuple::{OwnedTuple, Tuple, TupleRef},
+    structures::bplustree::Comparator,
+    types::{
         Blob, DataType, DataTypeKind, DataTypeRef, ObjectId, PAGE_ZERO, PageId, UInt8, UInt64,
         VarInt, varint::MAX_VARINT_LEN,
-    }
+    },
 };
 
 use std::{
@@ -698,7 +704,7 @@ impl Relation {
                 DataType::Text(Blob::from(self.name())),
             ],
             &schema,
-            TRANSACTION_ZERO // PLACEHOLDER. MUST DO THIS INSIDE A TRANSACTION IDEALLY
+            TRANSACTION_ZERO, // PLACEHOLDER. MUST DO THIS INSIDE A TRANSACTION IDEALLY
         )?;
 
         Ok(t.into())
