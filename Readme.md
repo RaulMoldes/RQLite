@@ -10,3 +10,4 @@ MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test
 
     1.4. Review failing workerpool tests
     1.5 Add mising create object function to workerpool (ddl-related functions);
+    1.6 Create a methiod to clearly distinguish between table relations and index relations when creating btrees in the catalog.
