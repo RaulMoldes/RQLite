@@ -1,14 +1,14 @@
+use axmosdb::sql::parse_sql;
+use serde::Deserialize;
 use std::{
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
-use axmosdb::sql::parse_sql;
-use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 struct Request {

@@ -34,7 +34,6 @@ fn is_datetime_iso(s: &str) -> bool {
     re.is_match(s)
 }
 
-
 /// SQL Analyzer internal metadata.
 struct AnalyzerCtx {
     table_aliases: HashMap<String, String>,
@@ -179,7 +178,9 @@ impl Analyzer {
         } else if STRING_FUNCTORS.contains(&name_upper.as_str()) {
             match name_upper.as_str() {
                 "LENGTH" => Ok(ExpressionAnalysisResult::Value(DataTypeKind::Int)),
-                "UPPER" | "LOWER" | "TRIM" | "SUBSTR" => Ok(ExpressionAnalysisResult::Value(DataTypeKind::Text)),
+                "UPPER" | "LOWER" | "TRIM" | "SUBSTR" => {
+                    Ok(ExpressionAnalysisResult::Value(DataTypeKind::Text))
+                }
                 _ => Ok(ExpressionAnalysisResult::Value(DataTypeKind::Text)),
             }
         } else if MATH_FUNCTORS.contains(&name_upper.as_str()) {
@@ -238,7 +239,10 @@ impl Analyzer {
                 let right_result = self.analyze_expr(right)?;
 
                 match (left_result, right_result) {
-                    (ExpressionAnalysisResult::Value(left_dt), ExpressionAnalysisResult::Value(right_dt)) => {
+                    (
+                        ExpressionAnalysisResult::Value(left_dt),
+                        ExpressionAnalysisResult::Value(right_dt),
+                    ) => {
                         // Special handling for NULL
                         if matches!(left_dt, DataTypeKind::Null) {
                             return Ok(ExpressionAnalysisResult::Value(right_dt));
@@ -287,7 +291,10 @@ impl Analyzer {
                             Ok(ExpressionAnalysisResult::Value(DataTypeKind::Boolean))
                         }
                     }
-                    (ExpressionAnalysisResult::Value(left_dt), ExpressionAnalysisResult::Table(right_dts)) => {
+                    (
+                        ExpressionAnalysisResult::Value(left_dt),
+                        ExpressionAnalysisResult::Table(right_dts),
+                    ) => {
                         // For IN operator with list
                         if right_dts.is_empty() {
                             return Ok(ExpressionAnalysisResult::Value(DataTypeKind::Boolean));
@@ -388,7 +395,9 @@ impl Analyzer {
                 };
 
                 for item in when_clauses {
-                    if let ExpressionAnalysisResult::Value(cond_dtype) = self.analyze_expr(&item.condition)? {
+                    if let ExpressionAnalysisResult::Value(cond_dtype) =
+                        self.analyze_expr(&item.condition)?
+                    {
                         if let Some(dtype) = op_dtype {
                             if !dtype.can_be_coerced(cond_dtype)
                                 && !cond_dtype.can_be_coerced(dtype)
@@ -406,7 +415,9 @@ impl Analyzer {
                         return Err(AnalyzerError::InvalidExpression);
                     };
 
-                    if let ExpressionAnalysisResult::Value(out_dtype) = self.analyze_expr(&item.result)? {
+                    if let ExpressionAnalysisResult::Value(out_dtype) =
+                        self.analyze_expr(&item.result)?
+                    {
                         out_dtypes.push(out_dtype);
                     } else {
                         return Err(AnalyzerError::InvalidExpression);

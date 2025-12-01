@@ -5,8 +5,8 @@
       "type": "lldb",
       "request": "launch",
       "name": "Debug Rust test (AxmosDB)",
-      "program": "${workspaceFolder}/target/debug/deps/axmosdb-b5089675e818e8c7",
-      "args": ["--nocapture", "test_analyzer_10"],
+      "program": "${workspaceFolder}/target/debug/deps/axmosdb-7cdfa5eb29efc589",
+      "args": ["--nocapture", "test_dealloc_bfs_with_overflow_chains"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {

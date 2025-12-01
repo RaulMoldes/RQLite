@@ -12,7 +12,7 @@ use std::{
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-pub(crate) struct Position(PageId, Slot);
+pub struct Position(PageId, Slot);
 
 impl std::fmt::Display for Position {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

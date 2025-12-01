@@ -733,10 +733,6 @@ pub enum TransactionStatement {
     Rollback,
 }
 
-
-
-
-
 impl Display for Statement {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
@@ -815,7 +811,11 @@ impl Display for Expr {
             Expr::Star => write!(f, "*"),
             Expr::BinaryOp { left, op, right } => write!(f, "({left} {op} {right})"),
             Expr::UnaryOp { op, expr } => write!(f, "{op}{expr}"),
-            Expr::FunctionCall { name, args, distinct } => {
+            Expr::FunctionCall {
+                name,
+                args,
+                distinct,
+            } => {
                 write!(f, "{name}(")?;
                 if *distinct {
                     write!(f, "DISTINCT ")?;
@@ -823,7 +823,11 @@ impl Display for Expr {
                 let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
                 write!(f, "{})", args_str.join(", "))
             }
-            Expr::Case { operand, when_clauses, else_clause } => {
+            Expr::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => {
                 write!(f, "CASE")?;
                 if let Some(op) = operand {
                     write!(f, " {op}")?;
@@ -841,7 +845,12 @@ impl Display for Expr {
                 let list: Vec<String> = items.iter().map(|i| i.to_string()).collect();
                 write!(f, "({})", list.join(", "))
             }
-            Expr::Between { expr, negated, low, high } => {
+            Expr::Between {
+                expr,
+                negated,
+                low,
+                high,
+            } => {
                 write!(f, "{expr}")?;
                 if *negated {
                     write!(f, " NOT")?;
@@ -906,7 +915,12 @@ impl Display for TableReference {
                 }
                 Ok(())
             }
-            TableReference::Join { left, join_type, right, on } => {
+            TableReference::Join {
+                left,
+                join_type,
+                right,
+                on,
+            } => {
                 write!(f, "{left} {join_type} {right}")?;
                 if let Some(on_expr) = on {
                     write!(f, " ON {on_expr}")?;
@@ -1047,7 +1061,11 @@ impl Display for TableConstraintExpr {
             TableConstraintExpr::Unique(cols) => {
                 write!(f, "UNIQUE ({})", cols.join(", "))
             }
-            TableConstraintExpr::ForeignKey { columns, ref_table, ref_columns } => {
+            TableConstraintExpr::ForeignKey {
+                columns,
+                ref_table,
+                ref_columns,
+            } => {
                 write!(
                     f,
                     "FOREIGN KEY ({}) REFERENCES {}({})",

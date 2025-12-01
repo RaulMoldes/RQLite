@@ -451,7 +451,6 @@ impl DataTypeKind {
             return true;
         }
 
-
         if self.is_numeric() && other.is_numeric() {
             return true;
         }
