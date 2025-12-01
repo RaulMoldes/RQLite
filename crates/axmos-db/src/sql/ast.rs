@@ -1,4 +1,5 @@
 use crate::types::DataTypeKind;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 pub trait Simplify {
     fn simplify(&mut self);
@@ -730,4 +731,442 @@ pub enum TransactionStatement {
     Begin,
     Commit,
     Rollback,
+}
+
+
+
+
+
+impl Display for Statement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Statement::Select(s) => write!(f, "{s}"),
+            Statement::Insert(s) => write!(f, "{s}"),
+            Statement::Update(s) => write!(f, "{s}"),
+            Statement::Delete(s) => write!(f, "{s}"),
+            Statement::CreateTable(s) => write!(f, "{s}"),
+            Statement::AlterTable(s) => write!(f, "{s}"),
+            Statement::DropTable(s) => write!(f, "{s}"),
+            Statement::CreateIndex(s) => write!(f, "{s}"),
+            Statement::Transaction(s) => write!(f, "{s}"),
+            Statement::With(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl Display for SelectStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "SELECT ")?;
+        if self.distinct {
+            write!(f, "DISTINCT ")?;
+        }
+
+        let cols: Vec<String> = self.columns.iter().map(|c| c.to_string()).collect();
+        write!(f, "{}", cols.join(", "))?;
+
+        if let Some(from) = &self.from {
+            write!(f, " FROM {from}")?;
+        }
+        if let Some(where_clause) = &self.where_clause {
+            write!(f, " WHERE {where_clause}")?;
+        }
+        if !self.group_by.is_empty() {
+            let groups: Vec<String> = self.group_by.iter().map(|g| g.to_string()).collect();
+            write!(f, " GROUP BY {}", groups.join(", "))?;
+        }
+        if let Some(having) = &self.having {
+            write!(f, " HAVING {having}")?;
+        }
+        if !self.order_by.is_empty() {
+            let orders: Vec<String> = self.order_by.iter().map(|o| o.to_string()).collect();
+            write!(f, " ORDER BY {}", orders.join(", "))?;
+        }
+        if let Some(limit) = self.limit {
+            write!(f, " LIMIT {limit}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for SelectItem {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            SelectItem::Star => write!(f, "*"),
+            SelectItem::ExprWithAlias { expr, alias } => {
+                write!(f, "{expr}")?;
+                if let Some(a) = alias {
+                    write!(f, " AS {a}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Display for Expr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Expr::Number(n) => write!(f, "{n}"),
+            Expr::String(s) => write!(f, "'{s}'"),
+            Expr::Boolean(b) => write!(f, "{}", if *b { "TRUE" } else { "FALSE" }),
+            Expr::Null => write!(f, "NULL"),
+            Expr::Identifier(id) => write!(f, "{id}"),
+            Expr::QualifiedIdentifier { table, column } => write!(f, "{table}.{column}"),
+            Expr::Star => write!(f, "*"),
+            Expr::BinaryOp { left, op, right } => write!(f, "({left} {op} {right})"),
+            Expr::UnaryOp { op, expr } => write!(f, "{op}{expr}"),
+            Expr::FunctionCall { name, args, distinct } => {
+                write!(f, "{name}(")?;
+                if *distinct {
+                    write!(f, "DISTINCT ")?;
+                }
+                let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                write!(f, "{})", args_str.join(", "))
+            }
+            Expr::Case { operand, when_clauses, else_clause } => {
+                write!(f, "CASE")?;
+                if let Some(op) = operand {
+                    write!(f, " {op}")?;
+                }
+                for clause in when_clauses {
+                    write!(f, " {clause}")?;
+                }
+                if let Some(else_expr) = else_clause {
+                    write!(f, " ELSE {else_expr}")?;
+                }
+                write!(f, " END")
+            }
+            Expr::Subquery(s) => write!(f, "({s})"),
+            Expr::List(items) => {
+                let list: Vec<String> = items.iter().map(|i| i.to_string()).collect();
+                write!(f, "({})", list.join(", "))
+            }
+            Expr::Between { expr, negated, low, high } => {
+                write!(f, "{expr}")?;
+                if *negated {
+                    write!(f, " NOT")?;
+                }
+                write!(f, " BETWEEN {low} AND {high}")
+            }
+            Expr::Exists(s) => write!(f, "EXISTS ({s})"),
+        }
+    }
+}
+
+impl Display for WhenClause {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "WHEN {} THEN {}", self.condition, self.result)
+    }
+}
+
+impl Display for BinaryOperator {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            BinaryOperator::Plus => write!(f, "+"),
+            BinaryOperator::Minus => write!(f, "-"),
+            BinaryOperator::Multiply => write!(f, "*"),
+            BinaryOperator::Divide => write!(f, "/"),
+            BinaryOperator::Modulo => write!(f, "%"),
+            BinaryOperator::Eq => write!(f, "="),
+            BinaryOperator::Neq => write!(f, "<>"),
+            BinaryOperator::Lt => write!(f, "<"),
+            BinaryOperator::Gt => write!(f, ">"),
+            BinaryOperator::Le => write!(f, "<="),
+            BinaryOperator::Ge => write!(f, ">="),
+            BinaryOperator::And => write!(f, "AND"),
+            BinaryOperator::Or => write!(f, "OR"),
+            BinaryOperator::Like => write!(f, "LIKE"),
+            BinaryOperator::NotLike => write!(f, "NOT LIKE"),
+            BinaryOperator::Concat => write!(f, "||"),
+            BinaryOperator::In => write!(f, "IN"),
+            BinaryOperator::NotIn => write!(f, "NOT IN"),
+            BinaryOperator::Is => write!(f, "IS"),
+            BinaryOperator::IsNot => write!(f, "IS NOT"),
+        }
+    }
+}
+
+impl Display for UnaryOperator {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            UnaryOperator::Plus => write!(f, "+"),
+            UnaryOperator::Minus => write!(f, "-"),
+            UnaryOperator::Not => write!(f, "NOT "),
+        }
+    }
+}
+
+impl Display for TableReference {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            TableReference::Table { name, alias } => {
+                write!(f, "{name}")?;
+                if let Some(a) = alias {
+                    write!(f, " AS {a}")?;
+                }
+                Ok(())
+            }
+            TableReference::Join { left, join_type, right, on } => {
+                write!(f, "{left} {join_type} {right}")?;
+                if let Some(on_expr) = on {
+                    write!(f, " ON {on_expr}")?;
+                }
+                Ok(())
+            }
+            TableReference::Subquery { query, alias } => {
+                write!(f, "({query}) AS {alias}")
+            }
+        }
+    }
+}
+
+impl Display for JoinType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            JoinType::Inner => write!(f, "INNER JOIN"),
+            JoinType::Left => write!(f, "LEFT JOIN"),
+            JoinType::Right => write!(f, "RIGHT JOIN"),
+            JoinType::Full => write!(f, "FULL JOIN"),
+            JoinType::Cross => write!(f, "CROSS JOIN"),
+        }
+    }
+}
+
+impl Display for OrderByExpr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}", self.expr)?;
+        if self.asc {
+            write!(f, " ASC")
+        } else {
+            write!(f, " DESC")
+        }
+    }
+}
+
+impl Display for InsertStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "INSERT INTO {}", self.table)?;
+        if let Some(cols) = &self.columns {
+            write!(f, " ({})", cols.join(", "))?;
+        }
+        write!(f, " {}", self.values)
+    }
+}
+
+impl Display for Values {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Values::Values(rows) => {
+                write!(f, "VALUES ")?;
+                let row_strs: Vec<String> = rows
+                    .iter()
+                    .map(|row| {
+                        let vals: Vec<String> = row.iter().map(|v| v.to_string()).collect();
+                        format!("({})", vals.join(", "))
+                    })
+                    .collect();
+                write!(f, "{}", row_strs.join(", "))
+            }
+            Values::Query(q) => write!(f, "{q}"),
+        }
+    }
+}
+
+impl Display for UpdateStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "UPDATE {} SET ", self.table)?;
+        let sets: Vec<String> = self.set_clauses.iter().map(|s| s.to_string()).collect();
+        write!(f, "{}", sets.join(", "))?;
+        if let Some(where_clause) = &self.where_clause {
+            write!(f, " WHERE {where_clause}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for SetClause {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{} = {}", self.column, self.value)
+    }
+}
+
+impl Display for DeleteStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "DELETE FROM {}", self.table)?;
+        if let Some(where_clause) = &self.where_clause {
+            write!(f, " WHERE {where_clause}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for CreateTableStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "CREATE TABLE {} (", self.table)?;
+        let cols: Vec<String> = self.columns.iter().map(|c| c.to_string()).collect();
+        write!(f, "{}", cols.join(", "))?;
+        if !self.constraints.is_empty() {
+            let cts: Vec<String> = self.constraints.iter().map(|c| c.to_string()).collect();
+            write!(f, ", {}", cts.join(", "))?;
+        }
+        write!(f, ")")
+    }
+}
+
+impl Display for ColumnDefExpr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{} {}", self.name, self.data_type)?;
+        for ct in &self.constraints {
+            write!(f, " {ct}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for ColumnConstraintExpr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            ColumnConstraintExpr::NotNull => write!(f, "NOT NULL"),
+            ColumnConstraintExpr::Unique => write!(f, "UNIQUE"),
+            ColumnConstraintExpr::PrimaryKey => write!(f, "PRIMARY KEY"),
+            ColumnConstraintExpr::ForeignKey { table, column } => {
+                write!(f, "REFERENCES {table}({column})")
+            }
+            ColumnConstraintExpr::Check(expr) => write!(f, "CHECK ({expr})"),
+            ColumnConstraintExpr::Default(expr) => write!(f, "DEFAULT {expr}"),
+        }
+    }
+}
+
+impl Display for TableConstraintExpr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            TableConstraintExpr::PrimaryKey(cols) => {
+                write!(f, "PRIMARY KEY ({})", cols.join(", "))
+            }
+            TableConstraintExpr::Unique(cols) => {
+                write!(f, "UNIQUE ({})", cols.join(", "))
+            }
+            TableConstraintExpr::ForeignKey { columns, ref_table, ref_columns } => {
+                write!(
+                    f,
+                    "FOREIGN KEY ({}) REFERENCES {}({})",
+                    columns.join(", "),
+                    ref_table,
+                    ref_columns.join(", ")
+                )
+            }
+            TableConstraintExpr::Check(expr) => write!(f, "CHECK ({expr})"),
+        }
+    }
+}
+
+impl Display for AlterTableStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "ALTER TABLE {} {}", self.table, self.action)
+    }
+}
+
+impl Display for AlterAction {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            AlterAction::AddColumn(col) => write!(f, "ADD COLUMN {col}"),
+            AlterAction::DropColumn(name) => write!(f, "DROP COLUMN {name}"),
+            AlterAction::AlterColumn(col) => write!(f, "ALTER COLUMN {col}"),
+            AlterAction::AddConstraint(ct) => write!(f, "ADD {ct}"),
+            AlterAction::DropConstraint(name) => write!(f, "DROP CONSTRAINT {name}"),
+        }
+    }
+}
+
+impl Display for AlterColumnStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{} {}", self.name, self.action)
+    }
+}
+
+impl Display for AlterColumnAction {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            AlterColumnAction::SetDataType(dt) => write!(f, "SET DATA TYPE {dt}"),
+            AlterColumnAction::SetDefault(expr) => write!(f, "SET DEFAULT {expr}"),
+            AlterColumnAction::DropDefault => write!(f, "DROP DEFAULT"),
+            AlterColumnAction::SetNotNull => write!(f, "SET NOT NULL"),
+            AlterColumnAction::DropNotNull => write!(f, "DROP NOT NULL"),
+        }
+    }
+}
+
+impl Display for DropTableStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "DROP TABLE")?;
+        if self.if_exists {
+            write!(f, " IF EXISTS")?;
+        }
+        write!(f, " {}", self.table)?;
+        if self.cascade {
+            write!(f, " CASCADE")?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for CreateIndexStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "CREATE")?;
+        if self.unique {
+            write!(f, " UNIQUE")?;
+        }
+        write!(f, " INDEX")?;
+        if self.if_not_exists {
+            write!(f, " IF NOT EXISTS")?;
+        }
+        write!(f, " {} ON {} (", self.name, self.table)?;
+        let cols: Vec<String> = self.columns.iter().map(|c| c.to_string()).collect();
+        write!(f, "{})", cols.join(", "))
+    }
+}
+
+impl Display for IndexColumn {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}", self.name)?;
+        if let Some(order) = &self.order {
+            write!(f, " {order}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for OrderDirection {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            OrderDirection::Asc => write!(f, "ASC"),
+            OrderDirection::Desc => write!(f, "DESC"),
+        }
+    }
+}
+
+impl Display for TransactionStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            TransactionStatement::Begin => write!(f, "BEGIN"),
+            TransactionStatement::Commit => write!(f, "COMMIT"),
+            TransactionStatement::Rollback => write!(f, "ROLLBACK"),
+        }
+    }
+}
+
+impl Display for WithStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "WITH ")?;
+        if self.recursive {
+            write!(f, "RECURSIVE ")?;
+        }
+        let ctes: Vec<String> = self
+            .ctes
+            .iter()
+            .map(|(name, query)| format!("{name} AS ({query})"))
+            .collect();
+        write!(f, "{} {}", ctes.join(", "), self.body)
+    }
 }

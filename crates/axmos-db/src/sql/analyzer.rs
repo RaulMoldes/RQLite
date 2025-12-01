@@ -34,6 +34,8 @@ fn is_datetime_iso(s: &str) -> bool {
     re.is_match(s)
 }
 
+
+/// SQL Analyzer internal metadata.
 struct AnalyzerCtx {
     table_aliases: HashMap<String, String>,
     subqueries: HashMap<String, Relation>,
@@ -86,7 +88,7 @@ impl AnalyzerCtx {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-enum ExprResult {
+enum ExpressionAnalysisResult {
     Table(Vec<DataTypeKind>),
     Value(DataTypeKind),
 }
@@ -152,47 +154,47 @@ impl Analyzer {
         &mut self,
         name: &str,
         args_dtypes: Vec<DataTypeKind>,
-    ) -> Result<ExprResult, AnalyzerError> {
+    ) -> Result<ExpressionAnalysisResult, AnalyzerError> {
         let name_upper = name.to_uppercase();
 
         if AGGREGATE_FUNCTORS.contains(&name_upper.as_str()) {
             match name_upper.as_str() {
-                "COUNT" => Ok(ExprResult::Value(DataTypeKind::BigInt)),
+                "COUNT" => Ok(ExpressionAnalysisResult::Value(DataTypeKind::BigInt)),
                 "SUM" | "AVG" => {
                     if args_dtypes.is_empty() || !args_dtypes[0].is_numeric() {
-                        Ok(ExprResult::Value(DataTypeKind::Double))
+                        Ok(ExpressionAnalysisResult::Value(DataTypeKind::Double))
                     } else {
-                        Ok(ExprResult::Value(args_dtypes[0]))
+                        Ok(ExpressionAnalysisResult::Value(args_dtypes[0]))
                     }
                 }
                 "MIN" | "MAX" => {
                     if args_dtypes.is_empty() {
-                        Ok(ExprResult::Value(DataTypeKind::Null))
+                        Ok(ExpressionAnalysisResult::Value(DataTypeKind::Null))
                     } else {
-                        Ok(ExprResult::Value(args_dtypes[0]))
+                        Ok(ExpressionAnalysisResult::Value(args_dtypes[0]))
                     }
                 }
-                _ => Ok(ExprResult::Value(DataTypeKind::Null)),
+                _ => Ok(ExpressionAnalysisResult::Value(DataTypeKind::Null)),
             }
         } else if STRING_FUNCTORS.contains(&name_upper.as_str()) {
             match name_upper.as_str() {
-                "LENGTH" => Ok(ExprResult::Value(DataTypeKind::Int)),
-                "UPPER" | "LOWER" | "TRIM" | "SUBSTR" => Ok(ExprResult::Value(DataTypeKind::Text)),
-                _ => Ok(ExprResult::Value(DataTypeKind::Text)),
+                "LENGTH" => Ok(ExpressionAnalysisResult::Value(DataTypeKind::Int)),
+                "UPPER" | "LOWER" | "TRIM" | "SUBSTR" => Ok(ExpressionAnalysisResult::Value(DataTypeKind::Text)),
+                _ => Ok(ExpressionAnalysisResult::Value(DataTypeKind::Text)),
             }
         } else if MATH_FUNCTORS.contains(&name_upper.as_str()) {
             if args_dtypes.is_empty() {
-                Ok(ExprResult::Value(DataTypeKind::Double))
+                Ok(ExpressionAnalysisResult::Value(DataTypeKind::Double))
             } else {
-                Ok(ExprResult::Value(args_dtypes[0]))
+                Ok(ExpressionAnalysisResult::Value(args_dtypes[0]))
             }
         } else {
             // Unknown function, return NULL for now
-            Ok(ExprResult::Value(DataTypeKind::Null))
+            Ok(ExpressionAnalysisResult::Value(DataTypeKind::Null))
         }
     }
 
-    fn analyze_expr(&mut self, expr: &Expr) -> Result<ExprResult, AnalyzerError> {
+    fn analyze_expr(&mut self, expr: &Expr) -> Result<ExpressionAnalysisResult, AnalyzerError> {
         match expr {
             Expr::QualifiedIdentifier { table, column } => {
                 // First check if it's an alias
@@ -207,7 +209,7 @@ impl Analyzer {
                 if let Some(subquery) = self.ctx.subqueries.get(table) {
                     let schema = subquery.schema();
                     if let Some(column) = schema.column(column) {
-                        return Ok(ExprResult::Value(column.dtype));
+                        return Ok(ExpressionAnalysisResult::Value(column.dtype));
                     }
                 }
 
@@ -219,7 +221,7 @@ impl Analyzer {
 
                 schema
                     .column(column)
-                    .map(|c| ExprResult::Value(c.dtype))
+                    .map(|c| ExpressionAnalysisResult::Value(c.dtype))
                     .ok_or_else(|| AnalyzerError::NotFound(format!("{table}.{column}")))
             }
             Expr::BinaryOp { left, op, right } => {
@@ -228,7 +230,7 @@ impl Analyzer {
                 if matches!(
                     right.as_ref(),
                     &Expr::Number(_) | &Expr::String(_) | &Expr::Boolean(_)
-                ) && let ExprResult::Value(dt) = left_result
+                ) && let ExpressionAnalysisResult::Value(dt) = left_result
                 {
                     self.analyze_value(dt, right)?;
                 };
@@ -236,13 +238,13 @@ impl Analyzer {
                 let right_result = self.analyze_expr(right)?;
 
                 match (left_result, right_result) {
-                    (ExprResult::Value(left_dt), ExprResult::Value(right_dt)) => {
+                    (ExpressionAnalysisResult::Value(left_dt), ExpressionAnalysisResult::Value(right_dt)) => {
                         // Special handling for NULL
                         if matches!(left_dt, DataTypeKind::Null) {
-                            return Ok(ExprResult::Value(right_dt));
+                            return Ok(ExpressionAnalysisResult::Value(right_dt));
                         }
                         if matches!(right_dt, DataTypeKind::Null) {
-                            return Ok(ExprResult::Value(left_dt));
+                            return Ok(ExpressionAnalysisResult::Value(left_dt));
                         }
 
                         // Type compatibility check
@@ -279,16 +281,16 @@ impl Analyzer {
                                 }
                                 _ => left_dt,
                             };
-                            Ok(ExprResult::Value(result_type))
+                            Ok(ExpressionAnalysisResult::Value(result_type))
                         } else {
                             // Comparison operators return boolean
-                            Ok(ExprResult::Value(DataTypeKind::Boolean))
+                            Ok(ExpressionAnalysisResult::Value(DataTypeKind::Boolean))
                         }
                     }
-                    (ExprResult::Value(left_dt), ExprResult::Table(right_dts)) => {
+                    (ExpressionAnalysisResult::Value(left_dt), ExpressionAnalysisResult::Table(right_dts)) => {
                         // For IN operator with list
                         if right_dts.is_empty() {
-                            return Ok(ExprResult::Value(DataTypeKind::Boolean));
+                            return Ok(ExpressionAnalysisResult::Value(DataTypeKind::Boolean));
                         }
 
                         // All elements in the list should be compatible
@@ -298,21 +300,21 @@ impl Analyzer {
                             }
                         }
 
-                        Ok(ExprResult::Value(DataTypeKind::Boolean))
+                        Ok(ExpressionAnalysisResult::Value(DataTypeKind::Boolean))
                     }
                     _ => Err(AnalyzerError::InvalidExpression),
                 }
             }
             Expr::Identifier(str) => {
                 let datatype = self.analyze_identifier(str)?;
-                Ok(ExprResult::Value(datatype))
+                Ok(ExpressionAnalysisResult::Value(datatype))
             }
             Expr::Exists(stmt) => {
                 // Save and restore context for subquery
                 let saved_context = self.ctx.save_context();
                 self.analyze_select(stmt.as_ref())?;
                 self.ctx.restore_context(saved_context);
-                Ok(ExprResult::Value(DataTypeKind::Boolean))
+                Ok(ExpressionAnalysisResult::Value(DataTypeKind::Boolean))
             }
             Expr::FunctionCall {
                 name,
@@ -321,7 +323,7 @@ impl Analyzer {
             } => {
                 let mut args_dtypes = Vec::with_capacity(args.len());
                 for arg in args {
-                    if let ExprResult::Value(item) = self.analyze_expr(arg)? {
+                    if let ExpressionAnalysisResult::Value(item) = self.analyze_expr(arg)? {
                         args_dtypes.push(item);
                     } else {
                         return Err(AnalyzerError::InvalidExpression);
@@ -335,8 +337,8 @@ impl Analyzer {
                 low,
                 high,
             } => {
-                if let ExprResult::Value(expr_dtype) = self.analyze_expr(expr)?
-                    && let ExprResult::Value(left_dtype) = self.analyze_expr(low)?
+                if let ExpressionAnalysisResult::Value(expr_dtype) = self.analyze_expr(expr)?
+                    && let ExpressionAnalysisResult::Value(left_dtype) = self.analyze_expr(low)?
                 {
                     if !expr_dtype.can_be_coerced(left_dtype)
                         && !left_dtype.can_be_coerced(expr_dtype)
@@ -345,7 +347,7 @@ impl Analyzer {
                         return Err(AnalyzerError::InvalidDataType(left_dtype));
                     }
 
-                    if let ExprResult::Value(right_dtype) = self.analyze_expr(high)? {
+                    if let ExpressionAnalysisResult::Value(right_dtype) = self.analyze_expr(high)? {
                         if !expr_dtype.can_be_coerced(right_dtype)
                             && !right_dtype.can_be_coerced(expr_dtype)
                             && !matches!(right_dtype, DataTypeKind::Null)
@@ -353,7 +355,7 @@ impl Analyzer {
                             return Err(AnalyzerError::InvalidDataType(right_dtype));
                         }
 
-                        return Ok(ExprResult::Value(DataTypeKind::Boolean));
+                        return Ok(ExpressionAnalysisResult::Value(DataTypeKind::Boolean));
                     }
                 }
                 Err(AnalyzerError::InvalidExpression)
@@ -362,11 +364,11 @@ impl Analyzer {
                 let mut dtypes = Vec::new();
                 for item in items {
                     match self.analyze_expr(item)? {
-                        ExprResult::Table(values) => dtypes.extend(values),
-                        ExprResult::Value(value) => dtypes.push(value),
+                        ExpressionAnalysisResult::Table(values) => dtypes.extend(values),
+                        ExpressionAnalysisResult::Value(value) => dtypes.push(value),
                     }
                 }
-                Ok(ExprResult::Table(dtypes))
+                Ok(ExpressionAnalysisResult::Table(dtypes))
             }
             Expr::Case {
                 operand,
@@ -376,7 +378,7 @@ impl Analyzer {
                 let mut out_dtypes = Vec::new();
 
                 let op_dtype = if let Some(expr) = operand {
-                    if let ExprResult::Value(item) = self.analyze_expr(expr)? {
+                    if let ExpressionAnalysisResult::Value(item) = self.analyze_expr(expr)? {
                         Some(item)
                     } else {
                         return Err(AnalyzerError::InvalidExpression);
@@ -386,7 +388,7 @@ impl Analyzer {
                 };
 
                 for item in when_clauses {
-                    if let ExprResult::Value(cond_dtype) = self.analyze_expr(&item.condition)? {
+                    if let ExpressionAnalysisResult::Value(cond_dtype) = self.analyze_expr(&item.condition)? {
                         if let Some(dtype) = op_dtype {
                             if !dtype.can_be_coerced(cond_dtype)
                                 && !cond_dtype.can_be_coerced(dtype)
@@ -404,7 +406,7 @@ impl Analyzer {
                         return Err(AnalyzerError::InvalidExpression);
                     };
 
-                    if let ExprResult::Value(out_dtype) = self.analyze_expr(&item.result)? {
+                    if let ExpressionAnalysisResult::Value(out_dtype) = self.analyze_expr(&item.result)? {
                         out_dtypes.push(out_dtype);
                     } else {
                         return Err(AnalyzerError::InvalidExpression);
@@ -412,7 +414,7 @@ impl Analyzer {
                 }
 
                 if let Some(expr) = else_clause {
-                    if let ExprResult::Value(else_dtype) = self.analyze_expr(expr)? {
+                    if let ExpressionAnalysisResult::Value(else_dtype) = self.analyze_expr(expr)? {
                         out_dtypes.push(else_dtype);
                     } else {
                         return Err(AnalyzerError::InvalidExpression);
@@ -421,7 +423,7 @@ impl Analyzer {
 
                 // Find the common type that all branches can be coerced to
                 if out_dtypes.is_empty() {
-                    return Ok(ExprResult::Value(DataTypeKind::Null));
+                    return Ok(ExpressionAnalysisResult::Value(DataTypeKind::Null));
                 }
 
                 let mut result_type = out_dtypes[0];
@@ -446,10 +448,10 @@ impl Analyzer {
                     }
                 }
 
-                Ok(ExprResult::Value(result_type))
+                Ok(ExpressionAnalysisResult::Value(result_type))
             }
             Expr::UnaryOp { op: _, expr } => self.analyze_expr(expr),
-            Expr::Null => Ok(ExprResult::Value(DataTypeKind::Null)),
+            Expr::Null => Ok(ExpressionAnalysisResult::Value(DataTypeKind::Null)),
             Expr::Star => {
                 let mut out = Vec::new();
 
@@ -478,18 +480,18 @@ impl Analyzer {
                     return Err(AnalyzerError::InvalidExpression);
                 }
 
-                Ok(ExprResult::Table(out))
+                Ok(ExpressionAnalysisResult::Table(out))
             }
-            Expr::Number(_) => Ok(ExprResult::Value(DataTypeKind::Double)),
-            Expr::String(_) => Ok(ExprResult::Value(DataTypeKind::Text)),
-            Expr::Boolean(_) => Ok(ExprResult::Value(DataTypeKind::Boolean)),
+            Expr::Number(_) => Ok(ExpressionAnalysisResult::Value(DataTypeKind::Double)),
+            Expr::String(_) => Ok(ExpressionAnalysisResult::Value(DataTypeKind::Text)),
+            Expr::Boolean(_) => Ok(ExpressionAnalysisResult::Value(DataTypeKind::Boolean)),
             Expr::Subquery(item) => {
                 // Save and restore context for subquery
                 let saved_context = self.ctx.save_context();
                 let schema = self.analyze_select(item)?;
                 self.ctx.restore_context(saved_context);
 
-                Ok(ExprResult::Table(
+                Ok(ExpressionAnalysisResult::Table(
                     schema.columns.iter().map(|d| d.dtype).collect(),
                 ))
             }
@@ -518,7 +520,7 @@ impl Analyzer {
                 self.ctx.current_table = None;
 
                 if let Some(on_expr) = on {
-                    if let ExprResult::Value(dtype) = self.analyze_expr(on_expr)? {
+                    if let ExpressionAnalysisResult::Value(dtype) = self.analyze_expr(on_expr)? {
                         if !matches!(dtype, DataTypeKind::Boolean | DataTypeKind::Null) {
                             return Err(AnalyzerError::InvalidExpression);
                         }
@@ -602,11 +604,11 @@ impl Analyzer {
 
                     let result = self.analyze_expr(expr)?;
                     match result {
-                        ExprResult::Value(dtype) => {
+                        ExpressionAnalysisResult::Value(dtype) => {
                             let column = Column::new_unindexed(dtype, &cname, None);
                             out_columns.push(column);
                         }
-                        ExprResult::Table(dtypes) => {
+                        ExpressionAnalysisResult::Table(dtypes) => {
                             // For subqueries returning multiple columns
                             if dtypes.len() == 1 {
                                 let column = Column::new_unindexed(dtypes[0], &cname, None);
@@ -622,7 +624,7 @@ impl Analyzer {
 
         // Validate WHERE clause
         if let Some(clause) = &stmt.where_clause {
-            if let ExprResult::Value(dt) = self.analyze_expr(clause)? {
+            if let ExpressionAnalysisResult::Value(dt) = self.analyze_expr(clause)? {
                 if !matches!(dt, DataTypeKind::Boolean | DataTypeKind::Null) {
                     return Err(AnalyzerError::InvalidExpression);
                 }
@@ -1013,7 +1015,7 @@ impl Analyzer {
                         | Expr::BinaryOp { .. }
                         | Expr::FunctionCall { .. } => {
                             let result = self.analyze_expr(&column.value)?;
-                            if let ExprResult::Value(value_type) = result
+                            if let ExpressionAnalysisResult::Value(value_type) = result
                                 && !value_type.can_be_coerced(col.dtype)
                                 && !col.dtype.can_be_coerced(value_type)
                                 && !matches!(value_type, DataTypeKind::Null)
@@ -1459,6 +1461,7 @@ mod sql_analyzer_tests {
         let db = create_db(4096, 10, &path).unwrap();
         let sql = "SELECT name, email FROM users WHERE age > 18";
 
+        parse_and_analyze(sql, &db).unwrap();
         assert!(parse_and_analyze(sql, &db).is_ok());
     }
 

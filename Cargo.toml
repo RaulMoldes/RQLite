@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/axmos-db",
+    "crates/axmos-client",
     "crates/axmos-derive",
 ]
 

@@ -19,7 +19,7 @@ use parser::Parser;
 mod tests;
 
 /// Parse a SQL query string into an AST
-pub(crate) fn parse_sql(sql: &str) -> Result<Statement, SQLError> {
+pub fn parse_sql(sql: &str) -> Result<Statement, SQLError> {
     let lexer = Lexer::new(sql);
     let mut parser = Parser::new(lexer);
     let mut stmt = parser.parse()?;

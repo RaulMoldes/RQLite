@@ -7,12 +7,12 @@ use std::{
 };
 
 pub struct BufferWithMetadata<M> {
-    /// Alignment of the buffer
-    alignment: u16,
     /// Length of the used content in the buffer
     len: u32,
     /// Total size of the buffer (size of header + size of data).
     size: u32, // We need four bytes to store the max size of a page (2^32) which would not fit in 2 bytes.
+    /// Alignment of the buffer
+    alignment: u16,
     /// Pointer to the header located at the beginning of the buffer.
     pub(crate) metadata: NonNull<M>,
     /// Pointer to the data located right after the header.
@@ -38,14 +38,6 @@ impl<M> BufferWithMetadata<M> {
         );
 
         alloc::Global.allocate_zeroed(alloc::Layout::from_size_align(size, alignment).unwrap())
-    }
-
-    pub fn with_global_allocator(capacity: usize, alignment: usize) -> Self {
-        Self::new_unchecked(capacity, alignment)
-    }
-
-    pub fn with_direct_io_allocator(capacity: usize, alignment: usize) -> Self {
-        Self::new_unchecked(capacity, alignment)
     }
 
     /// Allocate a zeroed buffer.
