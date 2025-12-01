@@ -326,7 +326,7 @@ impl Catalog {
         meta_idx.clear_worker_stack();
         let schema = meta_idx_schema();
         let tuple = TupleRef::read(payload.as_ref(), &schema)?;
-        println!("{tuple}");
+
         let id = match tuple.value(0)? {
             crate::types::DataTypeRef::BigUInt(v) => ObjectId::from(v.to_owned()),
             _ => {
@@ -362,8 +362,16 @@ impl Catalog {
         meta_table.clear_worker_stack();
         let schema = meta_table_schema();
         let tuple = TupleRef::read(payload.as_ref(), &schema)?;
-        //  println!("Read: {tuple}");
+
         Relation::try_from(tuple)
+    }
+
+    pub fn meta_table_root(&self) -> PageId {
+        self.meta_table
+    }
+
+    pub fn meta_index_root(&self) -> PageId {
+        self.meta_index
     }
 }
 
@@ -377,6 +385,7 @@ impl Database {
             siblings_per_side,
             main_worker.clone(),
         )?);
+
         let controller = TransactionCoordinator::new(pager.clone(), catalog.clone());
 
         Ok(Self {
@@ -393,6 +402,10 @@ impl Database {
 
     pub fn catalog(&self) -> SharedCatalog {
         self.catalog.clone()
+    }
+
+    pub fn coordinator(&self) -> TransactionCoordinator {
+        self.controller.clone()
     }
 
     pub fn main_worker_ref_mut(&self) -> RefMut<'_, ThreadWorker> {

@@ -1750,11 +1750,7 @@ where
     }
 
     /// Reads a node into memory
-    fn read_into_mem(
-        &mut self,
-        root: PageId,
-        buf: &mut Vec<(PageId, BtreePage)>,
-    ) -> io::Result<()> {
+    fn read_into_mem(&self, root: PageId, buf: &mut Vec<(PageId, BtreePage)>) -> io::Result<()> {
         // Must acquire the page in read mode in order to read it
         self.worker_mut()
             .acquire::<BtreePage>(root, FrameAccessMode::Read)?;
@@ -1771,7 +1767,7 @@ where
     }
 
     /// Utility to print a bplustree as json.
-    pub fn json(&mut self) -> io::Result<String> {
+    pub fn json(&self) -> io::Result<String> {
         let mut nodes = Vec::new();
 
         self.read_into_mem(self.root, &mut nodes)?;
@@ -1793,7 +1789,7 @@ where
     }
 
     /// Prints the content of a single page as a json string.
-    fn node_json(&mut self, number: PageId, page: &BtreePage) -> io::Result<String> {
+    fn node_json(&self, number: PageId, page: &BtreePage) -> io::Result<String> {
         let mut string = format!("{{\"page\":\"{number}\",\"entries\":[");
 
         if !page.is_empty() {

@@ -242,7 +242,8 @@ crate::repr_enum!(pub enum LogRecordType: u8 {
     Dealloc = 0x05,
     Update = 0x06,
     Delete = 0x07,
-    Insert = 0x08
+    Insert = 0x08,
+    CreateTable = 0x09,
 
 });
 

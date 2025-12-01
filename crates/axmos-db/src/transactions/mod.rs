@@ -109,7 +109,7 @@ impl Snapshot {
         // Transaction started after our snapshot,
         // Then it is impossible it committed before the snapshot was taken
         // Transaction was active when we took snapshot (had not commited)
-        if txid >= self.xmax || self.active_txs.contains(&txid) {
+        if (txid >= self.xmax && self.xmax != TRANSACTION_ZERO) || self.active_txs.contains(&txid) {
             return false;
         }
         // Transaction ID is below our snapshot's xmax and wasn't active
@@ -359,7 +359,12 @@ impl TransactionCoordinator {
         let mut txs = self.transactions.write();
         let entry = txs.get_mut(&txid).ok_or(TransactionError::NotFound(txid))?;
 
-        let valid_transition = matches!((entry.state, state), (TransactionState::Active, _) | (TransactionState::Committing, TransactionState::Committed) | (TransactionState::Committing, TransactionState::Aborted));
+        let valid_transition = matches!(
+            (entry.state, state),
+            (TransactionState::Active, _)
+                | (TransactionState::Committing, TransactionState::Committed)
+                | (TransactionState::Committing, TransactionState::Aborted)
+        );
 
         if !valid_transition {
             return Err(TransactionError::Other(format!(

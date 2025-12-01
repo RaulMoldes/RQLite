@@ -6,6 +6,8 @@ use std::{
 };
 
 use crate::{
+    ObjectId,
+    database::schema::ObjectType,
     sql::lexer::Token,
     transactions::LogicalId,
     types::{DataTypeKind, TransactionId},
@@ -291,9 +293,12 @@ pub enum TransactionError {
     Aborted(TransactionId),
     NotActive(TransactionId),
     AlreadyDeleted(LogicalId),
+    InvalidObjectType(ObjectId, ObjectType, ObjectType),
     WriteWriteConflict(TransactionId, LogicalId),
     NotFound(TransactionId),
+    ObjectNotFound(ObjectId),
     TupleNotVisible(TransactionId, LogicalId),
+    RelationAlreadyExists(String),
     Io(IoError),
     Other(String),
 }
@@ -302,7 +307,15 @@ impl std::fmt::Display for TransactionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TransactionError::Aborted(id) => write!(f, "Transaction with id {id} was aborted"),
-
+            TransactionError::ObjectNotFound(id) => write!(f, "Object with id {id} was anot found"),
+            TransactionError::InvalidObjectType(id, o1, o2) => write!(
+                f,
+                "Object with id {id} is invalid. Expected type {o1} but found {o2}"
+            ),
+            TransactionError::RelationAlreadyExists(str) => write!(
+                f,
+                "Cannot create relation. Relation with name: {str}, already exists"
+            ),
             TransactionError::NotActive(id) => {
                 write!(f, "Transaction with id {id} is not on active state")
             }

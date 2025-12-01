@@ -235,6 +235,54 @@ impl Schema {
         self.constraints.contains_key(ct_name)
             || self.columns.iter().any(|p| p.has_constraint(ct_name))
     }
+
+    pub fn get_indexed_columns(&self) -> Vec<(usize, IndexInfo)> {
+        self.iter_values()
+            .enumerate()
+            .filter_map(|(i, col)| col.index().is_some().then(|| (i, IndexInfo::from(col))))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexInfo {
+    dtype: DataTypeKind,
+    name: String,
+}
+
+impl IndexInfo {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn datatype(&self) -> DataTypeKind {
+        self.dtype
+    }
+}
+impl From<Column> for IndexInfo {
+    fn from(value: Column) -> IndexInfo {
+        if let Some(indx) = value.index() {
+            return IndexInfo {
+                dtype: value.dtype,
+                name: indx.to_string(),
+            };
+        } else {
+            panic!("Column does not have an index");
+        };
+    }
+}
+
+impl From<&Column> for IndexInfo {
+    fn from(value: &Column) -> IndexInfo {
+        if let Some(indx) = value.index() {
+            return IndexInfo {
+                dtype: value.dtype,
+                name: indx.to_string(),
+            };
+        } else {
+            panic!("Column does not have an index");
+        };
+    }
 }
 
 repr_enum!(
@@ -499,8 +547,8 @@ impl Table {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Index {
     object_id: ObjectId,
-    root_page: PageId,
 
+    root_page: PageId,
     name: String,
     min_val: Option<Box<[u8]>>,
     max_val: Option<Box<[u8]>>,
@@ -511,6 +559,7 @@ impl Index {
     pub fn new(name: &str, root_page: PageId, schema: Schema) -> Self {
         Self {
             object_id: ObjectId::new(),
+
             root_page,
 
             name: name.to_string(),
@@ -522,6 +571,7 @@ impl Index {
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         id: ObjectId,
+
         name: &str,
         root_page: PageId,
         schema: Schema,
@@ -531,6 +581,7 @@ impl Index {
     ) -> Self {
         Self {
             object_id: id,
+
             root_page,
 
             name: name.to_string(),
