@@ -32,7 +32,7 @@ macro_rules! insert_tests {
                 // Insert keys in specified order
                 for (i, key_val) in keys.iter().enumerate() {
 
-                    let key = TestKey(*key_val);
+                    let key = TestKey::new(*key_val);
                     tree.insert(root, key.as_ref())?;
 
                 }
@@ -41,7 +41,7 @@ macro_rules! insert_tests {
                 // Verify all keys exist (in sequential order)
                 for (i, k) in keys.iter().enumerate() {
 
-                    let key = TestKey(*k);
+                    let key = TestKey::new(*k);
                     let retrieved = tree.search(&start, key.as_ref(), FrameAccessMode::Read)?;
                     assert!(matches!(retrieved, SearchResult::Found(_)));
                     let cell = tree.get_payload(retrieved)?;
@@ -68,13 +68,13 @@ macro_rules! delete_test {
             let start = Position::start_pos(root);
             // Insert all keys
             for i in 0..$num_keys {
-                let key = TestKey(i as i32);
+                let key = TestKey::new(i as i32);
                 tree.insert(root, key.as_ref())?;
             }
 
             // Check all keys exist
             for i in 0..$num_keys {
-                let key = TestKey(i as i32);
+                let key = TestKey::new(i as i32);
                 let retrieved = tree.search(&start, key.as_ref(), FrameAccessMode::Read)?;
                 assert!(matches!(retrieved, SearchResult::Found(_)));
                 let cell = tree.get_payload(retrieved)?;
@@ -89,7 +89,7 @@ macro_rules! delete_test {
             // Apply delete sequences
             for seq in $delete_sequences.iter() {
                 for i in seq.clone().rev() {
-                    let key = TestKey(i as i32);
+                    let key = TestKey::new(i as i32);
                     tree.remove(root, key.as_ref())?;
                     deleted_keys.push(i);
                 }
@@ -97,7 +97,7 @@ macro_rules! delete_test {
 
             // Check remaining keys
             for i in 0..$num_keys {
-                let key = TestKey(i as i32);
+                let key = TestKey::new(i as i32);
                 if deleted_keys.contains(&i) {
                     // Key should be deleted
                     let retrieved = tree.search(&start, key.as_ref(), FrameAccessMode::Read)?;

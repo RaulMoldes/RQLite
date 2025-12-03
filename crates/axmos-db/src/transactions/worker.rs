@@ -2,7 +2,7 @@ use crate::{
     DataType,
     database::{
         META_INDEX, META_TABLE, SharedCatalog,
-        errors::TransactionError,
+        errors::{TransactionError, TransactionResult},
         meta_idx_schema,
         schema::{Column, Index, IndexInfo, ObjectType, Relation, Schema, Table},
     },
@@ -338,7 +338,7 @@ impl WorkerPool {
 
     /// Validate and commit the transaction
     /// Returns error if write-write conflict detected
-    pub fn try_commit(&self) -> Result<(), TransactionError> {
+    pub fn try_commit(&self) -> TransactionResult<()> {
         // First validate with coordinator (checks tuple_commits)
         self.coordinator.commit(self.transaction_id)?;
 
@@ -349,7 +349,7 @@ impl WorkerPool {
     }
 
     /// Abort the transaction
-    pub fn try_abort(&self) -> Result<(), TransactionError> {
+    pub fn try_abort(&self) -> TransactionResult<()> {
         self.coordinator.abort(self.transaction_id)?;
         self.rollback()?;
         Ok(())
@@ -364,11 +364,7 @@ impl WorkerPool {
     }
 
     /// Creates a new table using the catalog low level methods and properly logging to the wal
-    pub fn create_table(
-        &self,
-        table_name: &str,
-        schema: Schema,
-    ) -> Result<ObjectId, TransactionError> {
+    pub fn create_table(&self, table_name: &str, schema: Schema) -> TransactionResult<ObjectId> {
         let worker = self.get_or_create_worker();
 
         // Check if relation already exists
@@ -417,7 +413,7 @@ impl WorkerPool {
         Ok(object_id)
     }
 
-    pub fn add_column(&self, table_name: &str, column: Column) -> Result<(), TransactionError> {
+    pub fn add_column(&self, table_name: &str, column: Column) -> TransactionResult<()> {
         let worker = self.get_or_create_worker();
 
         let mut relation = self.catalog.get_relation(table_name, worker.clone())?;
@@ -465,7 +461,7 @@ impl WorkerPool {
         table_name: &str,
         column_name: &str,
         cascade: bool,
-    ) -> Result<(), TransactionError> {
+    ) -> TransactionResult<()> {
         let worker = self.get_or_create_worker();
 
         let mut relation = self.catalog.get_relation(table_name, worker.clone())?;
@@ -523,7 +519,7 @@ impl WorkerPool {
         Ok(())
     }
 
-    pub fn drop_object(&self, object_name: &str, cascade: bool) -> Result<(), TransactionError> {
+    pub fn drop_object(&self, object_name: &str, cascade: bool) -> TransactionResult<()> {
         let worker = self.get_or_create_worker();
 
         let relation = self.catalog.get_relation(object_name, worker.clone())?;
@@ -579,7 +575,7 @@ impl WorkerPool {
         table_name: &str,
         column_name: &str,
         column: Column,
-    ) -> Result<(), TransactionError> {
+    ) -> TransactionResult<()> {
         let worker = self.get_or_create_worker();
 
         let mut relation = self.catalog.get_relation(table_name, worker.clone())?;
@@ -632,7 +628,7 @@ impl WorkerPool {
         index_name: &str,
         table_name: &str,
         column_name: &str,
-    ) -> Result<ObjectId, TransactionError> {
+    ) -> TransactionResult<ObjectId> {
         let worker = self.get_or_create_worker();
 
         // Check if index already exists
@@ -734,11 +730,7 @@ impl WorkerPool {
     }
 
     /// Insert a new tuple into a table
-    pub fn insert_one(
-        &self,
-        table: &str,
-        values: &[DataType],
-    ) -> Result<LogicalId, TransactionError> {
+    pub fn insert_one(&self, table: &str, values: &[DataType]) -> TransactionResult<LogicalId> {
         let worker = self.get_or_create_worker();
 
         let mut relation = self.catalog.get_relation(table, worker.clone())?;
@@ -894,7 +886,7 @@ impl WorkerPool {
         &self,
         logical_id: LogicalId,
         values: &[(usize, DataType)],
-    ) -> Result<(), TransactionError> {
+    ) -> TransactionResult<()> {
         let worker = self.get_or_create_worker();
         let table = logical_id.table();
         let relation = self.catalog.get_relation_unchecked(table, worker.clone())?;
@@ -981,7 +973,7 @@ impl WorkerPool {
     }
 
     /// Delete a tuple by setting xmax
-    pub fn delete_one(&self, logical_id: LogicalId) -> Result<(), TransactionError> {
+    pub fn delete_one(&self, logical_id: LogicalId) -> TransactionResult<()> {
         let worker = self.get_or_create_worker();
         let table = logical_id.table();
         let relation = self.catalog.get_relation_unchecked(table, worker.clone())?;
@@ -1138,7 +1130,7 @@ mod worker_pool_tests {
     /// 3. The read returns the correct values
     #[test]
     #[serial]
-    fn test_workerpool_1() -> Result<(), TransactionError> {
+    fn test_workerpool_1() -> TransactionResult<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("test.db");
         let db = create_db(&path)?;
@@ -1183,7 +1175,7 @@ mod worker_pool_tests {
     /// 3. Transaction A reads the updated value
     #[test]
     #[serial]
-    fn test_workerpool_2() -> Result<(), TransactionError> {
+    fn test_workerpool_2() -> TransactionResult<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("test.db");
         let db = create_db(&path)?;
@@ -1229,7 +1221,7 @@ mod worker_pool_tests {
     /// 4. Transaction B reads the tuple -> NotVisible (deleted by self)
     #[test]
     #[serial]
-    fn test_workerpool_3() -> Result<(), TransactionError> {
+    fn test_workerpool_3() -> TransactionResult<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("test.db");
         let db = create_db(&path)?;
@@ -1270,7 +1262,7 @@ mod worker_pool_tests {
     /// 3. Transaction B should NOT see the tuple (A hasn't committed)
     #[test]
     #[serial]
-    fn test_workerpool_4() -> Result<(), TransactionError> {
+    fn test_workerpool_4() -> TransactionResult<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("test.db");
         let db = create_db(&path)?;
@@ -1313,7 +1305,7 @@ mod worker_pool_tests {
     /// 3. Transaction C tries to delete the same tuple -> AlreadyDeleted error
     #[test]
     #[serial]
-    fn test_workerpool_5() -> Result<(), TransactionError> {
+    fn test_workerpool_5() -> TransactionResult<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("test.db");
         let db = create_db(&path)?;
@@ -1363,7 +1355,7 @@ mod worker_pool_tests {
     /// 5. Verify we can look up the row_id via the index
     #[test]
     #[serial]
-    fn test_workerpool_6() -> Result<(), TransactionError> {
+    fn test_workerpool_6() -> TransactionResult<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("test.db");
 
@@ -1456,7 +1448,7 @@ mod worker_pool_tests {
     /// 3. Verify each index entry points to the correct row
     #[test]
     #[serial]
-    fn test_workerpool_7() -> Result<(), TransactionError> {
+    fn test_workerpool_7() -> TransactionResult<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("test.db");
 
@@ -1546,7 +1538,7 @@ mod worker_pool_tests {
     /// 5. Verify the new index entry points to the correct row
     #[test]
     #[serial]
-    fn test_workerpool_8() -> Result<(), TransactionError> {
+    fn test_workerpool_8() -> TransactionResult<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("test.db");
         let db = create_db(&path)?;
@@ -1651,7 +1643,7 @@ mod worker_pool_tests {
 
     #[test]
     #[serial]
-    fn test_workerpool_9() -> Result<(), TransactionError> {
+    fn test_workerpool_9() -> TransactionResult<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("test.db");
         let db = create_db(&path)?;

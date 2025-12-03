@@ -14,7 +14,7 @@ mod configs;
 mod database;
 mod io;
 mod macros;
-mod planner;
+//mod planner;
 pub mod sql;
 mod storage;
 mod structures;

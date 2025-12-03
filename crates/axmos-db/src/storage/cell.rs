@@ -158,7 +158,7 @@ dynamic_buffer_tests!(
     cell_dyn,
     CellHeader,
     size = 64,
-    align = CELL_ALIGNMENT.into()
+    align = CELL_ALIGNMENT as usize
 );
 
 #[cfg(test)]
@@ -166,7 +166,7 @@ static_buffer_tests!(
     cell_sta,
     CellHeader,
     size = 64,
-    align = CELL_ALIGNMENT.into()
+    align = CELL_ALIGNMENT as usize
 );
 
 #[cfg(test)]

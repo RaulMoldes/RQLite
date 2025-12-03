@@ -33,7 +33,7 @@ keywords! {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Token {
+pub enum Token {
     // Keywords
     Select,
     From,

@@ -6,7 +6,7 @@
       "request": "launch",
       "name": "Debug Rust test (AxmosDB)",
       "program": "${workspaceFolder}/target/debug/deps/axmosdb-7cdfa5eb29efc589",
-      "args": ["--nocapture", "test_dealloc_bfs_with_overflow_chains"],
+      "args": ["--nocapture", "test_subquery_in_select_validated"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {

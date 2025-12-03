@@ -1,7 +1,11 @@
-use crate::database::errors::ParserError;
-use crate::sql::ast::*;
-use crate::sql::lexer::{Lexer, Token};
-use crate::types::DataTypeKind;
+use crate::{
+    database::errors::{ParseResult, ParserError},
+    sql::{
+        ast::*,
+        lexer::{Lexer, Token},
+    },
+    types::DataTypeKind,
+};
 use std::mem;
 
 /// Main parser implementation.
@@ -28,7 +32,7 @@ impl Parser {
         self.lexer.__peek_token()
     }
 
-    fn expect(&mut self, expected: Token) -> Result<(), ParserError> {
+    fn expect(&mut self, expected: Token) -> ParseResult<()> {
         // docs on std::mem::discriminant: https://doc.rust-lang.org/std/mem/fn.discriminant.html
         // Returns a value uniquely identifying the enum variant in the calling token.
         if mem::discriminant(&self.current_token) == mem::discriminant(&expected) {
@@ -50,13 +54,13 @@ impl Parser {
     }
 
     /// Expression parsing with Pratt parsing
-    pub(crate) fn parse_expression(&mut self) -> Result<Expr, ParserError> {
+    pub(crate) fn parse_expression(&mut self) -> ParseResult<Expr> {
         self.parse_expr_bp(0)
     }
 
     /// Obtains the expression binding power using a Pratt Parsing approach.
     /// I recommend this read on Pratt Parsing: https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html
-    fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expr, ParserError> {
+    fn parse_expr_bp(&mut self, min_bp: u8) -> ParseResult<Expr> {
         let mut lhs = self.parse_prefix()?;
 
         while let Some((l_bp, r_bp)) = self.infix_binding_power() {
@@ -71,7 +75,7 @@ impl Parser {
     }
 
     /// Given the current token, obtains the parsed prefix of the expression.
-    fn parse_prefix(&mut self) -> Result<Expr, ParserError> {
+    fn parse_prefix(&mut self) -> ParseResult<Expr> {
         match &self.current_token {
             Token::NumberLiteral(n) => {
                 let num = *n;
@@ -123,8 +127,16 @@ impl Parser {
                     }
                 }
                 // Check for function call
+                // Check for function call
                 else if self.current_token == Token::LParen {
                     self.next_token();
+
+                    // Check if this is a subquery (SELECT inside parentheses)
+                    if self.current_token == Token::Select {
+                        let subquery = self.parse_select_statement()?;
+                        self.expect(Token::RParen)?;
+                        return Ok(Expr::Subquery(Box::new(subquery)));
+                    }
 
                     // Check for DISTINCT in aggregate functions
                     let distinct = self.consume_if(&Token::Distinct);
@@ -147,6 +159,9 @@ impl Parser {
                         args,
                         distinct,
                     })
+                } else if self.current_token == Token::Comma {
+                    self.next_token();
+                    Ok(Expr::Identifier(name))
                 } else {
                     Ok(Expr::Identifier(name))
                 }
@@ -236,7 +251,7 @@ impl Parser {
         }
     }
 
-    fn parse_infix(&mut self, left: Expr, r_bp: u8) -> Result<Expr, ParserError> {
+    fn parse_infix(&mut self, left: Expr, r_bp: u8) -> ParseResult<Expr> {
         let op = match &self.current_token {
             Token::Plus => {
                 self.next_token();
@@ -461,7 +476,7 @@ impl Parser {
     /// ELSE ...
     /// [...]
     /// ```
-    fn parse_case_expression(&mut self) -> Result<Expr, ParserError> {
+    fn parse_case_expression(&mut self) -> ParseResult<Expr> {
         self.expect(Token::Case)?;
 
         let mut operand = None;
@@ -497,7 +512,7 @@ impl Parser {
     }
 
     /// Parses a list of identifier tokens: (col1, col2, col3 ...).
-    fn parse_identifier_list(&mut self) -> Result<Vec<String>, ParserError> {
+    fn parse_identifier_list(&mut self) -> ParseResult<Vec<String>> {
         let mut identifiers = Vec::new();
 
         loop {
@@ -518,7 +533,7 @@ impl Parser {
         Ok(identifiers)
     }
 
-    pub fn parse(&mut self) -> Result<Statement, ParserError> {
+    pub fn parse(&mut self) -> ParseResult<Statement> {
         match &self.current_token {
             Token::With => Ok(Statement::With(self.parse_with_statement()?)),
             Token::Select => Ok(Statement::Select(self.parse_select_statement()?)),
@@ -557,7 +572,7 @@ impl Parser {
     /// ALTER TABLE [table] ALTER COLUMN
     /// [...]
     /// ```
-    fn parse_alter_statement(&mut self) -> Result<AlterTableStatement, ParserError> {
+    fn parse_alter_statement(&mut self) -> ParseResult<AlterTableStatement> {
         self.expect(Token::Alter)?;
         self.expect(Token::Table)?;
 
@@ -686,7 +701,7 @@ impl Parser {
     ///    [...]
     /// );",
     ///```
-    fn parse_create_table_statement(&mut self) -> Result<CreateTableStatement, ParserError> {
+    fn parse_create_table_statement(&mut self) -> ParseResult<CreateTableStatement> {
         self.expect(Token::Create)?;
         self.expect(Token::Table)?;
         let table = if let Token::Identifier(name) = &self.current_token {
@@ -745,7 +760,7 @@ impl Parser {
         })
     }
 
-    fn parse_create_index_statement(&mut self) -> Result<CreateIndexStatement, ParserError> {
+    fn parse_create_index_statement(&mut self) -> ParseResult<CreateIndexStatement> {
         self.expect(Token::Create)?;
 
         let unique = self.consume_if(&Token::Unique);
@@ -828,7 +843,7 @@ impl Parser {
     /// WHERE [expr]
     /// [...]
     /// ```
-    fn parse_delete_statement(&mut self) -> Result<DeleteStatement, ParserError> {
+    fn parse_delete_statement(&mut self) -> ParseResult<DeleteStatement> {
         self.expect(Token::Delete)?;
         self.expect(Token::From)?;
 
@@ -859,7 +874,7 @@ impl Parser {
     /// ```sql
     /// DROP TABLE [table]
     /// ```
-    fn parse_drop_statement(&mut self) -> Result<DropTableStatement, ParserError> {
+    fn parse_drop_statement(&mut self) -> ParseResult<DropTableStatement> {
         self.expect(Token::Drop)?;
         self.expect(Token::Table)?;
 
@@ -918,7 +933,7 @@ impl Parser {
     /// INSERT INTO [table] (col1, col2, col3)
     /// SELECT FROM [other table];
     /// ```
-    fn parse_insert_statement(&mut self) -> Result<InsertStatement, ParserError> {
+    fn parse_insert_statement(&mut self) -> ParseResult<InsertStatement> {
         self.expect(Token::Insert)?;
         self.expect(Token::Into)?;
 
@@ -998,7 +1013,7 @@ impl Parser {
     /// ROLLBACK
     /// END TRANSACTION
     /// ```
-    fn parse_transaction_statement(&mut self) -> Result<TransactionStatement, ParserError> {
+    fn parse_transaction_statement(&mut self) -> ParseResult<TransactionStatement> {
         match &self.current_token {
             Token::Begin => {
                 self.next_token();
@@ -1027,7 +1042,7 @@ impl Parser {
     /// WHERE [expr]
     /// [...]
     /// ```
-    fn parse_update_statement(&mut self) -> Result<UpdateStatement, ParserError> {
+    fn parse_update_statement(&mut self) -> ParseResult<UpdateStatement> {
         self.expect(Token::Update)?;
 
         let table = if let Token::Identifier(name) = &self.current_token {
@@ -1082,7 +1097,7 @@ impl Parser {
     /// ([CTE])
     ///[...] (Supports up to N ctes)
     /// SELECT [...]
-    fn parse_with_statement(&mut self) -> Result<WithStatement, ParserError> {
+    fn parse_with_statement(&mut self) -> ParseResult<WithStatement> {
         self.expect(Token::With)?;
         let recursive = if matches!(self.current_token, Token::Recursive) {
             self.next_token();
@@ -1092,7 +1107,7 @@ impl Parser {
         };
 
         let mut ctes = Vec::new();
-
+        dbg!(&self.current_token);
         loop {
             let name = if let Token::Identifier(id) = &self.current_token {
                 let id = id.clone();
@@ -1135,7 +1150,7 @@ impl Parser {
     /// ORDER BY [item] [ASC/DESC]
     /// LIMIT n;
     /// ```
-    fn parse_select_statement(&mut self) -> Result<SelectStatement, ParserError> {
+    fn parse_select_statement(&mut self) -> ParseResult<SelectStatement> {
         self.expect(Token::Select)?;
 
         let distinct = self.consume_if(&Token::Distinct);
@@ -1275,55 +1290,27 @@ impl Parser {
     /// [...]
     /// JOIN tablen ON .[..]
     /// ```
-    fn parse_table_ref(&mut self) -> Result<TableReference, ParserError> {
-        let mut table_ref = match &self.current_token {
-            Token::Identifier(name) => {
-                let table_name = name.clone();
-                self.next_token();
-                let alias = if let Token::Identifier(alias_name) = &self.current_token {
-                    let alias_name = alias_name.clone();
-                    self.next_token();
-                    Some(alias_name)
-                } else {
-                    None
-                };
-                TableReference::Table {
-                    name: table_name,
-                    alias,
-                }
-            }
-            Token::LParen => {
-                // Subquery in FROM
-                self.next_token();
-                let subquery = self.parse_select_statement()?;
-                self.expect(Token::RParen)?;
+    /// Also supports comma-separated tables (implicit cross join):
+    /// ```sql
+    /// FROM table1, table2, table3
+    /// ```
+    fn parse_table_ref(&mut self) -> ParseResult<TableReference> {
+        let mut table_ref = self.parse_single_table_ref()?;
 
-                if let Token::As = &self.current_token {
-                    self.next_token();
-                };
-
-                // Optional alias required for subquery
-                let alias = if let Token::Identifier(alias_name) = &self.current_token {
-                    let alias_name = alias_name.clone();
-                    self.next_token();
-                    alias_name
-                } else {
-                    return Err(ParserError::InvalidExpression(
-                        "expected alias for subquery".to_string(),
-                    ));
-                };
-                TableReference::Subquery {
-                    query: Box::new(subquery),
-                    alias,
-                }
-            }
-            _ => {
-                return Err(ParserError::UnexpectedEof);
-            }
-        };
-
-        // Parse optional JOINs
+        // Parse optional JOINs and comma-separated tables
         loop {
+            // Check for comma first (implicit cross join)
+            if self.consume_if(&Token::Comma) {
+                let right = self.parse_single_table_ref()?;
+                table_ref = TableReference::Join {
+                    left: Box::new(table_ref),
+                    join_type: JoinType::Cross,
+                    right: Box::new(right),
+                    on: None,
+                };
+                continue;
+            }
+
             let join_type = match &self.current_token {
                 Token::Join => {
                     self.next_token();
@@ -1357,8 +1344,8 @@ impl Parser {
                 _ => break, // No more joins
             };
 
-            // Parse the right-hand side of the join
-            let right = self.parse_table_ref()?;
+            // Parse the right-hand side of the join (single table, not recursive)
+            let right = self.parse_single_table_ref()?;
 
             // Optional ON clause
             let on = if self.consume_if(&Token::On) {
@@ -1378,10 +1365,71 @@ impl Parser {
         Ok(table_ref)
     }
 
+    /// Parses a single table reference (table name or subquery) without joins.
+    /// This is a helper for parse_table_ref to handle the base case.
+    fn parse_single_table_ref(&mut self) -> ParseResult<TableReference> {
+        match &self.current_token {
+            Token::Identifier(name) => {
+                let table_name = name.clone();
+                self.next_token();
+
+                // Parse optional alias (with or without AS keyword)
+                let alias = if self.consume_if(&Token::As) {
+                    if let Token::Identifier(alias_name) = &self.current_token {
+                        let alias_name = alias_name.clone();
+                        self.next_token();
+                        Some(alias_name)
+                    } else {
+                        return Err(ParserError::InvalidExpression(
+                            "expected alias after AS".to_string(),
+                        ));
+                    }
+                } else if let Token::Identifier(alias_name) = &self.current_token {
+                    // Implicit alias (without AS keyword)
+                    let alias_name = alias_name.clone();
+                    self.next_token();
+                    Some(alias_name)
+                } else {
+                    None
+                };
+
+                Ok(TableReference::Table {
+                    name: table_name,
+                    alias,
+                })
+            }
+            Token::LParen => {
+                // Subquery in FROM
+                self.next_token();
+                let subquery = self.parse_select_statement()?;
+                self.expect(Token::RParen)?;
+
+                // Optional AS keyword
+                self.consume_if(&Token::As);
+
+                // Alias required for subquery
+                let alias = if let Token::Identifier(alias_name) = &self.current_token {
+                    let alias_name = alias_name.clone();
+                    self.next_token();
+                    alias_name
+                } else {
+                    return Err(ParserError::InvalidExpression(
+                        "expected alias for subquery".to_string(),
+                    ));
+                };
+
+                Ok(TableReference::Subquery {
+                    query: Box::new(subquery),
+                    alias,
+                })
+            }
+            _ => Err(ParserError::UnexpectedToken(self.current_token.clone())),
+        }
+    }
     /// Parses data types.
     ///
     /// Supports both SQL standard data types and AxmosDB specific types (VARINT, BLOB and TEXT).
-    fn parse_data_type(&mut self) -> Result<DataTypeKind, ParserError> {
+    fn parse_data_type(&mut self) -> ParseResult<DataTypeKind> {
         let data_type = if let Token::Identifier(type_name) = &self.current_token {
             let name = type_name.to_uppercase();
             self.next_token();
@@ -1421,7 +1469,7 @@ impl Parser {
 
     /// Parses a column definition statement.
     /// [COL_NAME] [DATA TYPE] [CONSTRAINTS]
-    fn parse_column_def(&mut self) -> Result<ColumnDefExpr, ParserError> {
+    fn parse_column_def(&mut self) -> ParseResult<ColumnDefExpr> {
         let name = if let Token::Identifier(col_name) = &self.current_token {
             let name = col_name.clone();
             self.next_token();
@@ -1529,7 +1577,7 @@ impl Parser {
     /// ```sql
     /// ALTER TABLE foo ADD CONSTRAINT [body];
     /// ```
-    fn parse_table_constraint(&mut self) -> Result<TableConstraintExpr, ParserError> {
+    fn parse_table_constraint(&mut self) -> ParseResult<TableConstraintExpr> {
         // Skip optional CONSTRAINT name
         if self.consume_if(&Token::Constraint)
             && let Token::Identifier(_) = self.current_token

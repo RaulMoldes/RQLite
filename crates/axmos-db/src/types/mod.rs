@@ -10,8 +10,7 @@ pub mod id;
 pub mod sized_types;
 pub mod varint;
 
-use crate::repr_enum;
-use crate::sql::ast::Expr;
+
 pub use blob::{Blob, BlobRef, BlobRefMut};
 pub use date::{Date, DateRef, DateRefMut};
 pub use datetime::{DateTime, DateTimeRef, DateTimeRefMut};
@@ -23,8 +22,6 @@ pub use sized_types::{
     UInt32RefMut, UInt64, UInt64Ref, UInt64RefMut,
 };
 pub use varint::VarInt;
-
-use crate::database::errors::TypeError;
 
 #[cfg(test)]
 mod tests;
@@ -83,65 +80,6 @@ pub enum DataType {
 
     #[fixed]
     DateTime(DateTime),
-}
-
-impl TryFrom<(DataTypeKind, Expr)> for DataType {
-    type Error = TypeError;
-
-    fn try_from(value: (DataTypeKind, Expr)) -> Result<Self, Self::Error> {
-        use DataTypeKind as K;
-        use Expr as E;
-
-        match value {
-            (K::Null, _) | (_, E::Null) => Ok(DataType::Null),
-            (K::Boolean, E::Boolean(b)) => Ok(DataType::Boolean(UInt8::from(b as u8))),
-            (K::Boolean, E::Number(n)) => Ok(DataType::Boolean(UInt8::from((n != 0.0) as u8))),
-            (K::Boolean, E::String(s)) => match s.to_ascii_uppercase().as_str() {
-                "TRUE" => Ok(DataType::Boolean(UInt8::TRUE)),
-                "FALSE" => Ok(DataType::Boolean(UInt8::FALSE)),
-                _ => Err(TypeError::Other),
-            },
-            (K::SmallInt, E::Number(n)) => Ok(DataType::SmallInt(Int8::from(n as i8))),
-            (K::HalfInt, E::Number(n)) => Ok(DataType::HalfInt(Int16::from(n as i16))),
-            (K::Int, E::Number(n)) => Ok(DataType::Int(Int32::from(n as i32))),
-            (K::BigInt, E::Number(n)) => Ok(DataType::BigInt(Int64::from(n as i64))),
-            (K::SmallUInt, E::Number(n)) => Ok(DataType::SmallUInt(UInt8::from(n as u8))),
-            (K::HalfUInt, E::Number(n)) => Ok(DataType::HalfUInt(UInt16::from(n as u16))),
-            (K::UInt, E::Number(n)) => Ok(DataType::UInt(UInt32::from(n as u32))),
-            (K::BigUInt, E::Number(n)) => Ok(DataType::BigUInt(UInt64::from(n as u64))),
-            (K::Float, E::Number(n)) => Ok(DataType::Float(Float32::from(n as f32))),
-            (K::Double, E::Number(n)) => Ok(DataType::Double(Float64::from(n))),
-            (K::Text, E::String(s)) => Ok(DataType::Text(Blob::from(s.as_bytes()))),
-            (K::Blob, E::String(s)) => Ok(DataType::Blob(Blob::from(s.as_bytes()))),
-            (K::Text, E::Number(n)) => Ok(DataType::Text(Blob::from(&n.to_ne_bytes()))),
-            (K::Blob, E::Number(n)) => Ok(DataType::Blob(Blob::from(&n.to_ne_bytes()))),
-            (K::Char, E::String(s)) if s.len() == 1 => {
-                Ok(DataType::Char(UInt8::from(s.as_bytes()[0])))
-            }
-            (K::Char, E::Number(n)) => Ok(DataType::Char(UInt8::from(n as u8))),
-            (K::Date, E::String(s)) => {
-                let parsed = Date::parse_iso(&s).map_err(|e| TypeError::Other)?;
-                Ok(DataType::Date(parsed))
-            }
-            (K::Date, E::Number(n)) => Ok(DataType::Date(Date::from(n as u32))),
-            (K::DateTime, E::String(s)) => {
-                let parsed = DateTime::parse_iso(&s).map_err(|e| TypeError::Other)?;
-                Ok(DataType::DateTime(parsed))
-            }
-            (K::DateTime, E::Number(n)) => Ok(DataType::DateTime(DateTime::from(n as u64))),
-            (K::SmallInt, E::String(s)) => Ok(DataType::SmallInt(Int8::from(s.parse::<i8>()?))),
-            (K::HalfInt, E::String(s)) => Ok(DataType::HalfInt(Int16::from(s.parse::<i16>()?))),
-            (K::Int, E::String(s)) => Ok(DataType::Int(Int32::from(s.parse::<i32>()?))),
-            (K::BigInt, E::String(s)) => Ok(DataType::BigInt(Int64::from(s.parse::<i64>()?))),
-            (K::SmallUInt, E::String(s)) => Ok(DataType::SmallUInt(UInt8::from(s.parse::<u8>()?))),
-            (K::HalfUInt, E::String(s)) => Ok(DataType::HalfUInt(UInt16::from(s.parse::<u16>()?))),
-            (K::UInt, E::String(s)) => Ok(DataType::UInt(UInt32::from(s.parse::<u32>()?))),
-            (K::BigUInt, E::String(s)) => Ok(DataType::BigUInt(UInt64::from(s.parse::<u64>()?))),
-            (K::Float, E::String(s)) => Ok(DataType::Float(Float32::from(s.parse::<f32>()?))),
-            (K::Double, E::String(s)) => Ok(DataType::Double(Float64::from(s.parse::<f64>()?))),
-            (kind, expr) => Err(TypeError::UnexpectedDataType(kind)),
-        }
-    }
 }
 
 pub fn reinterpret_cast<'a>(
@@ -392,37 +330,10 @@ pub fn reinterpret_cast_mut<'a>(
     }
 }
 
-// TODO: Maybe we can include this in the derive macro to make all this cleaner overall.
-repr_enum!(
-pub enum DataTypeKind: u8 {
-    SmallInt = 0,
-    HalfInt = 1,
-    Int = 2,
-    BigInt = 3,
-    SmallUInt = 4,
-    HalfUInt = 5,
-    UInt = 6,
-    BigUInt = 7,
-    Float = 8,
-    Double = 9,
-    Byte = 10,
-    Char = 11,
-    Boolean = 12,
-    Date = 13,
-    DateTime = 14,
-    Blob = 15,
-    Text = 16,
-    Null = 17
-}
-
-);
-
 impl DataTypeKind {
-    pub fn is_fixed_size(&self) -> bool {
-        !matches!(self, DataTypeKind::Blob | DataTypeKind::Text)
-    }
 
-    pub fn size(&self) -> Option<usize> {
+
+    pub fn size_of_val(&self) -> Option<usize> {
         match self {
             DataTypeKind::Null => Some(0),
             DataTypeKind::SmallInt => Some(size_of::<i8>()),

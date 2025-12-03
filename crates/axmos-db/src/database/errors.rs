@@ -124,7 +124,7 @@ pub enum AlreadyExists {
 }
 
 impl Display for AlreadyExists {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match self {
             Self::Index(index) => write!(f, "index {index} already exists"),
             Self::Table(table) => write!(f, "table {table} already exists"),
@@ -137,7 +137,7 @@ impl Display for AlreadyExists {
 }
 
 impl Display for AnalyzerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match self {
             Self::ColumnValueCountMismatch(row) => write!(f,"number of columns doesn't match values on row {row}"),
             Self::NotFound(obj) => write!(f, "Object not found in the database {obj}"),
@@ -190,7 +190,7 @@ pub enum ParserError {
 }
 
 impl Display for ParserError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             Self::InvalidExpression(s) => write!(f, "invalid expression {s}"),
             Self::UnexpectedToken(s) => write!(f, "unexpected token  {s}"),
@@ -199,17 +199,130 @@ impl Display for ParserError {
     }
 }
 
+/// Errors that can occur during binding
+#[derive(Debug, Clone, PartialEq)]
+pub enum BinderError {
+    /// Table not found in catalog
+    TableNotFound(String),
+    /// Column not found in any table in scope
+    ColumnNotFound(String),
+    /// Column reference is ambiguous (exists in multiple tables)
+    AmbiguousColumn(String),
+    /// Type mismatch in expression
+    TypeMismatch {
+        expected: DataTypeKind,
+        found: DataTypeKind,
+        context: String,
+    },
+    /// Invalid expression
+    InvalidExpression(String),
+    /// Alias required but not provided
+    AliasRequired(String),
+    /// Duplicate alias in scope
+    DuplicateAlias(String),
+    /// CTE not found
+    CteNotFound(String),
+    /// Internal error
+    Internal(String),
+    ColumnCountMismatch {
+        expected: usize,
+        found: usize,
+    },
+}
+
+impl Display for BinderError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            BinderError::TableNotFound(name) => write!(f, "Table not found: {}", name),
+            BinderError::ColumnNotFound(name) => write!(f, "Column not found: {}", name),
+            BinderError::AmbiguousColumn(name) => {
+                write!(f, "Ambiguous column reference: {}", name)
+            }
+            BinderError::ColumnCountMismatch { expected, found } => write!(
+                f,
+                "Column count mismatch. Expected: {expected} but found {found}"
+            ),
+            BinderError::TypeMismatch {
+                expected,
+                found,
+                context,
+            } => {
+                write!(
+                    f,
+                    "Type mismatch in {}: expected {:?}, found {:?}",
+                    context, expected, found
+                )
+            }
+            BinderError::InvalidExpression(msg) => write!(f, "Invalid expression: {}", msg),
+            BinderError::AliasRequired(msg) => write!(f, "Alias required: {}", msg),
+            BinderError::DuplicateAlias(alias) => write!(f, "Duplicate alias: {}", alias),
+            BinderError::CteNotFound(name) => write!(f, "CTE not found: {}", name),
+            BinderError::Internal(msg) => write!(f, "Internal error: {}", msg),
+        }
+    }
+}
+
+impl Error for BinderError {}
+
+/// Errors that can occur during planning
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanError {
+    /// Table not found
+    TableNotFound(String),
+    /// Column not found
+    ColumnNotFound(String),
+    /// Ambiguous column reference
+    AmbiguousColumn(String),
+    /// Type mismatch
+    TypeMismatch(DataTypeKind, DataTypeKind),
+    /// Invalid expression
+    InvalidExpr(String),
+    /// Unsupported operation
+    Unsupported(String),
+    /// Internal error
+    Internal(String),
+    /// Invalid plan
+    InvalidPlan(String),
+}
+
+impl Display for PlanError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            PlanError::TableNotFound(t) => write!(f, "Table not found: {}", t),
+            PlanError::ColumnNotFound(c) => write!(f, "Column not found: {}", c),
+            PlanError::AmbiguousColumn(c) => write!(f, "Ambiguous column: {}", c),
+            PlanError::TypeMismatch(a, b) => write!(f, "Type mismatch: {:?} vs {:?}", a, b),
+            PlanError::InvalidExpr(e) => write!(f, "Invalid expression: {}", e),
+            PlanError::Unsupported(s) => write!(f, "Unsupported: {}", s),
+            PlanError::Internal(s) => write!(f, "Internal error: {}", s),
+            PlanError::InvalidPlan(s) => write!(f, "Invalid plan: {}", s),
+        }
+    }
+}
+
+impl Error for PlanError {}
+
+impl From<IoError> for PlanError {
+    fn from(e: IoError) -> Self {
+        PlanError::Internal(e.to_string())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SQLError {
     ParserError(ParserError),
     AnalyzerError(AnalyzerError),
+    BindererError(BinderError),
+    PlannerError(PlanError),
 }
 
 impl Display for SQLError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             Self::AnalyzerError(e) => write!(f, "analyzer error {e}"),
             Self::ParserError(e) => write!(f, "parser error {e}"),
+            Self::BindererError(e) => write!(f, "binder error {e}"),
+            Self::PlannerError(e) => write!(f, "planner error {e}"),
         }
     }
 }
@@ -223,6 +336,18 @@ impl From<ParserError> for SQLError {
 impl From<AnalyzerError> for SQLError {
     fn from(value: AnalyzerError) -> Self {
         Self::AnalyzerError(value)
+    }
+}
+
+impl From<PlanError> for SQLError {
+    fn from(value: PlanError) -> Self {
+        Self::PlannerError(value)
+    }
+}
+
+impl From<BinderError> for SQLError {
+    fn from(value: BinderError) -> Self {
+        Self::BindererError(value)
     }
 }
 
@@ -260,7 +385,7 @@ impl From<TransactionError> for DatabaseError {
 }
 
 impl Display for DatabaseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             DatabaseError::TypeError(err) => write!(f, "Type error: {}", err),
 
@@ -303,8 +428,8 @@ pub enum TransactionError {
     Other(String),
 }
 
-impl std::fmt::Display for TransactionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for TransactionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             TransactionError::Aborted(id) => write!(f, "Transaction with id {id} was aborted"),
             TransactionError::ObjectNotFound(id) => write!(f, "Object with id {id} was anot found"),
@@ -354,3 +479,10 @@ impl From<IoError> for TransactionError {
         Self::Io(value)
     }
 }
+
+pub type ParseResult<T> = Result<T, ParserError>;
+pub type AnalyzerResult<T> = Result<T, AnalyzerError>;
+pub type BinderResult<T> = Result<T, BinderError>;
+pub type SQLResult<T> = Result<T, SQLError>;
+pub type DatabaseResult<T> = Result<T, DatabaseError>;
+pub type TransactionResult<T> = Result<T, TransactionError>;

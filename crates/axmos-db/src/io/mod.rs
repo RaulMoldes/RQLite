@@ -66,7 +66,7 @@ pub fn read_type_from_buf<R: Read + Seek>(
     buf: &mut R,
 ) -> std::io::Result<DataType> {
     if dtype.is_fixed_size() {
-        let mut temp_buf = vec![0u8; dtype.size().unwrap()];
+        let mut temp_buf = vec![0u8; dtype.size_of_val().unwrap()];
         buf.read_exact(&mut temp_buf)?;
         Ok(reinterpret_cast(dtype, &temp_buf)?.0.to_owned())
     } else {

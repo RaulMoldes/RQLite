@@ -1,7 +1,10 @@
 //! MVCC Transaction System for AxmosDB
 use crate::{
     ObjectId, TRANSACTION_ZERO, UInt64,
-    database::{SharedCatalog, errors::TransactionError},
+    database::{
+        SharedCatalog,
+        errors::{TransactionError, TransactionResult},
+    },
     io::pager::SharedPager,
     types::TransactionId,
 };
@@ -226,7 +229,7 @@ impl TransactionCoordinator {
     }
 
     /// Create a snapshot of the database state for a given transaction id.
-    pub fn snapshot(&self, txid: TransactionId) -> Result<Snapshot, TransactionError> {
+    pub fn snapshot(&self, txid: TransactionId) -> TransactionResult<Snapshot> {
         let txs = self.transactions.read();
 
         // Collect active transaction IDs
@@ -247,7 +250,7 @@ impl TransactionCoordinator {
 
     /// Begin a new transaction.
     /// Returns a [TransactionHandle] to the thread that requested the begin operation.
-    pub fn begin(&self) -> Result<TransactionHandle, TransactionError> {
+    pub fn begin(&self) -> TransactionResult<TransactionHandle> {
         let txid = TransactionId::new();
 
         // Create snapshot under read lock
@@ -274,7 +277,7 @@ impl TransactionCoordinator {
     /// This performs optimistic concurrency control validation:
     /// Checks that no tuple in write set was modified by another committed transaction
     /// If validation passes, marks the transaction as committed
-    pub fn commit(&self, txid: TransactionId) -> Result<(), TransactionError> {
+    pub fn commit(&self, txid: TransactionId) -> TransactionResult<()> {
         // Perform validation
         match self.validate_write_set(txid)? {
             ValidationResult::Allowed => {
@@ -290,7 +293,7 @@ impl TransactionCoordinator {
     }
 
     /// Abort a transaction
-    pub fn abort(&self, txid: TransactionId) -> Result<(), TransactionError> {
+    pub fn abort(&self, txid: TransactionId) -> TransactionResult<()> {
         let mut txs = self.transactions.write();
 
         let entry = txs.get_mut(&txid).ok_or(TransactionError::NotFound(txid))?;
@@ -300,7 +303,7 @@ impl TransactionCoordinator {
     }
 
     /// Get a transaction's snapshot for visibility checks
-    pub fn get_snapshot(&self, txid: TransactionId) -> Result<Snapshot, TransactionError> {
+    pub fn get_snapshot(&self, txid: TransactionId) -> TransactionResult<Snapshot> {
         let txs = self.transactions.read();
 
         let entry = txs.get(&txid).ok_or(TransactionError::NotFound(txid))?;
@@ -309,11 +312,7 @@ impl TransactionCoordinator {
     }
 
     /// Record a read operation for a transaction
-    pub fn record_read(
-        &self,
-        txid: TransactionId,
-        logical_id: LogicalId,
-    ) -> Result<(), TransactionError> {
+    pub fn record_read(&self, txid: TransactionId, logical_id: LogicalId) -> TransactionResult<()> {
         let mut txs = self.transactions.write();
 
         let entry = txs.get_mut(&txid).ok_or(TransactionError::NotFound(txid))?;
@@ -335,7 +334,7 @@ impl TransactionCoordinator {
         txid: TransactionId,
         logical_id: LogicalId,
         version: Version,
-    ) -> Result<(), TransactionError> {
+    ) -> TransactionResult<()> {
         let mut txs = self.transactions.write();
 
         let entry = txs.get_mut(&txid).ok_or(TransactionError::NotFound(txid))?;
@@ -355,7 +354,7 @@ impl TransactionCoordinator {
         &self,
         txid: TransactionId,
         state: TransactionState,
-    ) -> Result<(), TransactionError> {
+    ) -> TransactionResult<()> {
         let mut txs = self.transactions.write();
         let entry = txs.get_mut(&txid).ok_or(TransactionError::NotFound(txid))?;
 
@@ -379,10 +378,7 @@ impl TransactionCoordinator {
 
     /// Validate write set for conflicts
     /// Returns [CommitResult::Allowed] if no conflicts detected
-    fn validate_write_set(
-        &self,
-        txid: TransactionId,
-    ) -> Result<ValidationResult, TransactionError> {
+    fn validate_write_set(&self, txid: TransactionId) -> TransactionResult<ValidationResult> {
         self.set_transaction_state(txid, TransactionState::Committing)?;
 
         let txs = self.transactions.read();
@@ -463,12 +459,12 @@ impl TransactionHandle {
     }
 
     /// Commit this transaction
-    pub fn commit(self) -> Result<(), TransactionError> {
+    pub fn commit(self) -> TransactionResult<()> {
         self.coordinator.commit(self.id)
     }
 
     /// Abort this transaction
-    pub fn abort(self) -> Result<(), TransactionError> {
+    pub fn abort(self) -> TransactionResult<()> {
         self.coordinator.abort(self.id)
     }
 }

@@ -7,7 +7,7 @@ use crate::{
     },
     repr_enum,
     storage::tuple::{OwnedTuple, Tuple, TupleRef},
-    structures::bplustree::Comparator,
+    structures::comparator::Comparator,
     types::{
         Blob, DataType, DataTypeKind, DataTypeRef, ObjectId, PAGE_ZERO, PageId, UInt8, UInt64,
         VarInt, varint::MAX_VARINT_LEN,
@@ -86,6 +86,12 @@ impl Schema {
             return self.columns.get(*idx);
         }
         None
+    }
+
+    // Utility method to access a the index of a columns
+    // Useful for fast column resolution.
+    pub fn column_idx(&self, name: &str) -> Option<&usize> {
+        self.column_index.get(name)
     }
 
     pub fn columns(&self) -> &Vec<Column> {

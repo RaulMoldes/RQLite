@@ -52,6 +52,10 @@ impl EnumInfo {
         format_ident!("{}Ref", &self.name)
     }
 
+    fn kind_name(&self) -> Ident {
+        format_ident!("{}Kind", &self.name)
+    }
+
     fn ref_mut_name(&self) -> Ident {
         format_ident!("{}RefMut", &self.name)
     }
@@ -78,6 +82,99 @@ impl EnumInfo {
             }
         }
     }
+
+    fn gen_kind_enum(&self) -> TokenStream {
+    let name = self.kind_name();
+    let vis = &self.vis;
+    let variant_names: Vec<_> = self.variants.iter().map(|v| &v.name).collect();
+    let variant_values: Vec<u8> = (0..variant_names.len() as u8).collect();
+
+    let variant_defs: Vec<_> = variant_names.iter().zip(variant_values.iter())
+        .map(|(variant_name, &value)| {
+            quote! { #variant_name = #value }
+        })
+        .collect();
+
+    let is_fixed_size = self.gen_is_fixed_size(true);
+
+
+    quote! {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[repr(u8)]
+        #vis enum #name {
+            #(#variant_defs,)*
+        }
+
+        impl #name {
+
+            #[inline]
+            pub const fn as_repr(self) -> u8 {
+                self as u8
+            }
+
+
+
+            #[inline]
+            pub const fn value(self) -> u8 {
+                self as u8
+            }
+
+
+            pub fn from_repr(value: u8) -> std::io::Result<Self> {
+                match value {
+                    #(
+                        #variant_values => Ok(Self::#variant_names),
+                    )*
+                    _ => Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Invalid {} value: {}", stringify!(#name), value),
+                    )),
+                }
+            }
+
+
+            #is_fixed_size
+
+
+
+            pub const fn variants() -> &'static [Self] {
+                &[
+                    #(Self::#variant_names,)*
+                ]
+            }
+
+
+            pub const fn name(self) -> &'static str {
+                match self {
+                    #(
+                        Self::#variant_names => stringify!(#variant_names),
+                    )*
+                }
+            }
+        }
+
+        impl From<#name> for u8 {
+            #[inline]
+            fn from(value: #name) -> Self {
+                value as u8
+            }
+        }
+
+        impl TryFrom<u8> for #name {
+            type Error = std::io::Error;
+
+            fn try_from(value: u8) -> Result<Self, Self::Error> {
+                Self::from_repr(value)
+            }
+        }
+
+        impl std::fmt::Display for #name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.name())
+            }
+        }
+    }
+}
 
     fn gen_as_ref(&self) -> TokenStream {
         let name = &self.name;
@@ -154,37 +251,67 @@ impl EnumInfo {
         }
     }
 
+     fn gen_kind(&self) -> TokenStream {
+        let kind_name = self.kind_name();
+
+        let arms = self.variants.iter().map(|v| {
+            let variant_name = &v.name;
+            if v.inner_type.is_some() {
+                quote! { Self::#variant_name(_) => #kind_name::#variant_name }
+            } else {
+                quote! { Self::#variant_name => #kind_name::#variant_name }
+            }
+        });
+
+        quote! {
+            #[inline]
+            pub fn kind(&self) -> #kind_name {
+                match self {
+                    #(#arms,)*
+                }
+            }
+        }
+    }
+
+
     fn gen_impl_block(&self) -> TokenStream {
         let name = &self.name;
-        let is_fixed_size_impl = self.gen_is_fixed_size();
+        let is_fixed_size_impl = self.gen_is_fixed_size(false);
         let size_impl = self.gen_size();
-        let datatype_impl = self.gen_datatype();
+
+
         let matches_impl = self.gen_matches();
+        let kind_impl = self.gen_kind();
 
         quote! {
             impl #name {
                 #is_fixed_size_impl
                 #size_impl
+                #kind_impl
 
                 #[inline]
                 pub fn is_null(&self) -> bool {
                     matches!(self, Self::Null)
                 }
 
-                #datatype_impl
+
                 #matches_impl
             }
         }
     }
 
-    fn gen_is_fixed_size(&self) -> TokenStream {
+    fn gen_is_fixed_size(&self, for_kind: bool) -> TokenStream {
         let fixed_patterns: Vec<_> = self
             .variants
             .iter()
             .filter(|v| v.is_fixed_size)
             .map(|v| {
                 let name = &v.name;
-                quote! { Self::#name(_) }
+                if !for_kind {
+                    quote! { Self::#name(_) }
+                } else {
+                    quote! { Self::#name }
+                }
             })
             .collect();
 
@@ -207,6 +334,8 @@ impl EnumInfo {
             }
         }
     }
+
+
 
     fn gen_size(&self) -> TokenStream {
         let arms = self.variants.iter().map(|v| {
@@ -231,25 +360,7 @@ impl EnumInfo {
         }
     }
 
-    fn gen_datatype(&self) -> TokenStream {
-        let arms = self.variants.iter().map(|v| {
-            let name = &v.name;
-            if v.inner_type.is_some() {
-                quote! { Self::#name(_) => DataTypeKind::#name }
-            } else {
-                quote! { Self::#name => DataTypeKind::#name }
-            }
-        });
-
-        quote! {
-            pub fn datatype(&self) -> DataTypeKind {
-                match self {
-                    #(#arms,)*
-                }
-            }
-        }
-    }
-
+  
     fn gen_matches(&self) -> TokenStream {
         let arms = self.variants.iter().map(|v| {
             let name = &v.name;
@@ -286,17 +397,17 @@ impl EnumInfo {
 
     fn generate_impl(&self, ref_name: &Ident) -> TokenStream {
         let name = &self.name;
-        let is_fixed_size = self.gen_is_fixed_size();
+        let is_fixed_size = self.gen_is_fixed_size(false);
         let size = self.gen_size();
         let matches = self.gen_matches();
-        let datatype = self.gen_datatype();
+
         let to_owned = self.gen_to_owned(name);
 
         quote! {
             impl<'a> #ref_name<'a> {
                 #is_fixed_size
                 #size
-                #datatype
+
                 #matches
 
                 #[inline]
@@ -380,10 +491,11 @@ pub fn data_type_impl(input: TokenStream) -> TokenStream {
     let impl_block = info.gen_impl_block();
     let ref_impls = info.generate_ref_impls();
     let as_ref_impl = info.gen_as_ref();
-
+    let kind_enum = info.gen_kind_enum();
     quote! {
         #ref_enum
         #ref_mut_enum
+        #kind_enum
         #impl_block
         #ref_impls
         #as_ref_impl

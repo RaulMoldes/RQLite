@@ -17,9 +17,11 @@ use crate::{
         page::BtreePage,
         tuple::{OwnedTuple, Tuple, TupleRef},
     },
-    structures::bplustree::{
-        BPlusTree, DynComparator, FixedSizeBytesComparator, NumericComparator, SearchResult,
-        VarlenComparator,
+    structures::{
+        bplustree::{BPlusTree, SearchResult},
+        comparator::{
+            DynComparator, FixedSizeBytesComparator, NumericComparator, VarlenComparator,
+        },
     },
     transactions::{
         TransactionCoordinator,
@@ -159,9 +161,9 @@ impl Catalog {
         tx: Worker,
     ) -> io::Result<BPlusTree<DynComparator>> {
         let comparator = if dtype.is_numeric() {
-            DynComparator::StrictNumeric(NumericComparator::for_size(dtype.size().unwrap()))
+            DynComparator::StrictNumeric(NumericComparator::for_size(dtype.size_of_val().unwrap()))
         } else if dtype.is_fixed_size() {
-            DynComparator::FixedSizeBytes(FixedSizeBytesComparator::for_size(dtype.size().unwrap()))
+            DynComparator::FixedSizeBytes(FixedSizeBytesComparator::for_size(dtype.size_of_val().unwrap()))
         } else {
             DynComparator::Variable(VarlenComparator)
         };

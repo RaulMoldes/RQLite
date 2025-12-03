@@ -1,123 +1,31 @@
 mod macros;
 
 use crate::{
-    AxmosDBConfig, IncrementalVaccum, TextEncoding, assert_cmp, delete_test, insert_tests,
-    io::{
-        frames::{FrameAccessMode, Position},
-        pager::{Pager, SharedPager},
-    },
+    assert_cmp, delete_test, insert_tests,
+    io::frames::{FrameAccessMode, Position},
     storage::{
         cell::Slot,
         page::{BtreePage, OverflowPage},
     },
     structures::{
-        bplustree::{
-            BPlusTree, Comparator, FixedSizeBytesComparator, IterDirection, NumericComparator,
-            SearchResult, VarlenComparator,
-        },
-        kvp::KeyValuePair,
+        bplustree::{IterDirection, SearchResult},
+        comparator::{Comparator, FixedSizeBytesComparator, NumericComparator, VarlenComparator},
     },
-    transactions::worker::Worker,
-    types::{PAGE_ZERO, PageId, VarInt},
+    types::{PAGE_ZERO, PageId},
 };
 
-use rand::{RngCore, SeedableRng};
-use rand_chacha::ChaCha20Rng;
+use rand::SeedableRng;
+
 use serial_test::serial;
-use std::collections::{HashSet, VecDeque};
-use std::{cmp::Ordering, io};
-use tempfile::tempdir;
+use std::{
+    cmp::Ordering,
+    collections::{HashSet, VecDeque},
+    io,
+};
 
-// Test key type
-#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
-struct TestKey(i32);
+mod utils;
 
-impl AsRef<[u8]> for TestKey {
-    fn as_ref(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(
-                &self.0 as *const i32 as *const u8,
-                std::mem::size_of::<i32>(),
-            )
-        }
-    }
-}
-
-struct TestVarLengthKey(Vec<u8>);
-
-impl TestVarLengthKey {
-    pub fn from_string(s: &str) -> Self {
-        Self(s.as_bytes().to_vec())
-    }
-
-    fn as_bytes(&self) -> Vec<u8> {
-        let mut buffer = [0u8; crate::types::varint::MAX_VARINT_LEN];
-        let mut bytes_data = VarInt::encode(self.0.len() as i64, &mut buffer).to_vec();
-        bytes_data.extend_from_slice(self.0.as_ref());
-        bytes_data
-    }
-}
-
-fn create_test_btree<Cmp: Comparator>(
-    page_size: u32,
-    capacity: usize,
-    min_keys: usize,
-    comparator: Cmp,
-) -> io::Result<BPlusTree<Cmp>> {
-    let dir = tempdir()?;
-    let path = dir.path().join("test_btree.db");
-
-    let config = AxmosDBConfig {
-        page_size,
-        cache_size: Some(capacity as u16),
-        incremental_vacuum_mode: IncrementalVaccum::Disabled,
-        min_keys: min_keys as u8,
-        text_encoding: TextEncoding::Utf8,
-    };
-
-    let shared_pager = SharedPager::from(Pager::from_config(config, &path)?);
-
-    let worker = Worker::new(shared_pager);
-    BPlusTree::new(worker, min_keys, 2, comparator)
-}
-
-pub fn gen_random_bytes(size: usize, seed: u64) -> Vec<u8> {
-    let mut v = vec![0u8; size];
-    let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    rng.fill_bytes(&mut v);
-    v
-}
-
-pub fn gen_repeating_pattern(pattern: &[u8], size: usize) -> Vec<u8> {
-    let mut v = Vec::with_capacity(size);
-    while v.len() < size {
-        let take = std::cmp::min(pattern.len(), size - v.len());
-        v.extend_from_slice(&pattern[..take]);
-    }
-    v
-}
-
-pub fn gen_ovf_blob(page_size: usize, pages: usize, seed: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(page_size * pages);
-    let header = format!(r#"{{"type":"overflow_test","pages":{pages},"page_size":{page_size}}}\n"#);
-    out.extend_from_slice(header.as_bytes());
-
-    let pattern = b"In the quiet field of night,\nDreams walk slow beneath the light.\n";
-    let chunk_repeat = gen_repeating_pattern(pattern, page_size / 2);
-
-    let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    for i in 0..pages {
-        out.extend_from_slice(&chunk_repeat);
-
-        let mut rnd = vec![0u8; page_size / 2];
-        rng.fill_bytes(&mut rnd);
-        out.extend_from_slice(&rnd);
-
-        let meta = format!("\n--SEG {i}--\n");
-        out.extend_from_slice(meta.as_bytes());
-    }
-    out
-}
+use utils::{KeyValuePair, TestKey, TestVarLengthKey, create_test_btree, gen_ovf_blob};
 
 #[test]
 fn test_comparators() -> std::io::Result<()> {
@@ -125,42 +33,67 @@ fn test_comparators() -> std::io::Result<()> {
     let varlen_comparator = VarlenComparator;
     let numeric_comparator = NumericComparator::with_type::<TestKey>();
 
-    assert_cmp!(fixed_comparator, TestKey(1), TestKey(1), Ordering::Equal);
-    assert_cmp!(fixed_comparator, TestKey(511), TestKey(767), Ordering::Less);
-    assert_cmp!(fixed_comparator, TestKey(3), TestKey(2), Ordering::Greater);
+    assert_cmp!(
+        fixed_comparator,
+        TestKey::new(1),
+        TestKey::new(1),
+        Ordering::Equal
+    );
+    assert_cmp!(
+        fixed_comparator,
+        TestKey::new(511),
+        TestKey::new(767),
+        Ordering::Less
+    );
+    assert_cmp!(
+        fixed_comparator,
+        TestKey::new(3),
+        TestKey::new(2),
+        Ordering::Greater
+    );
     // Fixed size comparators compare byte by byte, therefore the ordering might not always match strict numerical order. That is why we have [NumericComparator].
     assert_cmp!(
         fixed_comparator,
-        TestKey(511),
-        TestKey(762),
+        TestKey::new(511),
+        TestKey::new(762),
         Ordering::Greater
     );
-    assert_cmp!(fixed_comparator, TestKey(251), TestKey(763), Ordering::Less);
+    assert_cmp!(
+        fixed_comparator,
+        TestKey::new(251),
+        TestKey::new(763),
+        Ordering::Less
+    );
 
-    assert_cmp!(numeric_comparator, TestKey(1), TestKey(1), Ordering::Equal);
     assert_cmp!(
         numeric_comparator,
-        TestKey(511),
-        TestKey(767),
+        TestKey::new(1),
+        TestKey::new(1),
+        Ordering::Equal
+    );
+    assert_cmp!(
+        numeric_comparator,
+        TestKey::new(511),
+        TestKey::new(767),
         Ordering::Less
     );
     assert_cmp!(
         numeric_comparator,
-        TestKey(3),
-        TestKey(2),
+        TestKey::new(3),
+        TestKey::new(2),
         Ordering::Greater
     );
     // Numeric comparator always follows strict numerical order.
     assert_cmp!(
         numeric_comparator,
-        TestKey(762),
-        TestKey(511),
+        TestKey::new(762),
+        TestKey::new(511),
         Ordering::Greater
     );
     assert_cmp!(
         numeric_comparator,
-        TestKey(251),
-        TestKey(763),
+        TestKey::new(251),
+        TestKey::new(763),
         Ordering::Less
     );
 
@@ -191,7 +124,7 @@ fn test_search_empty_tree() -> io::Result<()> {
     let tree = create_test_btree(4096, 1, 4, comparator)?;
     let root = tree.get_root();
     let start_pos = Position::start_pos(root);
-    let key = TestKey(42);
+    let key = TestKey::new(42);
 
     let result = tree.search(&start_pos, key.as_ref(), FrameAccessMode::Read)?;
     assert!(matches!(result, SearchResult::NotFound(_)));
@@ -211,7 +144,7 @@ fn test_insert_remove_single_key() -> io::Result<()> {
     let start_pos = Position::start_pos(root);
 
     // Insert a key-value pair
-    let key = TestKey(42);
+    let key = TestKey::new(42);
     let bytes = key.as_ref();
     btree.insert(root, bytes)?;
 
@@ -239,7 +172,7 @@ fn test_insert_duplicates() -> io::Result<()> {
     let mut btree = create_test_btree(4096, 1, 4, comparator)?;
     let root = btree.get_root();
     // Insert a key-value pair
-    let key = TestKey(42);
+    let key = TestKey::new(42);
     let bytes = key.as_ref();
     btree.insert(root, bytes)?;
     let result = btree.insert(root, bytes);
@@ -250,7 +183,7 @@ fn test_insert_duplicates() -> io::Result<()> {
 #[test]
 #[serial]
 fn test_update_single_key() -> io::Result<()> {
-    let key = TestKey(1);
+    let key = TestKey::new(1);
     let data = b"Original";
     let kv = KeyValuePair::new(&key, data);
 
@@ -287,8 +220,8 @@ fn test_update_single_key() -> io::Result<()> {
 #[test]
 #[serial]
 fn test_upsert_single_key() -> io::Result<()> {
-    let key = TestKey(1);
-    let key2 = TestKey(2);
+    let key = TestKey::new(1);
+    let key2 = TestKey::new(2);
 
     let data = b"Original";
     let kv = KeyValuePair::new(&key, data);
@@ -375,7 +308,7 @@ fn test_overflow_chain() -> io::Result<()> {
     let mut tree = create_test_btree(4096, 100, 3, comparator)?;
     let root = tree.get_root();
     let start_pos = Position::start_pos(root);
-    let key = TestKey(1);
+    let key = TestKey::new(1);
     let data = gen_ovf_blob(4096, 20, 42);
     let kv = KeyValuePair::new(&key, &data);
 
@@ -403,11 +336,11 @@ fn test_multiple_overflow_chain() -> io::Result<()> {
 
     // Insert some data first:
     for i in 0..40 {
-        let small_data = TestKey(i);
+        let small_data = TestKey::new(i);
         tree.insert(root, small_data.as_ref())?;
     }
 
-    let key = TestKey(40);
+    let key = TestKey::new(40);
     let data = gen_ovf_blob(4096, 20, 42);
     let kv = KeyValuePair::new(&key, &data);
 
@@ -434,13 +367,13 @@ fn test_split_root() -> io::Result<()> {
 
     // Insert enough keys to force root to split
     for i in 0..50 {
-        let key = TestKey(i * 10);
+        let key = TestKey::new(i * 10);
         tree.insert(root, key.as_ref())?;
     }
-   // println!("{}", tree.json()?);
+    // println!("{}", tree.json()?);
 
     for i in 0..50 {
-        let key = TestKey(i * 10);
+        let key = TestKey::new(i * 10);
 
         let retrieved = tree.search(&start_pos, key.as_ref(), FrameAccessMode::Read)?;
         // Search does not release the latch on the node so we have to do it ourselves.
@@ -548,13 +481,13 @@ fn test_dealloc_bfs_with_overflow_chains() -> io::Result<()> {
 
     // Insert some regular keys
     for i in 0..20 {
-        let key = TestKey(i);
+        let key = TestKey::new(i);
         tree.insert(root, key.as_ref())?;
     }
 
     // Insert keys with overflow data
     for i in 20..30 {
-        let key = TestKey(i);
+        let key = TestKey::new(i);
         let data = gen_ovf_blob(4096, 5, i as u64);
         let kv = KeyValuePair::new(&key, &data);
         tree.insert(root, kv.as_ref())?;
@@ -574,7 +507,7 @@ fn test_dealloc_bfs_large_tree() -> io::Result<()> {
 
     // Insert enough to create a deep tree
     for i in 0..10000 {
-        let key = TestKey(i);
+        let key = TestKey::new(i);
         tree.insert(root, key.as_ref())?;
     }
 
@@ -591,7 +524,7 @@ fn test_iter_positions_multiple_pages() -> io::Result<()> {
     let root = tree.get_root();
 
     for i in 0..1000 {
-        let key = TestKey(i);
+        let key = TestKey::new(i);
         tree.insert(root, key.as_ref())?;
     }
 
@@ -623,7 +556,7 @@ fn test_iter_positions_rev_multiple_pages() -> io::Result<()> {
     let root = tree.get_root();
 
     for i in 0..1000 {
-        let key = TestKey(i);
+        let key = TestKey::new(i);
         tree.insert(root, key.as_ref())?;
     }
 
@@ -641,12 +574,12 @@ fn test_iter_positions_from_middle() -> io::Result<()> {
     let root = tree.get_root();
 
     for i in 0..100 {
-        let key = TestKey(i * 10); // Keys: 0, 10, 20, ..., 990
+        let key = TestKey::new(i * 10); // Keys: 0, 10, 20, ..., 990
         tree.insert(root, key.as_ref())?;
     }
 
     // Start from key 500
-    let start_key = TestKey(500);
+    let start_key = TestKey::new(500);
     let positions: Vec<Position> = tree
         .iter_positions_from(start_key.as_ref(), IterDirection::Forward)?
         .filter_map(|r| r.ok())
@@ -669,7 +602,7 @@ fn test_overflow_chain_integrity() -> io::Result<()> {
     let root = tree.get_root();
 
     // Insert a single overflow cell
-    let key = TestKey(1);
+    let key = TestKey::new(1);
     let data = gen_ovf_blob(4096, 5, 42);
     let kv = KeyValuePair::new(&key, &data);
 
@@ -759,12 +692,12 @@ fn test_iter_positions_from_backward() -> io::Result<()> {
     let root = tree.get_root();
 
     for i in 0..100 {
-        let key = TestKey(i * 10);
+        let key = TestKey::new(i * 10);
         tree.insert(root, key.as_ref())?;
     }
 
     // Start from key 500 and go backward
-    let start_key = TestKey(500);
+    let start_key = TestKey::new(500);
     let positions: Vec<Position> = tree
         .iter_positions_from(start_key.as_ref(), IterDirection::Backward)?
         .filter_map(|r| r.ok())
@@ -789,7 +722,7 @@ fn test_with_cell_at() -> io::Result<()> {
 
     let test_data: Vec<(TestKey, Vec<u8>)> = (0..50)
         .map(|i| {
-            let key = TestKey(i);
+            let key = TestKey::new(i);
             let value = format!("value_{i}").into_bytes();
             (key, value)
         })
@@ -823,7 +756,7 @@ fn test_with_cell_at_overflow() -> io::Result<()> {
     let mut tree = create_test_btree(4096, 100, 4, comparator)?;
     let root = tree.get_root();
 
-    let key = TestKey(42);
+    let key = TestKey::new(42);
     let data = gen_ovf_blob(4096, 10, 123);
     let kv = KeyValuePair::new(&key, &data);
 
@@ -852,7 +785,7 @@ fn test_with_cells_at_batch() -> io::Result<()> {
     let root = tree.get_root();
 
     for i in 0..100 {
-        let key = TestKey(i);
+        let key = TestKey::new(i);
         tree.insert(root, key.as_ref())?;
     }
 
@@ -881,7 +814,7 @@ fn test_with_cells_at_partial() -> io::Result<()> {
     let root = tree.get_root();
 
     for i in 0..100 {
-        let key = TestKey(i);
+        let key = TestKey::new(i);
         tree.insert(root, key.as_ref())?;
     }
 
@@ -915,7 +848,7 @@ fn test_dealloc_with_overflow() -> io::Result<()> {
     // Insert regular keys first (this will allocate btree pages)
     println!("Inserting regular keys...");
     for i in 0..20 {
-        let key = TestKey(i);
+        let key = TestKey::new(i);
         tree.insert(root, key.as_ref())?;
     }
 
@@ -951,7 +884,7 @@ fn test_dealloc_with_overflow() -> io::Result<()> {
     // Now insert overflow keys
     println!("\nInserting overflow keys...");
     for i in 20..30 {
-        let key = TestKey(i);
+        let key = TestKey::new(i);
         let data = gen_ovf_blob(4096, 5, i as u64);
         let kv = KeyValuePair::new(&key, &data);
         tree.insert(root, kv.as_ref())?;

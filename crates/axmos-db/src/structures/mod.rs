@@ -1,5 +1,5 @@
 pub mod bplustree;
-pub mod kvp;
+pub mod comparator;
 
 #[cfg(test)]
 mod tests;
