@@ -1,6 +1,6 @@
 //! # Binder Module.
 //! Performs mainly name and type resolution, transforming raw SQL statements into BoundStatements.
-mod ast;
+pub(crate) mod ast;
 use crate::{
     OBJECT_ZERO,
     database::{
@@ -248,10 +248,12 @@ impl Binder {
             .transpose()?;
         let columns = self.bind_select_items(&stmt.columns)?;
         let schema = self.build_select_schema(&columns);
+
+        // Pass select items to order_by binding so it can resolve aliases
         let order_by = stmt
             .order_by
             .iter()
-            .map(|o| self.bind_order_by(o))
+            .map(|o| self.bind_order_by(o, &stmt.columns, &columns))
             .collect::<BinderResult<_>>()?;
 
         Ok(BoundSelect {
@@ -263,7 +265,7 @@ impl Binder {
             having,
             order_by,
             limit: stmt.limit,
-            offset: None,
+            offset: stmt.offset,
             schema,
         })
     }
@@ -353,15 +355,30 @@ impl Binder {
                                     data_type: col.dtype,
                                 }),
                                 output_idx,
+                                output_name: col.name().to_string(),
                             });
                             output_idx += 1;
                         }
                     }
                 }
-                SelectItem::ExprWithAlias { expr, .. } => {
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    let bound_expr = self.bind_expr(expr)?;
+
+                    // Determine output name
+                    let output_name = if let Some(a) = alias {
+                        a.clone()
+                    } else {
+                        match expr {
+                            Expr::Identifier(name) => name.clone(),
+                            Expr::QualifiedIdentifier { column, .. } => column.clone(),
+                            _ => format!("col_{}", output_idx),
+                        }
+                    };
+
                     result.push(BoundSelectItem {
-                        expr: self.bind_expr(expr)?,
+                        expr: bound_expr,
                         output_idx,
+                        output_name,
                     });
                     output_idx += 1;
                 }
@@ -370,7 +387,43 @@ impl Binder {
         Ok(result)
     }
 
-    fn bind_order_by(&mut self, o: &OrderByExpr) -> BinderResult<BoundOrderBy> {
+    fn bind_order_by(
+        &mut self,
+        o: &OrderByExpr,
+        select_items: &[SelectItem],
+        bound_items: &[BoundSelectItem],
+    ) -> BinderResult<BoundOrderBy> {
+        // Check if the expression is a simple identifier that matches a SELECT alias
+        if let Expr::Identifier(name) = &o.expr {
+            // Look for matching alias in select items
+            for (i, (ast_item, bound_item)) in
+                select_items.iter().zip(bound_items.iter()).enumerate()
+            {
+                if let SelectItem::ExprWithAlias {
+                    alias: Some(alias), ..
+                } = ast_item
+                {
+                    if alias == name {
+                        // Reference the output column by index
+                        return Ok(BoundOrderBy {
+                            expr: bound_item.expr.clone(),
+                            asc: o.asc,
+                            nulls_first: false,
+                        });
+                    }
+                }
+                // Also check if it matches the output_name (for non-aliased columns)
+                if &bound_item.output_name == name {
+                    return Ok(BoundOrderBy {
+                        expr: bound_item.expr.clone(),
+                        asc: o.asc,
+                        nulls_first: false,
+                    });
+                }
+            }
+        }
+
+        // Fall back to normal expression binding
         Ok(BoundOrderBy {
             expr: self.bind_expr(&o.expr)?,
             asc: o.asc,
@@ -382,9 +435,7 @@ impl Binder {
         let cols: Vec<Column> = columns
             .iter()
             .enumerate()
-            .map(|(i, item)| {
-                Column::new_unindexed(item.expr.data_type(), &format!("col_{}", i), None)
-            })
+            .map(|(i, item)| Column::new_unindexed(item.expr.data_type(), &item.output_name, None))
             .collect();
         Schema::from_columns(&cols, 0)
     }

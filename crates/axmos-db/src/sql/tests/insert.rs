@@ -35,7 +35,8 @@ sql_test!(
             group_by: vec![],
             having: None,
             order_by: vec![],
-            limit: None
+            limit: None,
+            offset: None
         }))
     })
 );

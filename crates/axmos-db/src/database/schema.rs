@@ -20,7 +20,7 @@ use std::{
     io::{Read, Seek, Write},
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct Schema {
     pub(crate) columns: Vec<Column>,
     pub(crate) num_keys: u8,

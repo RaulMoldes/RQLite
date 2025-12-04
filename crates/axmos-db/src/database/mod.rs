@@ -137,6 +137,7 @@ impl Catalog {
 
         catalog.create_relation(Relation::TableRel(meta_table), worker.clone())?;
         catalog.create_relation(Relation::IndexRel(meta_idx), worker)?;
+
         Ok(catalog)
     }
 
@@ -163,7 +164,9 @@ impl Catalog {
         let comparator = if dtype.is_numeric() {
             DynComparator::StrictNumeric(NumericComparator::for_size(dtype.size_of_val().unwrap()))
         } else if dtype.is_fixed_size() {
-            DynComparator::FixedSizeBytes(FixedSizeBytesComparator::for_size(dtype.size_of_val().unwrap()))
+            DynComparator::FixedSizeBytes(FixedSizeBytesComparator::for_size(
+                dtype.size_of_val().unwrap(),
+            ))
         } else {
             DynComparator::Variable(VarlenComparator)
         };
@@ -310,8 +313,11 @@ impl Catalog {
         let meta_idx = self.index_btree(self.meta_index, DataTypeKind::Text, worker.clone())?;
 
         let blob = Blob::from(name);
+        // println!("Searching for table {name}");
+        let bytes: &[u8] = blob.as_ref();
+        //println!("{:?}", bytes);
 
-        let result = meta_idx.search_from_root(blob.as_ref(), FrameAccessMode::Read)?;
+        let result = meta_idx.search_from_root(bytes, FrameAccessMode::Read)?;
 
         let payload = match result {
             SearchResult::Found(_) => meta_idx.get_payload(result)?.ok_or_else(|| {

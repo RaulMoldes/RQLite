@@ -516,7 +516,9 @@ where
                     let overflow_pages =
                         self.acquire_overflow_chain(start, required_size, initial_bytes)?;
                     let content = self.reassemble_payload(&cell, &overflow_pages);
-
+                    if mid == Slot(0) {
+                        println!("SEARCHING FOR cero ");
+                    };
                     // The key content is always the first bytes of the cell
                     match self.comparator.compare(search_key, content.as_ref())? {
                         Ordering::Equal => {

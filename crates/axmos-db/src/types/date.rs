@@ -1,48 +1,47 @@
-//! Implementation of the date type was moved here to not put so much boilerplate code on the sized_types module.
-use crate::repr_enum;
+//! Date type for Axmos.
+//!
+//! Represents a date as days since Unix epoch (1970-01-01).
 
+use crate::{impl_numeric_marker, integer, scalar};
 use std::cmp::{Ord, PartialOrd};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MONTH_DAYS: [u16; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
 /// Check if this year is a leap year
 pub(crate) const fn is_leap_year(year: u32) -> bool {
-    (year.is_multiple_of(4) && year.is_multiple_of(100)) || (year.is_multiple_of(400))
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 // Helper to convert year-month-day to days since epoch
 pub(crate) const fn ymd_to_days(year: u32, month: u8, day: u8) -> u32 {
-    // Algorithm based on the Gregorian calendar
     let y = year as i32;
     let m = month as i32;
     let d = day as i32;
 
-    // Adjust months so March is month 0, January and February are months 10 and 11
     let adjusted_m = if m <= 2 { m + 9 } else { m - 3 };
     let adjusted_y = if m <= 2 { y - 1 } else { y };
 
-    // Calculate days using the formula
     let era = adjusted_y / 400;
-    let yoe = adjusted_y - era * 400; // [0, 399]
-    let doy = (153 * adjusted_m + 2) / 5 + d - 1; // [0, 365]
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    let yoe = adjusted_y - era * 400;
+    let doy = (153 * adjusted_m + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
 
     let total_days = era * 146097 + doe - 719468;
-
-    // Convert to days since Unix epoch (1970-01-01 = 719162 days from 0000-03-01)
     (total_days - 719162) as u32
 }
 
-// Days since Unix epoch (1970-01-01)
-// This allows us to represent dates from approximately year -5877641 to year 5881580
-// Using u32 for storage efficiency (4 bytes)
-crate::integer! {
+// Days since Unix epoch
+integer! {
     pub struct Date(u32);
 }
 
+// Mark Date as numeric
+impl_numeric_marker!(Date);
+
 // Duration in days
-crate::scalar! {
+scalar! {
     pub struct Days(u32);
 }
 
@@ -56,33 +55,80 @@ impl Days {
     }
 }
 
-repr_enum! {
-    /// Month of the year
-    pub enum Month {
-        January = 1 => ("January", "Jan"),
-        February = 2 => ("February", "Feb"),
-        March = 3 => ("March", "Mar"),
-        April = 4 => ("April", "Apr"),
-        May = 5 => ("May", "May"),
-        June = 6 => ("June", "Jun"),
-        July = 7 => ("July", "Jul"),
-        August = 8 => ("August", "Aug"),
-        September = 9 => ("September", "Sep"),
-        October = 10 => ("October", "Oct"),
-        November = 11 => ("November", "Nov"),
-        December = 12 => ("December", "Dec"),
-    }
+/// Month of the year
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum Month {
+    January = 1,
+    February = 2,
+    March = 3,
+    April = 4,
+    May = 5,
+    June = 6,
+    July = 7,
+    August = 8,
+    September = 9,
+    October = 10,
+    November = 11,
+    December = 12,
 }
 
 impl Month {
+    pub fn from_repr(value: u8) -> Result<Self, ()> {
+        match value {
+            1 => Ok(Month::January),
+            2 => Ok(Month::February),
+            3 => Ok(Month::March),
+            4 => Ok(Month::April),
+            5 => Ok(Month::May),
+            6 => Ok(Month::June),
+            7 => Ok(Month::July),
+            8 => Ok(Month::August),
+            9 => Ok(Month::September),
+            10 => Ok(Month::October),
+            11 => Ok(Month::November),
+            12 => Ok(Month::December),
+            _ => Err(()),
+        }
+    }
+
+    pub const fn as_repr(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_u8(value: u8) -> Option<Self> {
+        Self::from_repr(value).ok()
+    }
+
+    pub const fn as_u8(self) -> u8 {
+        self.as_repr()
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Month::January => "January",
+            Month::February => "February",
+            Month::March => "March",
+            Month::April => "April",
+            Month::May => "May",
+            Month::June => "June",
+            Month::July => "July",
+            Month::August => "August",
+            Month::September => "September",
+            Month::October => "October",
+            Month::November => "November",
+            Month::December => "December",
+        }
+    }
+
     fn days_in_month(&self, year: u32) -> u8 {
         match self {
             Self::January => 31,
             Self::February => {
-                if !is_leap_year(year) {
-                    28
-                } else {
+                if is_leap_year(year) {
                     29
+                } else {
+                    28
                 }
             }
             Self::March => 31,
@@ -99,32 +145,39 @@ impl Month {
     }
 }
 
-repr_enum! {
-    /// Month of the year
-    pub enum Weekday {
-        Monday = 1 => ("Monday", "Mon"),
-        Tuesday = 2 => ("Tuesday", "Tue"),
-        Wednesday = 3 => ("Wednesday", "Wed"),
-        Thursday = 4 => ("Thursday", "Thu"),
-        Friday = 5 => ("Friday", "Fri"),
-        Saturday = 6 => ("Saturday", "Sat"),
-        Sunday = 7 => ("Sunday", "Sun"),
-    }
-}
-
-impl Month {
-    pub fn from_u8(value: u8) -> Option<Self> {
-        Month::from_repr(value).ok()
-    }
-
-    pub const fn as_u8(self) -> u8 {
-        self.as_repr()
-    }
+/// Day of the week
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum Weekday {
+    Monday = 1,
+    Tuesday = 2,
+    Wednesday = 3,
+    Thursday = 4,
+    Friday = 5,
+    Saturday = 6,
+    Sunday = 7,
 }
 
 impl Weekday {
+    pub fn from_repr(value: u8) -> Result<Self, ()> {
+        match value {
+            1 => Ok(Weekday::Monday),
+            2 => Ok(Weekday::Tuesday),
+            3 => Ok(Weekday::Wednesday),
+            4 => Ok(Weekday::Thursday),
+            5 => Ok(Weekday::Friday),
+            6 => Ok(Weekday::Saturday),
+            7 => Ok(Weekday::Sunday),
+            _ => Err(()),
+        }
+    }
+
+    pub const fn as_repr(self) -> u8 {
+        self as u8
+    }
+
     pub fn from_u8(value: u8) -> Option<Self> {
-        Weekday::from_repr(value).ok()
+        Self::from_repr(value).ok()
     }
 
     pub const fn as_u8(self) -> u8 {
@@ -132,7 +185,7 @@ impl Weekday {
     }
 
     fn is_weekend(&self) -> bool {
-        matches!(self, Weekday::Saturday) || matches!(self, Weekday::Sunday)
+        matches!(self, Weekday::Saturday | Weekday::Sunday)
     }
 }
 
@@ -147,13 +200,12 @@ impl Date {
     pub const MAX: Self = Self(u32::MAX);
 
     /// Create a new Date from year, month, and day
-    pub(crate) fn new(year: u32, month: u8, day: u8) -> Self {
+    pub fn new(year: u32, month: u8, day: u8) -> Self {
         debug_assert!(
             year > 0 && month > 0 && month <= 12 && day > 0 && day <= 31,
             "Invalid date format {year}-{month}-{day}"
         );
 
-        // Validate day is within month bounds
         let month_value = Month::from_u8(month).unwrap();
         debug_assert!(
             day <= month_value.days_in_month(year),
@@ -167,17 +219,17 @@ impl Date {
     }
 
     /// Create a Date from days since Unix epoch
-    pub(crate) fn from_days(days: u32) -> Self {
+    pub fn from_days(days: u32) -> Self {
         Self(days)
     }
 
     /// Get the number of days since Unix epoch
-    pub(crate) fn days(self) -> u32 {
+    pub fn days(self) -> u32 {
         self.0
     }
 
     /// Create today's date
-    pub(crate) fn today() -> Self {
+    pub fn today() -> Self {
         let today = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
@@ -186,7 +238,7 @@ impl Date {
     }
 
     /// Parse from ISO 8601 format (YYYY-MM-DD)
-    pub(crate) fn parse_iso(s: &str) -> Result<Self, String> {
+    pub fn parse_iso(s: &str) -> Result<Self, String> {
         let parts: Vec<&str> = s.split('-').collect();
         if parts.len() != 3 {
             return Err(format!("Invalid date format: {s}"));
@@ -206,13 +258,13 @@ impl Date {
     }
 
     /// Format as ISO 8601 (YYYY-MM-DD)
-    pub(crate) fn to_iso_string(self) -> String {
+    pub fn to_iso_string(self) -> String {
         let (year, month, day) = self.yyyy_mm_dd();
         format!("{year:04}-{month:02}-{day:02}")
     }
 
     /// Get the year
-    pub(crate) fn year(self) -> u32 {
+    pub fn year(self) -> u32 {
         self.yyyy_mm_dd().0
     }
 
@@ -222,34 +274,31 @@ impl Date {
     }
 
     /// Get the day of the month
-    pub(crate) fn day(self) -> u8 {
+    pub fn day(self) -> u8 {
         self.yyyy_mm_dd().2
     }
 
     /// Convert days since epoch back into (year, month, day)
-    pub(crate) fn yyyy_mm_dd(self) -> (u32, u8, u8) {
-        // Algorithm adapted from Howard Hinnant’s date algorithms
-        // https://howardhinnant.github.io/date/date.html
+    pub fn yyyy_mm_dd(self) -> (u32, u8, u8) {
         let days = self.0 as i32 + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-        let doe = days - era * 146_097; // [0, 146096]
-        let yoe = (4000 * (doe + 1)) / 1_461_001; // [0, 399]
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-        let mp = (5 * doy + 2) / 153; // [0, 11]
-        let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-        let month = mp + if mp < 10 { 3 } else { -9 }; // [1, 12]
+        let doe = days - era * 146_097;
+        let yoe = (4000 * (doe + 1)) / 1_461_001;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = mp + if mp < 10 { 3 } else { -9 };
         let year = era * 400 + yoe + if month <= 2 { 1 } else { 0 };
         (year as u32, month as u8, day as u8)
     }
 
     /// Calculate day of the week (Monday = 1 … Sunday = 7)
-    pub(crate) fn weekday(self) -> Weekday {
-        // 1970-01-01 was a Thursday
+    pub fn weekday(self) -> Weekday {
         let weekday_num = ((self.0 + 4) % 7) + 1;
         Weekday::from_u8(weekday_num as u8).unwrap()
     }
 
-    pub(crate) fn day_of_year(self) -> u16 {
+    pub fn day_of_year(self) -> u16 {
         let (year, month, day) = self.yyyy_mm_dd();
         let month_days = MONTH_DAYS;
         let mut total = day as u16;
@@ -266,17 +315,14 @@ impl Date {
 
     /// Get the ISO week number (1-53)
     pub fn iso_week(self) -> u8 {
-        // This is a simplified version. Full ISO week calculation is complex
         let day_of_year = self.day_of_year();
         let weekday = self.weekday() as u8;
-
-        // Adjust for weeks starting on Monday
         let week = (day_of_year + 10 - weekday as u16) / 7;
         week.clamp(1, 53) as u8
     }
 
     /// Check if this date's year is a leap year
-    pub(crate) fn is_leap_year(self) -> bool {
+    pub fn is_leap_year(self) -> bool {
         is_leap_year(self.year())
     }
 

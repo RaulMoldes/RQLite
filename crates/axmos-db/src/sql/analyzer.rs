@@ -963,7 +963,7 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "SELECT name, (SELECT COUNT(*) FROM orders WHERE user_id = users.id) FROM users",
+            "SELECT name,(SELECT COUNT(*) FROM orders WHERE user_id = users.id) FROM users",
             &db,
         );
         assert!(result.is_ok());

@@ -70,8 +70,11 @@ impl Comparator for VarlenComparator {
                 let lhs_chunk = &left_data[i * 8..(i + 1) * 8];
                 let rhs_chunk = &right_data[i * 8..(i + 1) * 8];
 
-                let lhs_u64 = u64::from_ne_bytes(lhs_chunk.try_into().unwrap());
-                let rhs_u64 = u64::from_ne_bytes(rhs_chunk.try_into().unwrap());
+                // Ahhh yes.. overnight bugs.
+                // [from_ne_bytes] does not preserve lexicographical ordering of strings.
+                // for correctness we use [from_be_bytes]
+                let lhs_u64 = u64::from_be_bytes(lhs_chunk.try_into().unwrap());
+                let rhs_u64 = u64::from_be_bytes(rhs_chunk.try_into().unwrap());
 
                 match lhs_u64.cmp(&rhs_u64) {
                     Ordering::Equal => continue,

@@ -126,17 +126,17 @@ impl Parser {
                         ))
                     }
                 }
-                // Check for function call
-                // Check for function call
+                // CHECK FOR FUNCTION CALLS OR NESTED SUBQUERIES.
                 else if self.current_token == Token::LParen {
                     self.next_token();
 
                     // Check if this is a subquery (SELECT inside parentheses)
-                    if self.current_token == Token::Select {
+                    // This should be handled at the parse_prefix level.
+                    /* if self.current_token == Token::Select {
                         let subquery = self.parse_select_statement()?;
                         self.expect(Token::RParen)?;
                         return Ok(Expr::Subquery(Box::new(subquery)));
-                    }
+                    }*/
 
                     // Check for DISTINCT in aggregate functions
                     let distinct = self.consume_if(&Token::Distinct);
@@ -159,15 +159,22 @@ impl Parser {
                         args,
                         distinct,
                     })
-                } else if self.current_token == Token::Comma {
-                    self.next_token();
-                    Ok(Expr::Identifier(name))
+                /*} else if self.current_token == Token::Comma { CONSUMING THE COMMA TOKEN HERE WAS BREAKING THE COLUMN LIST PARSING
+                self.next_token();
+                Ok(Expr::Identifier(name))*/
                 } else {
                     Ok(Expr::Identifier(name))
                 }
             }
             Token::LParen => {
                 self.next_token();
+
+                // Check if this is a subquery (SELECT inside parentheses)
+                if self.current_token == Token::Select {
+                    let subquery = self.parse_select_statement()?;
+                    self.expect(Token::RParen)?;
+                    return Ok(Expr::Subquery(Box::new(subquery)));
+                }
 
                 let mut exprs = Vec::new();
                 loop {
@@ -1225,6 +1232,21 @@ impl Parser {
             None
         };
 
+        // Parse OFFSET clause
+        let offset = if self.consume_if(&Token::Offset) {
+            if let Token::NumberLiteral(n) = self.current_token {
+                let offset_val = n as usize;
+                self.next_token();
+                Some(offset_val)
+            } else {
+                return Err(ParserError::InvalidExpression(
+                    "expected number after OFFSET".to_string(),
+                ));
+            }
+        } else {
+            None
+        };
+
         Ok(SelectStatement {
             distinct,
             columns,
@@ -1234,6 +1256,7 @@ impl Parser {
             having,
             order_by,
             limit,
+            offset,
         })
     }
 

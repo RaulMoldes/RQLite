@@ -17,6 +17,7 @@ sql_test!(
         having: None,
         order_by: vec![],
         limit: None,
+        offset: None
     })
 );
 
@@ -39,6 +40,7 @@ sql_test!(
         having: None,
         order_by: vec![],
         limit: None,
+        offset: None
     })
 );
 
@@ -69,6 +71,7 @@ sql_test!(
         having: None,
         order_by: vec![],
         limit: None,
+        offset: None
     })
 );
 
@@ -89,7 +92,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -110,7 +114,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -135,7 +140,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -163,7 +169,8 @@ sql_test!(
         group_by: vec![Expr::Identifier("col2".to_string())],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -199,7 +206,8 @@ sql_test!(
             right: Box::new(Expr::Number(1.0))
         }),
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -221,7 +229,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -250,7 +259,8 @@ sql_test!(
             expr: Expr::Identifier("col1".to_string()),
             asc: true
         }],
-        limit: Some(100)
+        limit: Some(100),
+        offset: None
     })
 );
 
@@ -279,7 +289,8 @@ sql_test!(
             expr: Expr::Identifier("col1".to_string()),
             asc: false
         }],
-        limit: Some(100)
+        limit: Some(100),
+        offset: None
     })
 );
 
@@ -323,7 +334,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -367,7 +379,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -411,7 +424,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -455,7 +469,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -499,7 +514,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -543,7 +559,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -605,7 +622,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -627,7 +645,8 @@ sql_test!(
                 group_by: vec![],
                 having: None,
                 order_by: vec![],
-                limit: None
+                limit: None,
+                offset: None
             }
         )],
         body: Box::new(SelectStatement {
@@ -641,7 +660,8 @@ sql_test!(
             group_by: vec![],
             having: None,
             order_by: vec![],
-            limit: None
+            limit: None,
+            offset: None
         })
     })
 );
@@ -665,7 +685,8 @@ sql_test!(
                     group_by: vec![],
                     having: None,
                     order_by: vec![],
-                    limit: None
+                    limit: None,
+                    offset: None
                 }
             ),
             (
@@ -681,7 +702,8 @@ sql_test!(
                     group_by: vec![],
                     having: None,
                     order_by: vec![],
-                    limit: None
+                    limit: None,
+                    offset: None
                 }
             )
         ],
@@ -708,7 +730,8 @@ sql_test!(
             group_by: vec![],
             having: None,
             order_by: vec![],
-            limit: None
+            limit: None,
+            offset: None
         })
     })
 );
@@ -743,7 +766,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -785,7 +809,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -808,7 +833,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -834,7 +860,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -869,13 +896,15 @@ sql_test!(
                 group_by: vec![],
                 having: None,
                 order_by: vec![],
-                limit: None
+                limit: None,
+                offset: None
             })))
         }),
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -913,12 +942,14 @@ sql_test!(
             group_by: vec![],
             having: None,
             order_by: vec![],
-            limit: None
+            limit: None,
+            offset: None
         }))),
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -940,7 +971,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -962,7 +994,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -984,7 +1017,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1013,7 +1047,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1042,7 +1077,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1067,7 +1103,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1091,7 +1128,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1112,7 +1150,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1133,7 +1172,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1154,7 +1194,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1179,7 +1220,8 @@ sql_test!(
                 group_by: vec![],
                 having: None,
                 order_by: vec![],
-                limit: None
+                limit: None,
+                offset: None
             }),
             alias: "u".to_string()
         }),
@@ -1187,7 +1229,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1209,7 +1252,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1231,7 +1275,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1253,7 +1298,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1275,7 +1321,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 sql_test!(
@@ -1299,7 +1346,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1324,7 +1372,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1383,7 +1432,8 @@ sql_test!(
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1410,7 +1460,8 @@ sql_test!(
                 asc: false
             }
         ],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1435,7 +1486,8 @@ sql_test!(
             },
             asc: false
         }],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1473,7 +1525,8 @@ sql_test!(
         ],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1512,7 +1565,8 @@ sql_test!(
         }],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );
 
@@ -1534,7 +1588,8 @@ sql_test!(
                 group_by: vec![],
                 having: None,
                 order_by: vec![],
-                limit: None
+                limit: None,
+                offset: None
             }
         )],
         body: Box::new(SelectStatement {
@@ -1548,7 +1603,8 @@ sql_test!(
             group_by: vec![],
             having: None,
             order_by: vec![],
-            limit: None
+            limit: None,
+            offset: None
         })
     })
 );
@@ -1582,7 +1638,8 @@ sql_test!(
                     group_by: vec![],
                     having: None,
                     order_by: vec![],
-                    limit: None
+                    limit: None,
+                    offset: None
                 }
             ),
             (
@@ -1602,7 +1659,8 @@ sql_test!(
                     group_by: vec![],
                     having: None,
                     order_by: vec![],
-                    limit: None
+                    limit: None,
+                    offset: None
                 }
             )
         ],
@@ -1625,7 +1683,7 @@ sql_test!(
                         }],
                         distinct: false
                     },
-                    alias: None
+                    alias: None,
                 }
             ],
             from: Some(TableReference::Join {
@@ -1657,7 +1715,8 @@ sql_test!(
             }],
             having: None,
             order_by: vec![],
-            limit: None
+            limit: None,
+            offset: None
         })
     })
 );
@@ -1706,18 +1765,21 @@ sql_test!(
                         group_by: vec![],
                         having: None,
                         order_by: vec![],
-                        limit: None
+                        limit: None,
+                        offset: None
                     })))
                 }),
                 group_by: vec![],
                 having: None,
                 order_by: vec![],
-                limit: None
+                limit: None,
+                offset: None
             })))
         }),
         group_by: vec![],
         having: None,
         order_by: vec![],
-        limit: None
+        limit: None,
+        offset: None
     })
 );

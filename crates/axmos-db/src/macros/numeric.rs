@@ -1,11 +1,13 @@
+//! Macros for defining Axmos numeric types.
+//!
+//! These macros generate wrapper types with full trait implementations
+//! including `AxmosValueType` for integration with the derive macro system.
+
 /// Macro to implement arithmetic operations for numeric types
-/// Can implement operations between the wrapper and itself, or between wrapper and another type
 #[macro_export]
 macro_rules! arith {
-    // Entry point for implementing ops between wrapper and itself
     ($($wrapper:ident, $inner:ty),+ $(,)?) => {
         $(
-            // Binary operations between wrapper instances
             impl std::ops::Add for $wrapper {
                 type Output = Self;
                 fn add(self, rhs: Self) -> Self::Output {
@@ -41,7 +43,6 @@ macro_rules! arith {
                 }
             }
 
-            // Assignment operations between wrapper instances
             impl std::ops::AddAssign for $wrapper {
                 fn add_assign(&mut self, rhs: Self) {
                     self.0 += rhs.0;
@@ -72,138 +73,135 @@ macro_rules! arith {
                 }
             }
 
-
-
             impl std::ops::Add<$inner> for $wrapper {
-            type Output = $wrapper;
-            fn add(self, rhs: $inner) -> Self::Output {
-                $wrapper(self.0 + rhs)
+                type Output = $wrapper;
+                fn add(self, rhs: $inner) -> Self::Output {
+                    $wrapper(self.0 + rhs)
+                }
             }
-        }
 
-        impl std::ops::Sub<$inner> for $wrapper {
-            type Output = $wrapper;
-            fn sub(self, rhs: $inner) -> Self::Output {
-                $wrapper(self.0 - rhs)
+            impl std::ops::Sub<$inner> for $wrapper {
+                type Output = $wrapper;
+                fn sub(self, rhs: $inner) -> Self::Output {
+                    $wrapper(self.0 - rhs)
+                }
             }
-        }
 
-        impl std::ops::Mul<$inner> for $wrapper {
-            type Output = $wrapper;
-            fn mul(self, rhs: $inner) -> Self::Output {
-                $wrapper(self.0 * rhs)
+            impl std::ops::Mul<$inner> for $wrapper {
+                type Output = $wrapper;
+                fn mul(self, rhs: $inner) -> Self::Output {
+                    $wrapper(self.0 * rhs)
+                }
             }
-        }
 
-        impl std::ops::Div<$inner> for $wrapper {
-            type Output = $wrapper;
-            fn div(self, rhs: $inner) -> Self::Output {
-                $wrapper(self.0 / rhs)
+            impl std::ops::Div<$inner> for $wrapper {
+                type Output = $wrapper;
+                fn div(self, rhs: $inner) -> Self::Output {
+                    $wrapper(self.0 / rhs)
+                }
             }
-        }
 
-        impl std::ops::Rem<$inner> for $wrapper {
-            type Output = $wrapper;
-            fn rem(self, rhs: $inner) -> Self::Output {
-                $wrapper(self.0 % rhs)
+            impl std::ops::Rem<$inner> for $wrapper {
+                type Output = $wrapper;
+                fn rem(self, rhs: $inner) -> Self::Output {
+                    $wrapper(self.0 % rhs)
+                }
             }
-        }
 
-        impl std::ops::AddAssign<$inner> for $wrapper {
-            fn add_assign(&mut self, rhs: $inner) {
-                self.0 += rhs;
+            impl std::ops::AddAssign<$inner> for $wrapper {
+                fn add_assign(&mut self, rhs: $inner) {
+                    self.0 += rhs;
+                }
             }
-        }
 
-        impl std::ops::SubAssign<$inner> for $wrapper {
-            fn sub_assign(&mut self, rhs: $inner) {
-                self.0 -= rhs;
+            impl std::ops::SubAssign<$inner> for $wrapper {
+                fn sub_assign(&mut self, rhs: $inner) {
+                    self.0 -= rhs;
+                }
             }
-        }
 
-        impl std::ops::MulAssign<$inner> for $wrapper {
-            fn mul_assign(&mut self, rhs: $inner) {
-                self.0 *= rhs;
+            impl std::ops::MulAssign<$inner> for $wrapper {
+                fn mul_assign(&mut self, rhs: $inner) {
+                    self.0 *= rhs;
+                }
             }
-        }
 
-        impl std::ops::DivAssign<$inner> for $wrapper {
-            fn div_assign(&mut self, rhs: $inner) {
-                self.0 /= rhs;
+            impl std::ops::DivAssign<$inner> for $wrapper {
+                fn div_assign(&mut self, rhs: $inner) {
+                    self.0 /= rhs;
+                }
             }
-        }
 
-        impl std::ops::RemAssign<$inner> for $wrapper {
-            fn rem_assign(&mut self, rhs: $inner) {
-                self.0 %= rhs;
+            impl std::ops::RemAssign<$inner> for $wrapper {
+                fn rem_assign(&mut self, rhs: $inner) {
+                    self.0 %= rhs;
+                }
             }
-        }
 
-
-        impl std::ops::Add<usize> for $wrapper {
-            type Output = $wrapper;
-            fn add(self, rhs: usize) -> Self::Output {
-                $wrapper(self.0 + rhs as $inner)
+            impl std::ops::Add<usize> for $wrapper {
+                type Output = $wrapper;
+                fn add(self, rhs: usize) -> Self::Output {
+                    $wrapper(self.0 + rhs as $inner)
+                }
             }
-        }
 
-        impl std::ops::Sub<usize> for $wrapper {
-            type Output = $wrapper;
-            fn sub(self, rhs: usize) -> Self::Output {
-                $wrapper(self.0 - rhs as $inner)
+            impl std::ops::Sub<usize> for $wrapper {
+                type Output = $wrapper;
+                fn sub(self, rhs: usize) -> Self::Output {
+                    $wrapper(self.0 - rhs as $inner)
+                }
             }
-        }
 
-        impl std::ops::Mul<usize> for $wrapper {
-            type Output = $wrapper;
-            fn mul(self, rhs: usize) -> Self::Output {
-                $wrapper(self.0 * rhs as $inner)
+            impl std::ops::Mul<usize> for $wrapper {
+                type Output = $wrapper;
+                fn mul(self, rhs: usize) -> Self::Output {
+                    $wrapper(self.0 * rhs as $inner)
+                }
             }
-        }
 
-        impl std::ops::Div<usize> for $wrapper {
-            type Output = $wrapper;
-            fn div(self, rhs: usize) -> Self::Output {
-                $wrapper(self.0 / rhs as $inner)
+            impl std::ops::Div<usize> for $wrapper {
+                type Output = $wrapper;
+                fn div(self, rhs: usize) -> Self::Output {
+                    $wrapper(self.0 / rhs as $inner)
+                }
             }
-        }
 
-        impl std::ops::Rem<usize> for $wrapper {
-            type Output = $wrapper;
-            fn rem(self, rhs: usize) -> Self::Output {
-                $wrapper(self.0 % rhs as $inner)
+            impl std::ops::Rem<usize> for $wrapper {
+                type Output = $wrapper;
+                fn rem(self, rhs: usize) -> Self::Output {
+                    $wrapper(self.0 % rhs as $inner)
+                }
             }
-        }
 
-        impl std::ops::AddAssign<usize> for $wrapper {
-            fn add_assign(&mut self, rhs: usize) {
-                self.0 += rhs as $inner;
+            impl std::ops::AddAssign<usize> for $wrapper {
+                fn add_assign(&mut self, rhs: usize) {
+                    self.0 += rhs as $inner;
+                }
             }
-        }
 
-        impl std::ops::SubAssign<usize> for $wrapper {
-            fn sub_assign(&mut self, rhs: usize) {
-                self.0 -= rhs as $inner;
+            impl std::ops::SubAssign<usize> for $wrapper {
+                fn sub_assign(&mut self, rhs: usize) {
+                    self.0 -= rhs as $inner;
+                }
             }
-        }
 
-        impl std::ops::MulAssign<usize> for $wrapper {
-            fn mul_assign(&mut self, rhs: usize) {
-                self.0 *= rhs as $inner;
+            impl std::ops::MulAssign<usize> for $wrapper {
+                fn mul_assign(&mut self, rhs: usize) {
+                    self.0 *= rhs as $inner;
+                }
             }
-        }
 
-        impl std::ops::DivAssign<usize> for $wrapper {
-            fn div_assign(&mut self, rhs: usize) {
-                self.0 /= rhs as $inner;
+            impl std::ops::DivAssign<usize> for $wrapper {
+                fn div_assign(&mut self, rhs: usize) {
+                    self.0 /= rhs as $inner;
+                }
             }
-        }
 
-        impl std::ops::RemAssign<usize> for $wrapper {
-            fn rem_assign(&mut self, rhs: usize) {
-                self.0 %= rhs as $inner;
+            impl std::ops::RemAssign<usize> for $wrapper {
+                fn rem_assign(&mut self, rhs: usize) {
+                    self.0 %= rhs as $inner;
+                }
             }
-        }
         )+
     };
 }
@@ -269,8 +267,6 @@ macro_rules! numeric {
 macro_rules! impl_ref {
     ($wrapper:ident, $inner:ty) => {
         paste::paste! {
-
-            // Immutable reference type
             #[repr(transparent)]
             pub struct [<$wrapper Ref>]<'a> {
                 pub bytes: &'a [u8; std::mem::size_of::<$inner>()],
@@ -278,7 +274,6 @@ macro_rules! impl_ref {
 
             impl<'a> [<$wrapper Ref>]<'a> {
                 pub const SIZE: usize = std::mem::size_of::<$inner>();
-
 
                 pub fn from_bytes(bytes: &'a [u8]) -> std::io::Result<Self> {
                     use std::io::{Error, ErrorKind};
@@ -289,7 +284,8 @@ macro_rules! impl_ref {
 
                     let ptr = bytes.as_ptr();
                     let bytes = unsafe {
-                        &*(std::ptr::slice_from_raw_parts(ptr, Self::SIZE) as *const [u8; std::mem::size_of::<$inner>()])
+                        &*(std::ptr::slice_from_raw_parts(ptr, Self::SIZE)
+                            as *const [u8; std::mem::size_of::<$inner>()])
                     };
 
                     Ok(Self { bytes })
@@ -305,7 +301,6 @@ macro_rules! impl_ref {
                     $wrapper(self.get())
                 }
             }
-
 
             impl<'a> TryFrom<&'a [u8]> for [<$wrapper Ref>]<'a> {
                 type Error = std::io::Error;
@@ -363,6 +358,19 @@ macro_rules! impl_ref {
                 }
             }
 
+            // Implement AxmosValueTypeRef
+            impl<'a> $crate::types::core::AxmosValueTypeRef<'a> for [<$wrapper Ref>]<'a> {
+                type Owned = $wrapper;
+
+                fn to_owned(&self) -> Self::Owned {
+                    [<$wrapper Ref>]::to_owned(self)
+                }
+
+                fn as_bytes(&self) -> &[u8] {
+                    self.bytes
+                }
+            }
+
             // Mutable reference type
             #[repr(transparent)]
             pub struct [<$wrapper RefMut>]<'a> {
@@ -381,7 +389,8 @@ macro_rules! impl_ref {
 
                     let ptr = bytes.as_mut_ptr();
                     let bytes = unsafe {
-                        &mut *(std::ptr::slice_from_raw_parts_mut(ptr, Self::SIZE) as *mut [u8; std::mem::size_of::<$inner>()])
+                        &mut *(std::ptr::slice_from_raw_parts_mut(ptr, Self::SIZE)
+                            as *mut [u8; std::mem::size_of::<$inner>()])
                     };
 
                     Ok(Self { bytes })
@@ -396,7 +405,6 @@ macro_rules! impl_ref {
                 pub fn to_owned(&self) -> $wrapper {
                     $wrapper(self.get())
                 }
-
 
                 #[inline]
                 pub fn set(&mut self, value: $inner) {
@@ -419,7 +427,6 @@ macro_rules! impl_ref {
                 }
             }
 
-
             impl<'a> std::ops::AddAssign<$inner> for [<$wrapper RefMut>]<'a> {
                 fn add_assign(&mut self, rhs: $inner) {
                     self.update(|v| v + rhs);
@@ -431,7 +438,6 @@ macro_rules! impl_ref {
                     self.bytes
                 }
             }
-
 
             impl<'a> AsMut<[u8]> for [<$wrapper RefMut>]<'a> {
                 fn as_mut(&mut self) -> &mut [u8] {
@@ -463,7 +469,6 @@ macro_rules! impl_ref {
                 }
             }
 
-            // Assignment from wrapper type
             impl<'a> std::ops::AddAssign<$wrapper> for [<$wrapper RefMut>]<'a> {
                 fn add_assign(&mut self, rhs: $wrapper) {
                     self.update(|v| v + rhs.0);
@@ -493,7 +498,6 @@ macro_rules! impl_ref {
                     self.update(|v| v % rhs.0);
                 }
             }
-
 
             impl<'a> TryFrom<&'a mut [u8]> for [<$wrapper RefMut>]<'a> {
                 type Error = std::io::Error;
@@ -543,6 +547,57 @@ macro_rules! impl_ref {
                 fn eq(&self, other: &Self) -> bool {
                     self.get() == other.get()
                 }
+            }
+
+            // Implement AxmosValueTypeRefMut
+            impl<'a> $crate::types::core::AxmosValueTypeRefMut<'a> for [<$wrapper RefMut>]<'a> {
+                type Owned = $wrapper;
+
+                fn to_owned(&self) -> Self::Owned {
+                    [<$wrapper RefMut>]::to_owned(self)
+                }
+
+                fn as_bytes(&self) -> &[u8] {
+                    self.bytes
+                }
+
+                fn as_bytes_mut(&mut self) -> &mut [u8] {
+                    self.bytes
+                }
+            }
+        }
+    };
+}
+
+/// Implements AxmosValueType for a fixed-size numeric wrapper type
+#[macro_export]
+macro_rules! impl_axmos_value_type_fixed {
+    ($wrapper:ident, $inner:ty, numeric = $is_numeric:expr) => {
+        paste::paste! {
+            impl $crate::types::core::AxmosValueType for $wrapper {
+                type Ref<'a> = [<$wrapper Ref>]<'a>;
+                type RefMut<'a> = [<$wrapper RefMut>]<'a>;
+
+                const FIXED_SIZE: Option<usize> = Some(std::mem::size_of::<$inner>());
+                const IS_NUMERIC: bool = $is_numeric;
+
+                fn reinterpret(buffer: &[u8]) -> std::io::Result<(Self::Ref<'_>, usize)> {
+                    let r = [<$wrapper Ref>]::from_bytes(buffer)?;
+                    Ok((r, Self::SIZE))
+                }
+
+                fn reinterpret_mut(buffer: &mut [u8]) -> std::io::Result<(Self::RefMut<'_>, usize)> {
+                    let r = [<$wrapper RefMut>]::from_bytes(buffer)?;
+                    Ok((r, Self::SIZE))
+                }
+
+                fn value_size(&self) -> usize {
+                    Self::SIZE
+                }
+            }
+
+            impl $crate::types::core::FixedSizeType for $wrapper {
+                const SIZE: usize = std::mem::size_of::<$inner>();
             }
         }
     };
@@ -627,10 +682,11 @@ macro_rules! scalar {
         $crate::numeric!($name, $inner);
         $crate::arith!($name, $inner);
         $crate::as_slice!($name);
-
     };
 }
 
+/// Defines an integer wrapper type with full trait implementations.
+/// Generates: owned type, Ref type, RefMut type, and AxmosValueType impl.
 #[macro_export]
 macro_rules! integer {
     (
@@ -646,11 +702,12 @@ macro_rules! integer {
         $crate::recast!($name, $inner);
         $crate::arith!($name, $inner);
         $crate::impl_ref!($name, $inner);
-
-
+        $crate::impl_axmos_value_type_fixed!($name, $inner, numeric = true);
     };
 }
 
+/// Defines a float wrapper type with full trait implementations.
+/// Generates: owned type, Ref type, RefMut type, and AxmosValueType impl.
 #[macro_export]
 macro_rules! float {
     (
@@ -666,7 +723,16 @@ macro_rules! float {
         $crate::recast!($name, $inner);
         $crate::arith!($name, $inner);
         $crate::impl_ref!($name, $inner);
+        $crate::impl_axmos_value_type_fixed!($name, $inner, numeric = true);
+    };
+}
 
-
+/// Marker trait implementation for numeric types
+#[macro_export]
+macro_rules! impl_numeric_marker {
+    ($($wrapper:ident),+ $(,)?) => {
+        $(
+            impl $crate::types::core::NumericType for $wrapper {}
+        )+
     };
 }

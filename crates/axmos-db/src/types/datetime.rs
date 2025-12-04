@@ -1,18 +1,25 @@
+//! DateTime type for Axmos.
+//!
+//! Represents a date and time as seconds since Unix epoch.
+
 use crate::types::date::Date;
+use crate::{impl_numeric_marker, integer, scalar};
 use std::cmp::{Ord, PartialOrd};
 use std::fmt::{self, Display};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Represents a date and time (UTC-based)
-crate::integer! {
+integer! {
     pub struct DateTime(u64);
 }
 
-// Duration in seconds
-crate::scalar! {
-    pub struct Seconds(u64);
+// Mark DateTime as numeric
+impl_numeric_marker!(DateTime);
 
+// Duration in seconds
+scalar! {
+    pub struct Seconds(u64);
 }
 
 impl Seconds {
@@ -34,7 +41,7 @@ pub struct TimeOfDay {
 }
 
 impl TimeOfDay {
-    pub(crate) fn new(hour: u8, minute: u8, second: u8) -> Self {
+    pub fn new(hour: u8, minute: u8, second: u8) -> Self {
         debug_assert!(
             hour < 24 && minute < 60 && second < 60,
             "Invalid datetime format! {hour}hh-{minute}mm-{second}ss",
@@ -46,11 +53,11 @@ impl TimeOfDay {
         }
     }
 
-    pub(crate) fn as_seconds(self) -> u32 {
+    pub fn as_seconds(self) -> u32 {
         (self.hour as u32 * 3600) + (self.minute as u32 * 60) + self.second as u32
     }
 
-    pub(crate) fn from_seconds(seconds: u32) -> Self {
+    pub fn from_seconds(seconds: u32) -> Self {
         let hour = (seconds / 3600) as u8;
         let minute = ((seconds % 3600) / 60) as u8;
         let second = (seconds % 60) as u8;
@@ -92,12 +99,12 @@ impl DateTime {
 
     /// Extract time portion
     pub fn time(self) -> TimeOfDay {
-        let seconds_in_day = (self.0.rem_euclid(86_400)) as u32;
+        let seconds_in_day = (self.0 % 86_400) as u32;
         TimeOfDay::from_seconds(seconds_in_day)
     }
 
     /// Create from components
-    pub(crate) fn new(year: u32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> Self {
+    pub fn new(year: u32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> Self {
         let date = Date::new(year, month, day);
         let time = TimeOfDay::new(hour, minute, second);
         Self::from_date_and_time(date, time)

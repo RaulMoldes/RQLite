@@ -4,7 +4,9 @@ use crate::{
     types::{DataType, DataTypeKind, ObjectId},
 };
 
-#[derive(Debug, Clone, PartialEq)]
+use std::fmt::{self, Display, Formatter, Result as FmtResult};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BoundColumnRef {
     pub table_idx: usize,
     pub column_idx: usize,
@@ -53,7 +55,7 @@ pub enum Function {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum BoundExpression {
+pub(crate) enum BoundExpression {
     ColumnRef(BoundColumnRef),
     Literal {
         value: DataType,
@@ -144,14 +146,117 @@ impl BoundExpression {
     }
 }
 
+impl Display for BoundExpression {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            BoundExpression::BinaryOp {
+                left, op, right, ..
+            } => write!(f, "{} {} {}", left, op, right),
+            BoundExpression::UnaryOp { op, expr, .. } => write!(f, "{}{}", op, expr),
+            BoundExpression::ColumnRef(col) => write!(f, "col[{}]", col.column_idx),
+            BoundExpression::Literal { value } => write!(f, "{}", value),
+            BoundExpression::IsNull { expr, negated } => {
+                if *negated {
+                    write!(f, "{} IS NOT NULL", expr)
+                } else {
+                    write!(f, "{} IS NULL", expr)
+                }
+            }
+            BoundExpression::Cast { expr, target_type } => {
+                write!(f, "{}::{}", expr, target_type)
+            }
+            BoundExpression::Function { func, args, .. } => {
+                let arg_strs: Vec<_> = args.iter().map(|a| a.to_string()).collect();
+                write!(f, "{:?}({})", func, arg_strs.join(", "))
+            }
+            BoundExpression::Aggregate {
+                func,
+                arg,
+                distinct,
+                ..
+            } => {
+                let arg_str = arg
+                    .as_ref()
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "*".to_string());
+                if *distinct {
+                    write!(f, "{:?}(DISTINCT {})", func, arg_str)
+                } else {
+                    write!(f, "{:?}({})", func, arg_str)
+                }
+            }
+            BoundExpression::Star => write!(f, "*"),
+            BoundExpression::Subquery { .. } => write!(f, "(subquery)"),
+            BoundExpression::InList { expr, negated, .. } => {
+                if *negated {
+                    write!(f, "{} NOT IN (...)", expr)
+                } else {
+                    write!(f, "{} IN (...)", expr)
+                }
+            }
+            BoundExpression::InSubquery { expr, negated, .. } => {
+                if *negated {
+                    write!(f, "{} NOT IN (subquery)", expr)
+                } else {
+                    write!(f, "{} IN (subquery)", expr)
+                }
+            }
+            BoundExpression::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => {
+                if *negated {
+                    write!(f, "{} NOT BETWEEN {} AND {}", expr, low, high)
+                } else {
+                    write!(f, "{} BETWEEN {} AND {}", expr, low, high)
+                }
+            }
+            BoundExpression::Exists { negated, .. } => {
+                if *negated {
+                    write!(f, "NOT EXISTS (subquery)")
+                } else {
+                    write!(f, "EXISTS (subquery)")
+                }
+            }
+            BoundExpression::Case { .. } => write!(f, "CASE...END"),
+        }
+    }
+}
+
+impl BoundExpression {
+    /// Helper to summarize expressions
+    pub fn summarize(&self, max_len: usize) -> String {
+        let result = match self {
+            BoundExpression::ColumnRef(col) => Some(format!("col[{}]", col.column_idx)),
+            BoundExpression::Literal { value } => Some(value.to_string()),
+            _ => None,
+        };
+
+        if let Some(str) = result {
+            return str;
+        };
+
+        // Fallback for non-marker types
+        let full = self.to_string();
+        if full.len() > max_len {
+            format!("{}...", &full[..max_len.saturating_sub(3)])
+        } else {
+            full
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundSelectItem {
     pub expr: BoundExpression,
     pub output_idx: usize,
+    pub output_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum BoundTableRef {
+pub(crate) enum BoundTableRef {
     BaseTable {
         table_id: ObjectId,
         schema: Schema,
@@ -192,7 +297,7 @@ pub struct BoundOrderBy {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundSelect {
+pub(crate) struct BoundSelect {
     pub distinct: bool,
     pub columns: Vec<BoundSelectItem>,
     pub from: Option<BoundTableRef>,

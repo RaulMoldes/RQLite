@@ -6,7 +6,7 @@
       "request": "launch",
       "name": "Debug Rust test (AxmosDB)",
       "program": "${workspaceFolder}/target/debug/deps/axmosdb-7cdfa5eb29efc589",
-      "args": ["--nocapture", "test_subquery_in_select_validated"],
+      "args": ["--nocapture", "test_deeply_nested_query"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {

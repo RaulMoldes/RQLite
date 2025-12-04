@@ -1,4 +1,6 @@
-use crate::{float, integer};
+//! Fixed-size numeric types
+
+use crate::{float, impl_numeric_marker, integer};
 
 integer! {
     pub struct Int8(i8);
@@ -40,10 +42,15 @@ float! {
     pub struct Float64(f64);
 }
 
+// Mark all numeric types
+impl_numeric_marker!(
+    Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64
+);
+
+// Additional UInt8 methods for character/boolean handling
 impl UInt8 {
     pub const TRUE: Self = Self(1);
     pub const FALSE: Self = Self(0);
-
     pub const NULL: Self = Self(b'\0');
     pub const MAX: Self = Self(0xFF);
     pub const REPLACEMENT: Self = Self(0x1A);
@@ -69,7 +76,7 @@ impl UInt8 {
     }
 
     pub fn is_whitespace(self) -> bool {
-        matches!(self.0, b' ' | b'\t' | b'\n' | b'\r' | 0x0C) // form feed
+        matches!(self.0, b' ' | b'\t' | b'\n' | b'\r' | 0x0C)
     }
 
     pub const fn is_lowercase(self) -> bool {
@@ -92,7 +99,6 @@ impl UInt8 {
         if radix > 36 {
             return None;
         }
-
         let c = char::from(self.0);
         if c.is_digit(radix) {
             c.to_digit(radix)
@@ -136,9 +142,18 @@ impl UInt8 {
 
 impl From<bool> for UInt8 {
     fn from(value: bool) -> Self {
-        if value {
-            return Self::TRUE;
-        }
-        Self::FALSE
+        if value { Self::TRUE } else { Self::FALSE }
+    }
+}
+
+impl From<UInt8> for bool {
+    fn from(value: UInt8) -> Self {
+        value != UInt8::FALSE
+    }
+}
+
+impl From<UInt8> for char {
+    fn from(value: UInt8) -> Self {
+        value.to_char()
     }
 }

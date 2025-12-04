@@ -23,7 +23,7 @@ macro_rules! keywords {
 keywords! {
     Select, From, Where, And, Or, Not, Like, In, Between, Is, Null, True, False,
     Case, When, Then, Else, End, Order, By, Group, Having, Asc, Desc, Insert,
-    Into, Values, Update, Set, Delete, Create, Table, Drop, Limit, Join,
+    Into, Values, Update, Set, Delete, Create, Table, Drop, Limit, Offset, Join,
     Inner, Outer, Full, Left, Right, Cross, Exists, Any, All, Some, On, As,
     Distinct, Union, Intersect, Except, With, Recursive, Primary, Key, Foreign,
     References, Unique, Index, View, Procedure, Function, Trigger, Database,
@@ -82,6 +82,7 @@ pub enum Token {
     All,
     Some,
     On,
+    Offset,
     As,
     Distinct,
     Union,

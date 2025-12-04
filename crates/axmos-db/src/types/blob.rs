@@ -1,5 +1,14 @@
+//! Blob type for variable-length binary data.
+//!
+//! Blob stores binary data with a varint length prefix.
+//! It implements AxmosValueType as a dynamic-size type.
+
+use crate::TextEncoding;
+use crate::types::VarInt;
+use crate::types::core::{
+    AxmosValueType, AxmosValueTypeRef, AxmosValueTypeRefMut, DynamicSizeType,
+};
 use crate::types::varint::MAX_VARINT_LEN;
-use crate::{TextEncoding, types::VarInt};
 use std::cmp::PartialEq;
 use std::ops::{Deref, DerefMut};
 
@@ -117,7 +126,9 @@ impl<'a> AsRef<[u8]> for BlobRef<'a> {
 }
 
 impl<'a> BlobRef<'a> {
-    /// Create a new Blob from bytes that already include the length prefix
+    pub const SIZE: usize = 0; // Dynamic size marker
+
+    /// Create a new BlobRef from bytes that already include the length prefix
     pub fn from_raw_bytes(bytes: &'a [u8]) -> Self {
         Self(bytes)
     }
@@ -182,6 +193,18 @@ impl<'a> BlobRef<'a> {
     }
 }
 
+impl<'a> AxmosValueTypeRef<'a> for BlobRef<'a> {
+    type Owned = Blob;
+
+    fn to_owned(&self) -> Self::Owned {
+        BlobRef::to_owned(self)
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.0
+    }
+}
+
 impl<'a> AsRef<BlobRef<'a>> for Blob {
     fn as_ref(&self) -> &BlobRef<'a> {
         unsafe { &*(self.0.as_ref() as *const [u8] as *const BlobRef<'_>) }
@@ -212,6 +235,8 @@ impl<'a> AsMut<[u8]> for BlobRefMut<'a> {
 }
 
 impl<'a> BlobRefMut<'a> {
+    pub const SIZE: usize = 0; // Dynamic size marker
+
     /// Create a new Blob from bytes that already include the length prefix
     pub fn from_raw_bytes(bytes: &'a mut [u8]) -> Self {
         Self(bytes)
@@ -287,6 +312,69 @@ impl<'a> BlobRefMut<'a> {
         &mut self.data_mut()[offset..]
     }
 }
+
+impl<'a> AxmosValueTypeRefMut<'a> for BlobRefMut<'a> {
+    type Owned = Blob;
+
+    fn to_owned(&self) -> Self::Owned {
+        BlobRefMut::to_owned(self)
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.0
+    }
+
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
+        self.0
+    }
+}
+
+// Implement AxmosValueType for Blob
+impl AxmosValueType for Blob {
+    type Ref<'a> = BlobRef<'a>;
+    type RefMut<'a> = BlobRefMut<'a>;
+
+    const FIXED_SIZE: Option<usize> = None; // Dynamic size
+    const IS_NUMERIC: bool = false;
+
+    fn reinterpret(buffer: &[u8]) -> std::io::Result<(Self::Ref<'_>, usize)> {
+        let (len_varint, offset) = VarInt::from_encoded_bytes(buffer)?;
+        let len_usize: usize = len_varint.try_into()?;
+        let total_size = offset + len_usize;
+
+        if buffer.len() < total_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "not enough bytes for blob",
+            ));
+        }
+
+        let blob_ref = BlobRef::from_raw_bytes(&buffer[..total_size]);
+        Ok((blob_ref, total_size))
+    }
+
+    fn reinterpret_mut(buffer: &mut [u8]) -> std::io::Result<(Self::RefMut<'_>, usize)> {
+        let (len_varint, offset) = VarInt::from_encoded_bytes(buffer)?;
+        let len_usize: usize = len_varint.try_into()?;
+        let total_size = offset + len_usize;
+
+        if buffer.len() < total_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "not enough bytes for blob",
+            ));
+        }
+
+        let blob_ref = BlobRefMut::from_raw_bytes(&mut buffer[..total_size]);
+        Ok((blob_ref, total_size))
+    }
+
+    fn value_size(&self) -> usize {
+        self.len()
+    }
+}
+
+impl DynamicSizeType for Blob {}
 
 impl From<&str> for Blob {
     fn from(value: &str) -> Self {

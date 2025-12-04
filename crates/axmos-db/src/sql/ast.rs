@@ -341,6 +341,7 @@ pub struct SelectStatement {
     pub having: Option<Expr>,
     pub order_by: Vec<OrderByExpr>,
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 impl Simplify for SelectStatement {
