@@ -15,15 +15,15 @@ use super::prop::LogicalProperties;
 
 /// A logical expression in the memo
 #[derive(Debug, Clone)]
-pub struct LogicalExpr {
-    pub id: super::ExprId,
-    pub op: LogicalOperator,
-    pub children: Vec<GroupId>,
-    pub properties: LogicalProperties,
+pub(crate) struct LogicalExpr {
+    pub(crate) id: super::ExprId,
+    pub(crate) op: LogicalOperator,
+    pub(crate) children: Vec<GroupId>,
+    pub(crate) properties: LogicalProperties,
 }
 
 impl LogicalExpr {
-    pub fn new(op: LogicalOperator, children: Vec<GroupId>) -> Self {
+    pub(crate) fn new(op: LogicalOperator, children: Vec<GroupId>) -> Self {
         let properties = LogicalProperties::default();
         Self {
             id: super::ExprId::default(),
@@ -33,7 +33,7 @@ impl LogicalExpr {
         }
     }
 
-    pub fn with_properties(mut self, props: LogicalProperties) -> Self {
+    pub(crate) fn with_properties(mut self, props: LogicalProperties) -> Self {
         self.properties = props;
         self
     }
@@ -41,7 +41,7 @@ impl LogicalExpr {
 
 /// Logical operators - describe the logical structure of a query
 #[derive(Debug, Clone, PartialEq)]
-pub enum LogicalOperator {
+pub(crate) enum LogicalOperator {
     // Scan operators
     TableScan(TableScanOp),
     IndexScan(IndexScanOp),
@@ -82,10 +82,10 @@ pub enum LogicalOperator {
 
 // Implement display for logical plan
 #[derive(Debug, Clone)]
-pub struct LogicalPlan {
-    pub op: LogicalOperator,
-    pub children: Vec<LogicalPlan>,
-    pub properties: LogicalProperties,
+pub(crate) struct LogicalPlan {
+    pub(crate) op: LogicalOperator,
+    pub(crate) children: Vec<LogicalPlan>,
+    pub(crate) properties: LogicalProperties,
 }
 
 impl Display for LogicalPlan {
@@ -96,7 +96,7 @@ impl Display for LogicalPlan {
 
 impl LogicalOperator {
     /// Get the output schema of this operator
-    pub fn output_schema(&self) -> &Schema {
+    pub(crate) fn output_schema(&self) -> &Schema {
         match self {
             Self::TableScan(op) => &op.schema,
             Self::IndexScan(op) => &op.schema,
@@ -119,7 +119,7 @@ impl LogicalOperator {
     }
 
     /// Check if this operator is a leaf (has no children)
-    pub fn is_leaf(&self) -> bool {
+    pub(crate) fn is_leaf(&self) -> bool {
         matches!(
             self,
             Self::TableScan(_) | Self::IndexScan(_) | Self::Values(_) | Self::Empty(_)
@@ -127,7 +127,7 @@ impl LogicalOperator {
     }
 
     /// Get the arity (number of children) of this operator
-    pub fn arity(&self) -> usize {
+    pub(crate) fn arity(&self) -> usize {
         match self {
             Self::TableScan(_) | Self::IndexScan(_) | Self::Values(_) | Self::Empty(_) => 0,
             Self::Filter(_)
@@ -146,18 +146,18 @@ impl LogicalOperator {
 
 /// Table scan operator - reads all rows from a table
 #[derive(Debug, Clone, PartialEq)]
-pub struct TableScanOp {
-    pub table_id: ObjectId,
-    pub table_name: String,
-    pub schema: Schema,
+pub(crate) struct TableScanOp {
+    pub(crate) table_id: ObjectId,
+    pub(crate) table_name: String,
+    pub(crate) schema: Schema,
     /// Columns to read (if None, read all)
-    pub columns: Option<Vec<usize>>,
+    pub(crate) columns: Option<Vec<usize>>,
     /// Inline filter predicate (pushed down)
-    pub predicate: Option<BoundExpression>,
+    pub(crate) predicate: Option<BoundExpression>,
 }
 
 impl TableScanOp {
-    pub fn new(table_id: ObjectId, table_name: String, schema: Schema) -> Self {
+    pub(crate) fn new(table_id: ObjectId, table_name: String, schema: Schema) -> Self {
         Self {
             table_id,
             table_name,
@@ -167,12 +167,12 @@ impl TableScanOp {
         }
     }
 
-    pub fn with_columns(mut self, columns: Vec<usize>) -> Self {
+    pub(crate) fn with_columns(mut self, columns: Vec<usize>) -> Self {
         self.columns = Some(columns);
         self
     }
 
-    pub fn with_predicate(mut self, predicate: BoundExpression) -> Self {
+    pub(crate) fn with_predicate(mut self, predicate: BoundExpression) -> Self {
         self.predicate = Some(predicate);
         self
     }
@@ -180,28 +180,28 @@ impl TableScanOp {
 
 /// Index scan operator - reads rows using an index
 #[derive(Debug, Clone, PartialEq)]
-pub struct IndexScanOp {
-    pub table_id: ObjectId,
-    pub index_name: String,
-    pub schema: Schema,
+pub(crate) struct IndexScanOp {
+    pub(crate) table_id: ObjectId,
+    pub(crate) index_name: String,
+    pub(crate) schema: Schema,
     /// The indexed columns
-    pub index_columns: Vec<usize>,
+    pub(crate) index_columns: Vec<usize>,
     /// Range predicates on the index
-    pub range_start: Option<BoundExpression>,
-    pub range_end: Option<BoundExpression>,
+    pub(crate) range_start: Option<BoundExpression>,
+    pub(crate) range_end: Option<BoundExpression>,
     /// Additional filter after index lookup
-    pub residual_predicate: Option<BoundExpression>,
+    pub(crate) residual_predicate: Option<BoundExpression>,
 }
 
 /// Filter operator - applies a predicate to filter rows
 #[derive(Debug, Clone, PartialEq)]
-pub struct FilterOp {
-    pub predicate: BoundExpression,
-    pub input_schema: Schema,
+pub(crate) struct FilterOp {
+    pub(crate) predicate: BoundExpression,
+    pub(crate) input_schema: Schema,
 }
 
 impl FilterOp {
-    pub fn new(predicate: BoundExpression, input_schema: Schema) -> Self {
+    pub(crate) fn new(predicate: BoundExpression, input_schema: Schema) -> Self {
         Self {
             predicate,
             input_schema,
@@ -211,20 +211,24 @@ impl FilterOp {
 
 /// Project operator - selects and computes columns
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProjectOp {
-    pub expressions: Vec<ProjectExpr>,
-    pub input_schema: Schema,
-    pub output_schema: Schema,
+pub(crate) struct ProjectOp {
+    pub(crate) expressions: Vec<ProjectExpr>,
+    pub(crate) input_schema: Schema,
+    pub(crate) output_schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProjectExpr {
-    pub expr: BoundExpression,
-    pub alias: Option<String>,
+pub(crate) struct ProjectExpr {
+    pub(crate) expr: BoundExpression,
+    pub(crate) alias: Option<String>,
 }
 
 impl ProjectOp {
-    pub fn new(expressions: Vec<ProjectExpr>, input_schema: Schema, output_schema: Schema) -> Self {
+    pub(crate) fn new(
+        expressions: Vec<ProjectExpr>,
+        input_schema: Schema,
+        output_schema: Schema,
+    ) -> Self {
         Self {
             expressions,
             input_schema,
@@ -235,16 +239,16 @@ impl ProjectOp {
 
 /// Join operator
 #[derive(Debug, Clone, PartialEq)]
-pub struct JoinOp {
-    pub join_type: JoinType,
-    pub condition: Option<BoundExpression>,
-    pub left_schema: Schema,
-    pub right_schema: Schema,
-    pub output_schema: Schema,
+pub(crate) struct JoinOp {
+    pub(crate) join_type: JoinType,
+    pub(crate) condition: Option<BoundExpression>,
+    pub(crate) left_schema: Schema,
+    pub(crate) right_schema: Schema,
+    pub(crate) output_schema: Schema,
 }
 
 impl JoinOp {
-    pub fn new(
+    pub(crate) fn new(
         join_type: JoinType,
         condition: Option<BoundExpression>,
         left_schema: Schema,
@@ -267,7 +271,7 @@ impl JoinOp {
     }
 
     /// Check if this is an equi-join (join on equality conditions)
-    pub fn is_equi_join(&self) -> bool {
+    pub(crate) fn is_equi_join(&self) -> bool {
         match &self.condition {
             Some(expr) => Self::is_equi_condition(expr),
             None => false,
@@ -293,7 +297,7 @@ impl JoinOp {
     }
 
     /// Extract equi-join keys (left column index, right column index)
-    pub fn extract_equi_keys(&self) -> Vec<(usize, usize)> {
+    pub(crate) fn extract_equi_keys(&self) -> Vec<(usize, usize)> {
         let mut keys = Vec::new();
         if let Some(cond) = &self.condition {
             Self::collect_equi_keys(cond, &mut keys);
@@ -325,41 +329,41 @@ impl JoinOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct UnionOp {
-    pub all: bool, // UNION ALL vs UNION
-    pub schema: Schema,
+pub(crate) struct UnionOp {
+    pub(crate) all: bool, // UNION ALL vs UNION
+    pub(crate) schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct IntersectOp {
-    pub all: bool,
-    pub schema: Schema,
+pub(crate) struct IntersectOp {
+    pub(crate) all: bool,
+    pub(crate) schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ExceptOp {
-    pub all: bool,
-    pub schema: Schema,
+pub(crate) struct ExceptOp {
+    pub(crate) all: bool,
+    pub(crate) schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct AggregateOp {
-    pub group_by: Vec<BoundExpression>,
-    pub aggregates: Vec<AggregateExpr>,
-    pub input_schema: Schema,
-    pub output_schema: Schema,
+pub(crate) struct AggregateOp {
+    pub(crate) group_by: Vec<BoundExpression>,
+    pub(crate) aggregates: Vec<AggregateExpr>,
+    pub(crate) input_schema: Schema,
+    pub(crate) output_schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct AggregateExpr {
-    pub func: AggregateFunction,
-    pub arg: Option<BoundExpression>,
-    pub distinct: bool,
-    pub output_idx: usize,
+pub(crate) struct AggregateExpr {
+    pub(crate) func: AggregateFunction,
+    pub(crate) arg: Option<BoundExpression>,
+    pub(crate) distinct: bool,
+    pub(crate) output_idx: usize,
 }
 
 impl AggregateOp {
-    pub fn new(
+    pub(crate) fn new(
         group_by: Vec<BoundExpression>,
         aggregates: Vec<AggregateExpr>,
         input_schema: Schema,
@@ -375,33 +379,33 @@ impl AggregateOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SortOp {
-    pub order_by: Vec<SortExpr>,
-    pub schema: Schema,
+pub(crate) struct SortOp {
+    pub(crate) order_by: Vec<SortExpr>,
+    pub(crate) schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SortExpr {
-    pub expr: BoundExpression,
-    pub asc: bool,
-    pub nulls_first: bool,
+pub(crate) struct SortExpr {
+    pub(crate) expr: BoundExpression,
+    pub(crate) asc: bool,
+    pub(crate) nulls_first: bool,
 }
 
 impl SortOp {
-    pub fn new(order_by: Vec<SortExpr>, schema: Schema) -> Self {
+    pub(crate) fn new(order_by: Vec<SortExpr>, schema: Schema) -> Self {
         Self { order_by, schema }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct LimitOp {
-    pub limit: usize,
-    pub offset: Option<usize>,
-    pub schema: Schema,
+pub(crate) struct LimitOp {
+    pub(crate) limit: usize,
+    pub(crate) offset: Option<usize>,
+    pub(crate) schema: Schema,
 }
 
 impl LimitOp {
-    pub fn new(limit: usize, offset: Option<usize>, schema: Schema) -> Self {
+    pub(crate) fn new(limit: usize, offset: Option<usize>, schema: Schema) -> Self {
         Self {
             limit,
             offset,
@@ -411,25 +415,25 @@ impl LimitOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct DistinctOp {
-    pub schema: Schema,
+pub(crate) struct DistinctOp {
+    pub(crate) schema: Schema,
 }
 
 impl DistinctOp {
-    pub fn new(schema: Schema) -> Self {
+    pub(crate) fn new(schema: Schema) -> Self {
         Self { schema }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct InsertOp {
-    pub table_id: ObjectId,
-    pub columns: Vec<usize>,
-    pub table_schema: Schema,
+pub(crate) struct InsertOp {
+    pub(crate) table_id: ObjectId,
+    pub(crate) columns: Vec<usize>,
+    pub(crate) table_schema: Schema,
 }
 
 impl InsertOp {
-    pub fn new(table_id: ObjectId, columns: Vec<usize>, table_schema: Schema) -> Self {
+    pub(crate) fn new(table_id: ObjectId, columns: Vec<usize>, table_schema: Schema) -> Self {
         Self {
             table_id,
             columns,
@@ -439,14 +443,14 @@ impl InsertOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct UpdateOp {
-    pub table_id: ObjectId,
-    pub assignments: Vec<(usize, BoundExpression)>,
-    pub table_schema: Schema,
+pub(crate) struct UpdateOp {
+    pub(crate) table_id: ObjectId,
+    pub(crate) assignments: Vec<(usize, BoundExpression)>,
+    pub(crate) table_schema: Schema,
 }
 
 impl UpdateOp {
-    pub fn new(
+    pub(crate) fn new(
         table_id: ObjectId,
         assignments: Vec<(usize, BoundExpression)>,
         table_schema: Schema,
@@ -460,13 +464,13 @@ impl UpdateOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct DeleteOp {
-    pub table_id: ObjectId,
-    pub table_schema: Schema,
+pub(crate) struct DeleteOp {
+    pub(crate) table_id: ObjectId,
+    pub(crate) table_schema: Schema,
 }
 
 impl DeleteOp {
-    pub fn new(table_id: ObjectId, table_schema: Schema) -> Self {
+    pub(crate) fn new(table_id: ObjectId, table_schema: Schema) -> Self {
         Self {
             table_id,
             table_schema,
@@ -475,24 +479,24 @@ impl DeleteOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ValuesOp {
-    pub rows: Vec<Vec<BoundExpression>>,
-    pub schema: Schema,
+pub(crate) struct ValuesOp {
+    pub(crate) rows: Vec<Vec<BoundExpression>>,
+    pub(crate) schema: Schema,
 }
 
 impl ValuesOp {
-    pub fn new(rows: Vec<Vec<BoundExpression>>, schema: Schema) -> Self {
+    pub(crate) fn new(rows: Vec<Vec<BoundExpression>>, schema: Schema) -> Self {
         Self { rows, schema }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct EmptyOp {
-    pub schema: Schema,
+pub(crate) struct EmptyOp {
+    pub(crate) schema: Schema,
 }
 
 impl EmptyOp {
-    pub fn new(schema: Schema) -> Self {
+    pub(crate) fn new(schema: Schema) -> Self {
         Self { schema }
     }
 }

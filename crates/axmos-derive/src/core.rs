@@ -3,9 +3,23 @@
 //! Generates: DataTypeKind, DataTypeRef, DataTypeRefMut, reinterpret_cast,
 //! reinterpret_cast_mut, and all helper methods using trait dispatch.
 
+use std::collections::HashSet;
+
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Attribute, Data, DeriveInput, Fields, Ident, Type, Variant, Visibility, parse2};
+use syn::{
+    Attribute, Data, DeriveInput, Error as SynError, Fields, Ident, Result as SynResult, Type,
+    Variant, Visibility, parse2,
+};
+
+// Generate checked operations
+const ARITHMETIC_OPS: [(&str, &str, &str); 5] = [
+    ("checked_add", "Add", "add"),
+    ("checked_sub", "Sub", "sub"),
+    ("checked_mul", "Mul", "mul"),
+    ("checked_div", "Div", "div"),
+    ("checked_rem", "Rem", "rem"),
+];
 
 pub struct EnumInfo {
     name: Ident,
@@ -16,23 +30,33 @@ pub struct EnumInfo {
 pub struct VariantInfo {
     name: Ident,
     inner_type: Option<Type>,
-    is_null: bool,
-}
-
-fn is_null(attrs: &[Attribute]) -> bool {
-    let mut is_null = false;
-
-    for attr in attrs {
-        if attr.path().is_ident("null") {
-            is_null = true;
-        }
-    }
-
-    is_null
+    attrs: HashSet<String>,
 }
 
 impl VariantInfo {
-    fn from_variant(variant: Variant) -> syn::Result<Self> {
+    fn new(name: Ident, inner_type: Option<Type>) -> Self {
+        Self {
+            name,
+            inner_type,
+            attrs: HashSet::new(),
+        }
+    }
+
+    // Populate the attribute set of this enum variant
+    fn with_attrs(mut self, attrs: &[Attribute]) -> Self {
+        for attr in attrs {
+            if attr.path().is_ident("null") {
+                self.attrs.insert("null".to_string());
+            }
+
+            if attr.path().is_ident("non_arith") {
+                self.attrs.insert("non_arith".to_string());
+            }
+        }
+        self
+    }
+
+    fn from_variant(variant: Variant) -> SynResult<Self> {
         let name = variant.ident;
         let inner_type = match variant.fields {
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
@@ -40,27 +64,28 @@ impl VariantInfo {
             }
             Fields::Unit => None,
             _ => {
-                return Err(syn::Error::new_spanned(
+                return Err(SynError::new_spanned(
                     &name,
                     "Only unit variants or single-field tuple variants supported",
                 ));
             }
         };
+        Ok(VariantInfo::new(name, inner_type).with_attrs(&variant.attrs))
+    }
 
-        let is_null = is_null(&variant.attrs);
+    fn is_null(&self) -> bool {
+        self.attrs.contains("is_null")
+    }
 
-        Ok(VariantInfo {
-            name,
-            inner_type,
-            is_null,
-        })
+    fn is_arith(&self) -> bool {
+        !self.attrs.contains("non_arith")
     }
 }
 
 impl EnumInfo {
-    fn from_input(input: DeriveInput) -> syn::Result<Self> {
+    fn from_input(input: DeriveInput) -> SynResult<Self> {
         let Data::Enum(data) = input.data else {
-            return Err(syn::Error::new_spanned(
+            return Err(SynError::new_spanned(
                 input.ident,
                 "AxmosDataType only works with enums",
             ));
@@ -70,7 +95,7 @@ impl EnumInfo {
             .variants
             .into_iter()
             .map(VariantInfo::from_variant)
-            .collect::<syn::Result<Vec<_>>>()?;
+            .collect::<SynResult<Vec<_>>>()?;
 
         Ok(EnumInfo {
             name: input.ident,
@@ -91,6 +116,11 @@ impl EnumInfo {
         format_ident!("{}RefMut", &self.name)
     }
 
+    fn error_name(&self) -> Ident {
+        format_ident!("{}Error", &self.name)
+    }
+
+    // Generates the [is_null] function
     fn gen_is_null(&self) -> TokenStream {
         // [is_null] using the [null] type attr
         let is_null_arms: Vec<_> = self
@@ -98,7 +128,7 @@ impl EnumInfo {
             .iter()
             .map(|v| {
                 let vn = &v.name;
-                if v.is_null {
+                if v.is_null() {
                     quote! { Self::#vn => true }
                 } else {
                     quote! { Self::#vn => false }
@@ -112,6 +142,60 @@ impl EnumInfo {
                 #(#is_null_arms,)*
             }
         }}
+    }
+
+    fn gen_type_err(&self) -> TokenStream {
+        let error_name = self.error_name();
+        let kind_name = self.kind_name();
+        let vis = &self.vis;
+
+        quote! {
+            /// Error type for DataType operations
+            #[derive(Debug, Clone, PartialEq, Eq)]
+            #vis enum #error_name {
+                /// Attempted operation on Null variant
+                NullOperation,
+                /// Type mismatch between operands
+                TypeMismatch {
+                    left: #kind_name,
+                    right: #kind_name,
+                },
+                /// Cannot cast between types
+                CastError {
+                    from: #kind_name,
+                    to: #kind_name,
+                },
+                /// Type is not comparable
+                NotComparable(#kind_name),
+                /// Type does not support this operation
+                UnsupportedOperation {
+                    kind: #kind_name,
+                    operation: &'static str,
+                },
+            }
+
+            impl std::fmt::Display for #error_name {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    match self {
+                        Self::NullOperation => write!(f, "cannot perform operation on Null"),
+                        Self::TypeMismatch { left, right } => {
+                            write!(f, "type mismatch: {} vs {}", left, right)
+                        }
+                        Self::CastError { from, to } => {
+                            write!(f, "cannot cast {} to {}", from, to)
+                        }
+                        Self::NotComparable(k) => {
+                            write!(f, "type {} is not comparable", k)
+                        }
+                        Self::UnsupportedOperation { kind, operation } => {
+                            write!(f, "type {} does not support {}", kind, operation)
+                        }
+                    }
+                }
+            }
+
+            impl std::error::Error for #error_name {}
+        }
     }
 
     fn gen_kind_enum(&self) -> TokenStream {
@@ -133,7 +217,7 @@ impl EnumInfo {
             .map(|v| {
                 let vn = &v.name;
                 if let Some(ty) = &v.inner_type {
-                    // Use trait dispatch: FIXED_SIZE.is_some() means fixed
+                    // FIXED_SIZE.is_some() means fixed
                     quote! { Self::#vn => <#ty as AxmosValueType>::FIXED_SIZE.is_some() }
                 } else {
                     // Unit variants (Null) are considered fixed with size 0
@@ -149,10 +233,24 @@ impl EnumInfo {
             .map(|v| {
                 let vn = &v.name;
                 if let Some(ty) = &v.inner_type {
-                    // Use trait dispatch: <Type as AxmosValueType>::IS_NUMERIC
+                    // <Type as AxmosValueType>::IS_NUMERIC
                     quote! { Self::#vn => <#ty as AxmosValueType>::IS_NUMERIC }
                 } else {
                     // Unit variants (Null) are not numeric
+                    quote! { Self::#vn => false }
+                }
+            })
+            .collect();
+
+        // is_signed
+        let is_signed_arms: Vec<_> = self
+            .variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if let Some(ty) = &v.inner_type {
+                    quote! { Self::#vn => <#ty as AxmosValueType>::IS_SIGNED }
+                } else {
                     quote! { Self::#vn => false }
                 }
             })
@@ -165,7 +263,7 @@ impl EnumInfo {
             .map(|v| {
                 let vn = &v.name;
                 if let Some(ty) = &v.inner_type {
-                    // Use trait dispatch: <Type as AxmosValueType>::FIXED_SIZE
+                    //  <Type as AxmosValueType>::FIXED_SIZE
                     quote! { Self::#vn => <#ty as AxmosValueType>::FIXED_SIZE }
                 } else {
                     // Unit variants (Null) have size 0
@@ -199,11 +297,11 @@ impl EnumInfo {
                 #is_null_fn
 
 
-                pub fn from_repr(value: u8) -> ::std::io::Result<Self> {
+                pub fn from_repr(value: u8) -> std::io::Result<Self> {
                     match value {
                         #(#variant_values => Ok(Self::#variant_names),)*
-                        _ => Err(::std::io::Error::new(
-                            ::std::io::ErrorKind::InvalidData,
+                        _ => Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
                             format!("Invalid {} value: {}", stringify!(#name), value),
                         )),
                     }
@@ -220,6 +318,14 @@ impl EnumInfo {
                 pub const fn is_numeric(&self) -> bool {
                     match self {
                         #(#is_numeric_arms,)*
+                    }
+                }
+
+
+                 #[inline]
+                pub const fn is_signed(&self) -> bool {
+                    match self {
+                        #(#is_signed_arms,)*
                     }
                 }
 
@@ -248,15 +354,15 @@ impl EnumInfo {
             }
 
             impl TryFrom<u8> for #name {
-                type Error = ::std::io::Error;
+                type Error = std::io::Error;
 
                 fn try_from(value: u8) -> Result<Self, Self::Error> {
                     Self::from_repr(value)
                 }
             }
 
-            impl ::std::fmt::Display for #name {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            impl std::fmt::Display for #name {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     write!(f, "{}", self.name())
                 }
             }
@@ -344,7 +450,7 @@ impl EnumInfo {
             pub fn reinterpret_cast<'a>(
                 dtype: #kind_name,
                 buffer: &'a [u8],
-            ) -> ::std::io::Result<(#ref_name<'a>, usize)> {
+            ) -> std::io::Result<(#ref_name<'a>, usize)> {
                 match dtype {
                     #(#arms,)*
                 }
@@ -381,9 +487,97 @@ impl EnumInfo {
             pub fn reinterpret_cast_mut<'a>(
                 dtype: #kind_name,
                 buffer: &'a mut [u8],
-            ) -> ::std::io::Result<(#ref_mut_name<'a>, usize)> {
+            ) -> std::io::Result<(#ref_mut_name<'a>, usize)> {
                 match dtype {
                     #(#arms,)*
+                }
+            }
+        }
+    }
+
+    fn gen_try_cast(&self) -> TokenStream {
+        let name = &self.name;
+        let kind_name = self.kind_name();
+        let error_name = self.error_name();
+
+        // Generate match arms for casting
+        // Each variant tries to cast via the AxmosCastable trait
+        let cast_arms: Vec<_> = self
+            .variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if let Some(ty) = &v.inner_type {
+                    // For each target variant, try casting
+                    let target_arms: Vec<_> = self
+                        .variants
+                        .iter()
+                        .filter(|tv| tv.inner_type.is_some())
+                        .map(|tv| {
+                            let tvn = &tv.name;
+                            let tty = tv.inner_type.as_ref().unwrap();
+                            quote! {
+                                #kind_name::#tvn => {
+                                    <#ty as AxmosCastable<#tty>>::try_cast(inner)
+                                        .map(#name::#tvn)
+                                        .ok_or_else(|| #error_name::CastError {
+                                            from: #kind_name::#vn,
+                                            to: target,
+                                        })
+                                }
+                            }
+                        })
+                        .collect();
+
+                    quote! {
+                        Self::#vn(inner) => {
+                            match target {
+                                #(#target_arms)*
+                                _ => Err(#error_name::CastError {
+                                    from: self.kind(),
+                                    to: target,
+                                }),
+                            }
+                        }
+                    }
+                } else {
+                    // Null variant
+                    quote! {
+                        Self::#vn => {
+                            if target.is_null() {
+                                Ok(Self::#vn)
+                            } else {
+                                Err(#error_name::CastError {
+                                    from: #kind_name::#vn,
+                                    to: target,
+                                })
+                            }
+                        }
+                    }
+                }
+            })
+            .collect();
+
+        quote! {
+            impl #name {
+                /// Try to cast this value to a different type.
+                ///
+                /// Uses the `AxmosCastable` trait for type conversion.
+                /// Returns an error if the cast is not possible.
+                pub fn try_cast(&self, target: #kind_name) -> Result<Self, #error_name> {
+                    // Same type, no cast needed
+                    if self.kind() == target {
+                        return Ok(self.clone());
+                    }
+
+                    match self {
+                        #(#cast_arms)*
+                    }
+                }
+
+                /// Check if this value can be cast to the target type.
+                pub fn can_cast_to(&self, target: #kind_name) -> bool {
+                    self.kind() == target || self.kind().can_be_coerced(target)
                 }
             }
         }
@@ -592,6 +786,24 @@ impl EnumInfo {
             })
             .collect();
 
+        // PartialOrd for Ref types
+        let ref_cmp_arms: Vec<_> = self
+            .variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if v.inner_type.is_some() {
+                    quote! {
+                        (Self::#vn(a), Self::#vn(b)) => a.partial_cmp(b)
+                    }
+                } else {
+                    quote! {
+                        (Self::#vn, Self::#vn) => Some(std::cmp::Ordering::Equal)
+                    }
+                }
+            })
+            .collect();
+
         quote! {
             impl<'a> #ref_name<'a> {
                 #[inline]
@@ -639,6 +851,35 @@ impl EnumInfo {
                     }
                 }
             }
+
+
+             impl<'a> ::std::cmp::PartialOrd for #ref_name<'a> {
+                fn partial_cmp(&self, other: &Self) -> Option<::std::cmp::Ordering> {
+                    if ::std::mem::discriminant(self) != ::std::mem::discriminant(other) {
+                        return Some(self.kind().cmp(&other.kind()));
+                    }
+
+                    match (self, other) {
+                        #(#ref_cmp_arms,)*
+                        _ => None,
+                    }
+                }
+            }
+
+
+             impl<'a> std::cmp::PartialOrd for #ref_mut_name<'a> {
+                fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                    if std::mem::discriminant(self) != std::mem::discriminant(other) {
+                        return Some(self.kind().cmp(&other.kind()));
+                    }
+
+                    match (self, other) {
+                        #(#ref_cmp_arms,)*
+                        _ => None,
+                    }
+                }
+            }
+
 
             impl<'a> #ref_mut_name<'a> {
                 #[inline]
@@ -812,7 +1053,7 @@ impl EnumInfo {
             impl #kind_name {
                 /// Check if this type can be coerced to the target type.
                 pub fn can_be_coerced(&self, other: Self) -> bool {
-                    if ::std::mem::discriminant(self) == ::std::mem::discriminant(&other) {
+                    if std::mem::discriminant(self) == std::mem::discriminant(&other) {
                         return true;
                     }
 
@@ -821,6 +1062,338 @@ impl EnumInfo {
                     }
 
                     false
+                }
+            }
+        }
+    }
+
+    fn gen_arithmetic_ops(&self) -> TokenStream {
+        let name = &self.name;
+        let error_name = self.error_name();
+
+        let checked_methods: Vec<_> = ARITHMETIC_OPS
+            .iter()
+            .map(|(method_name, trait_name, op_name)| {
+                let method_ident = format_ident!("{}", method_name);
+                let op_ident = format_ident!("{}", trait_name);
+
+                let match_arms: Vec<_> = self
+                    .variants
+                    .iter()
+                    .map(|v| {
+                        let vn = &v.name;
+                        if v.inner_type.is_some() && v.is_arith() {
+                            quote! {
+                                (Self::#vn(a), Self::#vn(b)) => {
+                                    Ok(Self::#vn(std::ops::#op_ident::$op_ident(*a, *b)))
+                                }
+                            }
+                            .to_string()
+                            .replace("$op_ident", op_name)
+                            .parse::<TokenStream>()
+                            .unwrap()
+                        } else if v.inner_type.is_some() {
+                            quote! {
+                                (Self::#vn(_), Self::#vn(_)) => Err(#error_name::NullOperation)
+                            }
+                        } else {
+                            quote! {
+                                (Self::#vn, Self::#vn) => Err(#error_name::NullOperation)
+                            }
+                        }
+                    })
+                    .collect();
+
+                quote! {
+                    /// Perform checked arithmetic, returning error on type mismatch.
+                    pub fn #method_ident(&self, rhs: &Self) -> Result<Self, #error_name> {
+                        match (self, rhs) {
+                            #(#match_arms,)*
+                            (left, right) => Err(#error_name::TypeMismatch {
+                                left: left.kind(),
+                                right: right.kind(),
+                            }),
+                        }
+                    }
+                }
+            })
+            .collect();
+
+        // Generate std::ops trait implementations using the checked methods
+        let trait_impls = quote! {
+            impl std::ops::Add for #name {
+                type Output = Self;
+                fn add(self, rhs: Self) -> Self::Output {
+                    self.checked_add(&rhs).expect("arithmetic add failed")
+                }
+            }
+
+            impl std::ops::Add<&#name> for #name {
+                type Output = Self;
+                fn add(self, rhs: &#name) -> Self::Output {
+                    self.checked_add(rhs).expect("arithmetic add failed")
+                }
+            }
+
+
+            impl<'a> ::std::ops::Add<#name> for &'a #name {
+                type Output = #name;
+                fn add(self, rhs: #name) -> Self::Output {
+                    self.checked_add(&rhs).expect("arithmetic add failed")
+                }
+            }
+
+            impl<'a, 'b> ::std::ops::Add<&'b #name> for &'a #name {
+                type Output = #name;
+                fn add(self, rhs: &'b #name) -> Self::Output {
+                    self.checked_add(rhs).expect("arithmetic add failed")
+                }
+            }
+
+            impl std::ops::Sub for #name {
+                type Output = Self;
+                fn sub(self, rhs: Self) -> Self::Output {
+                    self.checked_sub(&rhs).expect("arithmetic sub failed")
+                }
+            }
+
+            impl std::ops::Sub<&#name> for #name {
+                type Output = Self;
+                fn sub(self, rhs: &#name) -> Self::Output {
+                    self.checked_sub(rhs).expect("arithmetic sub failed")
+                }
+            }
+
+
+             impl<'a> ::std::ops::Sub<#name> for &'a #name {
+                type Output = #name;
+                fn sub(self, rhs: #name) -> Self::Output {
+                    self.checked_sub(&rhs).expect("arithmetic sub failed")
+                }
+            }
+
+            impl<'a, 'b> ::std::ops::Sub<&'b #name> for &'a #name {
+                type Output = #name;
+                fn sub(self, rhs: &'b #name) -> Self::Output {
+                    self.checked_sub(rhs).expect("arithmetic sub failed")
+                }
+            }
+
+            impl std::ops::Mul for #name {
+                type Output = Self;
+                fn mul(self, rhs: Self) -> Self::Output {
+                    self.checked_mul(&rhs).expect("arithmetic mul failed")
+                }
+            }
+
+            impl std::ops::Mul<&#name> for #name {
+                type Output = Self;
+                fn mul(self, rhs: &#name) -> Self::Output {
+                    self.checked_mul(rhs).expect("arithmetic mul failed")
+                }
+            }
+
+
+
+            impl<'a> ::std::ops::Mul<#name> for &'a #name {
+                type Output = #name;
+                fn mul(self, rhs: #name) -> Self::Output {
+                    self.checked_mul(&rhs).expect("arithmetic mul failed")
+                }
+            }
+
+            impl<'a, 'b> ::std::ops::Mul<&'b #name> for &'a #name {
+                type Output = #name;
+                fn mul(self, rhs: &'b #name) -> Self::Output {
+                    self.checked_mul(rhs).expect("arithmetic mul failed")
+                }
+            }
+
+            impl std::ops::Div for #name {
+                type Output = Self;
+                fn div(self, rhs: Self) -> Self::Output {
+                    self.checked_div(&rhs).expect("arithmetic div failed")
+                }
+            }
+
+            impl std::ops::Div<&#name> for #name {
+                type Output = Self;
+                fn div(self, rhs: &#name) -> Self::Output {
+                    self.checked_div(rhs).expect("arithmetic div failed")
+                }
+            }
+
+             impl<'a> ::std::ops::Div<#name> for &'a #name {
+                type Output = #name;
+                fn div(self, rhs: #name) -> Self::Output {
+                    self.checked_div(&rhs).expect("arithmetic div failed")
+                }
+            }
+
+            impl<'a, 'b> ::std::ops::Div<&'b #name> for &'a #name {
+                type Output = #name;
+                fn div(self, rhs: &'b #name) -> Self::Output {
+                    self.checked_div(rhs).expect("arithmetic div failed")
+                }
+            }
+
+            impl std::ops::Rem for #name {
+                type Output = Self;
+                fn rem(self, rhs: Self) -> Self::Output {
+                    self.checked_rem(&rhs).expect("arithmetic rem failed")
+                }
+            }
+
+            impl std::ops::Rem<&#name> for #name {
+                type Output = Self;
+                fn rem(self, rhs: &#name) -> Self::Output {
+                    self.checked_rem(rhs).expect("arithmetic rem failed")
+                }
+            }
+
+
+              impl<'a> ::std::ops::Rem<#name> for &'a #name {
+                type Output = #name;
+                fn rem(self, rhs: #name) -> Self::Output {
+                    self.checked_rem(&rhs).expect("arithmetic rem failed")
+                }
+            }
+
+            impl<'a, 'b> ::std::ops::Rem<&'b #name> for &'a #name {
+                type Output = #name;
+                fn rem(self, rhs: &'b #name) -> Self::Output {
+                    self.checked_rem(rhs).expect("arithmetic rem failed")
+                }
+            }
+
+            impl std::ops::AddAssign for #name {
+                fn add_assign(&mut self, rhs: Self) {
+                    *self = self.checked_add(&rhs).expect("arithmetic add_assign failed");
+                }
+            }
+
+            impl std::ops::AddAssign<&#name> for #name {
+                fn add_assign(&mut self, rhs: &#name) {
+                    *self = self.checked_add(rhs).expect("arithmetic add_assign failed");
+                }
+            }
+
+            impl std::ops::SubAssign for #name {
+                fn sub_assign(&mut self, rhs: Self) {
+                    *self = self.checked_sub(&rhs).expect("arithmetic sub_assign failed");
+                }
+            }
+
+            impl std::ops::SubAssign<&#name> for #name {
+                fn sub_assign(&mut self, rhs: &#name) {
+                    *self = self.checked_sub(rhs).expect("arithmetic sub_assign failed");
+                }
+            }
+
+            impl std::ops::MulAssign for #name {
+                fn mul_assign(&mut self, rhs: Self) {
+                    *self = self.checked_mul(&rhs).expect("arithmetic mul_assign failed");
+                }
+            }
+
+            impl std::ops::MulAssign<&#name> for #name {
+                fn mul_assign(&mut self, rhs: &#name) {
+                    *self = self.checked_mul(rhs).expect("arithmetic mul_assign failed");
+                }
+            }
+
+            impl std::ops::DivAssign for #name {
+                fn div_assign(&mut self, rhs: Self) {
+                    *self = self.checked_div(&rhs).expect("arithmetic div_assign failed");
+                }
+            }
+
+            impl std::ops::DivAssign<&#name> for #name {
+                fn div_assign(&mut self, rhs: &#name) {
+                    *self = self.checked_div(rhs).expect("arithmetic div_assign failed");
+                }
+            }
+
+            impl std::ops::RemAssign for #name {
+                fn rem_assign(&mut self, rhs: Self) {
+                    *self = self.checked_rem(&rhs).expect("arithmetic rem_assign failed");
+                }
+            }
+
+            impl std::ops::RemAssign<&#name> for #name {
+                fn rem_assign(&mut self, rhs: &#name) {
+                    *self = self.checked_rem(rhs).expect("arithmetic rem_assign failed");
+                }
+            }
+        };
+
+        quote! {
+            impl #name {
+                #(#checked_methods)*
+            }
+
+            #trait_impls
+        }
+    }
+
+    fn gen_ordering(&self) -> TokenStream {
+        let name = &self.name;
+
+        let error_name = self.error_name();
+
+        // Generate comparison for same-variant types
+        let cmp_arms: Vec<_> = self
+            .variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if let Some(ty) = &v.inner_type {
+                    // Use PartialOrd from the inner type
+                    quote! {
+                        (Self::#vn(a), Self::#vn(b)) => {
+                            <#ty as std::cmp::PartialOrd>::partial_cmp(a, b)
+                        }
+                    }
+                } else {
+                    // Null equals Null
+                    quote! {
+                        (Self::#vn, Self::#vn) => Some(std::cmp::Ordering::Equal)
+                    }
+                }
+            })
+            .collect();
+
+        quote! {
+            impl std::cmp::PartialOrd for #name {
+                fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                    // Only compare same variants
+                    if std::mem::discriminant(self) != std::mem::discriminant(other) {
+                        // Different variants: compare by kind discriminant
+                        return Some(self.kind().cmp(&other.kind()));
+                    }
+
+                    match (self, other) {
+                        #(#cmp_arms,)*
+                        // This shouldn't happen if discriminants match
+                        _ => None,
+                    }
+                }
+            }
+
+            impl #name {
+
+
+
+                /// Compare two values, returning error on type mismatch.
+                pub fn try_cmp(&self, other: &Self) -> Result<std::cmp::Ordering, #error_name> {
+                    if std::mem::discriminant(self) != std::mem::discriminant(other) {
+                        return Err(#error_name::TypeMismatch {
+                            left: self.kind(),
+                            right: other.kind(),
+                        });
+                    }
+
+                    self.partial_cmp(other).ok_or_else(|| #error_name::NotComparable(self.kind()))
                 }
             }
         }
@@ -838,23 +1411,31 @@ pub fn data_type_impl(input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error(),
     };
 
+    let error_type = info.gen_type_err();
     let kind_enum = info.gen_kind_enum();
     let ref_enum = info.gen_ref_enum();
     let ref_mut_enum = info.gen_ref_mut_enum();
     let reinterpret_cast = info.gen_reinterpret_cast();
     let reinterpret_cast_mut = info.gen_reinterpret_cast_mut();
     let impl_block = info.gen_impl_block();
+    let try_cast = info.gen_try_cast();
+    let arithmetic_ops = info.gen_arithmetic_ops();
+    let ordering = info.gen_ordering();
     let ref_impls = info.gen_ref_impls();
     let as_ref_impls = info.gen_as_ref_impls();
     let coercion_impl = info.gen_coercion_impl();
 
     quote! {
+        #error_type
         #kind_enum
         #ref_enum
         #ref_mut_enum
         #reinterpret_cast
         #reinterpret_cast_mut
         #impl_block
+        #try_cast
+        #arithmetic_ops
+        #ordering
         #ref_impls
         #as_ref_impls
         #coercion_impl

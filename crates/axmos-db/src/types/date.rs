@@ -2,7 +2,14 @@
 //!
 //! Represents a date as days since Unix epoch (1970-01-01).
 
-use crate::{impl_numeric_marker, integer, scalar};
+use crate::{
+    datetime::TimeOfDay,
+    types::{
+        AxmosCastable, Blob, DateTime,
+        sized_types::{Float32, Float64, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64},
+    },
+};
+use crate::{direct_axmos_cast, scalar, unsigned_integer};
 use std::cmp::{Ord, PartialOrd};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,12 +40,9 @@ pub(crate) const fn ymd_to_days(year: u32, month: u8, day: u8) -> u32 {
 }
 
 // Days since Unix epoch
-integer! {
+unsigned_integer! {
     pub struct Date(u32);
 }
-
-// Mark Date as numeric
-impl_numeric_marker!(Date);
 
 // Duration in days
 scalar! {
@@ -414,5 +418,32 @@ impl TryFrom<&str> for Date {
 impl From<Date> for String {
     fn from(date: Date) -> Self {
         date.to_iso_string()
+    }
+}
+
+direct_axmos_cast!(
+    Date[u32]  => Int8[i8], Int16[i16], Int32[i32], UInt8[u8], UInt16[u16], UInt32[u32], Int64[i64], Float32[f32], Float64[f64], UInt64[u64]
+);
+
+impl AxmosCastable<Blob> for Date {
+    fn can_cast(&self) -> bool {
+        true
+    }
+
+    fn try_cast(&self) -> Option<Blob> {
+        Some(Blob::from(self.to_iso_string().as_str()))
+    }
+}
+
+impl AxmosCastable<DateTime> for Date {
+    fn can_cast(&self) -> bool {
+        true
+    }
+
+    fn try_cast(&self) -> Option<DateTime> {
+        Some(DateTime::from_date_and_time(
+            self.clone(),
+            TimeOfDay::from_seconds(0),
+        ))
     }
 }

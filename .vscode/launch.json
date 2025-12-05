@@ -5,8 +5,8 @@
       "type": "lldb",
       "request": "launch",
       "name": "Debug Rust test (AxmosDB)",
-      "program": "${workspaceFolder}/target/debug/deps/axmosdb-7cdfa5eb29efc589",
-      "args": ["--nocapture", "test_deeply_nested_query"],
+      "program": "${workspaceFolder}/target/debug/deps/axmosdb-bc5182bbda8020c7",
+      "args": ["--nocapture", "test_recompute_all"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {

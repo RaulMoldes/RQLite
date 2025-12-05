@@ -4,7 +4,7 @@
 //! describe HOW the query will be executed. Each physical operator corresponds to
 //! a specific iterator implementation.
 
-use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::fmt::{Debug, Display};
 
 use crate::{
     database::schema::Schema,
@@ -18,16 +18,16 @@ use super::prop::{PhysicalProperties, RequiredProperties};
 
 /// A physical expression in the memo
 #[derive(Debug, Clone)]
-pub struct PhysicalExpr {
-    pub id: super::ExprId,
-    pub op: PhysicalOperator,
-    pub children: Vec<GroupId>,
-    pub cost: f64,
-    pub properties: PhysicalProperties,
+pub(crate) struct PhysicalExpr {
+    pub(crate) id: super::ExprId,
+    pub(crate) op: PhysicalOperator,
+    pub(crate) children: Vec<GroupId>,
+    pub(crate) cost: f64,
+    pub(crate) properties: PhysicalProperties,
 }
 
 impl PhysicalExpr {
-    pub fn new(op: PhysicalOperator, children: Vec<GroupId>) -> Self {
+    pub(crate) fn new(op: PhysicalOperator, children: Vec<GroupId>) -> Self {
         let properties = op.provided_properties();
         Self {
             id: super::ExprId::default(),
@@ -41,16 +41,16 @@ impl PhysicalExpr {
 
 /// The final physical plan after optimization
 #[derive(Debug, Clone)]
-pub struct PhysicalPlan {
-    pub op: PhysicalOperator,
-    pub children: Vec<PhysicalPlan>,
-    pub cost: f64,
-    pub properties: PhysicalProperties,
+pub(crate) struct PhysicalPlan {
+    pub(crate) op: PhysicalOperator,
+    pub(crate) children: Vec<PhysicalPlan>,
+    pub(crate) cost: f64,
+    pub(crate) properties: PhysicalProperties,
 }
 
 impl PhysicalPlan {
     /// Get the total cost
-    pub fn total_cost(&self) -> f64 {
+    pub(crate) fn total_cost(&self) -> f64 {
         self.cost
     }
 }
@@ -63,7 +63,7 @@ impl Display for PhysicalPlan {
 
 /// Physical operators - concrete execution strategies
 #[derive(Debug, Clone, PartialEq)]
-pub enum PhysicalOperator {
+pub(crate) enum PhysicalOperator {
     // Scan implementations
     SeqScan(SeqScanOp),
     IndexScan(PhysIndexScanOp),
@@ -118,7 +118,7 @@ pub enum PhysicalOperator {
 
 impl PhysicalOperator {
     /// Get the operator name
-    pub fn name(&self) -> &'static str {
+    pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::SeqScan(_) => "SeqScan",
             Self::IndexScan(_) => "IndexScan",
@@ -149,7 +149,7 @@ impl PhysicalOperator {
     }
 
     /// Get the output schema
-    pub fn output_schema(&self) -> &Schema {
+    pub(crate) fn output_schema(&self) -> &Schema {
         match self {
             Self::SeqScan(op) => &op.schema,
             Self::IndexScan(op) => &op.schema,
@@ -180,7 +180,7 @@ impl PhysicalOperator {
     }
 
     /// Get the properties provided by this operator
-    pub fn provided_properties(&self) -> PhysicalProperties {
+    pub(crate) fn provided_properties(&self) -> PhysicalProperties {
         match self {
             // ExternalSort and EnforcerSort are different types, handle separately
             Self::ExternalSort(op) => PhysicalProperties {
@@ -208,7 +208,7 @@ impl PhysicalOperator {
     }
 
     /// Get required properties for a child
-    pub fn required_child_properties(
+    pub(crate) fn required_child_properties(
         &self,
         child_idx: usize,
         _required: &RequiredProperties,
@@ -243,16 +243,16 @@ impl PhysicalOperator {
 // Scan operators.
 /// Sequential scan (reads all rows from a table).
 #[derive(Debug, Clone, PartialEq)]
-pub struct SeqScanOp {
-    pub table_id: ObjectId,
-    pub table_name: String,
-    pub schema: Schema,
-    pub columns: Option<Vec<usize>>,
-    pub predicate: Option<BoundExpression>,
+pub(crate) struct SeqScanOp {
+    pub(crate) table_id: ObjectId,
+    pub(crate) table_name: String,
+    pub(crate) schema: Schema,
+    pub(crate) columns: Option<Vec<usize>>,
+    pub(crate) predicate: Option<BoundExpression>,
 }
 
 impl SeqScanOp {
-    pub fn new(table_id: ObjectId, table_name: String, schema: Schema) -> Self {
+    pub(crate) fn new(table_id: ObjectId, table_name: String, schema: Schema) -> Self {
         Self {
             table_id,
             table_name,
@@ -262,12 +262,12 @@ impl SeqScanOp {
         }
     }
 
-    pub fn with_columns(mut self, columns: Vec<usize>) -> Self {
+    pub(crate) fn with_columns(mut self, columns: Vec<usize>) -> Self {
         self.columns = Some(columns);
         self
     }
 
-    pub fn with_predicate(mut self, predicate: BoundExpression) -> Self {
+    pub(crate) fn with_predicate(mut self, predicate: BoundExpression) -> Self {
         self.predicate = Some(predicate);
         self
     }
@@ -275,52 +275,56 @@ impl SeqScanOp {
 
 /// Index scan (uses an index to find rows)
 #[derive(Debug, Clone, PartialEq)]
-pub struct PhysIndexScanOp {
-    pub table_id: ObjectId,
-    pub table_name: String,
-    pub index_name: String,
-    pub schema: Schema,
-    pub index_columns: Vec<usize>,
-    pub range_start: Option<BoundExpression>,
-    pub range_end: Option<BoundExpression>,
-    pub residual: Option<BoundExpression>,
+pub(crate) struct PhysIndexScanOp {
+    pub(crate) table_id: ObjectId,
+    pub(crate) table_name: String,
+    pub(crate) index_name: String,
+    pub(crate) schema: Schema,
+    pub(crate) index_columns: Vec<usize>,
+    pub(crate) range_start: Option<BoundExpression>,
+    pub(crate) range_end: Option<BoundExpression>,
+    pub(crate) residual: Option<BoundExpression>,
 }
 
 /// Index-only scan (returns data directly from index)
 #[derive(Debug, Clone, PartialEq)]
-pub struct IndexOnlyScanOp {
-    pub table_id: ObjectId,
-    pub table_name: String,
-    pub index_name: String,
-    pub schema: Schema,
-    pub index_columns: Vec<usize>,
-    pub range_start: Option<BoundExpression>,
-    pub range_end: Option<BoundExpression>,
+pub(crate) struct IndexOnlyScanOp {
+    pub(crate) table_id: ObjectId,
+    pub(crate) table_name: String,
+    pub(crate) index_name: String,
+    pub(crate) schema: Schema,
+    pub(crate) index_columns: Vec<usize>,
+    pub(crate) range_start: Option<BoundExpression>,
+    pub(crate) range_end: Option<BoundExpression>,
 }
 
 // Filter and Project
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PhysFilterOp {
-    pub predicate: BoundExpression,
-    pub schema: Schema,
+pub(crate) struct PhysFilterOp {
+    pub(crate) predicate: BoundExpression,
+    pub(crate) schema: Schema,
 }
 
 impl PhysFilterOp {
-    pub fn new(predicate: BoundExpression, schema: Schema) -> Self {
+    pub(crate) fn new(predicate: BoundExpression, schema: Schema) -> Self {
         Self { predicate, schema }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PhysProjectOp {
-    pub expressions: Vec<ProjectExpr>,
-    pub input_schema: Schema,
-    pub output_schema: Schema,
+pub(crate) struct PhysProjectOp {
+    pub(crate) expressions: Vec<ProjectExpr>,
+    pub(crate) input_schema: Schema,
+    pub(crate) output_schema: Schema,
 }
 
 impl PhysProjectOp {
-    pub fn new(expressions: Vec<ProjectExpr>, input_schema: Schema, output_schema: Schema) -> Self {
+    pub(crate) fn new(
+        expressions: Vec<ProjectExpr>,
+        input_schema: Schema,
+        output_schema: Schema,
+    ) -> Self {
         Self {
             expressions,
             input_schema,
@@ -332,14 +336,14 @@ impl PhysProjectOp {
 // Join Operators
 /// Nested loop join - O(n*m) complexity, works for all join types
 #[derive(Debug, Clone, PartialEq)]
-pub struct NestedLoopJoinOp {
-    pub join_type: JoinType,
-    pub condition: Option<BoundExpression>,
-    pub output_schema: Schema,
+pub(crate) struct NestedLoopJoinOp {
+    pub(crate) join_type: JoinType,
+    pub(crate) condition: Option<BoundExpression>,
+    pub(crate) output_schema: Schema,
 }
 
 impl NestedLoopJoinOp {
-    pub fn new(
+    pub(crate) fn new(
         join_type: JoinType,
         condition: Option<BoundExpression>,
         output_schema: Schema,
@@ -354,16 +358,16 @@ impl NestedLoopJoinOp {
 
 /// Hash join - O(n+m) for equi-joins
 #[derive(Debug, Clone, PartialEq)]
-pub struct HashJoinOp {
-    pub join_type: JoinType,
-    pub left_keys: Vec<BoundExpression>,
-    pub right_keys: Vec<BoundExpression>,
-    pub condition: Option<BoundExpression>,
-    pub output_schema: Schema,
+pub(crate) struct HashJoinOp {
+    pub(crate) join_type: JoinType,
+    pub(crate) left_keys: Vec<BoundExpression>,
+    pub(crate) right_keys: Vec<BoundExpression>,
+    pub(crate) condition: Option<BoundExpression>,
+    pub(crate) output_schema: Schema,
 }
 
 impl HashJoinOp {
-    pub fn new(
+    pub(crate) fn new(
         join_type: JoinType,
         left_keys: Vec<BoundExpression>,
         right_keys: Vec<BoundExpression>,
@@ -382,27 +386,27 @@ impl HashJoinOp {
 
 /// Merge join - O(n+m) for sorted inputs with equi-join
 #[derive(Debug, Clone, PartialEq)]
-pub struct MergeJoinOp {
-    pub join_type: JoinType,
-    pub left_keys: Vec<BoundExpression>,
-    pub right_keys: Vec<BoundExpression>,
-    pub left_ordering: Vec<OrderingSpec>,
-    pub right_ordering: Vec<OrderingSpec>,
-    pub output_ordering: Vec<(BoundExpression, bool)>,
-    pub output_schema: Schema,
+pub(crate) struct MergeJoinOp {
+    pub(crate) join_type: JoinType,
+    pub(crate) left_keys: Vec<BoundExpression>,
+    pub(crate) right_keys: Vec<BoundExpression>,
+    pub(crate) left_ordering: Vec<OrderingSpec>,
+    pub(crate) right_ordering: Vec<OrderingSpec>,
+    pub(crate) output_ordering: Vec<(BoundExpression, bool)>,
+    pub(crate) output_schema: Schema,
 }
 
 // Aggregations
 #[derive(Debug, Clone, PartialEq)]
-pub struct HashAggregateOp {
-    pub group_by: Vec<BoundExpression>,
-    pub aggregates: Vec<AggregateExpr>,
-    pub input_schema: Schema,
-    pub output_schema: Schema,
+pub(crate) struct HashAggregateOp {
+    pub(crate) group_by: Vec<BoundExpression>,
+    pub(crate) aggregates: Vec<AggregateExpr>,
+    pub(crate) input_schema: Schema,
+    pub(crate) output_schema: Schema,
 }
 
 impl HashAggregateOp {
-    pub fn new(
+    pub(crate) fn new(
         group_by: Vec<BoundExpression>,
         aggregates: Vec<AggregateExpr>,
         input_schema: Schema,
@@ -418,25 +422,25 @@ impl HashAggregateOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SortAggregateOp {
-    pub group_by: Vec<BoundExpression>,
-    pub aggregates: Vec<AggregateExpr>,
-    pub group_ordering: Vec<OrderingSpec>,
-    pub input_schema: Schema,
-    pub output_schema: Schema,
+pub(crate) struct SortAggregateOp {
+    pub(crate) group_by: Vec<BoundExpression>,
+    pub(crate) aggregates: Vec<AggregateExpr>,
+    pub(crate) group_ordering: Vec<OrderingSpec>,
+    pub(crate) input_schema: Schema,
+    pub(crate) output_schema: Schema,
 }
 
 // Sort Operators
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ExternalSortOp {
-    pub order_by: Vec<SortExpr>,
-    pub schema: Schema,
-    pub memory_limit: Option<usize>,
+pub(crate) struct ExternalSortOp {
+    pub(crate) order_by: Vec<SortExpr>,
+    pub(crate) schema: Schema,
+    pub(crate) memory_limit: Option<usize>,
 }
 
 impl ExternalSortOp {
-    pub fn new(order_by: Vec<SortExpr>, schema: Schema) -> Self {
+    pub(crate) fn new(order_by: Vec<SortExpr>, schema: Schema) -> Self {
         Self {
             order_by,
             schema,
@@ -446,15 +450,15 @@ impl ExternalSortOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct TopNOp {
-    pub order_by: Vec<SortExpr>,
-    pub limit: usize,
-    pub offset: Option<usize>,
-    pub schema: Schema,
+pub(crate) struct TopNOp {
+    pub(crate) order_by: Vec<SortExpr>,
+    pub(crate) limit: usize,
+    pub(crate) offset: Option<usize>,
+    pub(crate) schema: Schema,
 }
 
 impl TopNOp {
-    pub fn new(
+    pub(crate) fn new(
         order_by: Vec<SortExpr>,
         limit: usize,
         offset: Option<usize>,
@@ -472,42 +476,42 @@ impl TopNOp {
 // Set operations
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct HashUnionOp {
-    pub all: bool,
-    pub schema: Schema,
+pub(crate) struct HashUnionOp {
+    pub(crate) all: bool,
+    pub(crate) schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct HashIntersectOp {
-    pub all: bool,
-    pub schema: Schema,
+pub(crate) struct HashIntersectOp {
+    pub(crate) all: bool,
+    pub(crate) schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct HashExceptOp {
-    pub all: bool,
-    pub schema: Schema,
+pub(crate) struct HashExceptOp {
+    pub(crate) all: bool,
+    pub(crate) schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct HashDistinctOp {
-    pub schema: Schema,
+pub(crate) struct HashDistinctOp {
+    pub(crate) schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SortDistinctOp {
-    pub schema: Schema,
+pub(crate) struct SortDistinctOp {
+    pub(crate) schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PhysLimitOp {
-    pub limit: usize,
-    pub offset: Option<usize>,
-    pub schema: Schema,
+pub(crate) struct PhysLimitOp {
+    pub(crate) limit: usize,
+    pub(crate) offset: Option<usize>,
+    pub(crate) schema: Schema,
 }
 
 impl PhysLimitOp {
-    pub fn new(limit: usize, offset: Option<usize>, schema: Schema) -> Self {
+    pub(crate) fn new(limit: usize, offset: Option<usize>, schema: Schema) -> Self {
         Self {
             limit,
             offset,
@@ -519,14 +523,14 @@ impl PhysLimitOp {
 // DML Physical operators
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PhysInsertOp {
-    pub table_id: ObjectId,
-    pub columns: Vec<usize>,
-    pub table_schema: Schema,
+pub(crate) struct PhysInsertOp {
+    pub(crate) table_id: ObjectId,
+    pub(crate) columns: Vec<usize>,
+    pub(crate) table_schema: Schema,
 }
 
 impl PhysInsertOp {
-    pub fn new(table_id: ObjectId, columns: Vec<usize>, table_schema: Schema) -> Self {
+    pub(crate) fn new(table_id: ObjectId, columns: Vec<usize>, table_schema: Schema) -> Self {
         Self {
             table_id,
             columns,
@@ -536,14 +540,14 @@ impl PhysInsertOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PhysUpdateOp {
-    pub table_id: ObjectId,
-    pub assignments: Vec<(usize, BoundExpression)>,
-    pub table_schema: Schema,
+pub(crate) struct PhysUpdateOp {
+    pub(crate) table_id: ObjectId,
+    pub(crate) assignments: Vec<(usize, BoundExpression)>,
+    pub(crate) table_schema: Schema,
 }
 
 impl PhysUpdateOp {
-    pub fn new(
+    pub(crate) fn new(
         table_id: ObjectId,
         assignments: Vec<(usize, BoundExpression)>,
         table_schema: Schema,
@@ -557,13 +561,13 @@ impl PhysUpdateOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PhysDeleteOp {
-    pub table_id: ObjectId,
-    pub table_schema: Schema,
+pub(crate) struct PhysDeleteOp {
+    pub(crate) table_id: ObjectId,
+    pub(crate) table_schema: Schema,
 }
 
 impl PhysDeleteOp {
-    pub fn new(table_id: ObjectId, table_schema: Schema) -> Self {
+    pub(crate) fn new(table_id: ObjectId, table_schema: Schema) -> Self {
         Self {
             table_id,
             table_schema,
@@ -572,50 +576,50 @@ impl PhysDeleteOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PhysValuesOp {
-    pub rows: Vec<Vec<BoundExpression>>,
-    pub schema: Schema,
+pub(crate) struct PhysValuesOp {
+    pub(crate) rows: Vec<Vec<BoundExpression>>,
+    pub(crate) schema: Schema,
 }
 
 impl PhysValuesOp {
-    pub fn new(rows: Vec<Vec<BoundExpression>>, schema: Schema) -> Self {
+    pub(crate) fn new(rows: Vec<Vec<BoundExpression>>, schema: Schema) -> Self {
         Self { rows, schema }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PhysEmptyOp {
-    pub schema: Schema,
+pub(crate) struct PhysEmptyOp {
+    pub(crate) schema: Schema,
 }
 
 impl PhysEmptyOp {
-    pub fn new(schema: Schema) -> Self {
+    pub(crate) fn new(schema: Schema) -> Self {
         Self { schema }
     }
 }
 
 /// Sort enforcer adds sorting to satisfy ordering requirements
 #[derive(Debug, Clone, PartialEq)]
-pub struct EnforcerSortOp {
-    pub order_by: Vec<SortExpr>,
-    pub schema: Schema,
+pub(crate) struct EnforcerSortOp {
+    pub(crate) order_by: Vec<SortExpr>,
+    pub(crate) schema: Schema,
 }
 
 impl EnforcerSortOp {
-    pub fn new(order_by: Vec<SortExpr>, schema: Schema) -> Self {
+    pub(crate) fn new(order_by: Vec<SortExpr>, schema: Schema) -> Self {
         Self { order_by, schema }
     }
 }
 
 /// Exchange enforcer redistributes data (for parallel/distributed execution)
 #[derive(Debug, Clone, PartialEq)]
-pub struct ExchangeOp {
-    pub distribution: Distribution,
-    pub schema: Schema,
+pub(crate) struct ExchangeOp {
+    pub(crate) distribution: Distribution,
+    pub(crate) schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Distribution {
+pub(crate) enum Distribution {
     Any,
     Single,
     Hash(Vec<usize>),
@@ -625,17 +629,17 @@ pub enum Distribution {
 /// Ordering specification that doesn't require Eq/Hash on BoundExpression
 /// Used for RequiredProperties where we need Eq + Hash
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct OrderingSpec {
+pub(crate) struct OrderingSpec {
     /// Column index in the schema
-    pub column_idx: usize,
+    pub(crate) column_idx: usize,
     /// Ascending order
-    pub ascending: bool,
+    pub(crate) ascending: bool,
     /// Nulls first
-    pub nulls_first: bool,
+    pub(crate) nulls_first: bool,
 }
 
 impl OrderingSpec {
-    pub fn new(column_idx: usize, ascending: bool) -> Self {
+    pub(crate) fn new(column_idx: usize, ascending: bool) -> Self {
         Self {
             column_idx,
             ascending,
@@ -643,11 +647,11 @@ impl OrderingSpec {
         }
     }
 
-    pub fn asc(column_idx: usize) -> Self {
+    pub(crate) fn asc(column_idx: usize) -> Self {
         Self::new(column_idx, true)
     }
 
-    pub fn desc(column_idx: usize) -> Self {
+    pub(crate) fn desc(column_idx: usize) -> Self {
         Self::new(column_idx, false)
     }
 }

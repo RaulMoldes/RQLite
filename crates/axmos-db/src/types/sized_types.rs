@@ -1,36 +1,48 @@
 //! Fixed-size numeric types
 
-use crate::{float, impl_numeric_marker, integer};
+use crate::{
+    checked_conversion, direct_axmos_cast, float, signed_integer, to_blob,
+    types::{Blob, Date, DateTime, core::AxmosCastable},
+    unsigned_integer,
+};
 
-integer! {
+signed_integer! {
+
     pub struct Int8(i8);
 }
 
-integer! {
+signed_integer! {
+
     pub struct Int16(i16);
 }
 
-integer! {
+signed_integer! {
+
     pub struct Int32(i32);
 }
 
-integer! {
+signed_integer! {
+
     pub struct Int64(i64);
 }
 
-integer! {
+unsigned_integer! {
+
     pub struct UInt8(u8);
 }
 
-integer! {
+unsigned_integer! {
+
     pub struct UInt16(u16);
 }
 
-integer! {
+unsigned_integer! {
+
     pub struct UInt32(u32);
 }
 
-integer! {
+unsigned_integer! {
+
     pub struct UInt64(u64);
 }
 
@@ -42,12 +54,8 @@ float! {
     pub struct Float64(f64);
 }
 
-// Mark all numeric types
-impl_numeric_marker!(
-    Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64
-);
-
 // Additional UInt8 methods for character/boolean handling
+// We cannot create raw char/bool wrappers because their internal bit representation may be illegal (due to bytemuck Pod trait: https://docs.rs/bytemuck/latest/bytemuck/trait.Pod.html)
 impl UInt8 {
     pub const TRUE: Self = Self(1);
     pub const FALSE: Self = Self(0);
@@ -157,3 +165,70 @@ impl From<UInt8> for char {
         value.to_char()
     }
 }
+
+direct_axmos_cast!(
+    Int8[i8]  => Int16[i16], Int32[i32], Int64[i64], UInt8[u8], UInt16[u16], UInt32[u32], UInt64[u64], Float32[f32], Float64[f64], DateTime[u64], Date[u32]
+);
+
+direct_axmos_cast!(
+    Int16[i16]  => Int8[i8], Int32[i32], Int64[i64], UInt8[u8], UInt16[u16], UInt32[u32], UInt64[u64], Float32[f32], Float64[f64], DateTime[u64], Date[u32]
+);
+
+direct_axmos_cast!(
+    Int32[i32]  => Int8[i8], Int16[i16], Int64[i64], UInt8[u8], UInt16[u16], UInt32[u32], UInt64[u64], Float32[f32], Float64[f64], DateTime[u64], Date[u32]
+);
+
+direct_axmos_cast!(
+    Int64[i64]  => Int8[i8], Int16[i16], Int32[i32], UInt8[u8], UInt16[u16], UInt32[u32], UInt64[u64], Float32[f32], Float64[f64], DateTime[u64], Date[u32]
+);
+
+direct_axmos_cast!(
+    UInt8[u8]  => Int16[i16], Int32[i32], Int64[i64], Int8[i8], UInt16[u16], UInt32[u32], UInt64[u64], Float32[f32], Float64[f64], DateTime[u64], Date[u32]
+);
+
+direct_axmos_cast!(
+    UInt16[u16]  => Int8[i8], Int32[i32], Int64[i64], UInt8[u8], Int16[i16], UInt32[u32], UInt64[u64], Float32[f32], Float64[f64], DateTime[u64], Date[u32]
+);
+
+direct_axmos_cast!(
+    UInt32[u32]  => Int8[i8], Int16[i16], Int64[i64], UInt8[u8], UInt16[u16], Int32[i32], UInt64[u64], Float32[f32], Float64[f64], DateTime[u64], Date[u32]
+);
+
+direct_axmos_cast!(
+    UInt64[u64]  => Int8[i8], Int16[i16], Int32[i32], UInt8[u8], UInt16[u16], UInt32[u32], Int64[i64], Float32[f32], Float64[f64], DateTime[u64], Date[u32]
+);
+
+direct_axmos_cast!(
+    Float32[f32]  => Int8[i8], Int16[i16], Int64[i64], UInt8[u8], UInt16[u16], Int32[i32], UInt64[u64], UInt32[u32], DateTime[u64], Date[u32]
+);
+
+direct_axmos_cast!(
+    Float64[f64]  => Int8[i8], Int16[i16], Int32[i32], UInt8[u8], UInt16[u16], UInt32[u32], Int64[i64], UInt64[u64], DateTime[u64], Date[u32]
+);
+
+checked_conversion!(f64 => f32);
+checked_conversion!(f32 => f64);
+
+impl AxmosCastable<Float32> for Float64 {
+    fn can_cast(&self) -> bool {
+        true
+    }
+
+    fn try_cast(&self) -> Option<Float32> {
+        f64_to_f32_checked(self.0).map(Float32::from)
+    }
+}
+
+impl AxmosCastable<Float64> for Float32 {
+    fn can_cast(&self) -> bool {
+        true
+    }
+
+    fn try_cast(&self) -> Option<Float64> {
+        f32_to_f64_checked(self.0).map(Float64::from)
+    }
+}
+
+to_blob!(
+    UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64
+);

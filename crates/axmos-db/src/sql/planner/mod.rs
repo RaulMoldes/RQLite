@@ -7,16 +7,15 @@
 //! - Microsoft Research: "Extensible Query Optimizers in Practice" (https://www.microsoft.com/en-us/research/wp-content/uploads/2024/12/Extensible-Query-Optimizers-in-Practice.pdf)
 //!
 //! - Goetz Graefe: "The Cascades Framework for Query Optimization" (https://15721.courses.cs.cmu.edu/spring2016/papers/graefe-ieee1995.pdf)
-
-pub mod exporter;
-pub mod logical;
-pub mod memo;
-pub mod model;
-pub mod physical;
-pub mod plan;
-pub mod prop;
-pub mod rules;
-pub mod stats;
+pub(crate) mod exporter;
+pub(crate) mod logical;
+pub(crate) mod memo;
+pub(crate) mod model;
+pub(crate) mod physical;
+pub(crate) mod plan;
+pub(crate) mod prop;
+pub(crate) mod rules;
+pub(crate) mod stats;
 
 use std::{
     collections::HashSet,
@@ -27,20 +26,20 @@ use std::{
 
 use crate::{database::SharedCatalog, sql::binder::ast::*, transactions::worker::Worker};
 
-pub use memo::{ExprId, GroupId, Memo};
-pub use model::CostModel;
-pub use physical::PhysicalPlan;
-pub use plan::PlanBuilder;
-pub use prop::RequiredProperties;
-pub use rules::{ImplementationRule, TransformationRule};
-pub use stats::{Statistics, StatisticsProvider};
+pub(crate) use memo::{ExprId, GroupId, Memo};
+pub(crate) use model::CostModel;
+pub(crate) use physical::PhysicalPlan;
+pub(crate) use plan::PlanBuilder;
+pub(crate) use prop::RequiredProperties;
+pub(crate) use rules::{ImplementationRule, TransformationRule};
+pub(crate) use stats::{Statistics, StatisticsProvider};
 
 /// Result type for optimizer operations
-pub type OptimizerResult<T> = Result<T, OptimizerError>;
+pub(crate) type OptimizerResult<T> = Result<T, OptimizerError>;
 
 /// Optimizer errors
 #[derive(Debug, Clone)]
-pub enum OptimizerError {
+pub(crate) enum OptimizerError {
     /// No valid plan found
     NoPlanFound(String),
     /// Internal error during optimization
@@ -72,23 +71,23 @@ impl Error for OptimizerError {}
 
 /// Configuration for the optimizer
 #[derive(Debug, Clone)]
-pub struct OptimizerConfig {
+pub(crate) struct OptimizerConfig {
     /// Maximum time for optimization in milliseconds
-    pub max_optimization_time_ms: u64,
+    pub(crate) max_optimization_time_ms: u64,
     /// Maximum number of transformation rule applications
-    pub max_transformations: usize,
+    pub(crate) max_transformations: usize,
     /// Enable cost-based pruning
-    pub enable_pruning: bool,
+    pub(crate) enable_pruning: bool,
     /// Cost threshold for pruning
-    pub cost_threshold: f64,
+    pub(crate) cost_threshold: f64,
     /// Enable join reordering
-    pub enable_join_reorder: bool,
+    pub(crate) enable_join_reorder: bool,
     /// Maximum tables for exhaustive join enumeration
-    pub max_join_enumeration_tables: usize,
+    pub(crate) max_join_enumeration_tables: usize,
     /// Enable predicate pushdown
-    pub enable_predicate_pushdown: bool,
+    pub(crate) enable_predicate_pushdown: bool,
     /// Enable projection pushdown
-    pub enable_projection_pushdown: bool,
+    pub(crate) enable_projection_pushdown: bool,
 }
 
 impl Default for OptimizerConfig {
@@ -107,7 +106,7 @@ impl Default for OptimizerConfig {
 }
 
 /// Main Cascades optimizer
-pub struct CascadesOptimizer<Cost: CostModel, Prov: StatisticsProvider> {
+pub(crate) struct CascadesOptimizer<Cost: CostModel, Prov: StatisticsProvider> {
     /// Memo structure for storing expressions
     memo: Memo,
     /// Catalog reference for metadata
@@ -130,13 +129,13 @@ pub struct CascadesOptimizer<Cost: CostModel, Prov: StatisticsProvider> {
 
 /// Statistics about the optimization process
 #[derive(Debug, Default, Clone)]
-pub struct OptimizationStats {
-    pub groups_created: usize,
-    pub expressions_added: usize,
-    pub transformations_applied: usize,
-    pub implementations_generated: usize,
-    pub pruned_expressions: usize,
-    pub optimization_time_ms: u64,
+pub(crate) struct OptimizationStats {
+    pub(crate) groups_created: usize,
+    pub(crate) expressions_added: usize,
+    pub(crate) transformations_applied: usize,
+    pub(crate) implementations_generated: usize,
+    pub(crate) pruned_expressions: usize,
+    pub(crate) optimization_time_ms: u64,
 }
 
 impl<C, S> CascadesOptimizer<C, S>
@@ -145,7 +144,7 @@ where
     S: StatisticsProvider,
 {
     /// Create a new optimizer
-    pub fn new(
+    pub(crate) fn new(
         catalog: SharedCatalog,
         worker: Worker,
         config: OptimizerConfig,
@@ -166,31 +165,37 @@ where
     }
 
     /// Set a custom cost model
-    pub fn with_cost_model(mut self, cost_model: Arc<C>) -> Self {
+    pub(crate) fn with_cost_model(mut self, cost_model: Arc<C>) -> Self {
         self.cost_model = cost_model;
         self
     }
 
     /// Set a custom statistics provider
-    pub fn with_stats_provider(mut self, provider: Arc<S>) -> Self {
+    pub(crate) fn with_stats_provider(mut self, provider: Arc<S>) -> Self {
         self.stats_provider = provider;
         self
     }
 
     /// Add custom transformation rules
-    pub fn with_transformation_rules(mut self, rules: Vec<Arc<dyn TransformationRule>>) -> Self {
+    pub(crate) fn with_transformation_rules(
+        mut self,
+        rules: Vec<Arc<dyn TransformationRule>>,
+    ) -> Self {
         self.transformation_rules.extend(rules);
         self
     }
 
     /// Add custom implementation rules
-    pub fn with_implementation_rules(mut self, rules: Vec<Arc<dyn ImplementationRule>>) -> Self {
+    pub(crate) fn with_implementation_rules(
+        mut self,
+        rules: Vec<Arc<dyn ImplementationRule>>,
+    ) -> Self {
         self.implementation_rules.extend(rules);
         self
     }
 
     /// Optimize a bound statement and produce a physical plan
-    pub fn optimize(&mut self, stmt: &BoundStatement) -> OptimizerResult<PhysicalPlan> {
+    pub(crate) fn optimize(&mut self, stmt: &BoundStatement) -> OptimizerResult<PhysicalPlan> {
         let start_time = std::time::Instant::now();
 
         // Reset stats
@@ -412,7 +417,7 @@ where
     }
 
     /// Get optimization statistics
-    pub fn get_stats(&self) -> &OptimizationStats {
+    pub(crate) fn get_stats(&self) -> &OptimizationStats {
         &self.stats
     }
 }

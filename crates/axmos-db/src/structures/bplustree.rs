@@ -85,7 +85,7 @@ impl<'b> AsRef<[u8]> for Payload<'b> {
 }
 
 #[derive(Debug)]
-pub(crate) struct BPlusTree<Cmp>
+pub struct BPlusTree<Cmp>
 where
     Cmp: Comparator,
 {

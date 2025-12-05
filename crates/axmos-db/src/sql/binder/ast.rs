@@ -4,10 +4,10 @@ use crate::{
     types::{DataType, DataTypeKind, ObjectId},
 };
 
-use std::fmt::{self, Display, Formatter, Result as FmtResult};
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BoundColumnRef {
+pub(crate) struct BoundColumnRef {
     pub table_idx: usize,
     pub column_idx: usize,
     pub data_type: DataTypeKind,
@@ -249,7 +249,7 @@ impl BoundExpression {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundSelectItem {
+pub(crate) struct BoundSelectItem {
     pub expr: BoundExpression,
     pub output_idx: usize,
     pub output_name: String,
@@ -290,7 +290,7 @@ impl BoundTableRef {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundOrderBy {
+pub(crate) struct BoundOrderBy {
     pub expr: BoundExpression,
     pub asc: bool,
     pub nulls_first: bool,
@@ -311,7 +311,7 @@ pub(crate) struct BoundSelect {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundInsert {
+pub(crate) struct BoundInsert {
     pub table_id: ObjectId,
     pub columns: Vec<usize>,
     pub source: BoundInsertSource,
@@ -325,7 +325,7 @@ pub enum BoundInsertSource {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundUpdate {
+pub(crate) struct BoundUpdate {
     pub table_id: ObjectId,
     pub assignments: Vec<BoundAssignment>,
     pub filter: Option<BoundExpression>,
@@ -333,13 +333,13 @@ pub struct BoundUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundAssignment {
+pub(crate) struct BoundAssignment {
     pub column_idx: usize,
     pub value: BoundExpression,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundDelete {
+pub(crate) struct BoundDelete {
     pub table_id: ObjectId,
     pub filter: Option<BoundExpression>,
     pub table_schema: Schema,
@@ -347,7 +347,7 @@ pub struct BoundDelete {
 
 // DDL types
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundCreateTable {
+pub(crate) struct BoundCreateTable {
     pub table_name: String,
     pub columns: Vec<BoundColumnDef>,
     pub constraints: Vec<BoundTableConstraint>,
@@ -355,7 +355,7 @@ pub struct BoundCreateTable {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundColumnDef {
+pub(crate) struct BoundColumnDef {
     pub name: String,
     pub data_type: DataTypeKind,
     pub constraints: Vec<BoundColumnConstraint>,
@@ -387,7 +387,7 @@ pub enum BoundTableConstraint {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundCreateIndex {
+pub(crate) struct BoundCreateIndex {
     pub index_name: String,
     pub table_id: ObjectId,
     pub columns: Vec<BoundIndexColumn>,
@@ -396,13 +396,13 @@ pub struct BoundCreateIndex {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundIndexColumn {
+pub(crate) struct BoundIndexColumn {
     pub column_idx: usize,
     pub ascending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundAlterTable {
+pub(crate) struct BoundAlterTable {
     pub table_id: ObjectId,
     pub action: BoundAlterAction,
 }
@@ -424,7 +424,7 @@ pub enum BoundAlterAction {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundDropTable {
+pub(crate) struct BoundDropTable {
     pub table_id: ObjectId, // Cannot drop a table that does not exist
     pub if_exists: bool,
     pub cascade: bool,
@@ -438,14 +438,14 @@ pub enum BoundTransaction {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoundWith {
+pub(crate) struct BoundWith {
     pub recursive: bool,
     pub ctes: Vec<BoundSelect>,
     pub body: Box<BoundSelect>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum BoundStatement {
+pub(crate) enum BoundStatement {
     Select(BoundSelect),
     Insert(BoundInsert),
     Update(BoundUpdate),

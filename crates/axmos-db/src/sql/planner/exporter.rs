@@ -18,7 +18,7 @@ use super::prop::{LogicalProperties, PhysicalProperties};
 /// Visitor trait for exporting logical plans.
 ///
 /// Implementors define how each logical operator type should be exported.
-pub trait LogicalPlanVisitor {
+pub(crate) trait LogicalPlanVisitor {
     /// Called when entering a plan node (before visiting children).
     fn enter_plan(&mut self, plan: &LogicalPlan, depth: usize);
 
@@ -50,7 +50,7 @@ pub trait PhysicalPlanVisitor {
 }
 
 /// Trait for types that can be visited by a logical plan visitor.
-pub trait AcceptLogicalVisitor {
+pub(crate) trait AcceptLogicalVisitor {
     fn accept<V: LogicalPlanVisitor>(&self, visitor: &mut V);
     fn accept_with_depth<V: LogicalPlanVisitor>(&self, visitor: &mut V, depth: usize);
 }
@@ -165,7 +165,9 @@ impl Default for GraphvizConfig {
             show_schema: true,
             show_estimates: true,
             show_details: true,
-            font_name: "Inter, -apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif".to_string(),
+            font_name:
+                "Inter, -apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif"
+                    .to_string(),
             font_size: 12,
             rank_dir: RankDir::TopToBottom,
             rank_sep: 0.5,
@@ -188,14 +190,14 @@ pub struct GraphvizExporter {
 }
 
 impl GraphvizExporter {
-    pub fn new(title: impl Into<String>) -> Self {
+    pub(crate) fn new(title: impl Into<String>) -> Self {
         Self::with_config(GraphvizConfig {
             title: title.into(),
             ..Default::default()
         })
     }
 
-    pub fn with_config(config: GraphvizConfig) -> Self {
+    pub(crate) fn with_config(config: GraphvizConfig) -> Self {
         Self {
             config,
             output: String::new(),
@@ -228,7 +230,8 @@ impl GraphvizExporter {
         let _ = writeln!(
             self.output,
             "  node [shape=box, style=\"filled,rounded\", fontname=\"{}\", fontsize={}, margin=\"0.2,0.1\"];",
-            self.config.font_name, self.config.font_size.saturating_sub(3)
+            self.config.font_name,
+            self.config.font_size.saturating_sub(3)
         );
 
         let _ = writeln!(
@@ -808,7 +811,7 @@ impl Default for TextConfig {
 
 impl TextConfig {
     /// Minimal configuration - only show operator names.
-    pub fn minimal() -> Self {
+    pub(crate) fn minimal() -> Self {
         Self {
             show_schema: false,
             show_cardinality: false,
@@ -821,7 +824,7 @@ impl TextConfig {
     }
 
     /// Verbose configuration - show everything.
-    pub fn verbose() -> Self {
+    pub(crate) fn verbose() -> Self {
         Self::default()
     }
 }
@@ -836,18 +839,18 @@ pub struct TextExporter {
 }
 
 impl TextExporter {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_config(TextConfig::default())
     }
 
-    pub fn with_config(config: TextConfig) -> Self {
+    pub(crate) fn with_config(config: TextConfig) -> Self {
         Self {
             config,
             output: String::new(),
         }
     }
 
-    pub fn minimal() -> Self {
+    pub(crate) fn minimal() -> Self {
         Self::with_config(TextConfig::minimal())
     }
 
@@ -990,70 +993,70 @@ impl PhysicalPlanVisitor for TextExporter {
 
 impl LogicalPlan {
     /// Export to Graphviz DOT format (simple style).
-    pub fn to_graphviz(&self, title: &str) -> String {
+    pub(crate) fn to_graphviz(&self, title: &str) -> String {
         let mut exporter = GraphvizExporter::new(title);
         self.accept(&mut exporter);
         exporter.finish()
     }
 
     /// Export to Graphviz with custom configuration.
-    pub fn to_graphviz_with_config(&self, config: GraphvizConfig) -> String {
+    pub(crate) fn to_graphviz_with_config(&self, config: GraphvizConfig) -> String {
         let mut exporter = GraphvizExporter::with_config(config);
         self.accept(&mut exporter);
         exporter.finish()
     }
 
     /// Pretty print the plan as a tree (using visitor pattern).
-    pub fn explain(&self) -> String {
+    pub(crate) fn explain(&self) -> String {
         let mut exporter = TextExporter::new();
         self.accept(&mut exporter);
         exporter.finish()
     }
 
     /// Pretty print with custom configuration.
-    pub fn explain_with_config(&self, config: TextConfig) -> String {
+    pub(crate) fn explain_with_config(&self, config: TextConfig) -> String {
         let mut exporter = TextExporter::with_config(config);
         self.accept(&mut exporter);
         exporter.finish()
     }
 
     /// Get the output schema of this plan.
-    pub fn output_schema(&self) -> &Schema {
+    pub(crate) fn output_schema(&self) -> &Schema {
         self.op.output_schema()
     }
 }
 
 impl PhysicalPlan {
     /// Export to Graphviz DOT format (simple style).
-    pub fn to_graphviz(&self, title: &str) -> String {
+    pub(crate) fn to_graphviz(&self, title: &str) -> String {
         let mut exporter = GraphvizExporter::new(title);
         self.accept(&mut exporter);
         exporter.finish()
     }
 
     /// Export to Graphviz with custom configuration.
-    pub fn to_graphviz_with_config(&self, config: GraphvizConfig) -> String {
+    pub(crate) fn to_graphviz_with_config(&self, config: GraphvizConfig) -> String {
         let mut exporter = GraphvizExporter::with_config(config);
         self.accept(&mut exporter);
         exporter.finish()
     }
 
     /// Pretty print the plan as a tree
-    pub fn explain(&self) -> String {
+    pub(crate) fn explain(&self) -> String {
         let mut exporter = TextExporter::new();
         self.accept(&mut exporter);
         exporter.finish()
     }
 
     /// Pretty print with custom configuration.
-    pub fn explain_with_config(&self, config: TextConfig) -> String {
+    pub(crate) fn explain_with_config(&self, config: TextConfig) -> String {
         let mut exporter = TextExporter::with_config(config);
         self.accept(&mut exporter);
         exporter.finish()
     }
 
     /// Get the output schema of this plan.
-    pub fn output_schema(&self) -> &Schema {
+    pub(crate) fn output_schema(&self) -> &Schema {
         self.op.output_schema()
     }
 }

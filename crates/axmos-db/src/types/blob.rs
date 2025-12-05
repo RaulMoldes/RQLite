@@ -3,14 +3,27 @@
 //! Blob stores binary data with a varint length prefix.
 //! It implements AxmosValueType as a dynamic-size type.
 
-use crate::TextEncoding;
-use crate::types::VarInt;
-use crate::types::core::{
-    AxmosValueType, AxmosValueTypeRef, AxmosValueTypeRefMut, DynamicSizeType,
+use crate::{
+    TextEncoding, from_blob,
+    structures::comparator::{Comparator, VarlenComparator},
+    types::{
+        Date, DateTime, Float32, Float64, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
+        VarInt,
+        core::{
+            AxmosCastable, AxmosHashable, AxmosValueType, AxmosValueTypeRef, AxmosValueTypeRefMut,
+            DynamicSizeType,
+        },
+        varint::MAX_VARINT_LEN,
+    },
 };
-use crate::types::varint::MAX_VARINT_LEN;
-use std::cmp::PartialEq;
-use std::ops::{Deref, DerefMut};
+
+use murmur3::{murmur3_32, murmur3_x64_128};
+use std::io::Cursor;
+
+use std::{
+    cmp::{Ordering, PartialEq},
+    ops::{Deref, DerefMut},
+};
 
 pub(crate) fn decode_utf16le(bytes: &[u8]) -> String {
     let units: Vec<u16> = bytes
@@ -409,6 +422,27 @@ impl From<&[u8; 8]> for Blob {
     }
 }
 
+impl PartialOrd for Blob {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let comp = VarlenComparator;
+        comp.compare(self.as_ref(), other.as_ref()).ok()
+    }
+}
+
+impl<'a> PartialOrd for BlobRef<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let comp = VarlenComparator;
+        comp.compare(self.as_ref(), other.as_ref()).ok()
+    }
+}
+
+impl<'a> PartialOrd for BlobRefMut<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let comp = VarlenComparator;
+        comp.compare(self.as_ref(), other.as_ref()).ok()
+    }
+}
+
 impl PartialEq for Blob {
     fn eq(&self, other: &Self) -> bool {
         self.0.as_ref() == other.0.as_ref()
@@ -533,5 +567,52 @@ impl<'a> Deref for BlobRefMut<'a> {
 impl<'a> DerefMut for BlobRefMut<'a> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.as_mut()
+    }
+}
+
+impl AxmosCastable<Date> for Blob {
+    fn can_cast(&self) -> bool {
+        Date::parse_iso(&self.to_string(TextEncoding::Utf8)).is_ok()
+    }
+
+    fn try_cast(&self) -> Option<Date> {
+        Date::parse_iso(&self.to_string(TextEncoding::Utf8)).ok()
+    }
+}
+
+impl AxmosCastable<DateTime> for Blob {
+    fn can_cast(&self) -> bool {
+        DateTime::parse_iso(&self.to_string(TextEncoding::Utf8)).is_ok()
+    }
+
+    fn try_cast(&self) -> Option<DateTime> {
+        DateTime::parse_iso(&self.to_string(TextEncoding::Utf8)).ok()
+    }
+}
+
+from_blob!(
+    UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64
+);
+
+impl AxmosHashable for Blob {
+    fn hash64(&self) -> u64 {
+        // 128-bit Murmur3, take lower 64 bits
+        let bytes: &[u8] = self.as_ref();
+        let h128 = murmur3_x64_128(&mut Cursor::new(bytes), 0).unwrap();
+        h128 as u64
+    }
+}
+
+impl<'a> AxmosHashable for BlobRef<'a> {
+    fn hash64(&self) -> u64 {
+        let h128 = murmur3_x64_128(&mut Cursor::new(self.as_ref()), 0).unwrap();
+        h128 as u64
+    }
+}
+
+impl<'a> AxmosHashable for BlobRefMut<'a> {
+    fn hash64(&self) -> u64 {
+        let h128 = murmur3_x64_128(&mut Cursor::new(self.as_ref()), 0).unwrap();
+        h128 as u64
     }
 }

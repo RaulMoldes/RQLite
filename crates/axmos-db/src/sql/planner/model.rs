@@ -301,38 +301,10 @@ impl<S: StatisticsProvider> CostAwareStats<S> {
         let stats = self.provider.get_table_stats(table_id).unwrap_or_default();
 
         let sel = selectivity.unwrap_or(1.0);
-        let effective_rows = stats.row_count * sel;
+        let effective_rows = stats.row_count as f64 * sel;
 
         let effective_stats = Statistics::new(effective_rows, stats.avg_row_size);
         self.cost_model.seq_scan_cost(&effective_stats)
-    }
-
-    /// Estimate cost for joining two tables
-    pub fn estimate_join_cost(
-        &self,
-        left_table: ObjectId,
-        right_table: ObjectId,
-        join_selectivity: Option<f64>,
-    ) -> (f64, f64, f64) {
-        let left_stats = self
-            .provider
-            .get_table_stats(left_table)
-            .unwrap_or_default();
-        let right_stats = self
-            .provider
-            .get_table_stats(right_table)
-            .unwrap_or_default();
-
-        let left_rows = left_stats.row_count;
-        let right_rows = right_stats.row_count;
-
-        let nl_cost = self.cost_model.nested_loop_cost(left_rows, right_rows);
-        let hash_cost = self
-            .cost_model
-            .hash_join_cost(left_rows.min(right_rows), left_rows.max(right_rows));
-        let merge_cost = self.cost_model.merge_join_cost(left_rows, right_rows);
-
-        (nl_cost, hash_cost, merge_cost)
     }
 }
 

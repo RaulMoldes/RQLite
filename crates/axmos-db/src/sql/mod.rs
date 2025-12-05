@@ -3,7 +3,7 @@ pub mod ast;
 mod binder;
 pub mod lexer;
 pub mod parser;
-mod planner;
+pub mod planner;
 
 use crate::{
     database::{Database, errors::SQLResult},

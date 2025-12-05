@@ -1,13 +1,14 @@
 use crate::{
     TRANSACTION_ZERO, TextEncoding,
     database::meta_table_schema,
-    io::{
-        AsBytes, read_string_unchecked, read_type_from_buf, read_variable_length,
-        write_string_unchecked,
-    },
+    io::{AsBytes, read_string_unchecked, read_type_from_buf, write_string_unchecked},
     repr_enum,
+    sql::planner::stats::{IndexStatistics, TableStatistics},
     storage::tuple::{OwnedTuple, Tuple, TupleRef},
-    structures::comparator::Comparator,
+    structures::comparator::{
+        DynComparator, FixedSizeBytesComparator, NumericComparator, SignedNumericComparator,
+        VarlenComparator,
+    },
     types::{
         Blob, DataType, DataTypeKind, DataTypeRef, ObjectId, PAGE_ZERO, PageId, UInt8, UInt64,
         VarInt, varint::MAX_VARINT_LEN,
@@ -15,10 +16,40 @@ use crate::{
 };
 
 use std::{
-    cmp::Ordering,
     collections::HashMap,
-    io::{Read, Seek, Write},
+    io::{self, Read, Seek, Write},
 };
+
+/// Serializes optional statistics to bytes.
+pub(crate) fn serialize_optional<T: AsBytes, W: Write>(
+    stats: Option<&T>,
+    buffer: &mut W,
+) -> io::Result<()> {
+    match stats {
+        Some(s) => {
+            buffer.write_all(&[1u8])?;
+            s.write_to(buffer)?;
+        }
+        None => {
+            buffer.write_all(&[0u8])?;
+        }
+    }
+    Ok(())
+}
+
+/// Deserializes optional statistics from bytes.
+pub(crate) fn deserialize_optional<T: AsBytes, R: Read + Seek>(
+    bytes: &mut R,
+) -> io::Result<Option<T>> {
+    let mut flag = [0u8; 1];
+    bytes.read_exact(&mut flag)?;
+
+    if flag[0] == 1 {
+        Ok(Some(T::read_from(bytes)?))
+    } else {
+        Ok(None)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct Schema {
@@ -40,7 +71,7 @@ pub(crate) enum TableConstraint {
 }
 
 impl Schema {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             columns: Vec::new(),
             num_keys: 0,
@@ -49,22 +80,22 @@ impl Schema {
         }
     }
 
-    pub fn set_num_keys(&mut self, num_keys: u8) {
+    pub(crate) fn set_num_keys(&mut self, num_keys: u8) {
         self.num_keys = num_keys;
     }
 
-    pub fn keys(&self) -> Vec<&Column> {
+    pub(crate) fn keys(&self) -> Vec<&Column> {
         self.columns.iter().take(self.num_keys as usize).collect()
     }
 
-    pub fn keys_mut(&mut self) -> Vec<&mut Column> {
+    pub(crate) fn keys_mut(&mut self) -> Vec<&mut Column> {
         self.columns
             .iter_mut()
             .take(self.num_keys as usize)
             .collect()
     }
 
-    pub fn key(&self, name: &str) -> Option<&Column> {
+    pub(crate) fn key(&self, name: &str) -> Option<&Column> {
         if let Some(idx) = self.column_index.get(name)
             && *idx < self.num_keys as usize
         {
@@ -73,7 +104,7 @@ impl Schema {
         None
     }
 
-    pub fn key_mut(&mut self, name: &str) -> Option<&mut Column> {
+    pub(crate) fn key_mut(&mut self, name: &str) -> Option<&mut Column> {
         if let Some(idx) = self.column_index.get(name)
             && *idx < self.num_keys as usize
         {
@@ -81,7 +112,7 @@ impl Schema {
         }
         None
     }
-    pub fn column(&self, name: &str) -> Option<&Column> {
+    pub(crate) fn column(&self, name: &str) -> Option<&Column> {
         if let Some(idx) = self.column_index.get(name) {
             return self.columns.get(*idx);
         }
@@ -90,64 +121,64 @@ impl Schema {
 
     // Utility method to access a the index of a columns
     // Useful for fast column resolution.
-    pub fn column_idx(&self, name: &str) -> Option<&usize> {
+    pub(crate) fn column_idx(&self, name: &str) -> Option<&usize> {
         self.column_index.get(name)
     }
 
-    pub fn columns(&self) -> &Vec<Column> {
+    pub(crate) fn columns(&self) -> &Vec<Column> {
         &self.columns
     }
 
-    pub fn columns_mut(&mut self) -> &mut Vec<Column> {
+    pub(crate) fn columns_mut(&mut self) -> &mut Vec<Column> {
         &mut self.columns
     }
 
-    pub fn values(&self) -> &[Column] {
+    pub(crate) fn values(&self) -> &[Column] {
         &self.columns[self.num_keys as usize..]
     }
 
-    pub fn values_mut(&mut self) -> &mut [Column] {
+    pub(crate) fn values_mut(&mut self) -> &mut [Column] {
         &mut self.columns[self.num_keys as usize..]
     }
 
-    pub fn iter_keys(&self) -> impl Iterator<Item = &Column> {
+    pub(crate) fn iter_keys(&self) -> impl Iterator<Item = &Column> {
         self.columns.iter().take(self.num_keys as usize)
     }
 
-    pub fn iter_keys_mut(&mut self) -> impl Iterator<Item = &mut Column> {
+    pub(crate) fn iter_keys_mut(&mut self) -> impl Iterator<Item = &mut Column> {
         self.columns.iter_mut().take(self.num_keys as usize)
     }
 
-    pub fn iter_values(&self) -> impl Iterator<Item = &Column> {
+    pub(crate) fn iter_values(&self) -> impl Iterator<Item = &Column> {
         self.columns.iter().skip(self.num_keys as usize)
     }
 
-    pub fn iter_values_mut(&mut self) -> impl Iterator<Item = &mut Column> {
+    pub(crate) fn iter_values_mut(&mut self) -> impl Iterator<Item = &mut Column> {
         self.columns.iter_mut().skip(self.num_keys as usize)
     }
 
-    pub fn iter_columns(&self) -> impl Iterator<Item = &Column> {
+    pub(crate) fn iter_columns(&self) -> impl Iterator<Item = &Column> {
         self.columns.iter()
     }
 
-    pub fn iter_columns_mut(&mut self) -> impl Iterator<Item = &mut Column> {
+    pub(crate) fn iter_columns_mut(&mut self) -> impl Iterator<Item = &mut Column> {
         self.columns.iter_mut()
     }
 
-    pub fn column_mut(&mut self, name: &str) -> Option<&mut Column> {
+    pub(crate) fn column_mut(&mut self, name: &str) -> Option<&mut Column> {
         if let Some(idx) = self.column_index.get(name) {
             return self.columns.get_mut(*idx);
         }
         None
     }
 
-    pub fn push_column(&mut self, col: Column) {
+    pub(crate) fn push_column(&mut self, col: Column) {
         self.column_index
             .insert(col.name.clone(), self.columns.len());
         self.columns.push(col);
     }
 
-    pub fn add_column(
+    pub(crate) fn add_column(
         &mut self,
         name: &str,
         dtype: DataTypeKind,
@@ -171,11 +202,11 @@ impl Schema {
         self.push_column(col);
     }
 
-    pub fn has_column(&self, column_name: &str) -> bool {
+    pub(crate) fn has_column(&self, column_name: &str) -> bool {
         self.columns.iter().any(|p| p.name == column_name)
     }
 
-    pub fn has_pk(&self) -> bool {
+    pub(crate) fn has_pk(&self) -> bool {
         self.columns.iter().any(|p| p.is_pk())
             || self
                 .constraints
@@ -183,11 +214,11 @@ impl Schema {
                 .any(|c| matches!(c, TableConstraint::PrimaryKey(_)))
     }
 
-    pub fn drop_constraint(&mut self, constraint_name: &str) {
+    pub(crate) fn drop_constraint(&mut self, constraint_name: &str) {
         self.constraints.remove(constraint_name);
     }
 
-    pub fn add_constraint(&mut self, constraint: TableConstraint) {
+    pub(crate) fn add_constraint(&mut self, constraint: TableConstraint) {
         let name = match &constraint {
             TableConstraint::PrimaryKey(columns) => {
                 if self.has_pk() {
@@ -210,7 +241,7 @@ impl Schema {
         self.constraints.insert(name, constraint);
     }
 
-    pub fn get_dependants(&self) -> Vec<String> {
+    pub(crate) fn get_dependants(&self) -> Vec<String> {
         let mut deps: Vec<String> = self
             .columns
             .iter()
@@ -237,12 +268,12 @@ impl Schema {
         deps
     }
 
-    pub fn has_constraint(&self, ct_name: &str) -> bool {
+    pub(crate) fn has_constraint(&self, ct_name: &str) -> bool {
         self.constraints.contains_key(ct_name)
             || self.columns.iter().any(|p| p.has_constraint(ct_name))
     }
 
-    pub fn get_indexed_columns(&self) -> Vec<(usize, IndexInfo)> {
+    pub(crate) fn get_indexed_columns(&self) -> Vec<(usize, IndexInfo)> {
         self.iter_values()
             .enumerate()
             .filter_map(|(i, col)| col.index().is_some().then(|| (i, IndexInfo::from(col))))
@@ -257,11 +288,11 @@ pub struct IndexInfo {
 }
 
 impl IndexInfo {
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    pub fn datatype(&self) -> DataTypeKind {
+    pub(crate) fn datatype(&self) -> DataTypeKind {
         self.dtype
     }
 }
@@ -467,7 +498,7 @@ impl AsBytes for Schema {
 }
 
 impl Schema {
-    pub fn from_columns(columns: &[Column], num_keys: u8) -> Self {
+    pub(crate) fn from_columns(columns: &[Column], num_keys: u8) -> Self {
         let mut column_index = HashMap::new();
         for (i, col) in columns.iter().enumerate() {
             column_index.insert(col.name.clone(), i);
@@ -488,46 +519,54 @@ pub struct Table {
     root_page: PageId,
     next_row: UInt64,
     name: String,
+    stats: Option<TableStatistics>,
     schema: Schema,
 }
 
 impl Table {
-    pub fn new(name: &str, root_page: PageId, schema: Schema) -> Self {
+    pub(crate) fn new(name: &str, root_page: PageId, schema: Schema) -> Self {
         Self {
             object_id: ObjectId::new(),
             root_page,
             next_row: UInt64(0),
             name: name.to_string(),
             schema,
+            stats: None,
         }
     }
 
-    pub fn id(&self) -> ObjectId {
+    pub(crate) fn with_stats(mut self, stats: TableStatistics) -> Self {
+        self.stats = Some(stats);
+        self
+    }
+
+    pub(crate) fn id(&self) -> ObjectId {
         self.object_id
     }
 
-    pub fn root(&self) -> PageId {
+    pub(crate) fn root(&self) -> PageId {
         self.root_page
     }
 
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    pub fn schema(&self) -> &Schema {
+    pub(crate) fn schema(&self) -> &Schema {
         &self.schema
     }
 
-    pub fn next(&self) -> UInt64 {
+    pub(crate) fn next(&self) -> UInt64 {
         self.next_row
     }
 
-    pub fn build(
+    pub(crate) fn build(
         id: ObjectId,
         name: &str,
         root_page: PageId,
         schema: Schema,
         next_row: UInt64,
+        stats: Option<TableStatistics>,
     ) -> Self {
         Self {
             object_id: id,
@@ -535,17 +574,18 @@ impl Table {
             name: name.to_string(),
             schema,
             next_row,
+            stats,
         }
     }
 
-    pub fn add_row(&mut self) {
+    pub(crate) fn add_row(&mut self) {
         self.next_row += 1usize;
     }
 
-    pub fn set_next(&mut self, value: u64) {
+    pub(crate) fn set_next(&mut self, value: u64) {
         self.next_row = UInt64(value);
     }
-    pub fn get_next(&self) -> UInt64 {
+    pub(crate) fn get_next(&self) -> UInt64 {
         self.next_row
     }
 }
@@ -556,26 +596,29 @@ pub struct Index {
 
     root_page: PageId,
     name: String,
-    min_val: Option<Box<[u8]>>,
-    max_val: Option<Box<[u8]>>,
     schema: Schema,
+    stats: Option<IndexStatistics>,
 }
 
 impl Index {
-    pub fn new(name: &str, root_page: PageId, schema: Schema) -> Self {
+    pub(crate) fn new(name: &str, root_page: PageId, schema: Schema) -> Self {
         Self {
             object_id: ObjectId::new(),
 
             root_page,
-
             name: name.to_string(),
-            min_val: None,
-            max_val: None,
+            stats: None,
             schema,
         }
     }
+
+    pub(crate) fn with_stats(mut self, stats: IndexStatistics) -> Self {
+        self.stats = Some(stats);
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
-    pub fn build(
+    pub(crate) fn build(
         id: ObjectId,
 
         name: &str,
@@ -583,6 +626,7 @@ impl Index {
         schema: Schema,
         min_val: Box<[u8]>,
         max_val: Box<[u8]>,
+        stats: Option<IndexStatistics>,
         num_keys: u8,
     ) -> Self {
         Self {
@@ -591,53 +635,25 @@ impl Index {
             root_page,
 
             name: name.to_string(),
-            min_val: Some(min_val),
-            max_val: Some(max_val),
+            stats,
             schema,
         }
     }
 
-    pub fn id(&self) -> ObjectId {
+    pub(crate) fn id(&self) -> ObjectId {
         self.object_id
     }
 
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    pub fn root(&self) -> PageId {
+    pub(crate) fn root(&self) -> PageId {
         self.root_page
     }
 
-    pub fn schema(&self) -> &Schema {
+    pub(crate) fn schema(&self) -> &Schema {
         &self.schema
-    }
-
-    pub fn range(&self) -> Option<(&[u8], &[u8])> {
-        if let Some(xmin) = self.min_val.as_ref()
-            && let Some(xmax) = self.max_val.as_ref()
-        {
-            return Some((xmin.as_ref(), xmax.as_ref()));
-        }
-        None
-    }
-
-    pub fn add_item(&mut self, key: &[u8], comparator: impl Comparator) {
-        if let Some(max) = self.max_val.as_ref() {
-            if let Ok(Ordering::Greater) = comparator.compare(max.as_ref(), key) {
-                self.max_val = Some(key.to_vec().into_boxed_slice())
-            }
-        } else {
-            self.max_val = Some(key.to_vec().into_boxed_slice())
-        };
-
-        if let Some(min) = self.min_val.as_ref() {
-            if let Ok(Ordering::Less) = comparator.compare(min.as_ref(), key) {
-                self.min_val = Some(key.to_vec().into_boxed_slice())
-            }
-        } else {
-            self.min_val = Some(key.to_vec().into_boxed_slice())
-        };
     }
 }
 
@@ -648,100 +664,100 @@ pub enum Relation {
 }
 
 impl Relation {
-    pub fn id(&self) -> ObjectId {
+    pub(crate) fn id(&self) -> ObjectId {
         match self {
             Relation::TableRel(t) => t.object_id,
             Relation::IndexRel(i) => i.object_id,
         }
     }
 
-    pub fn columns(&self) -> &Vec<Column> {
+    pub(crate) fn columns(&self) -> &Vec<Column> {
         &self.schema().columns
     }
 
-    pub fn columns_mut(&mut self) -> &mut Vec<Column> {
+    pub(crate) fn columns_mut(&mut self) -> &mut Vec<Column> {
         &mut self.schema_mut().columns
     }
 
-    pub fn keys(&self) -> Vec<&Column> {
+    pub(crate) fn keys(&self) -> Vec<&Column> {
         self.schema().keys()
     }
 
-    pub fn keys_mut(&mut self) -> Vec<&mut Column> {
+    pub(crate) fn keys_mut(&mut self) -> Vec<&mut Column> {
         self.schema_mut().keys_mut()
     }
 
-    pub fn column(&self, name: &str) -> Option<&Column> {
+    pub(crate) fn column(&self, name: &str) -> Option<&Column> {
         self.schema().column(name)
     }
 
-    pub fn column_mut(&mut self, name: &str) -> Option<&mut Column> {
+    pub(crate) fn column_mut(&mut self, name: &str) -> Option<&mut Column> {
         self.schema_mut().column_mut(name)
     }
 
-    pub fn column_unchecked(&self, idx: usize) -> &Column {
+    pub(crate) fn column_unchecked(&self, idx: usize) -> &Column {
         &self.columns()[idx]
     }
 
-    pub fn column_mut_unchecked(&mut self, idx: usize) -> &mut Column {
+    pub(crate) fn column_mut_unchecked(&mut self, idx: usize) -> &mut Column {
         &mut self.columns_mut()[idx]
     }
 
-    pub fn key(&self, name: &str) -> Option<&Column> {
+    pub(crate) fn key(&self, name: &str) -> Option<&Column> {
         self.schema().key(name)
     }
 
-    pub fn key_mut(&mut self, name: &str) -> Option<&mut Column> {
+    pub(crate) fn key_mut(&mut self, name: &str) -> Option<&mut Column> {
         self.schema_mut().key_mut(name)
     }
 
-    pub fn schema_mut(&mut self) -> &mut Schema {
+    pub(crate) fn schema_mut(&mut self) -> &mut Schema {
         match self {
             Relation::TableRel(t) => &mut t.schema,
             Relation::IndexRel(i) => &mut i.schema,
         }
     }
 
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         match self {
             Relation::TableRel(t) => &t.name,
             Relation::IndexRel(i) => &i.name,
         }
     }
 
-    pub fn root(&self) -> PageId {
+    pub(crate) fn root(&self) -> PageId {
         match self {
             Relation::TableRel(t) => t.root_page,
             Relation::IndexRel(i) => i.root_page,
         }
     }
 
-    pub fn set_root(&mut self, root: PageId) {
+    pub(crate) fn set_root(&mut self, root: PageId) {
         match self {
             Relation::TableRel(t) => t.root_page = root,
             Relation::IndexRel(i) => i.root_page = root,
         }
     }
 
-    pub fn schema(&self) -> &Schema {
+    pub(crate) fn schema(&self) -> &Schema {
         match self {
             Relation::TableRel(t) => &t.schema,
             Relation::IndexRel(i) => &i.schema,
         }
     }
 
-    pub fn object_type(&self) -> ObjectType {
+    pub(crate) fn object_type(&self) -> ObjectType {
         match self {
             Relation::TableRel(_) => ObjectType::Table,
             Relation::IndexRel(_) => ObjectType::Index,
         }
     }
 
-    pub fn is_allocated(&self) -> bool {
+    pub(crate) fn is_allocated(&self) -> bool {
         self.root().is_valid()
     }
 
-    pub fn into_boxed_tuple(self) -> std::io::Result<OwnedTuple> {
+    pub(crate) fn into_boxed_tuple(self) -> std::io::Result<OwnedTuple> {
         let root_page = if self.root() != PAGE_ZERO {
             DataType::BigUInt(UInt64::from(self.root()))
         } else {
@@ -774,27 +790,10 @@ impl Relation {
         match self {
             Relation::TableRel(t) => {
                 buffer.write_all(t.next_row.as_ref())?;
+                serialize_optional(t.stats.as_ref(), &mut buffer)?;
             }
             Relation::IndexRel(i) => {
-                if let Some(val) = &i.min_val {
-                    buffer.write_all(&[1u8])?;
-                    let mut vbuffer = [0u8; MAX_VARINT_LEN];
-                    let len_buffer = VarInt::encode(val.len() as i64, &mut vbuffer);
-                    buffer.write_all(len_buffer)?;
-                    buffer.write_all(val.as_ref())?;
-                } else {
-                    buffer.write_all(&[0u8])?;
-                };
-
-                if let Some(val) = &i.max_val {
-                    buffer.write_all(&[1u8])?;
-                    let mut vbuffer = [0u8; MAX_VARINT_LEN];
-                    let len_buffer = VarInt::encode(val.len() as i64, &mut vbuffer);
-                    buffer.write_all(len_buffer)?;
-                    buffer.write_all(val.as_ref())?;
-                } else {
-                    buffer.write_all(&[0u8])?;
-                };
+                serialize_optional(i.stats.as_ref(), &mut buffer)?;
             }
         }
 
@@ -873,51 +872,24 @@ impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
                         let mut tmp_buf = [0u8; 8];
                         metadata_buf.read_exact(&mut tmp_buf)?;
                         let next_row = UInt64::try_from(tmp_buf.as_slice())?;
-
+                        let stats = deserialize_optional(&mut metadata_buf)?;
                         Ok(Relation::TableRel(Table {
                             object_id: o_id,
                             root_page: root,
-
+                            stats,
                             name: name.to_string(),
                             schema,
                             next_row,
                         }))
                     }
                     ObjectType::Index => {
-                        let dtype = schema
-                            .columns
-                            .first()
-                            .ok_or_else(|| {
-                                std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    "Index schema must have at least one column",
-                                )
-                            })?
-                            .dtype;
-
-                        let mut tmp_buf = [0u8; 1];
-                        metadata_buf.read_exact(&mut tmp_buf)?;
-                        let min_val = if tmp_buf[0] == 1 {
-                            Some(read_variable_length(&mut metadata_buf)?)
-                        } else {
-                            None
-                        };
-
-                        let mut tmp_buf = [0u8; 1];
-                        metadata_buf.read_exact(&mut tmp_buf)?;
-                        let max_val = if tmp_buf[0] == 1 {
-                            Some(read_variable_length(&mut metadata_buf)?)
-                        } else {
-                            None
-                        };
+                        let stats = deserialize_optional(&mut metadata_buf)?;
 
                         Ok(Relation::IndexRel(Index {
                             object_id: o_id,
                             root_page: root,
                             name: name.to_string(),
-
-                            min_val,
-                            max_val,
+                            stats,
                             schema,
                         }))
                     }
@@ -953,7 +925,7 @@ pub enum Constraint {
 }
 
 impl Column {
-    pub fn new(
+    pub(crate) fn new(
         dtype: DataTypeKind,
         name: &str,
         index: Option<String>,
@@ -967,7 +939,7 @@ impl Column {
         }
     }
 
-    pub fn new_unindexed(
+    pub(crate) fn new_unindexed(
         dtype: DataTypeKind,
         name: &str,
         constraints: Option<HashMap<String, Constraint>>,
@@ -975,43 +947,43 @@ impl Column {
         Self::new(dtype, name, None, constraints)
     }
 
-    pub fn has_constraint(&self, ct_name: &str) -> bool {
+    pub(crate) fn has_constraint(&self, ct_name: &str) -> bool {
         self.cts.contains_key(ct_name)
     }
 
-    pub fn has_index(&self) -> bool {
+    pub(crate) fn has_index(&self) -> bool {
         self.index.is_some()
     }
 
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    pub fn index(&self) -> Option<&String> {
+    pub(crate) fn index(&self) -> Option<&String> {
         self.index.as_ref()
     }
 
-    pub fn set_index(&mut self, index: String) {
+    pub(crate) fn set_index(&mut self, index: String) {
         self.index = Some(index);
     }
 
-    pub fn constraints(&self) -> &HashMap<String, Constraint> {
+    pub(crate) fn constraints(&self) -> &HashMap<String, Constraint> {
         &self.cts
     }
 
-    pub fn drop_constraint(&mut self, ct_name: &str) {
+    pub(crate) fn drop_constraint(&mut self, ct_name: &str) {
         self.cts.remove(ct_name);
     }
 
-    pub fn add_constraint(&mut self, ct_name: String, ct: Constraint) {
+    pub(crate) fn add_constraint(&mut self, ct_name: String, ct: Constraint) {
         self.cts.insert(ct_name, ct);
     }
 
-    pub fn rename(&mut self, name: String) {
+    pub(crate) fn rename(&mut self, name: String) {
         self.name = name;
     }
 
-    pub fn default(&self) -> Option<&DataType> {
+    pub(crate) fn default(&self) -> Option<&DataType> {
         self.cts.iter().find_map(|(_, p)| {
             if let Constraint::Default(dtype) = p {
                 Some(dtype)
@@ -1021,7 +993,7 @@ impl Column {
         })
     }
 
-    pub fn fk(&self) -> Option<&ForeignKey> {
+    pub(crate) fn fk(&self) -> Option<&ForeignKey> {
         self.cts.iter().find_map(|(_, p)| {
             if let Constraint::ForeignKey(key) = p {
                 Some(key)
@@ -1031,26 +1003,44 @@ impl Column {
         })
     }
 
-    pub fn is_pk(&self) -> bool {
+    pub(crate) fn is_pk(&self) -> bool {
         self.cts
             .iter()
             .any(|(_, p)| matches!(p, Constraint::PrimaryKey))
     }
 
-    pub fn is_unique(&self) -> bool {
+    pub(crate) fn is_unique(&self) -> bool {
         self.cts
             .iter()
             .any(|(_, p)| matches!(p, Constraint::Unique | Constraint::PrimaryKey))
     }
 
-    pub fn is_non_null(&self) -> bool {
+    pub(crate) fn is_non_null(&self) -> bool {
         self.cts
             .iter()
             .any(|(_, p)| matches!(p, Constraint::NonNull | Constraint::PrimaryKey))
     }
 
-    pub fn set_datatype(&mut self, datatype: DataTypeKind) {
+    pub(crate) fn set_datatype(&mut self, datatype: DataTypeKind) {
         self.dtype = datatype;
+    }
+
+    pub(crate) fn comparator(&self) -> DynComparator {
+        if self.dtype.is_signed()
+            && let Some(size) = self.dtype.size_of_val()
+        {
+            DynComparator::SignedNumeric(SignedNumericComparator::for_size(size))
+        } else if self.dtype.is_numeric()
+            && let Some(size) = self.dtype.size_of_val()
+        {
+            DynComparator::StrictNumeric(NumericComparator::for_size(size))
+        } else if self.dtype.is_fixed_size()
+            && let Some(size) = self.dtype.size_of_val()
+        {
+            DynComparator::FixedSizeBytes(FixedSizeBytesComparator::for_size(size))
+        } else {
+            DynComparator::Variable(VarlenComparator)
+        }
     }
 }
 
@@ -1169,7 +1159,7 @@ pub struct ForeignKey {
 }
 
 impl ForeignKey {
-    pub fn new(ref_table: String, ref_col: String) -> Self {
+    pub(crate) fn new(ref_table: String, ref_col: String) -> Self {
         Self { ref_table, ref_col }
     }
 }
@@ -1196,11 +1186,11 @@ impl AsBytes for ForeignKey {
 }
 
 impl ForeignKey {
-    pub fn table(&self) -> &str {
+    pub(crate) fn table(&self) -> &str {
         &self.ref_table
     }
 
-    pub fn column(&self) -> &str {
+    pub(crate) fn column(&self) -> &str {
         &self.ref_col
     }
 }

@@ -28,6 +28,9 @@ pub trait AxmosValueType: Sized {
     /// Whether this type is considered numeric for coercion purposes.
     const IS_NUMERIC: bool = false;
 
+    /// Wether this type is signed or not
+    const IS_SIGNED: bool = false;
+
     /// Reinterpret a byte buffer as this type's reference.
     /// Returns the reference and the number of bytes consumed.
     fn reinterpret(buffer: &[u8]) -> Result<(Self::Ref<'_>, usize)>;
@@ -89,5 +92,50 @@ pub trait FixedSizeType: AxmosValueType {
 /// Marker trait for dynamic-size types.
 pub trait DynamicSizeType: AxmosValueType {}
 
-/// Marker trait for numeric types that support coercion.
-pub trait NumericType: AxmosValueType {}
+/// Marker trait for numeric types.
+pub trait NumericType: AxmosValueType {
+    /// Whether this numeric type is signed (true) or unsigned (false)
+    const IS_SIGNED: bool = <Self as AxmosValueType>::IS_SIGNED;
+}
+
+/// Trait for type casting between Axmos value types.
+///
+/// This trait defines how one type can be converted to another.
+/// The derive macro uses this for `try_cast` implementation.
+///
+/// Implementations should be provided externally (not in the macro)
+/// to allow flexible casting rules.
+pub trait AxmosCastable<Target>: Sized {
+    /// Try to cast this value to the target type.
+    /// Returns `None` if the cast is not possible or would lose precision.
+    fn try_cast(&self) -> Option<Target>;
+
+    /// Check if this value can be cast to the target type.
+    fn can_cast(&self) -> bool {
+        self.try_cast().is_some()
+    }
+}
+
+/// Blanket implementation: any type can cast to itself.
+impl<T: Clone> AxmosCastable<T> for T {
+    #[inline]
+    fn try_cast(&self) -> Option<T> {
+        Some(self.clone())
+    }
+
+    #[inline]
+    fn can_cast(&self) -> bool {
+        true
+    }
+}
+
+/// Trait for types that support comparison operations.
+/// This is used by the derive macro to determine if a variant supports ordering.
+pub trait AxmosComparable: PartialOrd {}
+
+// Blanket implementation for all PartialOrd types
+impl<T: PartialOrd> AxmosComparable for T {}
+
+pub trait AxmosHashable {
+    fn hash64(&self) -> u64;
+}

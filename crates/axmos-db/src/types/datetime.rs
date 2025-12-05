@@ -3,19 +3,20 @@
 //! Represents a date and time as seconds since Unix epoch.
 
 use crate::types::date::Date;
-use crate::{impl_numeric_marker, integer, scalar};
+use crate::types::{
+    AxmosCastable, Blob,
+    sized_types::{Float32, Float64, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64},
+};
+use crate::{direct_axmos_cast, scalar, unsigned_integer};
 use std::cmp::{Ord, PartialOrd};
 use std::fmt::{self, Display};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Represents a date and time (UTC-based)
-integer! {
+unsigned_integer! {
     pub struct DateTime(u64);
 }
-
-// Mark DateTime as numeric
-impl_numeric_marker!(DateTime);
 
 // Duration in seconds
 scalar! {
@@ -227,5 +228,29 @@ impl TryFrom<&str> for DateTime {
 impl From<DateTime> for String {
     fn from(dt: DateTime) -> Self {
         dt.to_iso_string()
+    }
+}
+
+direct_axmos_cast!(
+    DateTime[u64]  => Int8[i8], Int16[i16], Int32[i32], UInt8[u8], UInt16[u16], UInt32[u32], Int64[i64], Float32[f32], Float64[f64], UInt64[u64]
+);
+
+impl AxmosCastable<Blob> for DateTime {
+    fn can_cast(&self) -> bool {
+        true
+    }
+
+    fn try_cast(&self) -> Option<Blob> {
+        Some(Blob::from(self.to_iso_string().as_str()))
+    }
+}
+
+impl AxmosCastable<Date> for DateTime {
+    fn can_cast(&self) -> bool {
+        true
+    }
+
+    fn try_cast(&self) -> Option<Date> {
+        Some(self.date())
     }
 }

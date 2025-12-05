@@ -1,10 +1,10 @@
 //! Types module.
 mod core;
 
-use core::{AxmosValueType, AxmosValueTypeRef, AxmosValueTypeRefMut};
+use core::{AxmosCastable, AxmosValueType, AxmosValueTypeRef, AxmosValueTypeRefMut};
 
 use axmos_derive::AxmosDataType;
-use std::{cmp::Ord, fmt};
+use std::fmt;
 
 pub mod blob;
 pub mod date;
@@ -25,11 +25,13 @@ pub use sized_types::{
     UInt32RefMut, UInt64, UInt64Ref, UInt64RefMut,
 };
 pub use varint::VarInt;
+
 #[cfg(test)]
 mod tests;
 
-#[derive(AxmosDataType, Debug, PartialEq, Clone)]
+#[derive(AxmosDataType, Debug, PartialEq, Clone, Default)]
 pub enum DataType {
+    #[default]
     #[null]
     Null,
 
@@ -55,8 +57,10 @@ pub enum DataType {
 
     Byte(UInt8),
 
+    #[non_arith]
     Blob(Blob),
 
+    #[non_arith]
     Text(Blob),
 
     Date(Date),
@@ -107,5 +111,75 @@ impl fmt::Display for DataType {
             DataType::Date(d) => write!(f, "Date({})", d.to_iso_string()),
             DataType::DateTime(dt) => write!(f, "DateTime({})", dt.to_iso_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod kind_enum_tests {
+    use super::*;
+
+    #[test]
+    fn test_datatype_kind_methods() {
+        // Test is_numeric()
+        assert!(!DataTypeKind::Null.is_numeric());
+        assert!(DataTypeKind::SmallInt.is_numeric()); // Int8
+        assert!(DataTypeKind::HalfInt.is_numeric()); // Int16
+        assert!(DataTypeKind::Int.is_numeric()); // Int32
+        assert!(DataTypeKind::BigInt.is_numeric()); // Int64
+        assert!(DataTypeKind::SmallUInt.is_numeric()); // UInt8
+        assert!(DataTypeKind::HalfUInt.is_numeric()); // UInt16
+        assert!(DataTypeKind::UInt.is_numeric()); // UInt32
+        assert!(DataTypeKind::BigUInt.is_numeric()); // UInt64
+        assert!(DataTypeKind::Float.is_numeric()); // Float32
+        assert!(DataTypeKind::Double.is_numeric()); // Float64
+        assert!(DataTypeKind::Byte.is_numeric()); // UInt8
+        assert!(!DataTypeKind::Blob.is_numeric());
+        assert!(!DataTypeKind::Text.is_numeric());
+        assert!(DataTypeKind::Date.is_numeric()); // Date
+        assert!(DataTypeKind::Char.is_numeric()); // UInt8
+        assert!(DataTypeKind::Boolean.is_numeric()); // UInt8
+        assert!(DataTypeKind::DateTime.is_numeric()); // DateTime
+
+        // Test is_fixed_size()
+        assert!(DataTypeKind::Null.is_fixed_size()); // Size 0
+        assert!(DataTypeKind::SmallInt.is_fixed_size()); // 1 byte
+        assert!(DataTypeKind::HalfInt.is_fixed_size()); // 2 bytes
+        assert!(DataTypeKind::Int.is_fixed_size()); // 4 bytes
+        assert!(DataTypeKind::BigInt.is_fixed_size()); // 8 bytes
+        assert!(DataTypeKind::SmallUInt.is_fixed_size()); // 1 byte
+        assert!(DataTypeKind::HalfUInt.is_fixed_size()); // 2 bytes
+        assert!(DataTypeKind::UInt.is_fixed_size()); // 4 bytes
+        assert!(DataTypeKind::BigUInt.is_fixed_size()); // 8 bytes
+        assert!(DataTypeKind::Float.is_fixed_size()); // 4 bytes
+        assert!(DataTypeKind::Double.is_fixed_size()); // 8 bytes
+        assert!(DataTypeKind::Byte.is_fixed_size()); // 1 byte
+        assert!(!DataTypeKind::Blob.is_fixed_size()); // Variable size
+        assert!(!DataTypeKind::Text.is_fixed_size()); // Variable size
+        assert!(DataTypeKind::Date.is_fixed_size()); // 4 bytes
+        assert!(DataTypeKind::Char.is_fixed_size()); // 1 byte
+        assert!(DataTypeKind::Boolean.is_fixed_size()); // 1 byte
+        assert!(DataTypeKind::DateTime.is_fixed_size()); // 8 bytes
+    }
+
+    #[test]
+    fn test_datatype_kind_is_signed() {
+        assert!(!DataTypeKind::Null.is_signed());
+        assert!(DataTypeKind::SmallInt.is_signed()); // Int8 signed
+        assert!(DataTypeKind::HalfInt.is_signed()); // Int16 signed
+        assert!(DataTypeKind::Int.is_signed()); // Int32 signed
+        assert!(DataTypeKind::BigInt.is_signed()); // Int64 signed
+        assert!(!DataTypeKind::SmallUInt.is_signed()); // UInt8 unsigned
+        assert!(!DataTypeKind::HalfUInt.is_signed()); // UInt16 unsigned
+        assert!(!DataTypeKind::UInt.is_signed()); // UInt32 unsigned
+        assert!(!DataTypeKind::BigUInt.is_signed()); // UInt64 unsigned
+        assert!(DataTypeKind::Float.is_signed()); // Float32 signed
+        assert!(DataTypeKind::Double.is_signed()); // Float64 signed
+        assert!(!DataTypeKind::Byte.is_signed()); // UInt8 (Byte) unsigned
+        assert!(!DataTypeKind::Blob.is_signed());
+        assert!(!DataTypeKind::Text.is_signed());
+        assert!(!DataTypeKind::Date.is_signed()); // Date not signed
+        assert!(!DataTypeKind::Char.is_signed()); // UInt8 (Char) unsigned
+        assert!(!DataTypeKind::Boolean.is_signed()); // UInt8 (Boolean) unsigned
+        assert!(!DataTypeKind::DateTime.is_signed()); // DateTime is unsigned
     }
 }

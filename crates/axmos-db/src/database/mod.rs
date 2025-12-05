@@ -1,5 +1,6 @@
 pub mod errors;
 pub mod schema;
+pub mod stats;
 
 use std::{
     cell::{Ref, RefMut},
@@ -20,7 +21,8 @@ use crate::{
     structures::{
         bplustree::{BPlusTree, SearchResult},
         comparator::{
-            DynComparator, FixedSizeBytesComparator, NumericComparator, VarlenComparator,
+            DynComparator, FixedSizeBytesComparator, NumericComparator, SignedNumericComparator,
+            VarlenComparator,
         },
     },
     transactions::{
@@ -36,6 +38,8 @@ use crate::{
 pub const META_TABLE: &str = "rqcatalog";
 pub const META_INDEX: &str = "rqindex";
 
+/// META TABLES AND META INDEXES ARE SPECIAL.
+/// THIS IS WHY TO MANAGE THE PRIMARY KEY OF THIS TABLES WE USE THE OBJECT ID ATOMIC INSTEAD OF THE STANDARD ROW-ID. THIS ALLOWS FOR FASTER ACCESS, AND ENSURES THE IDENTIFIER OF EACH TABLE ON EACH OF THE METAS IS THE SAME.
 pub fn meta_idx_schema() -> Schema {
     Schema::from_columns(
         [
@@ -161,12 +165,18 @@ impl Catalog {
         dtype: DataTypeKind,
         tx: Worker,
     ) -> io::Result<BPlusTree<DynComparator>> {
-        let comparator = if dtype.is_numeric() {
-            DynComparator::StrictNumeric(NumericComparator::for_size(dtype.size_of_val().unwrap()))
-        } else if dtype.is_fixed_size() {
-            DynComparator::FixedSizeBytes(FixedSizeBytesComparator::for_size(
-                dtype.size_of_val().unwrap(),
-            ))
+        let comparator = if dtype.is_signed()
+            && let Some(size) = dtype.size_of_val()
+        {
+            DynComparator::SignedNumeric(SignedNumericComparator::for_size(size))
+        } else if dtype.is_numeric()
+            && let Some(size) = dtype.size_of_val()
+        {
+            DynComparator::StrictNumeric(NumericComparator::for_size(size))
+        } else if dtype.is_fixed_size()
+            && let Some(size) = dtype.size_of_val()
+        {
+            DynComparator::FixedSizeBytes(FixedSizeBytesComparator::for_size(size))
         } else {
             DynComparator::Variable(VarlenComparator)
         };
@@ -180,7 +190,7 @@ impl Catalog {
         ))
     }
 
-    pub fn table_btree(
+    pub(crate) fn table_btree(
         &self,
         root: PageId,
         tx: Worker,
@@ -196,7 +206,12 @@ impl Catalog {
         ))
     }
 
-    pub fn create_table(&self, table_name: &str, schema: Schema, worker: Worker) -> io::Result<()> {
+    pub(crate) fn create_table(
+        &self,
+        table_name: &str,
+        schema: Schema,
+        worker: Worker,
+    ) -> io::Result<()> {
         let root = worker.borrow_mut().alloc_page::<BtreePage>()?;
         debug_assert!(
             root.is_valid(),
@@ -208,7 +223,12 @@ impl Catalog {
         )
     }
 
-    pub fn create_index(&self, index_name: &str, schema: Schema, worker: Worker) -> io::Result<()> {
+    pub(crate) fn create_index(
+        &self,
+        index_name: &str,
+        schema: Schema,
+        worker: Worker,
+    ) -> io::Result<()> {
         let root = worker.borrow_mut().alloc_page::<BtreePage>()?;
         debug_assert!(
             root.is_valid(),
@@ -302,7 +322,7 @@ impl Catalog {
     }
 
     /// Checks if a given relation exists in the meta-index
-    pub fn lookup_relation(&self, name: &str, worker: Worker) -> io::Result<SearchResult> {
+    pub(crate) fn lookup_relation(&self, name: &str, worker: Worker) -> io::Result<SearchResult> {
         let meta_idx = self.index_btree(self.meta_index, DataTypeKind::Text, worker)?;
         let blob = Blob::from(name);
         meta_idx.search_from_root(blob.as_ref(), FrameAccessMode::Read)
