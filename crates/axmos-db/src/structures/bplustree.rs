@@ -84,7 +84,7 @@ impl<'b> AsRef<[u8]> for Payload<'b> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BPlusTree<Cmp>
 where
     Cmp: Comparator,
@@ -1851,7 +1851,8 @@ where
                 })?
         };
 
-        self.worker_mut().release_latch(page_id);
+        // We cannot release the latch here!
+        // self.worker_mut().release_latch(page_id);
         Ok(result)
     }
 
@@ -1934,7 +1935,7 @@ where
                 indexed_results.push((original_idx, result));
             }
 
-            self.worker_mut().release_latch(page_id);
+            //  self.worker_mut().release_latch(page_id);
         }
 
         // Sort by original index and extract results
@@ -1944,10 +1945,10 @@ where
         Ok(results)
     }
 
-    /// Creates an iterator over cell slots from the leftmost position in the tree.
-    pub fn iter_positions(&mut self) -> io::Result<BPlusTreePositionIterator<'_, Cmp>> {
+    /// Computes the tree height by traversing from root to leaf.
+    pub fn height(&self) -> io::Result<usize> {
+        let mut height = 1usize;
         let mut current = self.root;
-
         loop {
             self.worker_mut()
                 .acquire::<BtreePage>(current, FrameAccessMode::Read)?;
@@ -1964,9 +1965,51 @@ where
             self.worker_mut().release_latch(current);
 
             if is_leaf {
+                return Ok(height);
+            }
+            height += 1;
+            current = first_child;
+        }
+    }
+
+    /// Creates an iterator over cell slots from the leftmost position in the tree.
+    pub fn iter_positions(&mut self) -> io::Result<BPlusTreePositionIterator<'_, Cmp>> {
+        let mut current = self.root;
+
+        loop {
+            self.worker_mut()
+                .acquire::<BtreePage>(current, FrameAccessMode::Read)?;
+
+            let (is_leaf, first_child) =
+                self.worker()
+                    .read_page::<BtreePage, _, _>(current, |btreepage| {
+                        let num_slots = btreepage.num_slots();
+                        let first_child = if num_slots > 0 {
+                            btreepage.cell(Slot(0)).metadata().left_child()
+                        } else {
+                            PAGE_ZERO
+                        };
+                        (btreepage.is_leaf(), first_child)
+                    })?;
+
+            self.worker_mut().release_latch(current);
+
+            if is_leaf {
+                // For empty trees, return an iterator that will immediately return None
                 return BPlusTreePositionIterator::from_position(
                     self,
-                    Position::start_pos(current),
+                    current,
+                    0,
+                    IterDirection::Forward,
+                );
+            }
+
+            // If interior node has no children, tree is malformed but handle gracefully
+            if !first_child.is_valid() {
+                return BPlusTreePositionIterator::from_position(
+                    self,
+                    current,
+                    0,
                     IterDirection::Forward,
                 );
             }
@@ -1975,7 +2018,7 @@ where
         }
     }
 
-    /// Creates an iterator over cell slots from the rightmost position in the tree.
+    /// Iterates the tree backward, starting from the right most slot and visiting leaf pages in reverse order.
     pub fn iter_positions_rev(&mut self) -> io::Result<BPlusTreePositionIterator<'_, Cmp>> {
         let mut current = self.root;
 
@@ -1983,25 +2026,48 @@ where
             self.worker_mut()
                 .acquire::<BtreePage>(current, FrameAccessMode::Read)?;
 
-            let (last_child, last_slot) =
+            let (is_leaf, num_slots, last_child) =
                 self.worker()
                     .read_page::<BtreePage, _, _>(current, |btree_page| {
-                        let last_slot = btree_page.num_slots().saturating_sub(1);
-                        (btree_page.metadata().right_child, Slot(last_slot))
+                        (
+                            btree_page.is_leaf(),
+                            btree_page.num_slots(),
+                            btree_page.metadata().right_child,
+                        )
                     })?;
 
             self.worker_mut().release_latch(current);
 
-            if !last_child.is_valid() && last_slot > Slot(0) {
+            if is_leaf {
+                // Start at last slot
+                let start_slot = if num_slots > 0 {
+                    (num_slots - 1) as i16
+                } else {
+                    -1 // Will immediately return None in backward iteration
+                };
+
                 return BPlusTreePositionIterator::from_position(
                     self,
-                    Position::new(current, last_slot),
+                    current,
+                    start_slot,
                     IterDirection::Backward,
                 );
-            } else if last_slot == Slot(0) && !last_child.is_valid() {
-                return Err(IoError::other(
-                    "Bplus tree is empty. Cannot iterate over an empty tree",
-                ));
+            }
+
+            if !last_child.is_valid() {
+                // Start at last slot
+                let start_slot = if num_slots > 0 {
+                    (num_slots - 1) as i16
+                } else {
+                    -1 // Will immediately return None in backward iteration
+                };
+                // Malformed interior node, handle gracefully
+                return BPlusTreePositionIterator::from_position(
+                    self,
+                    current,
+                    start_slot,
+                    IterDirection::Backward,
+                );
             }
 
             current = last_child;
@@ -2019,8 +2085,8 @@ where
         let pos = match position {
             SearchResult::Found(pos) | SearchResult::NotFound(pos) => pos,
         };
-
-        BPlusTreePositionIterator::from_position(self, pos, direction)
+        let slot: u16 = pos.slot().into();
+        BPlusTreePositionIterator::from_position(self, pos.page(), slot as i16, direction)
     }
 
     /// Deallocates the entire tree using BFS traversal.
@@ -2140,16 +2206,17 @@ where
 {
     pub fn from_position(
         tree: &'a BPlusTree<Cmp>,
-        position: Position,
+        page: PageId,
+        slot: i16,
         direction: IterDirection,
     ) -> io::Result<Self> {
         tree.worker_mut()
-            .acquire::<BtreePage>(position.page(), FrameAccessMode::Read)?;
-        let slot_val: u16 = position.slot().into();
+            .acquire::<BtreePage>(page, FrameAccessMode::Read)?;
+
         Ok(Self {
             tree,
-            current_page: Some(position.page()),
-            current_slot: slot_val as i16,
+            current_page: Some(page),
+            current_slot: slot,
             direction,
             _phantom: PhantomData,
         })

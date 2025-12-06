@@ -119,6 +119,7 @@ pub(crate) trait Comparator {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum DynComparator {
     Variable(VarlenComparator),
     StrictNumeric(NumericComparator),
@@ -170,6 +171,7 @@ impl Ranger for DynComparator {
 ///
 /// This comparator reconstructs numeric values from bytes before comparison,
 /// automatically handling the platform's endianness.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct NumericComparator(usize);
 
 impl NumericComparator {
@@ -248,6 +250,7 @@ impl Ranger for NumericComparator {
 }
 
 /// Comparator for signed numeric types stored in platform-native byte order.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct SignedNumericComparator(usize);
 
 impl SignedNumericComparator {
@@ -359,6 +362,7 @@ impl Ranger for SignedNumericComparator {
 /// - UUIDs
 /// - Fixed-length strings
 /// - Any type where lexicographic order is desired
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct FixedSizeBytesComparator(usize);
 
 impl FixedSizeBytesComparator {
@@ -422,6 +426,7 @@ impl Ranger for FixedSizeBytesComparator {
 ///
 /// Format: `[VarInt length][data bytes]`
 /// Comparison is lexicographic on the data portion.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct VarlenComparator;
 
 impl Comparator for VarlenComparator {

@@ -17,7 +17,7 @@ use crate::{
     },
 };
 
-use murmur3::{murmur3_32, murmur3_x64_128};
+use murmur3::murmur3_x64_128;
 use std::io::Cursor;
 
 use std::{

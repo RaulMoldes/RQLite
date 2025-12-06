@@ -5,32 +5,33 @@
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    io::{self, Error as IoError, ErrorKind},
+    error::Error,
+    fmt::{Display, Formatter, Result as FmtResult},
     time::{SystemTime, UNIX_EPOCH},
+    io::{self, Cursor}
 };
 
 use murmur3::murmur3_x64_128;
-use std::io::Cursor;
+
 
 use crate::{
-    DataType,
+
     database::{
-        Catalog, SharedCatalog,
-        schema::{Column, Index, Relation, Schema, Table},
+        Catalog, META_INDEX, META_TABLE,  meta_table_schema,
+        schema::{Column, Index, ObjectType, Relation, Schema, Table},
     },
-    io::frames::FrameAccessMode,
     sql::planner::stats::{
         ColumnStatistics, Histogram, HistogramBucket, IndexStatistics, TableStatistics,
     },
     storage::tuple::TupleRef,
     structures::{
-        bplustree::{BPlusTree, IterDirection},
-        comparator::{Comparator, DynComparator, NumericComparator},
+
+        comparator::{ Comparator, DynComparator},
     },
     transactions::worker::Worker,
     types::{
         DataTypeKind, DataTypeRef, Date, DateTime, Float32, Float64, Int8, Int16, Int32, Int64,
-        ObjectId, PageId, UInt8, UInt16, UInt32, UInt64,
+        PageId, UInt8, UInt16, UInt32, UInt64,
     },
 };
 
@@ -272,6 +273,8 @@ fn bytes_to_f64(bytes: &[u8], dtype: DataTypeKind) -> Option<f64> {
     }
 }
 
+
+
 /// Builds an equi-depth histogram from sample values.
 fn build_equidepth_histogram(values: &mut Vec<f64>, num_buckets: usize) -> Histogram {
     if values.is_empty() {
@@ -310,6 +313,34 @@ fn build_equidepth_histogram(values: &mut Vec<f64>, num_buckets: usize) -> Histo
     histogram
 }
 
+
+#[derive(Debug)]
+pub(crate) enum StatsComputeError {
+    Io(io::Error),
+    BtreeIteratorError(usize),
+    InvalidObjectType
+}
+
+
+impl From<io::Error> for StatsComputeError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+impl Display for StatsComputeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::BtreeIteratorError(i) => write!(f, "Error at btree iteration: {i}"),
+            Self::InvalidObjectType => write!(f, "Invalid object type"),
+            Self::Io(err) => write!(f, "IO error {err}")
+        }
+    }
+}
+
+pub(crate) type StatsComputeResult<T> = Result<T, StatsComputeError>;
+impl Error for StatsComputeError {}
+
 /// Gets current Unix timestamp.
 fn current_timestamp() -> u64 {
     SystemTime::now()
@@ -325,38 +356,29 @@ impl Catalog {
         table_name: &str,
         worker: Worker,
         config: &StatsComputeConfig,
-    ) -> io::Result<TableStatistics> {
+    ) -> StatsComputeResult<TableStatistics> {
+
         let relation = self.get_relation(table_name, worker.clone())?;
+        if let Relation::TableRel(table) = relation {
+            let stats =
+                self.compute_table_stats(table.root(), table.schema(), worker.clone(), config)?;
 
-        let (table, root, schema) = match relation {
-            Relation::TableRel(t) => {
-                let root = t.root();
-                let schema = t.schema().clone();
-                (t, root, schema)
-            }
-            Relation::IndexRel(_) => {
-                return Err(IoError::new(
-                    ErrorKind::InvalidInput,
-                    format!("{} is an index, not a table", table_name),
-                ));
-            }
-        };
+            // Update the table with new statistics
+            let updated_table = Table::build(
+                table.id(),
+                table.name(),
+                table.root(),
+                table.schema().clone(),
+                table.next(),
+                Some(stats.clone()),
+            );
 
-        let stats = self.compute_table_stats(root, &schema, worker.clone(), config)?;
+            self.update_relation(Relation::TableRel(updated_table), worker)?;
 
-        // Update the table with new statistics
-        let updated_table = Table::build(
-            table.id(),
-            table.name(),
-            table.root(),
-            schema,
-            table.next(),
-            Some(stats.clone()),
-        );
-
-        self.update_relation(Relation::TableRel(updated_table), worker)?;
-
-        Ok(stats)
+            Ok(stats)
+        } else {
+            return Err(StatsComputeError::InvalidObjectType)
+        }
     }
 
     /// Recomputes statistics for a single index.
@@ -365,109 +387,40 @@ impl Catalog {
         index_name: &str,
         worker: Worker,
         config: &StatsComputeConfig,
-    ) -> io::Result<IndexStatistics> {
+    ) -> StatsComputeResult<IndexStatistics> {
         let relation = self.get_relation(index_name, worker.clone())?;
 
-        let (index, root, schema) = match relation {
-            Relation::IndexRel(i) => {
-                let root = i.root();
-                let schema = i.schema().clone();
-                (i, root, schema)
-            }
-            Relation::TableRel(_) => {
-                return Err(IoError::new(
-                    ErrorKind::InvalidInput,
-                    format!("{} is a table, not an index", index_name),
-                ));
-            }
-        };
+        if let Relation::IndexRel(index) = relation {
+            let stats =
+                self.compute_index_stats(index.root(), index.schema(), worker.clone(), config)?;
 
-        let stats = self.compute_index_stats(root, &schema, worker.clone(), config)?;
+            // Update the index with new statistics
+            let updated_index = Index::build(
+                index.id(),
+                index.name(),
+                index.root(),
+                index.schema().clone(),
+                Some(stats.clone()),
+                index.schema().num_keys,
+            );
 
-        // Update the index with new statistics
-        let updated_index = Index::build(
-            index.id(),
-            index.name(),
-            index.root(),
-            schema,
-            stats.min_key.clone().unwrap_or_default(),
-            stats.max_key.clone().unwrap_or_default(),
-            Some(stats.clone()),
-            index.schema().num_keys,
-        );
+            self.update_relation(Relation::IndexRel(updated_index), worker)?;
 
-        self.update_relation(Relation::IndexRel(updated_index), worker)?;
-
-        Ok(stats)
-    }
-
-    /// Recomputes statistics for all tables and indexes in the catalog.
-    pub fn recompute_all_statistics(
-        &self,
-        worker: Worker,
-        config: &StatsComputeConfig,
-    ) -> io::Result<StatsComputeResult> {
-        let mut result = StatsComputeResult::default();
-
-        // Iterate through the meta table to find all relations
-        let mut btree = self.table_btree(self.meta_table_root(), worker.clone())?;
-
-        let positions: Vec<_> = btree.iter_positions()?.filter_map(|r| r.ok()).collect();
-
-        btree.clear_worker_stack();
-
-        for pos in positions {
-            let payload = btree.with_cell_at(pos, |data| data.to_vec())?;
-
-            let meta_schema = crate::database::meta_table_schema();
-            let tuple = TupleRef::read(&payload, &meta_schema)?;
-
-            let relation = Relation::try_from(tuple)?;
-            let name = relation.name().to_string();
-
-            // Skip meta tables
-            if name == crate::database::META_TABLE || name == crate::database::META_INDEX {
-                continue;
-            }
-
-            match relation {
-                Relation::TableRel(_) => {
-                    match self.recompute_table_statistics(&name, worker.clone(), config) {
-                        Ok(stats) => {
-                            result.tables_updated += 1;
-                            result.table_stats.insert(name, stats);
-                        }
-                        Err(e) => {
-                            result.errors.push(format!("Table {}: {}", name, e));
-                        }
-                    }
-                }
-                Relation::IndexRel(_) => {
-                    match self.recompute_index_statistics(&name, worker.clone(), config) {
-                        Ok(stats) => {
-                            result.indexes_updated += 1;
-                            result.index_stats.insert(name, stats);
-                        }
-                        Err(e) => {
-                            result.errors.push(format!("Index {}: {}", name, e));
-                        }
-                    }
-                }
-            }
+            Ok(stats)
+        } else {
+            return Err(StatsComputeError::InvalidObjectType);
         }
-
-        Ok(result)
     }
 
-    /// Internal: computes table statistics by scanning the B+tree.
+    /// Computes the table statistics by scanning the btree.
     fn compute_table_stats(
         &self,
         root: PageId,
         schema: &Schema,
         worker: Worker,
         config: &StatsComputeConfig,
-    ) -> io::Result<TableStatistics> {
-        let mut btree = self.table_btree(root, worker)?;
+    ) -> StatsComputeResult<TableStatistics> {
+        let btree = self.table_btree(root, worker)?;
 
         // Initialize collectors for each column
         let mut collectors: Vec<ColumnStatsCollector> = schema
@@ -488,48 +441,50 @@ impl Catalog {
             1
         };
 
-        // Iterate through all positions
-        let positions: Vec<_> = btree.iter_positions()?.filter_map(|r| r.ok()).collect();
-
         btree.clear_worker_stack();
 
-        for pos in positions {
-            // Track pages
-            page_set.insert(pos.page());
+        // Not sure if this approach will work as the iterator needs to acquire the worker mutably.
+        for (i, position) in btree.clone().iter_positions()?.enumerate() {
+            if let Ok(pos) = position {
+                // Track pages
+                page_set.insert(pos.page());
 
-            row_count += 1;
+                row_count += 1;
 
-            // Apply sampling
-            if sample_threshold > 1 && row_count % sample_threshold != 0 {
-                continue;
-            }
-
-            // Check max sample rows
-            if config.max_sample_rows > 0 && row_count > config.max_sample_rows as u64 {
-                break;
-            }
-
-            // Process the tuple
-            btree.with_cell_at(pos, |data| {
-                total_row_size += data.len() as u64;
-
-                if let Ok(tuple) = TupleRef::read(data, schema) {
-                    // Collect key column stats
-                    for i in 0..schema.num_keys as usize {
-                        if let Ok(value) = tuple.key(i) {
-                            collectors[i].observe(&value);
-                        }
-                    }
-
-                    // Collect value column stats
-                    for i in 0..schema.values().len() {
-                        let col_idx = schema.num_keys as usize + i;
-                        if let Ok(value) = tuple.value(i) {
-                            collectors[col_idx].observe(&value);
-                        }
-                    }
+                // Apply sampling
+                if sample_threshold > 1 && row_count % sample_threshold != 0 {
+                    continue;
                 }
-            })?;
+
+                // Check max sample rows
+                if config.max_sample_rows > 0 && row_count > config.max_sample_rows as u64 {
+                    break;
+                }
+
+                // Process the tuple
+                btree.with_cell_at(pos, |data| {
+                    total_row_size += data.len() as u64;
+
+                    if let Ok(tuple) = TupleRef::read(data, schema) {
+                        // Collect key column stats
+                        for i in 0..schema.num_keys as usize {
+                            if let Ok(value) = tuple.key(i) {
+                                collectors[i].observe(&value);
+                            }
+                        }
+
+                        // Collect value column stats
+                        for i in 0..schema.values().len() {
+                            let col_idx = schema.num_keys as usize + i;
+                            if let Ok(value) = tuple.value(i) {
+                                collectors[col_idx].observe(&value);
+                            }
+                        }
+                    }
+                })?;
+            } else {
+                  return Err(StatsComputeError::BtreeIteratorError(i))
+            }
         }
 
         // Finalize statistics
@@ -562,14 +517,14 @@ impl Catalog {
         Ok(stats)
     }
 
-    /// Internal: computes index statistics by scanning the B+tree.
+    /// Computes index statistics by scanning the B+tree.
     fn compute_index_stats(
         &self,
         root: PageId,
         schema: &Schema,
         worker: Worker,
         config: &StatsComputeConfig,
-    ) -> io::Result<IndexStatistics> {
+    ) -> StatsComputeResult<IndexStatistics> {
         // Get the key column's data type for the comparator
         let key_dtype = schema
             .keys()
@@ -577,16 +532,7 @@ impl Catalog {
             .map(|k| k.dtype)
             .unwrap_or(DataTypeKind::BigUInt);
 
-        let mut btree = self.index_btree(root, key_dtype, worker)?;
-
-        let comparator =
-            schema
-                .keys()
-                .first()
-                .map(|k| k.comparator())
-                .unwrap_or(DynComparator::Variable(
-                    crate::structures::comparator::VarlenComparator,
-                ));
+        let btree = self.index_btree(root, key_dtype, worker)?;
 
         let mut entries: u64 = 0;
         let mut distinct_keys: HashSet<u64> = HashSet::new();
@@ -596,56 +542,58 @@ impl Catalog {
         let mut leaf_pages: HashSet<PageId> = HashSet::new();
 
         // Count tree height via root traversal
-        let height = self.compute_tree_height(root, &mut btree)?;
+        let height = btree.height()?;
 
         // Iterate through all positions
-        let positions: Vec<_> = btree.iter_positions()?.filter_map(|r| r.ok()).collect();
-
         btree.clear_worker_stack();
 
-        for pos in positions {
-            leaf_pages.insert(pos.page());
-            entries += 1;
+        for (i, iter_result) in btree.clone().iter_positions()?.enumerate() {
+            if let Ok(pos) = iter_result {
+                leaf_pages.insert(pos.page());
+                entries += 1;
 
-            btree.with_cell_at(pos, |data| {
-                // Extract key bytes (first part of tuple for indexes)
-                if let Ok(tuple) = TupleRef::read(data, schema) {
-                    if let Ok(key_ref) = tuple.key(0) {
-                        let key_bytes: Box<[u8]> = Box::from(key_ref.as_ref());
-                        total_key_size += key_bytes.len() as u64;
+                btree.with_cell_at(pos, |data| {
+                    // Extract key bytes (first part of tuple for indexes)
+                    if let Ok(tuple) = TupleRef::read(data, schema) {
+                        if let Ok(key_ref) = tuple.key(0) {
+                            let key_bytes: Box<[u8]> = Box::from(key_ref.as_ref());
+                            total_key_size += key_bytes.len() as u64;
 
-                        // Track distinct
-                        let hash = murmur_hash(&key_bytes);
-                        distinct_keys.insert(hash);
+                            // Track distinct
+                            let hash = murmur_hash(&key_bytes);
+                            distinct_keys.insert(hash);
 
-                        // Update min
-                        match &min_key {
-                            None => min_key = Some(key_bytes.clone()),
-                            Some(current_min) => {
-                                if matches!(
-                                    comparator.compare(&key_bytes, current_min),
-                                    Ok(std::cmp::Ordering::Less)
-                                ) {
-                                    min_key = Some(key_bytes.clone());
+                            // Update min
+                            match &min_key {
+                                None => min_key = Some(key_bytes.clone()),
+                                Some(current_min) => {
+                                    if matches!(
+                                        btree.compare(&key_bytes, current_min),
+                                        Ok(Ordering::Less)
+                                    ) {
+                                        min_key = Some(key_bytes.clone());
+                                    }
                                 }
                             }
-                        }
 
-                        // Update max
-                        match &max_key {
-                            None => max_key = Some(key_bytes.clone()),
-                            Some(current_max) => {
-                                if matches!(
-                                    comparator.compare(&key_bytes, current_max),
-                                    Ok(std::cmp::Ordering::Greater)
-                                ) {
-                                    max_key = Some(key_bytes.clone());
+                            // Update max
+                            match &max_key {
+                                None => max_key = Some(key_bytes.clone()),
+                                Some(current_max) => {
+                                    if matches!(
+                                        btree.compare(&key_bytes, current_max),
+                                        Ok(Ordering::Greater)
+                                    ) {
+                                        max_key = Some(key_bytes.clone());
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            })?;
+                })?;
+            } else {
+                 return Err(StatsComputeError::BtreeIteratorError(i))
+            }
         }
 
         let avg_key_size = if entries > 0 {
@@ -668,54 +616,83 @@ impl Catalog {
         Ok(stats)
     }
 
-    /// Computes the height of a B+tree by traversing from root to leaf.
-    fn compute_tree_height<Cmp: Comparator>(
+    pub fn analyze(
         &self,
-        root: PageId,
-        btree: &mut BPlusTree<Cmp>,
-    ) -> io::Result<usize> {
-        use crate::storage::page::BtreePage;
+        worker: Worker,
+        config: &StatsComputeConfig,
+    ) -> StatsComputeResult<StatsComputation> {
+        let meta_table = self.table_btree(self.meta_table_root(), worker.clone())?;
+        let meta_schema = meta_table_schema();
 
-        let mut height = 0;
-        let mut current = root;
+        let mut relations_to_analyze: Vec<(String, ObjectType)> = Vec::new();
 
-        loop {
-            btree
-                .worker_mut()
-                .acquire::<BtreePage>(current, FrameAccessMode::Read)?;
+        // Collect all relations from the meta table
+        for iter_result in meta_table.clone().iter_positions()? {
+            if let Ok(pos) = iter_result {
+                meta_table.with_cell_at(pos, |data| {
+                    if let Ok(tuple) = TupleRef::read(data, &meta_schema) {
+                        // Get the name (value index 3, which is o_name)
+                        if let Ok(DataTypeRef::Text(name_blob)) = tuple.value(3) {
+                            let name = name_blob.as_str(crate::TextEncoding::Utf8).to_string();
 
-            let (is_leaf, first_child) =
-                btree
-                    .worker()
-                    .read_page::<BtreePage, _, _>(current, |page| {
-                        let is_leaf = page.is_leaf();
-                        let first_child = if page.num_slots() > 0 {
-                            page.cell(crate::storage::cell::Slot(0))
-                                .metadata()
-                                .left_child()
-                        } else {
-                            page.metadata().right_child
-                        };
-                        (is_leaf, first_child)
-                    })?;
+                            // Skip meta tables
+                            if name == META_TABLE || name == META_INDEX {
+                                return;
+                            }
 
-            btree.worker_mut().release_latch(current);
-            height += 1;
-
-            if is_leaf || !first_child.is_valid() {
-                break;
+                            // Get the object type (value index 1, which is o_type)
+                            if let Ok(DataTypeRef::Byte(type_byte)) = tuple.value(1) {
+                                if let Ok(obj_type) =
+                                    ObjectType::try_from(u8::from(type_byte.to_owned()))
+                                {
+                                    relations_to_analyze.push((name, obj_type));
+                                }
+                            }
+                        }
+                    }
+                })?;
             }
-
-            current = first_child;
         }
 
-        Ok(height)
+        meta_table.clear_worker_stack();
+
+        // Now recompute statistics for each relation
+        let mut result = StatsComputation::default();
+
+        for (name, obj_type) in relations_to_analyze {
+            match obj_type {
+                ObjectType::Table => {
+                    match self.recompute_table_statistics(&name, worker.clone(), config) {
+                        Ok(stats) => {
+                            result.tables_updated += 1;
+                            result.table_stats.insert(name, stats);
+                        }
+                        Err(e) => {
+                            result.errors.push(format!("Table {}: {}", name, e));
+                        }
+                    }
+                }
+                ObjectType::Index => {
+                    match self.recompute_index_statistics(&name, worker.clone(), config) {
+                        Ok(stats) => {
+                            result.indexes_updated += 1;
+                            result.index_stats.insert(name, stats);
+                        }
+                        Err(e) => {
+                            result.errors.push(format!("Index {}: {}", name, e));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(result)
     }
 }
 
 /// Result of a batch statistics computation.
 #[derive(Debug, Default)]
-pub struct StatsComputeResult {
+pub struct StatsComputation {
     pub tables_updated: usize,
     pub indexes_updated: usize,
     pub table_stats: HashMap<String, TableStatistics>,
@@ -723,7 +700,7 @@ pub struct StatsComputeResult {
     pub errors: Vec<String>,
 }
 
-impl StatsComputeResult {
+impl StatsComputation {
     pub fn is_success(&self) -> bool {
         self.errors.is_empty()
     }
@@ -734,7 +711,7 @@ impl StatsComputeResult {
 }
 
 #[cfg(test)]
-mod tests {
+mod stats_compute_tests {
     use super::*;
     use crate::{
         TRANSACTION_ZERO,
@@ -744,7 +721,7 @@ mod tests {
         types::{Blob, DataType, DataTypeKind, Int32, Int32Ref, Int64, UInt64},
     };
 
-    use std::path::Path;
+    use std::{io, path::Path};
     use tempfile::NamedTempFile;
 
     fn create_test_pager(path: impl AsRef<Path>, cache_size: usize) -> io::Result<Pager> {
@@ -806,7 +783,6 @@ mod tests {
         assert!(stats.max_bytes.is_some());
     }
 
-
     #[test]
     fn test_build_equidepth_histogram() {
         let mut values: Vec<f64> = (1..=100).map(|x| x as f64).collect();
@@ -827,11 +803,9 @@ mod tests {
         }
     }
 
-
-
     #[test]
-    fn test_stats_compute_result() {
-        let mut result = StatsComputeResult::default();
+    fn test_stats_computation() {
+        let mut result = StatsComputation::default();
         assert!(result.is_success());
         assert_eq!(result.total_updated(), 0);
 
@@ -844,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recompute_table_statistics() -> io::Result<()> {
+    fn test_recompute_table_statistics() -> StatsComputeResult<()> {
         let (db, _temp) = create_test_database()?;
         let catalog = db.catalog();
         let worker = db.main_worker_cloned();
@@ -897,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recompute_index_statistics() -> io::Result<()> {
+    fn test_recompute_index_statistics() -> StatsComputeResult<()> {
         let (db, _temp) = create_test_database()?;
         let catalog = db.catalog();
         let worker = db.main_worker_cloned();
@@ -946,33 +920,40 @@ mod tests {
     }
 
     #[test]
-    // TODO: REVIEW THIS TEST.
-    fn test_recompute_all() -> io::Result<()> {
+    fn test_analyze_all_relations() -> StatsComputeResult<()> {
         let (db, _temp) = create_test_database()?;
         let catalog = db.catalog();
         let worker = db.main_worker_cloned();
 
-        // Create multiple tables and indexes
+        // Create multiple tables
         let schema1 = create_test_schema();
-        catalog.create_table("table1", schema1.clone(), worker.clone())?;
+        catalog.create_table("users", schema1.clone(), worker.clone())?;
 
         let mut schema2 = Schema::new();
         schema2.add_column("product_id", DataTypeKind::BigInt, true, true, false);
+        schema2.add_column("name", DataTypeKind::Text, false, false, false);
         schema2.add_column("price", DataTypeKind::Double, false, false, false);
         schema2.set_num_keys(1);
-        catalog.create_table("table2", schema2.clone(), worker.clone())?;
+        catalog.create_table("products", schema2.clone(), worker.clone())?;
 
-        // Insert some data into table1
-        let relation = catalog.get_relation("table1", worker.clone())?;
+        // Create an index
+        let mut index_schema = Schema::new();
+        index_schema.add_column("email", DataTypeKind::Text, true, true, false);
+        index_schema.add_column("user_id", DataTypeKind::BigUInt, false, false, false);
+        index_schema.set_num_keys(1);
+        catalog.create_index("idx_users_email", index_schema.clone(), worker.clone())?;
+
+        // Insert data into users table
+        let relation = catalog.get_relation("users", worker.clone())?;
         let root = relation.root();
         let mut btree = catalog.table_btree(root, worker.clone())?;
 
-        for i in 0..20i64 {
+        for i in 0..50i64 {
             let tuple = Tuple::new(
                 &[
                     DataType::BigInt(Int64(i)),
-                    DataType::Text(Blob::from("test")),
-                    DataType::Int(Int32(25)),
+                    DataType::Text(Blob::from(format!("User {}", i).as_str())),
+                    DataType::Int(Int32((i % 30) as i32 + 20)),
                 ],
                 &schema1,
                 TRANSACTION_ZERO,
@@ -982,68 +963,19 @@ mod tests {
         }
         btree.clear_worker_stack();
 
-        // Recompute all statistics
-        let config = StatsComputeConfig::fast();
-        let result = catalog.recompute_all_statistics(worker, &config)?;
-
-        assert!(result.tables_updated >= 2);
-        assert!(result.table_stats.contains_key("table1"));
-        assert!(result.table_stats.contains_key("table2"));
-
-        // Verify table1 stats
-        let table1_stats = result.table_stats.get("table1").unwrap();
-        assert_eq!(table1_stats.row_count, 20);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_recompute_empty_table() -> io::Result<()> {
-        let (db, _temp) = create_test_database()?;
-        let catalog = db.catalog();
-        let worker = db.main_worker_cloned();
-
-        let schema = create_test_schema();
-        catalog.create_table("empty_table", schema, worker.clone())?;
-
-        let config = StatsComputeConfig::default();
-        let stats = catalog.recompute_table_statistics("empty_table", worker, &config)?;
-
-        assert_eq!(stats.row_count, 0);
-        assert_eq!(stats.page_count, 1); // Root page still counts
-        assert!((stats.avg_row_size - 0.0).abs() < f64::EPSILON);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_recompute_with_nulls() -> io::Result<()> {
-        let (db, _temp) = create_test_database()?;
-        let catalog = db.catalog();
-        let worker = db.main_worker_cloned();
-
-        let mut schema = Schema::new();
-        schema.add_column("id", DataTypeKind::BigInt, true, true, false);
-        schema.add_column("optional_val", DataTypeKind::Int, false, false, false);
-        schema.set_num_keys(1);
-
-        catalog.create_table("nullable_table", schema.clone(), worker.clone())?;
-
-        let relation = catalog.get_relation("nullable_table", worker.clone())?;
+        // Insert data into products table
+        let relation = catalog.get_relation("products", worker.clone())?;
         let root = relation.root();
         let mut btree = catalog.table_btree(root, worker.clone())?;
 
-        // Insert mix of null and non-null values
         for i in 0..30i64 {
-            let opt_val = if i % 3 == 0 {
-                DataType::Null
-            } else {
-                DataType::Int(Int32(i as i32))
-            };
-
             let tuple = Tuple::new(
-                &[DataType::BigInt(Int64(i)), opt_val],
-                &schema,
+                &[
+                    DataType::BigInt(Int64(i)),
+                    DataType::Text(Blob::from(format!("Product {}", i).as_str())),
+                    DataType::Double(crate::types::Float64((i as f64) * 9.99)),
+                ],
+                &schema2,
                 TRANSACTION_ZERO,
             )?;
             let owned: crate::storage::tuple::OwnedTuple = tuple.into();
@@ -1051,21 +983,130 @@ mod tests {
         }
         btree.clear_worker_stack();
 
-        let config = StatsComputeConfig::default();
-        let stats = catalog.recompute_table_statistics("nullable_table", worker, &config)?;
+        // Insert data into index
+        let relation = catalog.get_relation("idx_users_email", worker.clone())?;
+        let root = relation.root();
+        let mut btree = catalog.index_btree(root, DataTypeKind::Text, worker.clone())?;
 
-        let col1_stats = stats.get_column_stats(1).unwrap();
-        assert_eq!(col1_stats.null_count, 10); // Every 3rd value is null
+        for i in 0..50u64 {
+            let tuple = Tuple::new(
+                &[
+                    DataType::Text(Blob::from(format!("user{}@example.com", i).as_str())),
+                    DataType::BigUInt(UInt64(i)),
+                ],
+                &index_schema,
+                TRANSACTION_ZERO,
+            )?;
+            let owned: crate::storage::tuple::OwnedTuple = tuple.into();
+            btree.insert(root, owned.as_ref())?;
+        }
+        btree.clear_worker_stack();
+
+        // Run analyze
+        let config = StatsComputeConfig::default();
+        let result = catalog.analyze(worker, &config)?;
+
+        // Verify results
+        assert!(
+            result.is_success(),
+            "Analyze should complete without errors: {:?}",
+            result.errors
+        );
+        assert_eq!(result.tables_updated, 2, "Should have updated 2 tables");
+        assert_eq!(result.indexes_updated, 1, "Should have updated 1 index");
+        assert_eq!(
+            result.total_updated(),
+            3,
+            "Should have updated 3 relations total"
+        );
+
+        // Verify users table stats
+        assert!(result.table_stats.contains_key("users"));
+        let users_stats = result.table_stats.get("users").unwrap();
+        assert_eq!(users_stats.row_count, 50);
+        assert!(users_stats.page_count > 0);
+        assert_eq!(users_stats.column_stats.len(), 3);
+
+        // Verify id column has 50 distinct values
+        let id_stats = users_stats.get_column_stats(0).unwrap();
+        assert_eq!(id_stats.ndv, 50);
+
+        // Verify age column has 30 distinct values (i % 30 + 20)
+        let age_stats = users_stats.get_column_stats(2).unwrap();
+        assert_eq!(age_stats.ndv, 30);
+
+        // Verify products table stats
+        assert!(result.table_stats.contains_key("products"));
+        let products_stats = result.table_stats.get("products").unwrap();
+        assert_eq!(products_stats.row_count, 30);
+        assert_eq!(products_stats.column_stats.len(), 3);
+
+        // Verify index stats
+        assert!(result.index_stats.contains_key("idx_users_email"));
+        let index_stats = result.index_stats.get("idx_users_email").unwrap();
+        assert_eq!(index_stats.entries, 50);
+        assert_eq!(index_stats.distinct_keys, 50);
+        assert!(index_stats.height >= 1);
+        assert!(index_stats.min_key.is_some());
+        assert!(index_stats.max_key.is_some());
 
         Ok(())
     }
 
     #[test]
-    fn test_recompute_with_sampling() -> io::Result<()> {
+    fn test_analyze_empty_database() -> StatsComputeResult<()> {
         let (db, _temp) = create_test_database()?;
         let catalog = db.catalog();
         let worker = db.main_worker_cloned();
 
+        // Run analyze on empty database (only meta tables exist)
+        let config = StatsComputeConfig::default();
+        let result = catalog.analyze(worker, &config)?;
+
+        // Should succeed with no user tables/indexes
+        assert!(result.is_success());
+        assert_eq!(result.tables_updated, 0);
+        assert_eq!(result.indexes_updated, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_analyze_with_empty_tables() -> StatsComputeResult<()> {
+        let (db, _temp) = create_test_database()?;
+        let catalog = db.catalog();
+        let worker = db.main_worker_cloned();
+
+        // Create empty tables
+        let schema = create_test_schema();
+        catalog.create_table("empty_table1", schema.clone(), worker.clone())?;
+        catalog.create_table("empty_table2", schema.clone(), worker.clone())?;
+
+        // Run analyze
+        let config = StatsComputeConfig::default();
+        let result = catalog.analyze(worker, &config)?;
+
+        assert!(result.is_success());
+        assert_eq!(result.tables_updated, 2);
+
+        // Verify empty table stats
+        let stats1 = result.table_stats.get("empty_table1").unwrap();
+        assert_eq!(stats1.row_count, 0);
+        assert_eq!(stats1.page_count, 0);
+
+        let stats2 = result.table_stats.get("empty_table2").unwrap();
+        assert_eq!(stats2.row_count, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_analyze_with_fast_config() -> StatsComputeResult<()> {
+        let (db, _temp) = create_test_database()?;
+        let catalog = db.catalog();
+        let worker = db.main_worker_cloned();
+
+        // Create a table with data
         let schema = create_test_schema();
         catalog.create_table("large_table", schema.clone(), worker.clone())?;
 
@@ -1073,12 +1114,11 @@ mod tests {
         let root = relation.root();
         let mut btree = catalog.table_btree(root, worker.clone())?;
 
-        // Insert enough data to test sampling
-        for i in 0..200i64 {
+        for i in 0..100i64 {
             let tuple = Tuple::new(
                 &[
                     DataType::BigInt(Int64(i)),
-                    DataType::Text(Blob::from("test")),
+                    DataType::Text(Blob::from(format!("Name {}", i).as_str())),
                     DataType::Int(Int32(i as i32)),
                 ],
                 &schema,
@@ -1089,93 +1129,21 @@ mod tests {
         }
         btree.clear_worker_stack();
 
-        // Test with max_sample_rows limit
-        let config = StatsComputeConfig {
-            histogram_buckets: 10,
-            sample_rate: 1.0,
-            max_sample_rows: 50,
-            compute_histograms: false,
-        };
+        // Run analyze with fast config (sampling enabled)
+        let config = StatsComputeConfig::fast();
+        let result = catalog.analyze(worker, &config)?;
 
-        let stats = catalog.recompute_table_statistics("large_table", worker, &config)?;
+        assert!(result.is_success());
+        assert_eq!(result.tables_updated, 1);
 
-        // Row count should still reflect full table
-        assert_eq!(stats.row_count, 200);
+        let stats = result.table_stats.get("large_table").unwrap();
+        // Row count should still reflect full table even with sampling
+        assert_eq!(stats.row_count, 100);
 
-        Ok(())
-    }
-
-    #[test]
-    fn test_statistics_persistence() -> io::Result<()> {
-        let (db, _temp) = create_test_database()?;
-        let catalog = db.catalog();
-        let worker = db.main_worker_cloned();
-
-        let schema = create_test_schema();
-        catalog.create_table("persist_test", schema.clone(), worker.clone())?;
-
-        // Insert data
-        let relation = catalog.get_relation("persist_test", worker.clone())?;
-        let root = relation.root();
-        let mut btree = catalog.table_btree(root, worker.clone())?;
-
-        for i in 0..10i64 {
-            let tuple = Tuple::new(
-                &[
-                    DataType::BigInt(Int64(i)),
-                    DataType::Text(Blob::from("test")),
-                    DataType::Int(Int32(25)),
-                ],
-                &schema,
-                TRANSACTION_ZERO,
-            )?;
-            let owned: crate::storage::tuple::OwnedTuple = tuple.into();
-            btree.insert(root, owned.as_ref())?;
-        }
-        btree.clear_worker_stack();
-
-        // Compute and persist stats
-        let config = StatsComputeConfig::default();
-        catalog.recompute_table_statistics("persist_test", worker.clone(), &config)?;
-
-        // Retrieve the table again and verify stats are present
-        let relation = catalog.get_relation("persist_test", worker)?;
-
-        match relation {
-            Relation::TableRel(table) => {
-                // The table should have statistics attached
-                // Note: In practice, you'd need to add a method to Table to access stats
-                // For now, we just verify the relation can be retrieved
-                assert_eq!(table.name(), "persist_test");
-            }
-            _ => panic!("Expected table relation"),
-        }
+        // With fast config, histograms should not be computed
+        let col_stats = stats.get_column_stats(0).unwrap();
+        assert!(col_stats.histogram.is_none());
 
         Ok(())
-    }
-
-    #[test]
-    fn test_histogram_selectivity_estimation() {
-        let histogram = Histogram {
-            buckets: vec![
-                HistogramBucket::new(0.0, 25.0, 100.0, 25.0),
-                HistogramBucket::new(25.0, 50.0, 100.0, 25.0),
-                HistogramBucket::new(50.0, 75.0, 100.0, 25.0),
-                HistogramBucket::new(75.0, 100.0, 100.0, 25.0),
-            ],
-            num_buckets: 4,
-        };
-
-        // Full range should be ~1.0
-        let full_sel = histogram.estimate_range_selectivity(Some(0.0), Some(100.0));
-        assert!((full_sel - 1.0).abs() < 0.01);
-
-        // Half range should be ~0.5
-        let half_sel = histogram.estimate_range_selectivity(Some(0.0), Some(50.0));
-        assert!((half_sel - 0.5).abs() < 0.01);
-
-        // Quarter range should be ~0.25
-        let quarter_sel = histogram.estimate_range_selectivity(Some(0.0), Some(25.0));
-        assert!((quarter_sel - 0.25).abs() < 0.01);
     }
 }

@@ -279,6 +279,17 @@ impl Schema {
             .filter_map(|(i, col)| col.index().is_some().then(|| (i, IndexInfo::from(col))))
             .collect()
     }
+
+    pub(crate) fn comparator(&self) -> DynComparator {
+        if self.num_keys > 1 {
+            DynComparator::Variable(VarlenComparator)
+        } else {
+            self.columns()
+                .first()
+                .map(|c| c.comparator())
+                .unwrap_or(DynComparator::Variable(VarlenComparator))
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -624,8 +635,7 @@ impl Index {
         name: &str,
         root_page: PageId,
         schema: Schema,
-        min_val: Box<[u8]>,
-        max_val: Box<[u8]>,
+
         stats: Option<IndexStatistics>,
         num_keys: u8,
     ) -> Self {

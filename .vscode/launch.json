@@ -6,7 +6,7 @@
       "request": "launch",
       "name": "Debug Rust test (AxmosDB)",
       "program": "${workspaceFolder}/target/debug/deps/axmosdb-bc5182bbda8020c7",
-      "args": ["--nocapture", "test_recompute_all"],
+      "args": ["--nocapture", "test_analyze_with_empty_tables"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {
