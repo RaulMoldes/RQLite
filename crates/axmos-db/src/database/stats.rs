@@ -1,7 +1,3 @@
-// stats_compute.rs - Statistics computation for tables and indexes
-//
-// Add this to your database module or as a separate module imported by the catalog.
-
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
