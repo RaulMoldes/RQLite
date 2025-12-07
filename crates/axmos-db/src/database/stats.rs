@@ -3,27 +3,24 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fmt::{Display, Formatter, Result as FmtResult},
+    io::{self, Cursor},
     time::{SystemTime, UNIX_EPOCH},
-    io::{self, Cursor}
 };
 
 use murmur3::murmur3_x64_128;
 
-
 use crate::{
-
+    ObjectId,
     database::{
-        Catalog, META_INDEX, META_TABLE,  meta_table_schema,
+        Catalog, META_INDEX, META_TABLE, SharedCatalog, meta_table_schema,
         schema::{Column, Index, ObjectType, Relation, Schema, Table},
     },
-    sql::planner::stats::{
-        ColumnStatistics, Histogram, HistogramBucket, IndexStatistics, TableStatistics,
+    sql::planner::{
+        StatisticsProvider,
+        stats::{ColumnStatistics, Histogram, HistogramBucket, IndexStatistics, TableStatistics},
     },
     storage::tuple::TupleRef,
-    structures::{
-
-        comparator::{ Comparator, DynComparator},
-    },
+    structures::comparator::{Comparator, DynComparator},
     transactions::worker::Worker,
     types::{
         DataTypeKind, DataTypeRef, Date, DateTime, Float32, Float64, Int8, Int16, Int32, Int64,
@@ -269,8 +266,6 @@ fn bytes_to_f64(bytes: &[u8], dtype: DataTypeKind) -> Option<f64> {
     }
 }
 
-
-
 /// Builds an equi-depth histogram from sample values.
 fn build_equidepth_histogram(values: &mut Vec<f64>, num_buckets: usize) -> Histogram {
     if values.is_empty() {
@@ -309,14 +304,12 @@ fn build_equidepth_histogram(values: &mut Vec<f64>, num_buckets: usize) -> Histo
     histogram
 }
 
-
 #[derive(Debug)]
 pub(crate) enum StatsComputeError {
     Io(io::Error),
     BtreeIteratorError(usize),
-    InvalidObjectType
+    InvalidObjectType,
 }
-
 
 impl From<io::Error> for StatsComputeError {
     fn from(value: io::Error) -> Self {
@@ -329,7 +322,7 @@ impl Display for StatsComputeError {
         match self {
             Self::BtreeIteratorError(i) => write!(f, "Error at btree iteration: {i}"),
             Self::InvalidObjectType => write!(f, "Invalid object type"),
-            Self::Io(err) => write!(f, "IO error {err}")
+            Self::Io(err) => write!(f, "IO error {err}"),
         }
     }
 }
@@ -353,7 +346,6 @@ impl Catalog {
         worker: Worker,
         config: &StatsComputeConfig,
     ) -> StatsComputeResult<TableStatistics> {
-
         let relation = self.get_relation(table_name, worker.clone())?;
         if let Relation::TableRel(table) = relation {
             let stats =
@@ -373,7 +365,7 @@ impl Catalog {
 
             Ok(stats)
         } else {
-            return Err(StatsComputeError::InvalidObjectType)
+            return Err(StatsComputeError::InvalidObjectType);
         }
     }
 
@@ -479,7 +471,7 @@ impl Catalog {
                     }
                 })?;
             } else {
-                  return Err(StatsComputeError::BtreeIteratorError(i))
+                return Err(StatsComputeError::BtreeIteratorError(i));
             }
         }
 
@@ -588,7 +580,7 @@ impl Catalog {
                     }
                 })?;
             } else {
-                 return Err(StatsComputeError::BtreeIteratorError(i))
+                return Err(StatsComputeError::BtreeIteratorError(i));
             }
         }
 
@@ -706,6 +698,50 @@ impl StatsComputation {
     }
 }
 
+pub(crate) struct CatalogStatsProvider {
+    catalog: SharedCatalog,
+    worker: Worker,
+}
+
+impl CatalogStatsProvider {
+    pub(crate) fn new(catalog: SharedCatalog, worker: Worker) -> Self {
+        Self { catalog, worker }
+    }
+}
+
+impl StatisticsProvider for CatalogStatsProvider {
+    fn get_column_stats(&self, table_id: ObjectId, column_idx: usize) -> Option<ColumnStatistics> {
+        if let Ok(Relation::TableRel(table)) = self
+            .catalog
+            .get_relation_unchecked(table_id, self.worker.clone())
+        {
+            if let Some(statistics) = table.stats() {
+                return statistics.get_column_stats(column_idx).cloned();
+            }
+        }
+        None
+    }
+
+    fn get_index_stats(&self, object_id: ObjectId) -> Option<IndexStatistics> {
+        if let Ok(Relation::IndexRel(index)) = self
+            .catalog
+            .get_relation_unchecked(object_id, self.worker.clone())
+        {
+            return index.stats().cloned();
+        }
+        None
+    }
+
+    fn get_table_stats(&self, table_id: ObjectId) -> Option<TableStatistics> {
+        if let Ok(Relation::TableRel(table)) = self
+            .catalog
+            .get_relation_unchecked(table_id, self.worker.clone())
+        {
+            return table.stats().cloned();
+        }
+        None
+    }
+}
 #[cfg(test)]
 mod stats_compute_tests {
     use super::*;

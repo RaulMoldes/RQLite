@@ -211,7 +211,7 @@ impl Catalog {
         table_name: &str,
         schema: Schema,
         worker: Worker,
-    ) -> io::Result<()> {
+    ) -> io::Result<ObjectId> {
         let root = worker.borrow_mut().alloc_page::<BtreePage>()?;
         debug_assert!(
             root.is_valid(),
@@ -228,7 +228,7 @@ impl Catalog {
         index_name: &str,
         schema: Schema,
         worker: Worker,
-    ) -> io::Result<()> {
+    ) -> io::Result<ObjectId> {
         let root = worker.borrow_mut().alloc_page::<BtreePage>()?;
         debug_assert!(
             root.is_valid(),
@@ -315,10 +315,11 @@ impl Catalog {
     }
 
     /// Stores a relation in the meta index and the meta table using the provided worker.
-    pub fn create_relation(&self, relation: Relation, worker: Worker) -> io::Result<()> {
+    pub fn create_relation(&self, relation: Relation, worker: Worker) -> io::Result<ObjectId> {
+        let id = relation.id();
         self.index_relation(&relation, worker.clone())?;
         self.store_relation(relation, worker)?;
-        Ok(())
+        Ok(id)
     }
 
     /// Checks if a given relation exists in the meta-index

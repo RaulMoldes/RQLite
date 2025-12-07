@@ -13,28 +13,37 @@ use crate::types::ObjectId;
 use super::logical::*;
 use super::memo::{GroupId, Memo};
 use super::prop::LogicalProperties;
+use super::prop::PropertyDeriver;
+use super::stats::StatisticsProvider;
 use super::{OptimizerError, OptimizerResult};
 
 /// Builds logical plans from bound statements
-pub struct PlanBuilder<'a> {
+pub struct PlanBuilder<'a, P: StatisticsProvider> {
     memo: &'a mut Memo,
     catalog: SharedCatalog,
     worker: Worker,
+
+    deriver: PropertyDeriver<'a, P>,
     /// CTE storage for WITH queries - maps CTE index to its built group
     cte_groups: Vec<Option<GroupId>>,
 }
 
-impl<'a> PlanBuilder<'a> {
-    pub fn new(memo: &'a mut Memo, catalog: SharedCatalog, worker: Worker) -> Self {
+impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
+    pub fn new(
+        memo: &'a mut Memo,
+        catalog: SharedCatalog,
+        worker: Worker,
+        stats_provider: &'a P,
+    ) -> Self {
         Self {
             memo,
             catalog,
             worker,
+            deriver: PropertyDeriver::new(stats_provider),
             cte_groups: Vec::new(),
         }
     }
 
-    /// Build a logical plan from a bound statement
     pub fn build(mut self, stmt: &BoundStatement) -> OptimizerResult<GroupId> {
         match stmt {
             BoundStatement::Select(select) => self.build_select(select),
@@ -52,21 +61,17 @@ impl<'a> PlanBuilder<'a> {
         }
     }
 
-    /// Build a SELECT query plan
     fn build_select(&mut self, select: &BoundSelect) -> OptimizerResult<GroupId> {
-        // 1. Build the FROM clause
         let from_group = match &select.from {
             Some(table_ref) => self.build_table_ref(table_ref)?,
             None => self.build_empty(&select.schema)?,
         };
 
-        // 2. Apply WHERE clause filter
         let filtered_group = match &select.where_clause {
             Some(predicate) => self.build_filter(from_group, predicate.clone())?,
             None => from_group,
         };
 
-        // 3. Apply GROUP BY and aggregates
         let aggregated_group =
             if !select.group_by.is_empty() || self.has_aggregates(&select.columns) {
                 self.build_aggregate(
@@ -79,62 +84,51 @@ impl<'a> PlanBuilder<'a> {
                 filtered_group
             };
 
-        // 4. Apply HAVING clause
         let having_group = match &select.having {
             Some(predicate) => self.build_filter(aggregated_group, predicate.clone())?,
             None => aggregated_group,
         };
 
-        // 5. Apply projection
         let projected_group = self.build_project(having_group, &select.columns, &select.schema)?;
 
-        // 6. Apply DISTINCT
         let distinct_group = if select.distinct {
             self.build_distinct(projected_group, &select.schema)?
         } else {
             projected_group
         };
 
-        // 7. Apply ORDER BY
         let sorted_group = if !select.order_by.is_empty() {
             self.build_sort(distinct_group, &select.order_by, &select.schema)?
         } else {
             distinct_group
         };
 
-        // 8. Apply LIMIT/OFFSET
         let limited_group = match select.limit {
             Some(limit) => self.build_limit(sorted_group, limit, select.offset, &select.schema)?,
-            None => {
-                // Handle OFFSET without LIMIT (rare but valid SQL)
-                match select.offset {
-                    Some(offset) if offset > 0 => {
-                        // Create a limit with max value and the offset
-                        self.build_limit(sorted_group, usize::MAX, Some(offset), &select.schema)?
-                    }
-                    _ => sorted_group,
+            None => match select.offset {
+                Some(offset) if offset > 0 => {
+                    self.build_limit(sorted_group, usize::MAX, Some(offset), &select.schema)?
                 }
-            }
+                _ => sorted_group,
+            },
         };
 
         Ok(limited_group)
     }
 
-    /// Build FROM clause (table references and joins)
     fn build_table_ref(&mut self, table_ref: &BoundTableRef) -> OptimizerResult<GroupId> {
         match table_ref {
             BoundTableRef::BaseTable { table_id, schema } => {
-                // Get table name from catalog
                 let table_name = self.get_table_name(*table_id)?;
                 self.build_table_scan(*table_id, table_name, schema.clone())
             }
-            BoundTableRef::Subquery { query, schema: _ } => self.build_select(query),
+            BoundTableRef::Subquery { query, .. } => self.build_select(query),
             BoundTableRef::Join {
                 left,
                 right,
                 join_type,
                 condition,
-                schema: _,
+                ..
             } => {
                 let left_group = self.build_table_ref(left)?;
                 let right_group = self.build_table_ref(right)?;
@@ -147,13 +141,8 @@ impl<'a> PlanBuilder<'a> {
                     right.schema().clone(),
                 )
             }
-            BoundTableRef::Cte { cte_idx, schema } => {
-                // Look up the CTE in our storage
+            BoundTableRef::Cte { cte_idx, .. } => {
                 if let Some(Some(group_id)) = self.cte_groups.get(*cte_idx) {
-                    // CTE already built, reference its group
-                    // We need to create a new reference to the CTE's result
-                    // For now, we'll create an empty operator that references the schema
-                    // In a full implementation, this would be a CTE reference operator
                     Ok(*group_id)
                 } else {
                     Err(OptimizerError::Internal(format!(
@@ -165,46 +154,46 @@ impl<'a> PlanBuilder<'a> {
         }
     }
 
-    /// Build a table scan operator
     fn build_table_scan(
         &mut self,
         table_id: ObjectId,
         table_name: String,
         schema: Schema,
     ) -> OptimizerResult<GroupId> {
-        let op = LogicalOperator::TableScan(TableScanOp::new(table_id, table_name, schema.clone()));
-        let props = LogicalProperties::new(schema);
+        let op = LogicalOperator::TableScan(TableScanOp::new(table_id, table_name, schema));
+        let props = self.deriver.derive(&op, &[]);
         let expr = LogicalExpr::new(op, vec![]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
-    /// Build a filter operator
     fn build_filter(
         &mut self,
         input: GroupId,
         predicate: BoundExpression,
     ) -> OptimizerResult<GroupId> {
-        let input_schema = self.get_group_schema(input)?;
-        let op = LogicalOperator::Filter(FilterOp::new(predicate, input_schema.clone()));
-        let props = LogicalProperties::new(input_schema);
+        let input_props = self.get_group_properties(input)?;
+        let input_schema = input_props.schema.clone();
+
+        let op = LogicalOperator::Filter(FilterOp::new(predicate, input_schema));
+        let props = self.deriver.derive(&op, &[&input_props]);
         let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
-    /// Build a projection operator
     fn build_project(
         &mut self,
         input: GroupId,
         columns: &[BoundSelectItem],
         output_schema: &Schema,
     ) -> OptimizerResult<GroupId> {
-        let input_schema = self.get_group_schema(input)?;
+        let input_props = self.get_group_properties(input)?;
+        let input_schema = input_props.schema.clone();
 
         let expressions: Vec<ProjectExpr> = columns
             .iter()
             .map(|item| ProjectExpr {
                 expr: item.expr.clone(),
-                alias: None, // Aliases are already in the schema
+                alias: None,
             })
             .collect();
 
@@ -213,13 +202,11 @@ impl<'a> PlanBuilder<'a> {
             input_schema,
             output_schema.clone(),
         ));
-
-        let props = LogicalProperties::new(output_schema.clone());
+        let props = self.deriver.derive(&op, &[&input_props]);
         let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
-    /// Build a join operator
     fn build_join(
         &mut self,
         left: GroupId,
@@ -229,20 +216,16 @@ impl<'a> PlanBuilder<'a> {
         left_schema: Schema,
         right_schema: Schema,
     ) -> OptimizerResult<GroupId> {
+        let left_props = self.get_group_properties(left)?;
+        let right_props = self.get_group_properties(right)?;
+
         let op =
             LogicalOperator::Join(JoinOp::new(join_type, condition, left_schema, right_schema));
-
-        let output_schema = match &op {
-            LogicalOperator::Join(j) => j.output_schema.clone(),
-            _ => unreachable!(),
-        };
-
-        let props = LogicalProperties::new(output_schema);
+        let props = self.deriver.derive(&op, &[&left_props, &right_props]);
         let expr = LogicalExpr::new(op, vec![left, right]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
-    /// Build an aggregate operator
     fn build_aggregate(
         &mut self,
         input: GroupId,
@@ -250,9 +233,9 @@ impl<'a> PlanBuilder<'a> {
         columns: &[BoundSelectItem],
         output_schema: &Schema,
     ) -> OptimizerResult<GroupId> {
-        let input_schema = self.get_group_schema(input)?;
+        let input_props = self.get_group_properties(input)?;
+        let input_schema = input_props.schema.clone();
 
-        // Extract aggregates from the select list
         let mut aggregates = Vec::new();
         for (idx, item) in columns.iter().enumerate() {
             self.collect_aggregates(&item.expr, idx, &mut aggregates);
@@ -264,19 +247,19 @@ impl<'a> PlanBuilder<'a> {
             input_schema,
             output_schema.clone(),
         ));
-
-        let props = LogicalProperties::new(output_schema.clone());
+        let props = self.deriver.derive(&op, &[&input_props]);
         let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
-    /// Build a sort operator
     fn build_sort(
         &mut self,
         input: GroupId,
         order_by: &[BoundOrderBy],
         schema: &Schema,
     ) -> OptimizerResult<GroupId> {
+        let input_props = self.get_group_properties(input)?;
+
         let sort_exprs: Vec<SortExpr> = order_by
             .iter()
             .map(|o| SortExpr {
@@ -287,12 +270,11 @@ impl<'a> PlanBuilder<'a> {
             .collect();
 
         let op = LogicalOperator::Sort(SortOp::new(sort_exprs, schema.clone()));
-        let props = LogicalProperties::new(schema.clone());
+        let props = self.deriver.derive(&op, &[&input_props]);
         let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
-    /// Build a limit operator
     fn build_limit(
         &mut self,
         input: GroupId,
@@ -300,75 +282,72 @@ impl<'a> PlanBuilder<'a> {
         offset: Option<usize>,
         schema: &Schema,
     ) -> OptimizerResult<GroupId> {
+        let input_props = self.get_group_properties(input)?;
+
         let op = LogicalOperator::Limit(LimitOp::new(limit, offset, schema.clone()));
-        let props = LogicalProperties::new(schema.clone()).with_cardinality(limit as f64);
+        let props = self.deriver.derive(&op, &[&input_props]);
         let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
-    /// Build a distinct operator
     fn build_distinct(&mut self, input: GroupId, schema: &Schema) -> OptimizerResult<GroupId> {
+        let input_props = self.get_group_properties(input)?;
+
         let op = LogicalOperator::Distinct(DistinctOp::new(schema.clone()));
-        let props = LogicalProperties::new(schema.clone()).with_unique(true);
+        let props = self.deriver.derive(&op, &[&input_props]);
         let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
-    /// Build an empty relation (for SELECT without FROM)
     fn build_empty(&mut self, schema: &Schema) -> OptimizerResult<GroupId> {
         let op = LogicalOperator::Empty(EmptyOp::new(schema.clone()));
-        let props = LogicalProperties::new(schema.clone()).with_cardinality(1.0);
+        let props = self.deriver.derive(&op, &[]);
         let expr = LogicalExpr::new(op, vec![]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
-    /// Build an INSERT plan
     fn build_insert(&mut self, insert: &BoundInsert) -> OptimizerResult<GroupId> {
-        // Build the source (VALUES or SELECT)
         let source_group = match &insert.source {
             BoundInsertSource::Values(rows) => self.build_values(rows, &insert.table_schema)?,
             BoundInsertSource::Query(query) => self.build_select(query)?,
         };
+
+        let source_props = self.get_group_properties(source_group)?;
 
         let op = LogicalOperator::Insert(InsertOp::new(
             insert.table_id,
             insert.columns.clone(),
             insert.table_schema.clone(),
         ));
-
-        // INSERT returns affected row count, but we use table schema for now
-        let props = LogicalProperties::new(insert.table_schema.clone());
+        let props = self.deriver.derive(&op, &[&source_props]);
         let expr = LogicalExpr::new(op, vec![source_group]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
-    /// Build a VALUES operator
     fn build_values(
         &mut self,
         rows: &[Vec<BoundExpression>],
         schema: &Schema,
     ) -> OptimizerResult<GroupId> {
         let op = LogicalOperator::Values(ValuesOp::new(rows.to_vec(), schema.clone()));
-        let props = LogicalProperties::new(schema.clone()).with_cardinality(rows.len() as f64);
+        let props = self.deriver.derive(&op, &[]);
         let expr = LogicalExpr::new(op, vec![]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
-    /// Build an UPDATE plan
     fn build_update(&mut self, update: &BoundUpdate) -> OptimizerResult<GroupId> {
         let table_name = self.get_table_name(update.table_id)?;
 
-        // Build table scan
         let scan_group =
             self.build_table_scan(update.table_id, table_name, update.table_schema.clone())?;
 
-        // Apply filter if present
         let filtered_group = match &update.filter {
             Some(predicate) => self.build_filter(scan_group, predicate.clone())?,
             None => scan_group,
         };
 
-        // Build assignments
+        let filtered_props = self.get_group_properties(filtered_group)?;
+
         let assignments: Vec<(usize, BoundExpression)> = update
             .assignments
             .iter()
@@ -380,137 +359,50 @@ impl<'a> PlanBuilder<'a> {
             assignments,
             update.table_schema.clone(),
         ));
-
-        let props = LogicalProperties::new(update.table_schema.clone());
+        let props = self.deriver.derive(&op, &[&filtered_props]);
         let expr = LogicalExpr::new(op, vec![filtered_group]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
-    /// Build a DELETE plan
     fn build_delete(&mut self, delete: &BoundDelete) -> OptimizerResult<GroupId> {
         let table_name = self.get_table_name(delete.table_id)?;
 
-        // Build table scan
         let scan_group =
             self.build_table_scan(delete.table_id, table_name, delete.table_schema.clone())?;
 
-        // Apply filter if present
         let filtered_group = match &delete.filter {
             Some(predicate) => self.build_filter(scan_group, predicate.clone())?,
             None => scan_group,
         };
 
+        let filtered_props = self.get_group_properties(filtered_group)?;
+
         let op =
             LogicalOperator::Delete(DeleteOp::new(delete.table_id, delete.table_schema.clone()));
-
-        let props = LogicalProperties::new(delete.table_schema.clone());
+        let props = self.deriver.derive(&op, &[&filtered_props]);
         let expr = LogicalExpr::new(op, vec![filtered_group]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
-    /// Build a WITH (CTE) plan
     fn build_with(&mut self, with: &BoundWith) -> OptimizerResult<GroupId> {
-        // Initialize CTE storage
         self.cte_groups = vec![None; with.ctes.len()];
 
-        // Build each CTE and store its group
         for (idx, cte_query) in with.ctes.iter().enumerate() {
             let cte_group = self.build_select(cte_query)?;
             self.cte_groups[idx] = Some(cte_group);
         }
 
-        // Build the main query body
         self.build_select(&with.body)
     }
 
-    /// Build a UNION operator
-    fn build_union(
-        &mut self,
-        left: GroupId,
-        right: GroupId,
-        all: bool,
-        schema: &Schema,
-    ) -> OptimizerResult<GroupId> {
-        let op = LogicalOperator::Union(UnionOp {
-            all,
-            schema: schema.clone(),
-        });
-        let props = LogicalProperties::new(schema.clone());
-        let expr = LogicalExpr::new(op, vec![left, right]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
-    }
-
-    /// Build an INTERSECT operator
-    fn build_intersect(
-        &mut self,
-        left: GroupId,
-        right: GroupId,
-        all: bool,
-        schema: &Schema,
-    ) -> OptimizerResult<GroupId> {
-        let op = LogicalOperator::Intersect(IntersectOp {
-            all,
-            schema: schema.clone(),
-        });
-        let props = LogicalProperties::new(schema.clone());
-        let expr = LogicalExpr::new(op, vec![left, right]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
-    }
-
-    /// Build an EXCEPT operator
-    fn build_except(
-        &mut self,
-        left: GroupId,
-        right: GroupId,
-        all: bool,
-        schema: &Schema,
-    ) -> OptimizerResult<GroupId> {
-        let op = LogicalOperator::Except(ExceptOp {
-            all,
-            schema: schema.clone(),
-        });
-        let props = LogicalProperties::new(schema.clone());
-        let expr = LogicalExpr::new(op, vec![left, right]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
-    }
-
-    /// Build an index scan operator
-    fn build_index_scan(
-        &mut self,
-        table_id: ObjectId,
-        index_name: String,
-        schema: Schema,
-        index_columns: Vec<usize>,
-        range_start: Option<BoundExpression>,
-        range_end: Option<BoundExpression>,
-        residual_predicate: Option<BoundExpression>,
-    ) -> OptimizerResult<GroupId> {
-        let op = LogicalOperator::IndexScan(IndexScanOp {
-            table_id,
-            index_name,
-            schema: schema.clone(),
-            index_columns,
-            range_start,
-            range_end,
-            residual_predicate,
-        });
-        let props = LogicalProperties::new(schema);
-        let expr = LogicalExpr::new(op, vec![]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
-    }
-
-    // ==================== Helper Methods ====================
-
-    /// Get the schema of a group
-    fn get_group_schema(&self, group_id: GroupId) -> OptimizerResult<Schema> {
+    fn get_group_properties(&self, group_id: GroupId) -> OptimizerResult<LogicalProperties> {
         let group = self
             .memo
             .get_group(group_id)
             .ok_or_else(|| OptimizerError::InvalidState("Group not found".to_string()))?;
-        Ok(group.logical_props.schema.clone())
+        Ok(group.logical_props.clone())
     }
 
-    /// Get table name from catalog
     fn get_table_name(&self, table_id: ObjectId) -> OptimizerResult<String> {
         match self
             .catalog
@@ -524,14 +416,12 @@ impl<'a> PlanBuilder<'a> {
         }
     }
 
-    /// Check if select list contains aggregates
     fn has_aggregates(&self, columns: &[BoundSelectItem]) -> bool {
         columns
             .iter()
             .any(|item| self.contains_aggregate(&item.expr))
     }
 
-    /// Check if expression contains an aggregate function
     fn contains_aggregate(&self, expr: &BoundExpression) -> bool {
         match expr {
             BoundExpression::Aggregate { .. } => true,
@@ -574,29 +464,6 @@ impl<'a> PlanBuilder<'a> {
         }
     }
 
-    /// Extract aggregate expression from bound expression (single level)
-    fn extract_aggregate(
-        &self,
-        expr: &BoundExpression,
-        output_idx: usize,
-    ) -> Option<AggregateExpr> {
-        match expr {
-            BoundExpression::Aggregate {
-                func,
-                arg,
-                distinct,
-                ..
-            } => Some(AggregateExpr {
-                func: *func,
-                arg: arg.as_ref().map(|a| *a.clone()),
-                distinct: *distinct,
-                output_idx,
-            }),
-            _ => None,
-        }
-    }
-
-    /// Recursively collect all aggregates from an expression
     fn collect_aggregates(
         &self,
         expr: &BoundExpression,
@@ -662,81 +529,8 @@ impl<'a> PlanBuilder<'a> {
             BoundExpression::IsNull { expr, .. } => {
                 self.collect_aggregates(expr, output_idx, aggregates);
             }
-            // These don't contain aggregates at this level
             _ => {}
         }
-    }
-
-    /// Check if an expression is a simple column reference
-    fn is_column_ref(&self, expr: &BoundExpression) -> bool {
-        matches!(expr, BoundExpression::ColumnRef(_))
-    }
-
-    /// Extract column reference from expression
-    fn extract_column_ref(&self, expr: &BoundExpression) -> Option<BoundColumnRef> {
-        match expr {
-            BoundExpression::ColumnRef(col_ref) => Some(col_ref.clone()),
-            _ => None,
-        }
-    }
-
-    /// Check if predicate can be pushed down to a scan
-    fn can_pushdown_to_scan(&self, predicate: &BoundExpression) -> bool {
-        match predicate {
-            BoundExpression::BinaryOp {
-                left, op, right, ..
-            } => {
-                use crate::sql::ast::BinaryOperator;
-                match op {
-                    BinaryOperator::Eq
-                    | BinaryOperator::Neq
-                    | BinaryOperator::Lt
-                    | BinaryOperator::Le
-                    | BinaryOperator::Gt
-                    | BinaryOperator::Ge => {
-                        // Can push down if comparing column to literal
-                        (self.is_column_ref(left) && self.is_literal(right))
-                            || (self.is_literal(left) && self.is_column_ref(right))
-                    }
-                    BinaryOperator::And => {
-                        self.can_pushdown_to_scan(left) || self.can_pushdown_to_scan(right)
-                    }
-                    BinaryOperator::Or => {
-                        self.can_pushdown_to_scan(left) && self.can_pushdown_to_scan(right)
-                    }
-                    _ => false,
-                }
-            }
-            BoundExpression::IsNull { expr, .. } => self.is_column_ref(expr),
-            BoundExpression::InList { expr, list, .. } => {
-                self.is_column_ref(expr) && list.iter().all(|e| self.is_literal(e))
-            }
-            BoundExpression::Between {
-                expr, low, high, ..
-            } => self.is_column_ref(expr) && self.is_literal(low) && self.is_literal(high),
-            _ => false,
-        }
-    }
-
-    /// Check if expression is a literal value
-    fn is_literal(&self, expr: &BoundExpression) -> bool {
-        matches!(expr, BoundExpression::Literal { .. })
-    }
-
-    /// Estimate cardinality for a filter predicate
-    fn estimate_filter_selectivity(&self, _predicate: &BoundExpression) -> f64 {
-        // Default selectivity estimate
-        // In a real implementation, this would use statistics
-        0.1
-    }
-
-    /// Get the cardinality estimate for a group
-    fn get_group_cardinality(&self, group_id: GroupId) -> OptimizerResult<f64> {
-        let group = self
-            .memo
-            .get_group(group_id)
-            .ok_or_else(|| OptimizerError::InvalidState("Group not found".to_string()))?;
-        Ok(group.logical_props.cardinality)
     }
 
     /// Convert a memo group to a LogicalPlan tree
@@ -789,7 +583,7 @@ impl<'a> PlanBuilder<'a> {
 #[cfg(test)]
 mod planner_tests {
     use super::*;
-    use crate::database::Database;
+    use crate::database::{Database, stats::CatalogStatsProvider};
     use crate::io::pager::{Pager, SharedPager};
     use crate::sql::binder::Binder;
     use crate::sql::lexer::Lexer;
@@ -862,11 +656,13 @@ mod planner_tests {
         let bound_stmt = binder
             .bind(&stmt)
             .map_err(|e| OptimizerError::Internal(e.to_string()))?;
+        let provider = CatalogStatsProvider::new(db.catalog(), db.main_worker_cloned());
 
         let mut memo = Memo::new();
-        let builder = PlanBuilder::new(&mut memo, db.catalog(), db.main_worker_cloned());
+        let builder = PlanBuilder::new(&mut memo, db.catalog(), db.main_worker_cloned(), &provider);
         let id = builder.build(&bound_stmt)?;
-        let displayer = PlanBuilder::new(&mut memo, db.catalog(), db.main_worker_cloned());
+        let displayer =
+            PlanBuilder::new(&mut memo, db.catalog(), db.main_worker_cloned(), &provider);
         let plan = displayer.build_logical_plan(id)?;
 
         Ok(id)
@@ -885,10 +681,12 @@ mod planner_tests {
             .map_err(|e| OptimizerError::Internal(e.to_string()))?;
 
         let mut memo = Memo::new();
-        let builder = PlanBuilder::new(&mut memo, db.catalog(), db.main_worker_cloned());
+        let provider = CatalogStatsProvider::new(db.catalog(), db.main_worker_cloned());
+        let builder = PlanBuilder::new(&mut memo, db.catalog(), db.main_worker_cloned(), &provider);
         let group_id = builder.build(&bound_stmt)?;
 
-        let displayer = PlanBuilder::new(&mut memo, db.catalog(), db.main_worker_cloned());
+        let displayer =
+            PlanBuilder::new(&mut memo, db.catalog(), db.main_worker_cloned(), &provider);
         let plan = displayer.build_logical_plan(group_id)?;
         println!("{}", plan.explain());
         std::fs::write("output.dot", plan.to_graphviz("MY QUERY PLAN")).unwrap();

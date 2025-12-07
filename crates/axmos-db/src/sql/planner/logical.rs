@@ -182,7 +182,8 @@ impl TableScanOp {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IndexScanOp {
     pub(crate) table_id: ObjectId,
-    pub(crate) index_name: String,
+    pub(crate) index_id: ObjectId,
+
     pub(crate) schema: Schema,
     /// The indexed columns
     pub(crate) index_columns: Vec<usize>,
@@ -191,6 +192,40 @@ pub(crate) struct IndexScanOp {
     pub(crate) range_end: Option<BoundExpression>,
     /// Additional filter after index lookup
     pub(crate) residual_predicate: Option<BoundExpression>,
+}
+
+impl IndexScanOp {
+    pub(crate) fn new(
+        table_id: ObjectId,
+        index_id: ObjectId,
+        schema: Schema,
+        index_columns: Vec<usize>,
+    ) -> Self {
+        Self {
+            table_id,
+            index_id,
+            schema,
+            index_columns,
+            range_start: None,
+            range_end: None,
+            residual_predicate: None,
+        }
+    }
+
+    pub(crate) fn with_range_start(mut self, range_start: BoundExpression) -> Self {
+        self.range_start = Some(range_start);
+        self
+    }
+
+    pub(crate) fn with_range_end(mut self, range_end: BoundExpression) -> Self {
+        self.range_end = Some(range_end);
+        self
+    }
+
+    pub(crate) fn with_predicate(mut self, pred: BoundExpression) -> Self {
+        self.residual_predicate = Some(pred);
+        self
+    }
 }
 
 /// Filter operator - applies a predicate to filter rows

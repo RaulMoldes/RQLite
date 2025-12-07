@@ -458,7 +458,7 @@ impl Display for LogicalOperator {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             LogicalOperator::TableScan(scan) => write!(f, "TableScan({})", scan.table_name),
-            LogicalOperator::IndexScan(scan) => write!(f, "IndexScan({})", scan.index_name),
+            LogicalOperator::IndexScan(scan) => write!(f, "IndexScan({})", scan.index_id),
             LogicalOperator::Filter(_) => write!(f, "Filter"),
             LogicalOperator::Project(p) => write!(f, "Project({} exprs)", p.expressions.len()),
             LogicalOperator::Join(j) => write!(f, "{:?} Join", j.join_type),
@@ -512,12 +512,12 @@ impl Display for LogicalOperator {
 impl Display for PhysicalOperator {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            PhysicalOperator::SeqScan(s) => write!(f, "SeqScan({})", s.table_name),
+            PhysicalOperator::SeqScan(s) => write!(f, "SeqScan({})", s.table_id),
             PhysicalOperator::IndexScan(s) => {
-                write!(f, "IndexScan({}.{})", s.table_name, s.index_name)
+                write!(f, "IndexScan({}.{})", s.table_id, s.index_id)
             }
             PhysicalOperator::IndexOnlyScan(s) => {
-                write!(f, "IndexOnlyScan({}.{})", s.table_name, s.index_name)
+                write!(f, "IndexOnlyScan({}.{})", s.table_id, s.index_id)
             }
             PhysicalOperator::Filter(_) => write!(f, "Filter"),
             PhysicalOperator::Project(_) => write!(f, "Project"),

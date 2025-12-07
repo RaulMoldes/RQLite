@@ -8,7 +8,8 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct BoundColumnRef {
-    pub table_idx: usize,
+    pub table_id: ObjectId,
+    pub scope_table_index: usize,
     pub column_idx: usize,
     pub data_type: DataTypeKind,
 }
@@ -54,6 +55,51 @@ pub enum Function {
     Unknown,
 }
 
+impl BoundExpression {
+    pub fn is_equi_condition(&self) -> bool {
+        match self {
+            BoundExpression::BinaryOp {
+                left, op, right, ..
+            } => {
+                if *op == BinaryOperator::Eq {
+                    matches!(left.as_ref(), BoundExpression::ColumnRef(_))
+                        && matches!(right.as_ref(), BoundExpression::ColumnRef(_))
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    pub fn extract_non_equi(&self) -> Option<BoundExpression> {
+        match self {
+            BoundExpression::BinaryOp {
+                left,
+                op,
+                right,
+                result_type,
+            } if *op == BinaryOperator::And => {
+                let left_non_equi = left.extract_non_equi();
+                let right_non_equi = right.extract_non_equi();
+
+                match (left_non_equi, right_non_equi) {
+                    (Some(l), Some(r)) => Some(BoundExpression::BinaryOp {
+                        left: Box::new(l),
+                        op: BinaryOperator::And,
+                        right: Box::new(r),
+                        result_type: *result_type,
+                    }),
+                    (Some(l), None) => Some(l),
+                    (None, Some(r)) => Some(r),
+                    (None, None) => None,
+                }
+            }
+            _ if self.is_equi_condition() => None,
+            _ => Some(self.clone()),
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BoundExpression {
     ColumnRef(BoundColumnRef),

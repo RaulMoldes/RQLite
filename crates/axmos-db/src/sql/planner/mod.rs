@@ -1,12 +1,3 @@
-//! # Cascades Query Optimizer
-//!
-//! This module implements a Cascades-style query optimizer that transforms bound SQL statements into physical execution plans.
-//!
-//! ## References
-//!
-//! - Microsoft Research: "Extensible Query Optimizers in Practice" (https://www.microsoft.com/en-us/research/wp-content/uploads/2024/12/Extensible-Query-Optimizers-in-Practice.pdf)
-//!
-//! - Goetz Graefe: "The Cascades Framework for Query Optimization" (https://15721.courses.cs.cmu.edu/spring2016/papers/graefe-ieee1995.pdf)
 pub(crate) mod exporter;
 pub(crate) mod logical;
 pub(crate) mod memo;
@@ -18,7 +9,6 @@ pub(crate) mod rules;
 pub(crate) mod stats;
 
 use std::{
-    collections::HashSet,
     error::Error,
     fmt::{Display, Formatter, Result as FmtResult},
     sync::Arc,
@@ -27,30 +17,22 @@ use std::{
 use crate::{database::SharedCatalog, sql::binder::ast::*, transactions::worker::Worker};
 
 pub(crate) use memo::{ExprId, GroupId, Memo};
-pub(crate) use model::CostModel;
+pub(crate) use model::{CostModel, DerivedStats};
 pub(crate) use physical::PhysicalPlan;
 pub(crate) use plan::PlanBuilder;
 pub(crate) use prop::RequiredProperties;
 pub(crate) use rules::{ImplementationRule, TransformationRule};
-pub(crate) use stats::{Statistics, StatisticsProvider};
+pub(crate) use stats::StatisticsProvider;
 
-/// Result type for optimizer operations
 pub(crate) type OptimizerResult<T> = Result<T, OptimizerError>;
 
-/// Optimizer errors
 #[derive(Debug, Clone)]
 pub(crate) enum OptimizerError {
-    /// No valid plan found
     NoPlanFound(String),
-    /// Internal error during optimization
     Internal(String),
-    /// Unsupported operation
     Unsupported(String),
-    /// Invalid state
     InvalidState(String),
-    /// Cost overflow
     CostOverflow,
-    /// Timeout during optimization
     Timeout,
 }
 
@@ -69,25 +51,12 @@ impl Display for OptimizerError {
 
 impl Error for OptimizerError {}
 
-/// Configuration for the optimizer
 #[derive(Debug, Clone)]
 pub(crate) struct OptimizerConfig {
-    /// Maximum time for optimization in milliseconds
     pub(crate) max_optimization_time_ms: u64,
-    /// Maximum number of transformation rule applications
     pub(crate) max_transformations: usize,
-    /// Enable cost-based pruning
     pub(crate) enable_pruning: bool,
-    /// Cost threshold for pruning
-    pub(crate) cost_threshold: f64,
-    /// Enable join reordering
-    pub(crate) enable_join_reorder: bool,
-    /// Maximum tables for exhaustive join enumeration
-    pub(crate) max_join_enumeration_tables: usize,
-    /// Enable predicate pushdown
-    pub(crate) enable_predicate_pushdown: bool,
-    /// Enable projection pushdown
-    pub(crate) enable_projection_pushdown: bool,
+    pub(crate) upper_bound: f64,
 }
 
 impl Default for OptimizerConfig {
@@ -96,87 +65,53 @@ impl Default for OptimizerConfig {
             max_optimization_time_ms: 5000,
             max_transformations: 10000,
             enable_pruning: true,
-            cost_threshold: f64::MAX,
-            enable_join_reorder: true,
-            max_join_enumeration_tables: 10,
-            enable_predicate_pushdown: true,
-            enable_projection_pushdown: true,
+            upper_bound: f64::MAX,
         }
     }
 }
 
-/// Main Cascades optimizer
-pub(crate) struct CascadesOptimizer<Cost: CostModel, Prov: StatisticsProvider> {
-    /// Memo structure for storing expressions
-    memo: Memo,
-    /// Catalog reference for metadata
-    catalog: SharedCatalog,
-    /// Worker for catalog access
-    worker: Worker,
-    /// Cost model
-    cost_model: Arc<Cost>,
-    /// Statistics provider
-    stats_provider: Arc<Prov>,
-    /// Transformation rules
-    transformation_rules: Vec<Arc<dyn TransformationRule>>,
-    /// Implementation rules
-    implementation_rules: Vec<Arc<dyn ImplementationRule>>,
-    /// Configuration
-    config: OptimizerConfig,
-    /// Optimization statistics
-    stats: OptimizationStats,
-}
-
-/// Statistics about the optimization process
 #[derive(Debug, Default, Clone)]
 pub(crate) struct OptimizationStats {
     pub(crate) groups_created: usize,
-    pub(crate) expressions_added: usize,
+    pub(crate) logical_exprs: usize,
+    pub(crate) physical_exprs: usize,
     pub(crate) transformations_applied: usize,
-    pub(crate) implementations_generated: usize,
-    pub(crate) pruned_expressions: usize,
     pub(crate) optimization_time_ms: u64,
 }
 
-impl<C, S> CascadesOptimizer<C, S>
-where
-    C: CostModel,
-    S: StatisticsProvider,
-{
-    /// Create a new optimizer
+pub(crate) struct CascadesOptimizer<C: CostModel, P: StatisticsProvider> {
+    memo: Memo,
+    catalog: SharedCatalog,
+    worker: Worker,
+    cost_model: Arc<C>,
+    stats_provider: Arc<P>,
+    transformation_rules: Vec<Arc<dyn TransformationRule>>,
+    implementation_rules: Vec<Arc<dyn ImplementationRule>>,
+    config: OptimizerConfig,
+    opt_stats: OptimizationStats,
+}
+
+impl<C: CostModel, P: StatisticsProvider> CascadesOptimizer<C, P> {
     pub(crate) fn new(
         catalog: SharedCatalog,
         worker: Worker,
         config: OptimizerConfig,
         cost_model: C,
-        stats: S,
+        stats_provider: P,
     ) -> Self {
         Self {
             memo: Memo::new(),
             catalog,
             worker,
             cost_model: Arc::new(cost_model),
-            stats_provider: Arc::new(stats),
+            stats_provider: Arc::new(stats_provider),
             transformation_rules: rules::default_transformation_rules(),
             implementation_rules: rules::default_implementation_rules(),
             config,
-            stats: OptimizationStats::default(),
+            opt_stats: OptimizationStats::default(),
         }
     }
 
-    /// Set a custom cost model
-    pub(crate) fn with_cost_model(mut self, cost_model: Arc<C>) -> Self {
-        self.cost_model = cost_model;
-        self
-    }
-
-    /// Set a custom statistics provider
-    pub(crate) fn with_stats_provider(mut self, provider: Arc<S>) -> Self {
-        self.stats_provider = provider;
-        self
-    }
-
-    /// Add custom transformation rules
     pub(crate) fn with_transformation_rules(
         mut self,
         rules: Vec<Arc<dyn TransformationRule>>,
@@ -185,7 +120,6 @@ where
         self
     }
 
-    /// Add custom implementation rules
     pub(crate) fn with_implementation_rules(
         mut self,
         rules: Vec<Arc<dyn ImplementationRule>>,
@@ -194,90 +128,114 @@ where
         self
     }
 
-    /// Optimize a bound statement and produce a physical plan
     pub(crate) fn optimize(&mut self, stmt: &BoundStatement) -> OptimizerResult<PhysicalPlan> {
-        let start_time = std::time::Instant::now();
+        let start = std::time::Instant::now();
 
-        // Reset stats
-        self.stats = OptimizationStats::default();
         self.memo = Memo::new();
+        self.opt_stats = OptimizationStats::default();
 
-        // Phase 1: Build initial logical plan and insert into memo
-        let root_group = self.build_logical_plan(stmt)?;
+        let root_group = self.build_initial_plan(stmt)?;
+        let required = RequiredProperties::default();
 
-        // Phase 2: Exploration (Apply transformation rules)
-        self.explore(root_group)?;
+        self.optimize_group(root_group, &required, self.config.upper_bound)?;
 
-        // Phase 3: Implementation - generate physical alternatives
-        let required_props = RequiredProperties::default();
-        self.implement(root_group, &required_props)?;
+        let plan = self.extract_plan(root_group, &required)?;
 
-        // Phase 4: Extract best plan
-        let plan = self.extract_best_plan(root_group, &required_props)?;
-
-        self.stats.optimization_time_ms = start_time.elapsed().as_millis() as u64;
+        self.opt_stats.optimization_time_ms = start.elapsed().as_millis() as u64;
+        self.opt_stats.groups_created = self.memo.num_groups();
 
         Ok(plan)
     }
 
-    /// Build the initial logical plan from a bound statement
-    fn build_logical_plan(&mut self, stmt: &BoundStatement) -> OptimizerResult<GroupId> {
-        let builder = PlanBuilder::new(&mut self.memo, self.catalog.clone(), self.worker.clone());
+    fn build_initial_plan(&mut self, stmt: &BoundStatement) -> OptimizerResult<GroupId> {
+        let builder = PlanBuilder::new(
+            &mut self.memo,
+            self.catalog.clone(),
+            self.worker.clone(),
+            self.stats_provider.as_ref(),
+        );
         builder.build(stmt)
     }
 
-    /// Exploration phase: apply transformation rules to find equivalent plans
-    fn explore(&mut self, root_group: GroupId) -> OptimizerResult<()> {
-        let mut explored = HashSet::new();
-        let mut worklist = vec![root_group];
+    fn optimize_group(
+        &mut self,
+        group_id: GroupId,
+        required: &RequiredProperties,
+        upper_bound: f64,
+    ) -> OptimizerResult<Option<f64>> {
+        if let Some(winner) = self
+            .memo
+            .get_group(group_id)
+            .and_then(|g| g.get_winner(required))
+        {
+            return Ok(Some(winner.cost));
+        }
 
-        while let Some(group_id) = worklist.pop() {
-            if explored.contains(&group_id) {
-                continue;
-            }
-            explored.insert(group_id);
+        if self
+            .memo
+            .get_group(group_id)
+            .map(|g| g.has_explored(required))
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
 
-            if self.stats.transformations_applied >= self.config.max_transformations {
-                break;
-            }
+        self.explore_group(group_id)?;
 
-            // Get expressions in this group
-            let expr_ids: Vec<ExprId> = {
-                let group = self
-                    .memo
-                    .get_group(group_id)
-                    .ok_or_else(|| OptimizerError::InvalidState("Group not found".into()))?;
-                group.logical_exprs.iter().map(|e| e.id).collect()
-            };
+        let result = self.implement_group(group_id, required, upper_bound)?;
 
-            // Try each transformation rule on each expression
-            for expr_id in expr_ids {
-                for rule in &self.transformation_rules.clone() {
-                    if let Some(expr) = self.memo.get_logical_expr(expr_id) {
-                        if rule.matches(&expr, &self.memo) {
-                            let new_exprs = rule.apply(&expr, &mut self.memo)?;
-                            for new_expr in new_exprs {
-                                self.memo.add_logical_expr_to_group(group_id, new_expr);
-                                self.stats.transformations_applied += 1;
-                            }
-                        }
+        Ok(result)
+    }
+
+    fn explore_group(&mut self, group_id: GroupId) -> OptimizerResult<()> {
+        if self
+            .memo
+            .get_group(group_id)
+            .map(|g| g.explored)
+            .unwrap_or(true)
+        {
+            return Ok(());
+        }
+
+        let expr_count = self
+            .memo
+            .get_group(group_id)
+            .map(|g| g.logical_exprs.len())
+            .unwrap_or(0);
+
+        for expr_idx in 0..expr_count {
+            let expr_id = ExprId::logical(group_id, expr_idx);
+            self.explore_expr(expr_id)?;
+        }
+
+        if let Some(group) = self.memo.get_group_mut(group_id) {
+            group.explored = true;
+        }
+
+        Ok(())
+    }
+
+    fn explore_expr(&mut self, expr_id: ExprId) -> OptimizerResult<()> {
+        let expr = match self.memo.get_logical_expr(expr_id) {
+            Some(e) => e.clone(),
+            None => return Ok(()),
+        };
+
+        for &child_group in &expr.children {
+            self.explore_group(child_group)?;
+        }
+
+        for rule in self.transformation_rules.clone() {
+            if rule.matches(&expr, &self.memo) {
+                let new_exprs = rule.apply(&expr, &mut self.memo)?;
+                for new_expr in new_exprs {
+                    if self
+                        .memo
+                        .add_logical_expr_to_group(expr_id.group_id, new_expr)
+                        .is_some()
+                    {
+                        self.opt_stats.transformations_applied += 1;
                     }
-                }
-            }
-
-            // Recursively explore children
-            let child_groups: Vec<GroupId> = {
-                let group = self.memo.get_group(group_id).unwrap();
-                group
-                    .logical_exprs
-                    .iter()
-                    .flat_map(|e| e.children.clone())
-                    .collect()
-            };
-
-            for child in child_groups {
-                if !explored.contains(&child) {
-                    worklist.push(child);
                 }
             }
         }
@@ -285,151 +243,158 @@ where
         Ok(())
     }
 
-    /// Implementation phase: generate physical operators
-    fn implement(
+    fn implement_group(
         &mut self,
         group_id: GroupId,
-        required_props: &RequiredProperties,
+        required: &RequiredProperties,
+        mut upper_bound: f64,
     ) -> OptimizerResult<Option<f64>> {
-        // Check if already computed
-        if let Some(group) = self.memo.get_group(group_id) {
-            if let Some(&(cost, _)) = group.best_physical.get(required_props) {
-                return Ok(Some(cost));
-            }
-        }
+        let expr_count = self
+            .memo
+            .get_group(group_id)
+            .map(|g| g.logical_exprs.len())
+            .unwrap_or(0);
 
-        let mut best_cost = f64::MAX;
+        let mut best_cost: Option<f64> = None;
         let mut best_expr_id: Option<ExprId> = None;
 
-        // Get logical expressions
-        let logical_exprs: Vec<_> = {
-            let group = self
-                .memo
-                .get_group(group_id)
-                .ok_or_else(|| OptimizerError::InvalidState("Group not found".into()))?;
-            group.logical_exprs.clone()
-        };
+        for expr_idx in 0..expr_count {
+            let logical_id = ExprId::logical(group_id, expr_idx);
 
-        // Try each implementation rule on each logical expression
-        for logical_expr in &logical_exprs {
-            for rule in &self.implementation_rules.clone() {
-                if rule.matches(logical_expr, &self.memo) {
-                    let physical_exprs =
-                        rule.implement(logical_expr, required_props, &self.memo)?;
+            let logical_expr = match self.memo.get_logical_expr(logical_id) {
+                Some(e) => e.clone(),
+                None => continue,
+            };
 
-                    for mut phys_expr in physical_exprs {
-                        // Recursively implement children and compute cost
-                        let mut total_cost = self
-                            .cost_model
-                            .compute_operator_cost(&phys_expr.op, &self.get_group_stats(group_id));
+            for rule in self.implementation_rules.clone() {
+                if !rule.matches(&logical_expr, &self.memo) {
+                    continue;
+                }
 
-                        let mut valid = true;
-                        for (i, &child_group) in phys_expr.children.iter().enumerate() {
-                            let child_required =
-                                phys_expr.op.required_child_properties(i, required_props);
-                            match self.implement(child_group, &child_required)? {
-                                Some(child_cost) => total_cost += child_cost,
-                                None => {
-                                    valid = false;
-                                    break;
-                                }
+                let physical_exprs = rule.implement(&logical_expr, required, &self.memo)?;
+
+                for phys_expr in physical_exprs {
+                    let cost =
+                        self.compute_expr_cost(group_id, &phys_expr, required, upper_bound)?;
+
+                    if let Some(c) = cost {
+                        if best_cost.map(|bc| c < bc).unwrap_or(true) {
+                            let phys_id = self.memo.add_physical_expr_to_group(group_id, phys_expr);
+                            best_cost = Some(c);
+                            best_expr_id = Some(phys_id);
+
+                            if self.config.enable_pruning {
+                                upper_bound = c;
                             }
-                        }
-
-                        if valid && total_cost < best_cost {
-                            // Apply cost-based pruning
-                            if self.config.enable_pruning && total_cost > self.config.cost_threshold
-                            {
-                                self.stats.pruned_expressions += 1;
-                                continue;
-                            }
-
-                            best_cost = total_cost;
-                            phys_expr.cost = total_cost;
-                            let expr_id = self.memo.add_physical_expr_to_group(group_id, phys_expr);
-                            best_expr_id = Some(expr_id);
-                            self.stats.implementations_generated += 1;
                         }
                     }
                 }
             }
         }
 
-        // Record best physical expression for this group and properties
-        if let Some(expr_id) = best_expr_id {
-            if let Some(group) = self.memo.get_group_mut(group_id) {
-                group
-                    .best_physical
-                    .insert(required_props.clone(), (best_cost, expr_id));
-            }
-            Ok(Some(best_cost))
-        } else {
-            Ok(None)
+        let winner = best_expr_id.map(|id| memo::Winner {
+            expr_id: id,
+            cost: best_cost.unwrap(),
+        });
+
+        if let Some(group) = self.memo.get_group_mut(group_id) {
+            group.set_winner(required.clone(), winner);
         }
+
+        Ok(best_cost)
     }
 
-    /// Extract the best physical plan from the memo
-    fn extract_best_plan(
+    fn compute_expr_cost(
+        &mut self,
+        group_id: GroupId,
+        phys_expr: &physical::PhysicalExpr,
+        parent_required: &RequiredProperties,
+        upper_bound: f64,
+    ) -> OptimizerResult<Option<f64>> {
+        let mut children_stats = Vec::with_capacity(phys_expr.children.len());
+        let mut children_cost = 0.0;
+
+        for (i, &child_group) in phys_expr.children.iter().enumerate() {
+            let child_required = phys_expr.op.required_child_properties(i, parent_required);
+
+            let remaining = upper_bound - children_cost;
+            if remaining <= 0.0 {
+                return Ok(None);
+            }
+
+            match self.optimize_group(child_group, &child_required, remaining)? {
+                Some(cost) => {
+                    children_cost += cost;
+                    let child_stats = self.derive_group_stats(child_group);
+                    children_stats.push(child_stats);
+                }
+                None => return Ok(None),
+            }
+        }
+
+        let op_cost = self.cost_model.compute_operator_cost(
+            &phys_expr.op,
+            self.stats_provider.as_ref(),
+            &children_stats,
+        );
+
+        let total = children_cost + op_cost;
+
+        if total >= upper_bound {
+            return Ok(None);
+        }
+
+        Ok(Some(total))
+    }
+
+    fn derive_group_stats(&self, group_id: GroupId) -> DerivedStats {
+        let group = match self.memo.get_group(group_id) {
+            Some(g) => g,
+            None => return DerivedStats::unknown(),
+        };
+
+        DerivedStats::new(
+            group.logical_props.cardinality,
+            group.logical_props.avg_row_size,
+        )
+    }
+
+    fn extract_plan(
         &self,
         group_id: GroupId,
-        required_props: &RequiredProperties,
+        required: &RequiredProperties,
     ) -> OptimizerResult<PhysicalPlan> {
-        let group = self
-            .memo
-            .get_group(group_id)
-            .ok_or_else(|| OptimizerError::NoPlanFound("Root group not found".into()))?;
+        let group = self.memo.get_group(group_id).ok_or_else(|| {
+            OptimizerError::InvalidState(format!("Group {:?} not found", group_id))
+        })?;
 
-        let (_, expr_id) = group.best_physical.get(required_props).ok_or_else(|| {
+        let winner = group.get_winner(required).ok_or_else(|| {
             OptimizerError::NoPlanFound(format!(
-                "No physical plan for group {:?} with props {:?}",
-                group_id, required_props
+                "No winner for group {:?} with {:?}",
+                group_id, required
             ))
         })?;
 
         let phys_expr = self
             .memo
-            .get_physical_expr(*expr_id)
-            .ok_or_else(|| OptimizerError::InvalidState("Physical expr not found".into()))?;
+            .get_physical_expr(winner.expr_id)
+            .ok_or_else(|| OptimizerError::InvalidState("Winner expression not found".into()))?;
 
-        // Recursively extract children
-        let mut children = Vec::new();
+        let mut children = Vec::with_capacity(phys_expr.children.len());
         for (i, &child_group) in phys_expr.children.iter().enumerate() {
-            let child_required = phys_expr.op.required_child_properties(i, required_props);
-            let child_plan = self.extract_best_plan(child_group, &child_required)?;
-            children.push(child_plan);
+            let child_required = phys_expr.op.required_child_properties(i, required);
+            children.push(self.extract_plan(child_group, &child_required)?);
         }
 
         Ok(PhysicalPlan {
             op: phys_expr.op.clone(),
             children,
-            cost: phys_expr.cost,
+            cost: winner.cost,
             properties: phys_expr.properties.clone(),
         })
     }
 
-    /// Get statistics for a group (placeholder for now)
-    fn get_group_stats(&self, group_id: GroupId) -> Statistics {
-        if let Some(group) = self.memo.get_group(group_id) {
-            group.stats.clone()
-        } else {
-            Statistics::default()
-        }
-    }
-
-    /// Get optimization statistics
     pub(crate) fn get_stats(&self) -> &OptimizationStats {
-        &self.stats
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_optimizer_config_default() {
-        let config = OptimizerConfig::default();
-        assert!(config.enable_pruning);
-        assert!(config.enable_predicate_pushdown);
+        &self.opt_stats
     }
 }

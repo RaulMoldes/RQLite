@@ -26,8 +26,8 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 struct ScopeEntry {
     table_id: Option<ObjectId>,
+    scope_index: usize,
     ref_name: String,
-    table_idx: usize,
     schema: Schema,
     cte_idx: Option<usize>,
 }
@@ -41,7 +41,8 @@ impl ScopeEntry {
         if let Some(idx) = self.get_schema().column_idx(column_name) {
             let data_type = self.get_schema().columns[*idx].dtype;
             return Some(BoundColumnRef {
-                table_idx: self.table_idx,
+                table_id: self.table_id.unwrap_or(OBJECT_ZERO),
+                scope_table_index: self.scope_index,
                 column_idx: *idx,
                 data_type,
             });
@@ -68,7 +69,7 @@ impl BinderScope {
         if self.entries.contains_key(&ref_name) {
             return Err(BinderError::DuplicateAlias(ref_name));
         }
-        entry.table_idx = self.entry_order.len();
+        entry.scope_index = self.entry_order.len();
         self.entry_order.push(ref_name.clone());
         self.entries.insert(ref_name, entry);
         Ok(())
@@ -279,7 +280,7 @@ impl Binder {
                     self.ctx.add_to_scope(ScopeEntry {
                         table_id: None,
                         ref_name,
-                        table_idx: 0,
+                        scope_index: 0,
                         schema: schema.clone(),
                         cte_idx: Some(cte_idx),
                     })?;
@@ -296,7 +297,7 @@ impl Binder {
                 self.ctx.add_to_scope(ScopeEntry {
                     table_id: Some(table_id),
                     ref_name,
-                    table_idx: 0,
+                    scope_index: 0,
                     schema: schema.clone(),
                     cte_idx: None,
                 })?;
@@ -328,7 +329,7 @@ impl Binder {
                 self.ctx.add_to_scope(ScopeEntry {
                     table_id: None,
                     ref_name: alias.clone(),
-                    table_idx: 0,
+                    scope_index: 0,
                     schema: schema.clone(),
                     cte_idx: None,
                 })?;
@@ -350,7 +351,8 @@ impl Binder {
                         for (col_idx, col) in entry.schema.columns().iter().enumerate() {
                             result.push(BoundSelectItem {
                                 expr: BoundExpression::ColumnRef(BoundColumnRef {
-                                    table_idx: entry.table_idx,
+                                    scope_table_index: entry.scope_index,
+                                    table_id: entry.table_id.unwrap_or(OBJECT_ZERO),
                                     column_idx: col_idx,
                                     data_type: col.dtype,
                                 }),
@@ -567,7 +569,7 @@ impl Binder {
         self.ctx.add_to_scope(ScopeEntry {
             table_id: Some(table_id),
             ref_name: stmt.table.clone(),
-            table_idx: 0,
+            scope_index: 0,
             schema: table_schema.clone(),
             cte_idx: None,
         })?;
@@ -615,7 +617,7 @@ impl Binder {
         self.ctx.add_to_scope(ScopeEntry {
             table_id: Some(table_id),
             ref_name: stmt.table.clone(),
-            table_idx: 0,
+            scope_index: 0,
             schema: table_schema.clone(),
             cte_idx: None,
         })?;
@@ -740,7 +742,7 @@ impl Binder {
                 self.ctx.add_to_scope(ScopeEntry {
                     table_id: None,
                     ref_name: String::new(),
-                    table_idx: 0,
+                    scope_index: 0,
                     schema: schema.clone(),
                     cte_idx: None,
                 })?;
@@ -1412,12 +1414,12 @@ mod binder_tests {
         if let BoundStatement::Select(select) = result {
             // First column from users (table_idx 0)
             if let BoundExpression::ColumnRef(cr) = &select.columns[0].expr {
-                assert_eq!(cr.table_idx, 0);
+                assert_eq!(cr.scope_table_index, 0);
                 assert_eq!(cr.column_idx, 0);
             }
             // Second column from orders (table_idx 1)
             if let BoundExpression::ColumnRef(cr) = &select.columns[1].expr {
-                assert_eq!(cr.table_idx, 1);
+                assert_eq!(cr.scope_table_index, 1);
                 assert_eq!(cr.column_idx, 0);
             }
         } else {
@@ -1455,7 +1457,7 @@ mod binder_tests {
 
         if let BoundStatement::Select(select) = result {
             if let BoundExpression::ColumnRef(cr) = &select.columns[0].expr {
-                assert_eq!(cr.table_idx, 0);
+                assert_eq!(cr.scope_table_index, 0);
                 assert_eq!(cr.column_idx, 1); // name
             }
         } else {
@@ -1555,12 +1557,12 @@ mod binder_tests {
                 if let BoundExpression::BinaryOp { left, right, .. } = cond {
                     // u.id (table_idx 0, column_idx 0)
                     if let BoundExpression::ColumnRef(l) = left.as_ref() {
-                        assert_eq!(l.table_idx, 0);
+                        assert_eq!(l.scope_table_index, 0);
                         assert_eq!(l.column_idx, 0);
                     }
                     // o.user_id (table_idx 1, column_idx 1)
                     if let BoundExpression::ColumnRef(r) = right.as_ref() {
-                        assert_eq!(r.table_idx, 1);
+                        assert_eq!(r.scope_table_index, 1);
                         assert_eq!(r.column_idx, 1);
                     }
                 }

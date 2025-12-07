@@ -571,6 +571,10 @@ impl Table {
         self.next_row
     }
 
+    pub(crate) fn stats(&self) -> Option<&TableStatistics> {
+        self.stats.as_ref()
+    }
+
     pub(crate) fn build(
         id: ObjectId,
         name: &str,
@@ -621,6 +625,10 @@ impl Index {
             stats: None,
             schema,
         }
+    }
+
+    pub(crate) fn stats(&self) -> Option<&IndexStatistics> {
+        self.stats.as_ref()
     }
 
     pub(crate) fn with_stats(mut self, stats: IndexStatistics) -> Self {

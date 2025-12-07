@@ -4,112 +4,21 @@
 //! database tables and indexes. Statistics are used by the query optimizer to
 //! estimate cardinalities and select optimal execution plans.
 //!
-//! # Key Components
-//!
-//! - `ColumnStatistics`: Per-column statistics including NDV, null counts, and value ranges
-//! - `TableStatistics`: Table-level statistics aggregating column stats
-//! - `IndexStatistics`: B-tree index statistics (height, leaf pages, etc.)
-//! - `Histogram`: Equi-depth histogram for value distribution estimation
-//!
-//! # Range Calculations
-//!
 //! Statistics support byte-based range calculations using the `Ranger` trait from
 //! the comparator module. This allows selectivity estimation for any comparable
 //! data type without requiring conversion to floating point.
 
 use crate::{
+    ObjectId,
     io::AsBytes,
-    sql::{
-        ast::{BinaryOperator, UnaryOperator},
-        binder::ast::BoundExpression,
-    },
     structures::comparator::{Comparator, Ranger},
-    types::{ObjectId, VarInt, varint::MAX_VARINT_LEN},
+    types::{VarInt, varint::MAX_VARINT_LEN},
 };
 use std::{
     cmp::Ordering,
     collections::HashMap,
     io::{self, Read, Seek, Write},
 };
-
-/// Statistics about a query plan node.
-///
-/// Used during query optimization to estimate costs and cardinalities.
-#[derive(Debug, Clone, Default)]
-pub struct Statistics {
-    /// Estimated row count
-    pub row_count: f64,
-    /// Average row size in bytes
-    pub avg_row_size: f64,
-    /// Column statistics indexed by column position
-    pub column_stats: HashMap<usize, ColumnStatistics>,
-}
-
-impl Statistics {
-    /// Creates new statistics with the given row count and average row size.
-    pub fn new(row_count: f64, avg_row_size: f64) -> Self {
-        Self {
-            row_count,
-            avg_row_size,
-            column_stats: HashMap::new(),
-        }
-    }
-
-    /// Adds column statistics for a specific column index.
-    pub fn with_column_stats(mut self, column_idx: usize, stats: ColumnStatistics) -> Self {
-        self.column_stats.insert(column_idx, stats);
-        self
-    }
-
-    /// Estimates selectivity for a predicate expression.
-    ///
-    /// Returns a value between 0.0 and 1.0 representing the fraction of rows
-    /// expected to satisfy the predicate.
-    pub fn estimate_selectivity(&self, predicate: &BoundExpression) -> f64 {
-        match predicate {
-            BoundExpression::BinaryOp {
-                op, left, right, ..
-            } => match op {
-                BinaryOperator::Eq => 0.1,
-                BinaryOperator::Neq => 0.9,
-                BinaryOperator::Lt
-                | BinaryOperator::Gt
-                | BinaryOperator::Le
-                | BinaryOperator::Ge => 0.33,
-                BinaryOperator::And => {
-                    self.estimate_selectivity(left) * self.estimate_selectivity(right)
-                }
-                BinaryOperator::Or => {
-                    let l = self.estimate_selectivity(left);
-                    let r = self.estimate_selectivity(right);
-                    (l + r - l * r).min(1.0)
-                }
-                _ => 0.5,
-            },
-            BoundExpression::UnaryOp { op, expr, .. } => match op {
-                UnaryOperator::Not => 1.0 - self.estimate_selectivity(expr),
-                _ => 0.5,
-            },
-            BoundExpression::IsNull { negated, .. } => {
-                if *negated {
-                    0.95
-                } else {
-                    0.05
-                }
-            }
-            BoundExpression::Between { negated, .. } => {
-                let base = 0.25;
-                if *negated { 1.0 - base } else { base }
-            }
-            BoundExpression::InList { list, negated, .. } => {
-                let list_selectivity = (list.len() as f64) * 0.01;
-                let sel = list_selectivity.min(0.5);
-                if *negated { 1.0 - sel } else { sel }
-            }
-            _ => 0.5,
-        }
-    }
-}
 
 /// Statistics for a single column.
 ///
@@ -949,7 +858,7 @@ impl AsBytes for IndexStatistics {
 /// Provider interface for statistics.
 ///
 /// Implementations provide statistics access for the query optimizer.
-pub trait StatisticsProvider: Send + Sync {
+pub(crate) trait StatisticsProvider {
     /// Gets statistics for a table.
     fn get_table_stats(&self, table_id: ObjectId) -> Option<TableStatistics>;
 
@@ -957,89 +866,13 @@ pub trait StatisticsProvider: Send + Sync {
     fn get_column_stats(&self, table_id: ObjectId, column_idx: usize) -> Option<ColumnStatistics>;
 
     /// Gets index statistics.
-    fn get_index_stats(&self, index_name: &str) -> Option<IndexStatistics>;
+    fn get_index_stats(&self, index_id: ObjectId) -> Option<IndexStatistics>;
 }
 
-/// Placeholder statistics provider for development/testing.
-#[derive(Default)]
-pub struct PlaceholderStatsProvider {
-    default_row_count: u64,
-    default_page_count: usize,
-    table_cache: HashMap<ObjectId, TableStatistics>,
-    index_cache: HashMap<String, IndexStatistics>,
+pub(crate) enum Statistics {
+    Index(IndexStatistics),
+    Table(TableStatistics),
 }
-
-impl PlaceholderStatsProvider {
-    /// Creates a new placeholder provider with default values.
-    pub fn new() -> Self {
-        Self {
-            default_row_count: 1000,
-            default_page_count: 10,
-            table_cache: HashMap::new(),
-            index_cache: HashMap::new(),
-        }
-    }
-
-    /// Sets the default row count for unknown tables.
-    pub fn with_default_row_count(mut self, count: u64) -> Self {
-        self.default_row_count = count;
-        self
-    }
-
-    /// Pre-populates statistics for a table.
-    pub fn add_table_stats(&mut self, table_id: ObjectId, stats: TableStatistics) {
-        self.table_cache.insert(table_id, stats);
-    }
-
-    /// Pre-populates statistics for an index.
-    pub fn add_index_stats(&mut self, index_name: String, stats: IndexStatistics) {
-        self.index_cache.insert(index_name, stats);
-    }
-}
-
-impl StatisticsProvider for PlaceholderStatsProvider {
-    fn get_table_stats(&self, table_id: ObjectId) -> Option<TableStatistics> {
-        if let Some(stats) = self.table_cache.get(&table_id) {
-            return Some(stats.clone());
-        }
-
-        Some(TableStatistics {
-            row_count: self.default_row_count,
-            page_count: self.default_page_count,
-            avg_row_size: 100.0,
-            column_stats: HashMap::new(),
-            last_updated: 0,
-        })
-    }
-
-    fn get_column_stats(&self, table_id: ObjectId, column_idx: usize) -> Option<ColumnStatistics> {
-        if let Some(table_stats) = self.table_cache.get(&table_id) {
-            if let Some(col_stats) = table_stats.column_stats.get(&column_idx) {
-                return Some(col_stats.clone());
-            }
-        }
-
-        Some(ColumnStatistics::default())
-    }
-
-    fn get_index_stats(&self, index_name: &str) -> Option<IndexStatistics> {
-        if let Some(stats) = self.index_cache.get(index_name) {
-            return Some(stats.clone());
-        }
-
-        Some(IndexStatistics {
-            height: 2,
-            leaf_pages: 10,
-            entries: 1000,
-            distinct_keys: 1000,
-            avg_key_size: 8.0,
-            min_key: None,
-            max_key: None,
-            last_updated: 0,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1206,23 +1039,5 @@ mod tests {
         // Higher value updates max
         stats.update_with_value(&[100, 0, 0, 0], &comparator);
         assert_eq!(stats.max_bytes.as_ref().unwrap()[0], 100);
-    }
-
-    #[test]
-    fn test_placeholder_provider() {
-        let mut provider = PlaceholderStatsProvider::new().with_default_row_count(5000);
-        let table_id = ObjectId::new();
-
-        // Test default stats
-        let stats = provider.get_table_stats(table_id).unwrap();
-        assert_eq!(stats.row_count, 5000);
-
-        // Add custom stats
-        let custom_stats = TableStatistics::new().with_row_count(999);
-        provider.add_table_stats(table_id, custom_stats);
-
-        // Verify custom stats are returned
-        let stats = provider.get_table_stats(table_id).unwrap();
-        assert_eq!(stats.row_count, 999);
     }
 }

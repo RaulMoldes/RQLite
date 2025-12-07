@@ -245,17 +245,16 @@ impl PhysicalOperator {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SeqScanOp {
     pub(crate) table_id: ObjectId,
-    pub(crate) table_name: String,
     pub(crate) schema: Schema,
     pub(crate) columns: Option<Vec<usize>>,
     pub(crate) predicate: Option<BoundExpression>,
 }
 
 impl SeqScanOp {
-    pub(crate) fn new(table_id: ObjectId, table_name: String, schema: Schema) -> Self {
+    pub(crate) fn new(table_id: ObjectId, schema: Schema) -> Self {
         Self {
             table_id,
-            table_name,
+
             schema,
             columns: None,
             predicate: None,
@@ -277,8 +276,7 @@ impl SeqScanOp {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PhysIndexScanOp {
     pub(crate) table_id: ObjectId,
-    pub(crate) table_name: String,
-    pub(crate) index_name: String,
+    pub(crate) index_id: ObjectId,
     pub(crate) schema: Schema,
     pub(crate) index_columns: Vec<usize>,
     pub(crate) range_start: Option<BoundExpression>,
@@ -286,12 +284,59 @@ pub(crate) struct PhysIndexScanOp {
     pub(crate) residual: Option<BoundExpression>,
 }
 
+impl From<IndexScanOp> for PhysIndexScanOp {
+    fn from(value: IndexScanOp) -> Self {
+        Self {
+            table_id: value.table_id,
+            index_id: value.index_id,
+            schema: value.schema,
+            index_columns: value.index_columns,
+            range_start: value.range_start,
+            range_end: value.range_end,
+            residual: value.residual_predicate,
+        }
+    }
+}
+
+impl PhysIndexScanOp {
+    pub(crate) fn new(
+        table_id: ObjectId,
+        index_id: ObjectId,
+        schema: Schema,
+        index_columns: Vec<usize>,
+    ) -> Self {
+        Self {
+            table_id,
+            index_id,
+            schema,
+            index_columns,
+            range_start: None,
+            range_end: None,
+            residual: None,
+        }
+    }
+
+    pub(crate) fn with_range_start(mut self, range_start: BoundExpression) -> Self {
+        self.range_start = Some(range_start);
+        self
+    }
+
+    pub(crate) fn with_range_end(mut self, range_end: BoundExpression) -> Self {
+        self.range_end = Some(range_end);
+        self
+    }
+
+    pub(crate) fn with_predicate(mut self, pred: BoundExpression) -> Self {
+        self.residual = Some(pred);
+        self
+    }
+}
+
 /// Index-only scan (returns data directly from index)
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IndexOnlyScanOp {
     pub(crate) table_id: ObjectId,
-    pub(crate) table_name: String,
-    pub(crate) index_name: String,
+    pub(crate) index_id: ObjectId,
     pub(crate) schema: Schema,
     pub(crate) index_columns: Vec<usize>,
     pub(crate) range_start: Option<BoundExpression>,
@@ -654,6 +699,11 @@ impl OrderingSpec {
     pub(crate) fn desc(column_idx: usize) -> Self {
         Self::new(column_idx, false)
     }
+
+    pub(crate) fn with_nulls_first(mut self, nulls_first: bool) -> Self {
+        self.nulls_first = nulls_first;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -675,11 +725,7 @@ mod tests {
     fn test_physical_plan_explain() {
         let schema = test_schema();
         let plan = PhysicalPlan {
-            op: PhysicalOperator::SeqScan(SeqScanOp::new(
-                ObjectId::new(),
-                "users".to_string(),
-                schema.clone(),
-            )),
+            op: PhysicalOperator::SeqScan(SeqScanOp::new(ObjectId::new(), schema.clone())),
             children: vec![],
             cost: 100.0,
             properties: PhysicalProperties::default(),
