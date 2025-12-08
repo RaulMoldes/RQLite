@@ -54,6 +54,12 @@ float! {
     pub struct Float64(f64);
 }
 
+impl From<Float32> for f64 {
+    fn from(value: Float32) -> Self {
+        value.0 as f64
+    }
+}
+
 // Additional UInt8 methods for character/boolean handling
 // We cannot create raw char/bool wrappers because their internal bit representation may be illegal (due to bytemuck Pod trait: https://docs.rs/bytemuck/latest/bytemuck/trait.Pod.html)
 impl UInt8 {

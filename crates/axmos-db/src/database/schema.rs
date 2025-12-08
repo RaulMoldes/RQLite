@@ -80,6 +80,23 @@ impl Schema {
         }
     }
 
+    pub(crate) fn into_values(self) -> Self {
+        let mut columns = Vec::new();
+        let mut column_index = HashMap::new();
+
+        for (i, value) in self.values().iter().enumerate() {
+            column_index.insert(value.name().to_string(), i);
+            columns.push(value.clone());
+        }
+
+        Self {
+            columns,
+            num_keys: 0,
+            constraints: HashMap::new(),
+            column_index,
+        }
+    }
+
     pub(crate) fn set_num_keys(&mut self, num_keys: u8) {
         self.num_keys = num_keys;
     }

@@ -199,7 +199,7 @@ impl Display for BoundExpression {
                 left, op, right, ..
             } => write!(f, "{} {} {}", left, op, right),
             BoundExpression::UnaryOp { op, expr, .. } => write!(f, "{}{}", op, expr),
-            BoundExpression::ColumnRef(col) => write!(f, "col[{}]", col.column_idx),
+            BoundExpression::ColumnRef(col) => write!(f, "#{}", col.column_idx),
             BoundExpression::Literal { value } => write!(f, "{}", value),
             BoundExpression::IsNull { expr, negated } => {
                 if *negated {
@@ -209,7 +209,7 @@ impl Display for BoundExpression {
                 }
             }
             BoundExpression::Cast { expr, target_type } => {
-                write!(f, "{}::{}", expr, target_type)
+                write!(f, "CAST({} AS {})", expr, target_type)
             }
             BoundExpression::Function { func, args, .. } => {
                 let arg_strs: Vec<_> = args.iter().map(|a| a.to_string()).collect();

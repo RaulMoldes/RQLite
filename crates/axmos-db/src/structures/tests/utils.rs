@@ -83,7 +83,7 @@ impl TestVarLengthKey {
     }
 }
 
-pub fn create_test_btree<Cmp: Comparator>(
+pub fn create_test_btree<Cmp: Comparator + Clone>(
     page_size: u32,
     capacity: usize,
     min_keys: usize,

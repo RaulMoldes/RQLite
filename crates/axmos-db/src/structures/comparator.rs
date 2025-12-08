@@ -120,7 +120,7 @@ pub(crate) trait Comparator {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum DynComparator {
+pub(crate) enum DynComparator {
     Variable(VarlenComparator),
     StrictNumeric(NumericComparator),
     FixedSizeBytes(FixedSizeBytesComparator),
@@ -175,11 +175,11 @@ impl Ranger for DynComparator {
 pub(crate) struct NumericComparator(usize);
 
 impl NumericComparator {
-    pub fn with_type<T>() -> Self {
+    pub(crate) fn with_type<T>() -> Self {
         Self(mem::size_of::<T>())
     }
 
-    pub fn for_size(size: usize) -> Self {
+    pub(crate) fn for_size(size: usize) -> Self {
         Self(size)
     }
 
@@ -254,11 +254,11 @@ impl Ranger for NumericComparator {
 pub(crate) struct SignedNumericComparator(usize);
 
 impl SignedNumericComparator {
-    pub fn with_type<T>() -> Self {
+    pub(crate) fn with_type<T>() -> Self {
         Self(mem::size_of::<T>())
     }
 
-    pub fn for_size(size: usize) -> Self {
+    pub(crate) fn for_size(size: usize) -> Self {
         Self(size)
     }
 
@@ -366,11 +366,11 @@ impl Ranger for SignedNumericComparator {
 pub(crate) struct FixedSizeBytesComparator(usize);
 
 impl FixedSizeBytesComparator {
-    pub fn with_type<T>() -> Self {
+    pub(crate) fn with_type<T>() -> Self {
         Self(std::mem::size_of::<T>())
     }
 
-    pub fn for_size(size: usize) -> Self {
+    pub(crate) fn for_size(size: usize) -> Self {
         Self(size)
     }
 }

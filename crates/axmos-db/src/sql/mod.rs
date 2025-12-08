@@ -1,6 +1,7 @@
 mod analyzer;
 pub mod ast;
 mod binder;
+pub mod executor;
 pub mod lexer;
 pub mod parser;
 pub mod planner;

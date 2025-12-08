@@ -2,7 +2,7 @@ use crate::id_type;
 id_type!(LogId, __GLOBAL_LOG_COUNT, "LogId");
 id_type!(PageId, __GLOBAL_PAGE_COUNT, "PageId");
 id_type!(TransactionId, __GLOBAL_TX_COUNT, "TransactionId");
-id_type!(ObjectId, __GLOBAL_OBJ_COUNT, "ObectId");
+id_type!(ObjectId, __GLOBAL_OBJ_COUNT, "ObjectId");
 
 pub fn initialize_atomics() {
     __GLOBAL_LOG_COUNT.store(1, std::sync::atomic::Ordering::Relaxed);

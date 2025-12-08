@@ -1797,7 +1797,6 @@ mod transformation_rules_tests {
     use crate::sql::planner::GroupId;
     use crate::sql::planner::prop::LogicalProperties;
     use crate::types::{DataType, DataTypeKind, Int32, ObjectId, UInt8};
-   
 
     fn col(idx: usize) -> BoundExpression {
         BoundExpression::ColumnRef(BoundColumnRef {

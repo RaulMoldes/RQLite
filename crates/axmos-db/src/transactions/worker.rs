@@ -11,6 +11,7 @@ use crate::{
         pager::SharedPager,
         wal::{Abort, Begin, Commit, Delete, End, Insert, LogRecordBuilder, LogRecordType, Update},
     },
+    sql::executor::context::ExecutionContext,
     storage::{
         buffer::BufferWithMetadata,
         latches::Latch,
@@ -31,7 +32,7 @@ use std::{
 
 // TODO: FOR NOW, EACH TRANSACTION WILL MANAGE A SINGLE THREAD. IN THE FUTURE , WE SHOULD FIGURE OUT HOW TO DO THIS PROPERLY WITH THREAD POOLS
 #[derive(Debug)]
-pub struct ThreadWorker {
+pub(crate) struct ThreadWorker {
     /// Thread id.
     thread_id: ThreadId,
 
@@ -43,18 +44,18 @@ pub struct ThreadWorker {
 }
 
 #[derive(Debug)]
-pub struct Worker(Rc<RefCell<ThreadWorker>>);
+pub(crate) struct Worker(Rc<RefCell<ThreadWorker>>);
 
 impl Worker {
-    pub fn new(pager: SharedPager) -> Self {
+    pub(crate) fn new(pager: SharedPager) -> Self {
         Self(Rc::new(RefCell::new(ThreadWorker::new(pager))))
     }
 
-    pub fn borrow(&self) -> Ref<'_, ThreadWorker> {
+    pub(crate) fn borrow(&self) -> Ref<'_, ThreadWorker> {
         self.0.borrow()
     }
 
-    pub fn borrow_mut(&self) -> RefMut<'_, ThreadWorker> {
+    pub(crate) fn borrow_mut(&self) -> RefMut<'_, ThreadWorker> {
         self.0.borrow_mut()
     }
 }
@@ -66,7 +67,7 @@ impl Clone for Worker {
 }
 
 impl ThreadWorker {
-    pub fn new(pager: SharedPager) -> Self {
+    pub(crate) fn new(pager: SharedPager) -> Self {
         Self {
             thread_id: thread::current_id(),
             pager,
@@ -74,7 +75,7 @@ impl ThreadWorker {
         }
     }
 
-    pub fn thread_id(&self) -> ThreadId {
+    pub(crate) fn thread_id(&self) -> ThreadId {
         self.thread_id
     }
 
@@ -86,34 +87,34 @@ impl ThreadWorker {
         &self.stack
     }
 
-    pub fn get_page_size(&self) -> usize {
+    pub(crate) fn get_page_size(&self) -> usize {
         self.pager.read().page_size() as usize
     }
 
-    pub fn clear_stack(&mut self) {
+    pub(crate) fn clear_stack(&mut self) {
         self.stack_mut().clear()
     }
 
-    pub fn release_latch(&mut self, page_id: PageId) {
+    pub(crate) fn release_latch(&mut self, page_id: PageId) {
         self.stack_mut().release(page_id);
     }
 
-    pub fn last(&self) -> Option<&Position> {
+    pub(crate) fn last(&self) -> Option<&Position> {
         self.stack_ref().last()
     }
 
-    pub fn pop(&mut self) -> Option<Position> {
+    pub(crate) fn pop(&mut self) -> Option<Position> {
         self.stack_mut().pop()
     }
 
     // Track the current position in the stack
-    pub fn visit(&mut self, position: Position) -> std::io::Result<()> {
+    pub(crate) fn visit(&mut self, position: Position) -> std::io::Result<()> {
         self.stack_mut().visit(position);
         Ok(())
     }
 
     // Acquire a lock on the stack for a page using the given [AccessMode]
-    pub fn acquire<P: Page>(
+    pub(crate) fn acquire<P: Page>(
         &mut self,
         page_id: PageId,
         access_mode: FrameAccessMode,
@@ -126,7 +127,7 @@ impl ThreadWorker {
         Ok(())
     }
 
-    pub fn alloc_page<P: Page>(&mut self) -> std::io::Result<PageId>
+    pub(crate) fn alloc_page<P: Page>(&mut self) -> std::io::Result<PageId>
     where
         MemPage: From<P>,
         BufferWithMetadata<P::Header>: Into<MemPage>,
@@ -135,7 +136,7 @@ impl ThreadWorker {
         self.pager.write().cache_frame(page)
     }
 
-    pub fn dealloc_page<P: Page>(&mut self, id: PageId) -> std::io::Result<()>
+    pub(crate) fn dealloc_page<P: Page>(&mut self, id: PageId) -> std::io::Result<()>
     where
         MemPage: From<P>,
     {
@@ -151,7 +152,7 @@ impl ThreadWorker {
 
     // Allows to execute a mutating callback on the requested page.
     // The page latch must have been already acquired.
-    pub fn write_page<P, F, R>(&mut self, id: PageId, callback: F) -> io::Result<R>
+    pub(crate) fn write_page<P, F, R>(&mut self, id: PageId, callback: F) -> io::Result<R>
     where
         P: Page + Clone,
         F: FnOnce(&mut P) -> R,
@@ -171,7 +172,7 @@ impl ThreadWorker {
     }
 
     // Allows to execute a read only callback on the given page.
-    pub fn read_page<P, F, R>(&self, id: PageId, callback: F) -> io::Result<R>
+    pub(crate) fn read_page<P, F, R>(&self, id: PageId, callback: F) -> io::Result<R>
     where
         P: Page + Clone,
         F: FnOnce(&P) -> R,
@@ -192,7 +193,7 @@ impl ThreadWorker {
 
     // Same as [`write_page`] but the callback must return io::Result, propagating the error o the caller.
     // The page latch must have been already acquired.
-    pub fn try_write_page<P, F, R>(&mut self, id: PageId, callback: F) -> io::Result<R>
+    pub(crate) fn try_write_page<P, F, R>(&mut self, id: PageId, callback: F) -> io::Result<R>
     where
         P: Page + Clone,
         F: FnOnce(&mut P) -> io::Result<R>,
@@ -214,7 +215,7 @@ impl ThreadWorker {
 
     // Same as [`read_page`] but the callback must return io::Result, propagating the error o the caller.
     // Allows to execute a read only callback on the given page.
-    pub fn try_read_page<P, F, R>(&self, id: PageId, callback: F) -> io::Result<R>
+    pub(crate) fn try_read_page<P, F, R>(&self, id: PageId, callback: F) -> io::Result<R>
     where
         P: Page + Clone,
         F: FnOnce(&P) -> io::Result<R>,
@@ -236,7 +237,7 @@ impl ThreadWorker {
 
 /// Result of a tuple read operation
 #[derive(Debug)]
-pub enum ReadResult<T> {
+pub(crate) enum ReadResult<T> {
     /// Tuple found and visible
     Found(T),
     /// Tuple exists but not visible to this transaction
@@ -259,7 +260,7 @@ impl From<TransactionHandle> for WorkerPool {
     }
 }
 
-pub struct WorkerPool {
+pub(crate) struct WorkerPool {
     /// Transaction ID
     transaction_id: TransactionId,
     /// Snapshot for visibility checks
@@ -277,7 +278,7 @@ pub struct WorkerPool {
 }
 
 impl WorkerPool {
-    pub fn new(
+    pub(crate) fn new(
         tx_id: TransactionId,
         snapshot: Snapshot,
         pager: SharedPager,
@@ -296,11 +297,11 @@ impl WorkerPool {
         }
     }
 
-    pub fn transaction_id(&self) -> TransactionId {
+    pub(crate) fn transaction_id(&self) -> TransactionId {
         self.transaction_id
     }
 
-    pub fn snapshot(&self) -> &Snapshot {
+    pub(crate) fn snapshot(&self) -> &Snapshot {
         &self.snapshot
     }
 
@@ -308,29 +309,44 @@ impl WorkerPool {
         self.builder
     }
 
+    /// Creates an execution context for running  queries within this transaction.
+    ///
+    /// The execution context contains:
+    /// - A worker for page-level operations
+    /// - The transaction's snapshot for MVCC visibility checks
+    /// - Access to the catalog for metadata lookups
+    pub(crate) fn execution_context(&self) -> ExecutionContext {
+        ExecutionContext::new(
+            self.get_or_create_worker(),
+            self.catalog.clone(),
+            self.snapshot.clone(),
+            self.transaction_id,
+        )
+    }
+
     /// Write BEGIN record to WAL
-    pub fn begin(&self) -> io::Result<()> {
+    pub(crate) fn begin(&self) -> io::Result<()> {
         let operation = Begin;
         let rec = self.builder().build_rec(LogRecordType::Begin, operation);
         self.pager.write().push_to_log(rec)
     }
 
     /// Write COMMIT record to WAL
-    pub fn commit(&self) -> io::Result<()> {
+    pub(crate) fn commit(&self) -> io::Result<()> {
         let operation = Commit;
         let rec = self.builder().build_rec(LogRecordType::Commit, operation);
         self.pager.write().push_to_log(rec)
     }
 
     /// Write ABORT record to WAL
-    pub fn rollback(&self) -> io::Result<()> {
+    pub(crate) fn rollback(&self) -> io::Result<()> {
         let operation = Abort;
         let rec = self.builder().build_rec(LogRecordType::Abort, operation);
         self.pager.write().push_to_log(rec)
     }
 
     /// Write END record to WAL
-    pub fn end(&self) -> io::Result<()> {
+    pub(crate) fn end(&self) -> io::Result<()> {
         let operation = End;
         let rec = self.builder().build_rec(LogRecordType::End, operation);
         self.pager.write().push_to_log(rec)
@@ -338,7 +354,7 @@ impl WorkerPool {
 
     /// Validate and commit the transaction
     /// Returns error if write-write conflict detected
-    pub fn try_commit(&self) -> TransactionResult<()> {
+    pub(crate) fn try_commit(&self) -> TransactionResult<()> {
         // First validate with coordinator (checks tuple_commits)
         self.coordinator.commit(self.transaction_id)?;
 
@@ -349,7 +365,7 @@ impl WorkerPool {
     }
 
     /// Abort the transaction
-    pub fn try_abort(&self) -> TransactionResult<()> {
+    pub(crate) fn try_abort(&self) -> TransactionResult<()> {
         self.coordinator.abort(self.transaction_id)?;
         self.rollback()?;
         Ok(())
@@ -364,7 +380,11 @@ impl WorkerPool {
     }
 
     /// Creates a new table using the catalog low level methods and properly logging to the wal
-    pub fn create_table(&self, table_name: &str, schema: Schema) -> TransactionResult<ObjectId> {
+    pub(crate) fn create_table(
+        &self,
+        table_name: &str,
+        schema: Schema,
+    ) -> TransactionResult<ObjectId> {
         let worker = self.get_or_create_worker();
 
         // Check if relation already exists
@@ -413,7 +433,7 @@ impl WorkerPool {
         Ok(object_id)
     }
 
-    pub fn add_column(&self, table_name: &str, column: Column) -> TransactionResult<()> {
+    pub(crate) fn add_column(&self, table_name: &str, column: Column) -> TransactionResult<()> {
         let worker = self.get_or_create_worker();
 
         let mut relation = self.catalog.get_relation(table_name, worker.clone())?;
@@ -456,7 +476,7 @@ impl WorkerPool {
         Ok(())
     }
 
-    pub fn drop_column(
+    pub(crate) fn drop_column(
         &self,
         table_name: &str,
         column_name: &str,
@@ -519,7 +539,7 @@ impl WorkerPool {
         Ok(())
     }
 
-    pub fn drop_object(&self, object_name: &str, cascade: bool) -> TransactionResult<()> {
+    pub(crate) fn drop_object(&self, object_name: &str, cascade: bool) -> TransactionResult<()> {
         let worker = self.get_or_create_worker();
 
         let relation = self.catalog.get_relation(object_name, worker.clone())?;
@@ -570,7 +590,7 @@ impl WorkerPool {
         Ok(())
     }
 
-    pub fn alter_column(
+    pub(crate) fn alter_column(
         &self,
         table_name: &str,
         column_name: &str,
@@ -623,7 +643,7 @@ impl WorkerPool {
     }
 
     /// Creates a new index using the catalog low level methods and properly logging to the wal
-    pub fn create_index(
+    pub(crate) fn create_index(
         &self,
         index_name: &str,
         table_name: &str,
@@ -730,7 +750,11 @@ impl WorkerPool {
     }
 
     /// Insert a new tuple into a table
-    pub fn insert_one(&self, table: &str, values: &[DataType]) -> TransactionResult<LogicalId> {
+    pub(crate) fn insert_one(
+        &self,
+        table: &str,
+        values: &[DataType],
+    ) -> TransactionResult<LogicalId> {
         let worker = self.get_or_create_worker();
 
         let mut relation = self.catalog.get_relation(table, worker.clone())?;
@@ -809,7 +833,7 @@ impl WorkerPool {
 
     /// Read a tuple by logical ID, respecting MVCC visibility.
     /// Executes the provided function over the visible tuple if found.
-    pub fn read_one<F, T>(
+    pub(crate) fn read_one<F, T>(
         &self,
         logical_id: LogicalId,
         f: F,
@@ -847,7 +871,7 @@ impl WorkerPool {
 
     /// Read a tuple mutably by logical ID, respecting MVCC visibility.
     /// Executes the provided function over the visible tuple if found.
-    pub fn read_one_mut<F, T>(
+    pub(crate) fn read_one_mut<F, T>(
         &self,
         logical_id: LogicalId,
         f: F,
@@ -882,7 +906,7 @@ impl WorkerPool {
     }
 
     /// Update a tuple, creating a new version
-    pub fn update_one(
+    pub(crate) fn update_one(
         &self,
         logical_id: LogicalId,
         values: &[(usize, DataType)],
@@ -973,7 +997,7 @@ impl WorkerPool {
     }
 
     /// Delete a tuple by setting xmax
-    pub fn delete_one(&self, logical_id: LogicalId) -> TransactionResult<()> {
+    pub(crate) fn delete_one(&self, logical_id: LogicalId) -> TransactionResult<()> {
         let worker = self.get_or_create_worker();
         let table = logical_id.table();
         let relation = self.catalog.get_relation_unchecked(table, worker.clone())?;

@@ -18,7 +18,7 @@ use crate::{
 };
 
 use murmur3::murmur3_x64_128;
-use std::io::Cursor;
+use std::{hash::Hash, io::Cursor};
 
 use std::{
     cmp::{Ordering, PartialEq},
@@ -614,5 +614,11 @@ impl<'a> AxmosHashable for BlobRefMut<'a> {
     fn hash64(&self) -> u64 {
         let h128 = murmur3_x64_128(&mut Cursor::new(self.as_ref()), 0).unwrap();
         h128 as u64
+    }
+}
+
+impl From<Blob> for f64 {
+    fn from(value: Blob) -> Self {
+        value.hash64() as f64
     }
 }

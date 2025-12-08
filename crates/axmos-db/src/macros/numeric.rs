@@ -728,6 +728,33 @@ macro_rules! numeric {
 }
 
 #[macro_export]
+macro_rules! impl_number_op {
+    ($func_name:ident, $op:tt) => {
+        fn $func_name(a: Number, b: Number) -> Number {
+            match (a, b) {
+                // Float combinations
+                (Number::Float(x), Number::Float(y)) => Number::Float(x $op y),
+                (Number::Float(x), Number::Signed(y)) => Number::Float(x $op (y as f64)),
+                (Number::Float(x), Number::Unsigned(y)) => Number::Float(x $op (y as f64)),
+
+                (Number::Signed(x), Number::Float(y)) => Number::Float((x as f64) $op y),
+                (Number::Unsigned(x), Number::Float(y)) => Number::Float((x as f64) $op y),
+
+                // Pure signed
+                (Number::Signed(x), Number::Signed(y)) => Number::Signed(x $op y),
+
+                // Pure unsigned
+                (Number::Unsigned(x), Number::Unsigned(y)) => Number::Unsigned(x $op y),
+
+                // Mixed signed/unsigned -> signed
+                (Number::Signed(x), Number::Unsigned(y)) => Number::Signed(x $op (y as i64)),
+                (Number::Unsigned(x), Number::Signed(y)) => Number::Signed((x as i64) $op y),
+            }
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! impl_ref {
     ($wrapper:ident, $inner:ty) => {
         paste::paste! {
@@ -1092,6 +1119,9 @@ macro_rules! float {
             const IS_SIGNED: bool = true;
         }
 
+
+
+
     };
 }
 
@@ -1117,6 +1147,12 @@ macro_rules! signed_integer {
             const IS_SIGNED: bool = true;
         }
 
+        impl From<$name> for f64 {
+            fn from(value: $name) -> Self {
+                value.0 as f64
+            }
+        }
+
     };
 }
 
@@ -1140,6 +1176,12 @@ macro_rules! unsigned_integer {
         // Implement NumericType
         impl $crate::types::core::NumericType for $name {
             const IS_SIGNED: bool = false;
+        }
+
+        impl From<$name> for f64 {
+            fn from(value: $name) -> Self {
+                value.0 as f64
+            }
         }
 
     };

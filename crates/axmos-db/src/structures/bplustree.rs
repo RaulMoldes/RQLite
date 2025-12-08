@@ -40,7 +40,7 @@ pub(crate) enum NodeStatus {
 }
 
 #[derive(Debug)]
-pub enum Payload<'b> {
+pub(crate) enum Payload<'b> {
     Boxed(Box<[u8]>),
     Reference(&'b [u8]),
 }
@@ -85,7 +85,7 @@ impl<'b> AsRef<[u8]> for Payload<'b> {
 }
 
 #[derive(Debug, Clone)]
-pub struct BPlusTree<Cmp>
+pub(crate) struct BPlusTree<Cmp>
 where
     Cmp: Comparator,
 {
@@ -98,7 +98,7 @@ where
 
 impl<Cmp> BPlusTree<Cmp>
 where
-    Cmp: Comparator,
+    Cmp: Comparator + Clone,
 {
     pub(crate) fn new(
         worker: Worker,
@@ -133,11 +133,11 @@ where
         }
     }
 
-    pub fn root_pos(&self) -> Position {
+    pub(crate) fn root_pos(&self) -> Position {
         Position::start_pos(self.root)
     }
 
-    pub fn compare(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Ordering> {
+    pub(crate) fn compare(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Ordering> {
         self.comparator.compare(lhs, rhs)
     }
 
@@ -149,19 +149,19 @@ where
         self.root = new_root
     }
 
-    pub fn get_root(&self) -> PageId {
+    pub(crate) fn get_root(&self) -> PageId {
         self.root
     }
 
-    pub fn worker(&self) -> Ref<'_, ThreadWorker> {
+    pub(crate) fn worker(&self) -> Ref<'_, ThreadWorker> {
         self.worker.borrow()
     }
 
-    pub fn worker_mut(&self) -> RefMut<'_, ThreadWorker> {
+    pub(crate) fn worker_mut(&self) -> RefMut<'_, ThreadWorker> {
         self.worker.borrow_mut()
     }
 
-    pub fn clear_worker_stack(&self) {
+    pub(crate) fn clear_worker_stack(&self) {
         self.worker_mut().clear_stack();
     }
 
@@ -217,7 +217,7 @@ where
     // Retrieves the content of a cell as a boxed payload from a search result.
     // Will return OK(None) if the cell is not found.
     // Propagates the error if it fails accessing the cell content.
-    pub fn get_payload(&self, result: SearchResult) -> io::Result<Option<Payload<'_>>> {
+    pub(crate) fn get_payload(&self, result: SearchResult) -> io::Result<Option<Payload<'_>>> {
         match result {
             SearchResult::NotFound(_) => Ok(None),
             SearchResult::Found(position) => {
@@ -232,7 +232,7 @@ where
     }
 
     /// Traverses the full tree from the root to the leaf in order to find the position of the key it is asked for.
-    pub fn search_from_root(
+    pub(crate) fn search_from_root(
         &self,
         entry: &[u8],
         access_mode: FrameAccessMode,
@@ -243,7 +243,7 @@ where
     /// Searches for a specific key starting at a given position.
     /// For a public API is better to use the [`search_from_root`] as most searches may start at the root node.
     /// Might make it private when I make sure there are no calls to this function in other parts of the system.
-    pub fn search(
+    pub(crate) fn search(
         &self,
         start: &Position,
         entry: &[u8],
@@ -540,7 +540,7 @@ where
 
     /// Inserts a key at the corresponding position in the Btree.
     /// Returns an [io::Error] if the key already exists.
-    pub fn insert(&mut self, page_id: PageId, data: &[u8]) -> io::Result<()> {
+    pub(crate) fn insert(&mut self, page_id: PageId, data: &[u8]) -> io::Result<()> {
         let start_pos = Position::start_pos(page_id);
         let search_result = self.search(&start_pos, data, FrameAccessMode::Write)?;
 
@@ -647,7 +647,7 @@ where
 
     /// Inserts a key at the corresponding position in the Btree.
     /// Updates its contents if it already exists.
-    pub fn upsert(&mut self, page_id: PageId, data: &[u8]) -> io::Result<()> {
+    pub(crate) fn upsert(&mut self, page_id: PageId, data: &[u8]) -> io::Result<()> {
         let start_pos = Position::start_pos(page_id);
         let search_result = self.search(&start_pos, data, FrameAccessMode::Write)?;
 
@@ -666,7 +666,7 @@ where
 
     /// Updates a key at the corresponding position in the Btree.
     /// Returns an [IoError] if the key is not found.
-    pub fn update(&mut self, page_id: PageId, data: &[u8]) -> io::Result<()> {
+    pub(crate) fn update(&mut self, page_id: PageId, data: &[u8]) -> io::Result<()> {
         let start_pos = Position::start_pos(page_id);
         let search_result = self.search(&start_pos, data, FrameAccessMode::Write)?;
 
@@ -684,7 +684,7 @@ where
 
     /// Removes the entry corresponding to the given key if it exists.
     /// Returns an [IoError] if the key is not found.
-    pub fn remove(&mut self, page_id: PageId, key: &[u8]) -> io::Result<()> {
+    pub(crate) fn remove(&mut self, page_id: PageId, key: &[u8]) -> io::Result<()> {
         let start_pos = Position::start_pos(page_id);
         let search = self.search(&start_pos, key, FrameAccessMode::Write)?;
 
@@ -1732,7 +1732,7 @@ where
     }
 
     /// Utility to print a bplustree as json.
-    pub fn json(&self) -> io::Result<String> {
+    pub(crate) fn json(&self) -> io::Result<String> {
         let mut nodes = Vec::new();
 
         self.read_into_mem(self.root, &mut nodes)?;
@@ -1801,7 +1801,7 @@ where
 
     /// Executes a callback on the cell at the given position, returning a reference-based payload when possible.
     /// Only clones data for overflow cells that need reassembly.
-    pub fn with_cell_at<F, R>(&self, pos: Position, f: F) -> io::Result<R>
+    pub(crate) fn with_cell_at<F, R>(&self, pos: Position, f: F) -> io::Result<R>
     where
         F: FnOnce(&[u8]) -> R,
     {
@@ -1858,7 +1858,7 @@ where
 
     /// Batch process multiple positions, grouping by page for efficiency.
     /// Calls the callback for each position with a reference to the cell data.
-    pub fn with_cells_at<F, R>(&self, positions: &[Position], mut f: F) -> io::Result<Vec<R>>
+    pub(crate) fn with_cells_at<F, R>(&self, positions: &[Position], mut f: F) -> io::Result<Vec<R>>
     where
         F: FnMut(Position, &[u8]) -> R,
     {
@@ -1946,7 +1946,7 @@ where
     }
 
     /// Computes the tree height by traversing from root to leaf.
-    pub fn height(&self) -> io::Result<usize> {
+    pub(crate) fn height(&self) -> io::Result<usize> {
         let mut height = 1usize;
         let mut current = self.root;
         loop {
@@ -1973,7 +1973,7 @@ where
     }
 
     /// Creates an iterator over cell slots from the leftmost position in the tree.
-    pub fn iter_positions(&mut self) -> io::Result<BPlusTreePositionIterator<'_, Cmp>> {
+    pub(crate) fn iter_positions(&mut self) -> io::Result<BPlusTreePositionIterator<Cmp>> {
         let mut current = self.root;
 
         loop {
@@ -1997,7 +1997,7 @@ where
             if is_leaf {
                 // For empty trees, return an iterator that will immediately return None
                 return BPlusTreePositionIterator::from_position(
-                    self,
+                    self.clone(),
                     current,
                     0,
                     IterDirection::Forward,
@@ -2007,7 +2007,7 @@ where
             // If interior node has no children, tree is malformed but handle gracefully
             if !first_child.is_valid() {
                 return BPlusTreePositionIterator::from_position(
-                    self,
+                    self.clone(),
                     current,
                     0,
                     IterDirection::Forward,
@@ -2019,7 +2019,7 @@ where
     }
 
     /// Iterates the tree backward, starting from the right most slot and visiting leaf pages in reverse order.
-    pub fn iter_positions_rev(&mut self) -> io::Result<BPlusTreePositionIterator<'_, Cmp>> {
+    pub(crate) fn iter_positions_rev(&mut self) -> io::Result<BPlusTreePositionIterator<Cmp>> {
         let mut current = self.root;
 
         loop {
@@ -2047,7 +2047,7 @@ where
                 };
 
                 return BPlusTreePositionIterator::from_position(
-                    self,
+                    self.clone(),
                     current,
                     start_slot,
                     IterDirection::Backward,
@@ -2063,7 +2063,7 @@ where
                 };
                 // Malformed interior node, handle gracefully
                 return BPlusTreePositionIterator::from_position(
-                    self,
+                    self.clone(),
                     current,
                     start_slot,
                     IterDirection::Backward,
@@ -2075,25 +2075,25 @@ where
     }
 
     /// Creates an iterator over cell slots from the provided position in the tree.
-    pub fn iter_positions_from(
+    pub(crate) fn iter_positions_from(
         &mut self,
         key: &[u8],
         direction: IterDirection,
-    ) -> io::Result<BPlusTreePositionIterator<'_, Cmp>> {
+    ) -> io::Result<BPlusTreePositionIterator<Cmp>> {
         let start_pos = Position::start_pos(self.root);
         let position = self.search(&start_pos, key, FrameAccessMode::Read)?;
         let pos = match position {
             SearchResult::Found(pos) | SearchResult::NotFound(pos) => pos,
         };
         let slot: u16 = pos.slot().into();
-        BPlusTreePositionIterator::from_position(self, pos.page(), slot as i16, direction)
+        BPlusTreePositionIterator::from_position(self.clone(), pos.page(), slot as i16, direction)
     }
 
     /// Deallocates the entire tree using BFS traversal.
     /// More efficient than position iterator since we only need page IDs.
     /// The intuition is the following:
     /// Starts from the root, accumulates all unique children and overflow pages and deallocates them in order.
-    pub fn dealloc(&mut self) -> io::Result<()> {
+    pub(crate) fn dealloc(&mut self) -> io::Result<()> {
         let mut queue: VecDeque<PageId> = VecDeque::new();
         let mut visited: HashSet<PageId> = HashSet::new();
         let mut overflow_chains: HashSet<PageId> = HashSet::new(); // Use HashSet to deduplicate.
@@ -2181,7 +2181,7 @@ where
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum IterDirection {
+pub(crate) enum IterDirection {
     Forward,
     Backward,
 }
@@ -2189,23 +2189,27 @@ pub enum IterDirection {
 /// Iterator that yields cell positions instead of entire [`Payloads<'_>`]
 /// My first idea was iterate over full payload objects, however, this comes with the downside of having to create a copy of each cell we visit. This is pretty awful specially with overflow cells that occupy a lot of space.
 /// Positions are always small (10 bytes data structures) and therefore the time required to iterate remaings constant. Later, if required, we provide the [with_cells_at] and [with_cell_at] functions to execute custom payloads at specific positions in the btree.
-pub struct BPlusTreePositionIterator<'a, Cmp>
+pub(crate) struct BPlusTreePositionIterator<Cmp>
 where
-    Cmp: Comparator,
+    Cmp: Comparator + Clone,
 {
-    tree: &'a BPlusTree<Cmp>,
+    tree: BPlusTree<Cmp>,
     current_page: Option<PageId>,
     current_slot: i16,
     direction: IterDirection,
     _phantom: PhantomData<Cmp>,
 }
 
-impl<'a, Cmp> BPlusTreePositionIterator<'a, Cmp>
+impl<Cmp> BPlusTreePositionIterator<Cmp>
 where
-    Cmp: Comparator,
+    Cmp: Comparator + Clone,
 {
-    pub fn from_position(
-        tree: &'a BPlusTree<Cmp>,
+    pub(crate) fn get_tree(&self) -> BPlusTree<Cmp> {
+        self.tree.clone()
+    }
+
+    pub(crate) fn from_position(
+        tree: BPlusTree<Cmp>,
         page: PageId,
         slot: i16,
         direction: IterDirection,
@@ -2281,9 +2285,9 @@ where
     }
 }
 
-impl<'a, Cmp> Iterator for BPlusTreePositionIterator<'a, Cmp>
+impl<Cmp> Iterator for BPlusTreePositionIterator<Cmp>
 where
-    Cmp: Comparator,
+    Cmp: Comparator + Clone,
 {
     type Item = io::Result<Position>;
 
@@ -2330,9 +2334,9 @@ where
     }
 }
 
-impl<'a, Cmp> Drop for BPlusTreePositionIterator<'a, Cmp>
+impl<Cmp> Drop for BPlusTreePositionIterator<Cmp>
 where
-    Cmp: Comparator,
+    Cmp: Comparator + Clone,
 {
     fn drop(&mut self) {
         if let Some(page) = self.current_page {
@@ -2341,9 +2345,9 @@ where
     }
 }
 
-impl<'a, Cmp> DoubleEndedIterator for BPlusTreePositionIterator<'a, Cmp>
+impl<Cmp> DoubleEndedIterator for BPlusTreePositionIterator<Cmp>
 where
-    Cmp: Comparator,
+    Cmp: Comparator + Clone,
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         let original_direction = self.direction;

@@ -1,6 +1,6 @@
-pub mod errors;
-pub mod schema;
-pub mod stats;
+pub(crate) mod errors;
+pub(crate) mod schema;
+pub(crate) mod stats;
 
 use std::{
     cell::{Ref, RefMut},
@@ -35,12 +35,12 @@ use crate::{
     },
 };
 
-pub const META_TABLE: &str = "rqcatalog";
-pub const META_INDEX: &str = "rqindex";
+pub(crate) const META_TABLE: &str = "rqcatalog";
+pub(crate) const META_INDEX: &str = "rqindex";
 
 /// META TABLES AND META INDEXES ARE SPECIAL.
 /// THIS IS WHY TO MANAGE THE PRIMARY KEY OF THIS TABLES WE USE THE OBJECT ID ATOMIC INSTEAD OF THE STANDARD ROW-ID. THIS ALLOWS FOR FASTER ACCESS, AND ENSURES THE IDENTIFIER OF EACH TABLE ON EACH OF THE METAS IS THE SAME.
-pub fn meta_idx_schema() -> Schema {
+pub(crate) fn meta_idx_schema() -> Schema {
     Schema::from_columns(
         [
             Column::new_unindexed(DataTypeKind::Text, "o_name", None),
@@ -50,7 +50,7 @@ pub fn meta_idx_schema() -> Schema {
         1,
     )
 }
-pub fn meta_table_schema() -> Schema {
+pub(crate) fn meta_table_schema() -> Schema {
     let mut key_constraints = HashMap::new();
     key_constraints.insert("name_pkey".to_string(), Constraint::PrimaryKey);
 
@@ -72,7 +72,7 @@ pub fn meta_table_schema() -> Schema {
     )
 }
 
-pub struct Database {
+pub(crate) struct Database {
     pager: SharedPager,
     controller: TransactionCoordinator,
     main_worker: Worker,
@@ -80,7 +80,7 @@ pub struct Database {
 }
 
 #[derive(Debug)]
-pub struct Catalog {
+pub(crate) struct Catalog {
     meta_table: PageId,
     meta_index: PageId,
     btree_min_keys: usize,
@@ -88,7 +88,7 @@ pub struct Catalog {
 }
 
 #[derive(Debug)]
-pub struct SharedCatalog(Arc<Catalog>);
+pub(crate) struct SharedCatalog(Arc<Catalog>);
 
 impl Clone for SharedCatalog {
     fn clone(&self) -> Self {
@@ -111,7 +111,7 @@ impl From<Catalog> for SharedCatalog {
 }
 
 impl Catalog {
-    pub fn new_uninit(min_keys: usize, siblings_per_side: usize) -> Self {
+    pub(crate) fn new_uninit(min_keys: usize, siblings_per_side: usize) -> Self {
         Self {
             meta_table: PAGE_ZERO,
             meta_index: PAGE_ZERO,
@@ -120,7 +120,11 @@ impl Catalog {
         }
     }
 
-    pub fn new_init(min_keys: usize, siblings_per_side: usize, worker: Worker) -> io::Result<Self> {
+    pub(crate) fn new_init(
+        min_keys: usize,
+        siblings_per_side: usize,
+        worker: Worker,
+    ) -> io::Result<Self> {
         let (meta_table_root, meta_index_root) = {
             let mut worker = worker.borrow_mut();
             (
@@ -145,7 +149,7 @@ impl Catalog {
         Ok(catalog)
     }
 
-    pub fn create_meta_table(root: PageId) -> io::Result<Table> {
+    pub(crate) fn create_meta_table(root: PageId) -> io::Result<Table> {
         let meta_schema = meta_table_schema();
         let mut meta_table = Table::new(META_TABLE, root, meta_schema);
         let next = get_next_object();
@@ -154,12 +158,12 @@ impl Catalog {
         Ok(meta_table)
     }
 
-    pub fn create_meta_index(root: PageId) -> io::Result<Index> {
+    pub(crate) fn create_meta_index(root: PageId) -> io::Result<Index> {
         let meta_schema = meta_idx_schema();
         Ok(Index::new(META_INDEX, root, meta_schema))
     }
 
-    pub fn index_btree(
+    pub(crate) fn index_btree(
         &self,
         root: PageId,
         dtype: DataTypeKind,
@@ -241,7 +245,7 @@ impl Catalog {
     }
 
     /// Stores a new relation in the meta table using the provided worker.
-    pub fn store_relation(&self, mut obj: Relation, worker: Worker) -> io::Result<ObjectId> {
+    pub(crate) fn store_relation(&self, mut obj: Relation, worker: Worker) -> io::Result<ObjectId> {
         if !obj.is_allocated() {
             let id = worker.borrow_mut().alloc_page::<BtreePage>()?;
             obj.set_root(id);
@@ -259,7 +263,7 @@ impl Catalog {
     }
 
     /// Updates the metadata of a given relation using the provided worker.
-    pub fn update_relation(&self, obj: Relation, worker: Worker) -> io::Result<()> {
+    pub(crate) fn update_relation(&self, obj: Relation, worker: Worker) -> io::Result<()> {
         let mut btree = self.table_btree(self.meta_table, worker.clone())?;
         let tuple = obj.into_boxed_tuple()?;
         btree.clear_worker_stack();
@@ -269,7 +273,12 @@ impl Catalog {
 
     /// Removes a given relation using the provided worker.
     /// Cascades the removal if required.
-    pub fn remove_relation(&self, rel: Relation, cascade: bool, worker: Worker) -> io::Result<()> {
+    pub(crate) fn remove_relation(
+        &self,
+        rel: Relation,
+        cascade: bool,
+        worker: Worker,
+    ) -> io::Result<()> {
         if cascade {
             let schema = rel.schema();
             let dependants = schema.get_dependants();
@@ -294,7 +303,7 @@ impl Catalog {
     }
 
     /// Stores a relation in the meta - index using the provided Worker
-    pub fn index_relation(&self, obj: &Relation, worker: Worker) -> io::Result<()> {
+    pub(crate) fn index_relation(&self, obj: &Relation, worker: Worker) -> io::Result<()> {
         let mut btree = self.index_btree(self.meta_index, DataTypeKind::Text, worker.clone())?;
 
         let schema = meta_idx_schema();
@@ -315,7 +324,11 @@ impl Catalog {
     }
 
     /// Stores a relation in the meta index and the meta table using the provided worker.
-    pub fn create_relation(&self, relation: Relation, worker: Worker) -> io::Result<ObjectId> {
+    pub(crate) fn create_relation(
+        &self,
+        relation: Relation,
+        worker: Worker,
+    ) -> io::Result<ObjectId> {
         let id = relation.id();
         self.index_relation(&relation, worker.clone())?;
         self.store_relation(relation, worker)?;
@@ -330,7 +343,7 @@ impl Catalog {
     }
 
     /// Obtains a relation from the meta table if it exists, using the provided worker.
-    pub fn get_relation(&self, name: &str, worker: Worker) -> io::Result<Relation> {
+    pub(crate) fn get_relation(&self, name: &str, worker: Worker) -> io::Result<Relation> {
         let meta_idx = self.index_btree(self.meta_index, DataTypeKind::Text, worker.clone())?;
 
         let blob = Blob::from(name);
@@ -372,7 +385,11 @@ impl Catalog {
     }
 
     /// Directly gets a relation from the meta table
-    pub fn get_relation_unchecked(&self, id: ObjectId, worker: Worker) -> io::Result<Relation> {
+    pub(crate) fn get_relation_unchecked(
+        &self,
+        id: ObjectId,
+        worker: Worker,
+    ) -> io::Result<Relation> {
         let meta_table = self.table_btree(self.meta_table, worker.clone())?;
         let bytes: &[u8] = id.as_ref();
         let result = meta_table.search_from_root(id.as_ref(), FrameAccessMode::Read)?;
@@ -395,17 +412,21 @@ impl Catalog {
         Relation::try_from(tuple)
     }
 
-    pub fn meta_table_root(&self) -> PageId {
+    pub(crate) fn meta_table_root(&self) -> PageId {
         self.meta_table
     }
 
-    pub fn meta_index_root(&self) -> PageId {
+    pub(crate) fn meta_index_root(&self) -> PageId {
         self.meta_index
     }
 }
 
 impl Database {
-    pub fn new(pager: SharedPager, min_keys: usize, siblings_per_side: usize) -> io::Result<Self> {
+    pub(crate) fn new(
+        pager: SharedPager,
+        min_keys: usize,
+        siblings_per_side: usize,
+    ) -> io::Result<Self> {
         initialize_atomics();
 
         let main_worker = Worker::new(pager.clone());
@@ -425,27 +446,27 @@ impl Database {
         })
     }
 
-    pub fn main_worker_ref(&self) -> Ref<'_, ThreadWorker> {
+    pub(crate) fn main_worker_ref(&self) -> Ref<'_, ThreadWorker> {
         self.main_worker.borrow()
     }
 
-    pub fn catalog(&self) -> SharedCatalog {
+    pub(crate) fn catalog(&self) -> SharedCatalog {
         self.catalog.clone()
     }
 
-    pub fn coordinator(&self) -> TransactionCoordinator {
+    pub(crate) fn coordinator(&self) -> TransactionCoordinator {
         self.controller.clone()
     }
 
-    pub fn main_worker_ref_mut(&self) -> RefMut<'_, ThreadWorker> {
+    pub(crate) fn main_worker_ref_mut(&self) -> RefMut<'_, ThreadWorker> {
         self.main_worker.borrow_mut()
     }
 
-    pub fn main_worker_cloned(&self) -> Worker {
+    pub(crate) fn main_worker_cloned(&self) -> Worker {
         self.main_worker.clone()
     }
 
-    pub fn pager(&self) -> SharedPager {
+    pub(crate) fn pager(&self) -> SharedPager {
         self.pager.clone()
     }
 

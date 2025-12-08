@@ -968,11 +968,15 @@ impl PhysicalPlanVisitor for TextExporter {
 
         // Ordering information
         if self.config.show_ordering && !plan.properties.ordering.is_empty() {
-            let _ = writeln!(
-                self.output,
-                "{}│  ordering: {:?}",
-                indent, plan.properties.ordering
-            );
+            let formatted_ordering: String = plan
+                .properties
+                .ordering
+                .iter()
+                .map(|(c, a)| format!("Col {c} {}", if *a { "ASC" } else { "DESC" }))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let _ = writeln!(self.output, "{}│  ordering: {}", indent, formatted_ordering,);
         }
     }
 

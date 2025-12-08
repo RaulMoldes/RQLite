@@ -34,29 +34,29 @@ fn align_down(value: usize, align: usize) -> usize {
 /// Slotted page header.
 #[derive(Debug)]
 #[repr(C, align(64))]
-pub struct BtreePageHeader {
-    pub page_number: PageId,
-    pub right_child: PageId,
-    pub next_sibling: PageId,
-    pub previous_sibling: PageId,
-    pub free_space_ptr: u32,
-    pub page_size: u32,
-    pub free_space: u32,
-    pub padding: u32,
-    pub num_slots: u16,
+pub(crate) struct BtreePageHeader {
+    pub(crate) page_number: PageId,
+    pub(crate) right_child: PageId,
+    pub(crate) next_sibling: PageId,
+    pub(crate) previous_sibling: PageId,
+    pub(crate) free_space_ptr: u32,
+    pub(crate) page_size: u32,
+    pub(crate) free_space: u32,
+    pub(crate) padding: u32,
+    pub(crate) num_slots: u16,
 }
-pub const BTREE_PAGE_HEADER_SIZE: usize = std::mem::size_of::<BtreePageHeader>();
+pub(crate) const BTREE_PAGE_HEADER_SIZE: usize = std::mem::size_of::<BtreePageHeader>();
 
 crate::as_slice!(BtreePageHeader);
 #[derive(Debug, PartialEq, Clone, Copy)]
 #[repr(C, align(64))]
 pub(crate) struct OverflowPageHeader {
-    pub page_number: PageId,
-    pub next: PageId,
-    pub num_bytes: u32,
-    pub padding: u32,
+    pub(crate) page_number: PageId,
+    pub(crate) next: PageId,
+    pub(crate) num_bytes: u32,
+    pub(crate) padding: u32,
 }
-pub const OVERFLOW_HEADER_SIZE: usize = std::mem::size_of::<OverflowPageHeader>();
+pub(crate) const OVERFLOW_HEADER_SIZE: usize = std::mem::size_of::<OverflowPageHeader>();
 
 crate::as_slice!(OverflowPageHeader);
 
@@ -99,18 +99,18 @@ impl Header for OverflowPageHeader {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C, align(64))]
 pub(crate) struct DatabaseHeader {
-    pub first_free_page: PageId,
-    pub last_free_page: PageId,
-    pub axmo: u32,
-    pub page_size: u32,
-    pub total_pages: u32,
-    pub free_pages: u32,
-    pub cache_size: u16,
-    pub min_keys: u8,
-    pub text_encoding: crate::TextEncoding,
-    pub incremental_vacuum_mode: crate::IncrementalVaccum,
+    pub(crate) first_free_page: PageId,
+    pub(crate) last_free_page: PageId,
+    pub(crate) axmo: u32,
+    pub(crate) page_size: u32,
+    pub(crate) total_pages: u32,
+    pub(crate) free_pages: u32,
+    pub(crate) cache_size: u16,
+    pub(crate) min_keys: u8,
+    pub(crate) text_encoding: crate::TextEncoding,
+    pub(crate) incremental_vacuum_mode: crate::IncrementalVaccum,
 }
-pub const DB_HEADER_SIZE: usize = std::mem::size_of::<DatabaseHeader>();
+pub(crate) const DB_HEADER_SIZE: usize = std::mem::size_of::<DatabaseHeader>();
 
 crate::as_slice!(DatabaseHeader);
 
@@ -200,7 +200,7 @@ impl BtreePageHeader {
     }
 }
 
-pub type BtreePage = BufferWithMetadata<BtreePageHeader>;
+pub(crate) type BtreePage = BufferWithMetadata<BtreePageHeader>;
 
 impl Page for BtreePage {
     type Header = BtreePageHeader;
@@ -228,19 +228,19 @@ impl Page for BtreePage {
 }
 
 impl BtreePage {
-    pub fn max_allowed_payload_size(&self) -> u16 {
+    pub(crate) fn max_allowed_payload_size(&self) -> u16 {
         max_payload_size_in(self.capacity()) as u16
     }
 
-    pub fn overflow_threshold(page_size: usize) -> usize {
+    pub(crate) fn overflow_threshold(page_size: usize) -> usize {
         Self::usable_space(page_size).saturating_mul(3).div_ceil(4) as usize
     }
 
-    pub fn underflow_threshold(page_size: usize) -> usize {
+    pub(crate) fn underflow_threshold(page_size: usize) -> usize {
         Self::usable_space(page_size).div_ceil(4) as usize
     }
 
-    pub fn ideal_max_payload_size(page_size: usize, min_cells: usize) -> usize {
+    pub(crate) fn ideal_max_payload_size(page_size: usize, min_cells: usize) -> usize {
         debug_assert!(
             min_cells > 0,
             "if you're not gonna store any cells then why are you even calling this function?"
@@ -256,15 +256,15 @@ impl BtreePage {
         ideal_size
     }
 
-    pub fn num_slots(&self) -> u16 {
+    pub(crate) fn num_slots(&self) -> u16 {
         self.metadata().num_slots
     }
 
-    pub fn max_slot_index(&self) -> Slot {
+    pub(crate) fn max_slot_index(&self) -> Slot {
         Slot(self.metadata().num_slots)
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.num_slots() == 0
     }
 
@@ -285,7 +285,7 @@ impl BtreePage {
     }
 
     /// Returns a pointer to the [`Cell`] located at the given slot.
-    pub fn get_cell_at(&self, index: Slot) -> NonNull<Cell> {
+    pub(crate) fn get_cell_at(&self, index: Slot) -> NonNull<Cell> {
         debug_assert!(
             index.0 <= self.num_slots(),
             "slot index {index} out of bounds for slot array of length {}",
@@ -303,7 +303,7 @@ impl BtreePage {
     }
 
     /// Mutable reference to a cell.
-    pub fn cell_mut(&mut self, index: Slot) -> &mut Cell {
+    pub(crate) fn cell_mut(&mut self, index: Slot) -> &mut Cell {
         let mut cell = self.get_cell_at(index);
         // SAFETY: Same as [`Self::cell_at_offset`].
         unsafe { cell.as_mut() }
@@ -315,7 +315,7 @@ impl BtreePage {
     }
 
     /// Returns the child at the given `index`.
-    pub fn child(&self, index: Slot) -> PageId {
+    pub(crate) fn child(&self, index: Slot) -> PageId {
         if index == self.num_slots() {
             self.metadata().right_child
         } else {
@@ -324,7 +324,7 @@ impl BtreePage {
     }
 
     /// Iterates over all the children pointers in this page.
-    pub fn iter_children(&self) -> impl DoubleEndedIterator<Item = PageId> + '_ {
+    pub(crate) fn iter_children(&self) -> impl DoubleEndedIterator<Item = PageId> + '_ {
         let len = if self.is_leaf() {
             0
         } else {
@@ -335,23 +335,23 @@ impl BtreePage {
         (0..len).map(|i| self.child(Slot(i)))
     }
 
-    pub fn iter_cells(&self) -> impl DoubleEndedIterator<Item = &Cell> + '_ {
+    pub(crate) fn iter_cells(&self) -> impl DoubleEndedIterator<Item = &Cell> + '_ {
         let len = self.num_slots();
         (0..len).map(|i| self.cell(Slot(i)))
     }
 
     /// Returns `true` if this page is underflow
-    pub fn has_underflown(&self) -> bool {
+    pub(crate) fn has_underflown(&self) -> bool {
         !self.can_release_space(Slot::SIZE)
     }
 
     /// Returns `true` if this page has overflown.
     /// We need at least 2 bytes for the last cell slot and 4 extra bytes to store the pointer to an overflow page
-    pub fn has_overflown(&self) -> bool {
+    pub(crate) fn has_overflown(&self) -> bool {
         !self.has_space_for(Slot::SIZE + CELL_HEADER_SIZE + std::mem::size_of::<PageId>())
     }
 
-    pub fn has_space_for(&self, additional_space: usize) -> bool {
+    pub(crate) fn has_space_for(&self, additional_space: usize) -> bool {
         let occupied_space = self
             .size()
             .saturating_sub(self.metadata().free_space as usize)
@@ -360,7 +360,7 @@ impl BtreePage {
         occupied_space <= max_allowed
     }
 
-    pub fn can_release_space(&self, removable_space: usize) -> bool {
+    pub(crate) fn can_release_space(&self, removable_space: usize) -> bool {
         let occupied_space = self
             .size()
             .saturating_sub(self.metadata().free_space as usize)
@@ -368,31 +368,31 @@ impl BtreePage {
         let min_allowed = Self::underflow_threshold(self.size());
         occupied_space >= min_allowed
     }
-    pub fn is_leaf(&self) -> bool {
+    pub(crate) fn is_leaf(&self) -> bool {
         !self.metadata().right_child.is_valid()
     }
 
-    pub fn is_interior(&self) -> bool {
+    pub(crate) fn is_interior(&self) -> bool {
         self.metadata().right_child.is_valid()
     }
 
     /// Number of used bytes in this page.
-    pub fn used_bytes(&self) -> u32 {
+    pub(crate) fn used_bytes(&self) -> u32 {
         self.capacity() as u32 - self.metadata().free_space
     }
 
     /// Number of free bytes in this page.
-    pub fn effective_free_space(&self) -> u32 {
+    pub(crate) fn effective_free_space(&self) -> u32 {
         self.metadata().free_space_ptr - self.metadata().content_start_ptr() as u32
     }
 
     /// Adds `cell` to this page, possibly overflowing the page.
-    pub fn push(&mut self, cell: Cell) {
+    pub(crate) fn push(&mut self, cell: Cell) {
         self.insert(Slot(self.num_slots()), cell);
     }
 
     /// Attempts to insert the given `cell` in this page.
-    pub fn insert(&mut self, index: Slot, cell: Cell) -> Slot {
+    pub(crate) fn insert(&mut self, index: Slot, cell: Cell) -> Slot {
         assert!(
             cell.data.len() <= self.max_allowed_payload_size() as usize,
             "attempt to store payload of size {} when max allowed payload size is {}",
@@ -473,7 +473,7 @@ impl BtreePage {
 
     /// Tries to replace the cell pointed by the given slot `index` with the
     /// `new_cell`.
-    pub fn replace(&mut self, index: Slot, new_cell: Cell) -> Cell {
+    pub(crate) fn replace(&mut self, index: Slot, new_cell: Cell) -> Cell {
         let old_cell = self.cell(index);
 
         // There's no way we can fit the new cell in this page, even if we
@@ -514,7 +514,7 @@ impl BtreePage {
     }
 
     /// Removes the cell pointed by the given slot `index`.
-    pub fn remove(&mut self, index: Slot) -> Cell {
+    pub(crate) fn remove(&mut self, index: Slot) -> Cell {
         let len = self.num_slots();
 
         assert!(
@@ -576,7 +576,10 @@ impl BtreePage {
 
     /// Works like [`Vec::drain`] execept it doesn't remove elements unless
     /// consumed.
-    pub fn drain(&mut self, range: impl RangeBounds<usize>) -> impl Iterator<Item = Cell> + '_ {
+    pub(crate) fn drain(
+        &mut self,
+        range: impl RangeBounds<usize>,
+    ) -> impl Iterator<Item = Cell> + '_ {
         let start = match range.start_bound() {
             Bound::Unbounded => 0,
             Bound::Excluded(i) => i + 1,
@@ -645,7 +648,7 @@ impl Page for OverflowPage {
 
 impl OverflowPage {
     /// Returns a read-only reference to the payload (not the entire data).
-    pub fn payload(&self) -> &[u8] {
+    pub(crate) fn payload(&self) -> &[u8] {
         &self.data()[..self.metadata().num_bytes as usize]
     }
 }
@@ -677,7 +680,7 @@ pub(crate) enum MemPage {
     Btree(BtreePage),
 }
 
-pub trait Page: Into<MemPage> + AsRef<[u8]> + AsMut<[u8]>
+pub(crate) trait Page: Into<MemPage> + AsRef<[u8]> + AsMut<[u8]>
 where
     Self: for<'a> TryFrom<(&'a [u8], usize), Error = &'static str>,
 {
@@ -687,7 +690,7 @@ where
     fn page_number(&self) -> PageId;
 }
 
-pub trait Header: AsRef<[u8]> {
+pub(crate) trait Header: AsRef<[u8]> {
     fn page_number(&self) -> PageId;
     fn init(size: u32, page_number: PageId) -> Self;
     fn alloc(size: u32) -> Self;
@@ -703,7 +706,7 @@ impl MemPage {
     }
 
     /// Converts this page into another type.
-    pub fn reinit_as<P>(&mut self)
+    pub(crate) fn reinit_as<P>(&mut self)
     where
         P: Page,
         BufferWithMetadata<P::Header>: Into<MemPage>,
@@ -737,16 +740,16 @@ impl MemPage {
     // Free pages have the same header as overflow pages.
     // We are reusing the same header type to reduce the boiler plate.
     // It is the responsability of the database header to distinguish between pages that are used for the free list and pages that are actual overflow pages.
-    pub fn dealloc(&mut self) {
+    pub(crate) fn dealloc(&mut self) {
         self.reinit_as::<OverflowPage>();
     }
 
-    pub fn is_free_page(&self) -> bool {
+    pub(crate) fn is_free_page(&self) -> bool {
         matches!(self, MemPage::Overflow(_))
     }
 
     /// Returns `true` if the page is in overflow state.
-    pub fn has_overflown(&self) -> bool {
+    pub(crate) fn has_overflown(&self) -> bool {
         match self {
             Self::Btree(page) => page.has_overflown(),
             _ => false,

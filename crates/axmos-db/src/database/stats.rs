@@ -38,17 +38,73 @@ fn murmur_hash(bytes: &[u8]) -> u64 {
     hash128 as u64
 }
 
+/// Converts bytes to f64 for histogram building.
+fn bytes_to_f64(bytes: &[u8], dtype: DataTypeKind) -> Option<f64> {
+    match dtype {
+        DataTypeKind::Byte | DataTypeKind::SmallUInt | DataTypeKind::Char => {
+            let value = UInt8::try_from(bytes).ok()?;
+            Some(u8::from(value) as f64)
+        }
+        DataTypeKind::SmallInt => {
+            let value = Int8::try_from(bytes).ok()?;
+            Some(i8::from(value) as f64)
+        }
+        DataTypeKind::Int => {
+            let value = Int32::try_from(bytes).ok()?;
+            Some(i32::from(value) as f64)
+        }
+        DataTypeKind::HalfInt => {
+            let value = Int16::try_from(bytes).ok()?;
+            Some(i16::from(value) as f64)
+        }
+        DataTypeKind::BigInt => {
+            let value = Int64::try_from(bytes).ok()?;
+            Some(i64::from(value) as f64)
+        }
+        DataTypeKind::BigUInt => {
+            let value = UInt64::try_from(bytes).ok()?;
+            Some(u64::from(value) as f64)
+        }
+        DataTypeKind::UInt => {
+            let value = UInt32::try_from(bytes).ok()?;
+            Some(u32::from(value) as f64)
+        }
+        DataTypeKind::Date => {
+            let value = Date::try_from(bytes).ok()?;
+            Some(u32::from(value) as f64)
+        }
+        DataTypeKind::DateTime => {
+            let value = DateTime::try_from(bytes).ok()?;
+            Some(u64::from(value) as f64)
+        }
+        DataTypeKind::HalfUInt => {
+            let value = UInt16::try_from(bytes).ok()?;
+            Some(u16::from(value) as f64)
+        }
+        DataTypeKind::Float => {
+            let value = Float32::try_from(bytes).ok()?;
+            Some(f32::from(value) as f64)
+        }
+        DataTypeKind::Double => {
+            let value = Float64::try_from(bytes).ok()?;
+            Some(f64::from(value) as f64)
+        }
+        DataTypeKind::Text | DataTypeKind::Blob => Some(murmur_hash(bytes) as f64),
+        _ => None,
+    }
+}
+
 /// Configuration for statistics computation.
 #[derive(Debug, Clone)]
-pub struct StatsComputeConfig {
+pub(crate) struct StatsComputeConfig {
     /// Number of histogram buckets to create per column.
-    pub histogram_buckets: usize,
+    pub(crate) histogram_buckets: usize,
     /// Sample rate for large tables (0.0 to 1.0). 1.0 means full scan.
-    pub sample_rate: f64,
+    pub(crate) sample_rate: f64,
     /// Maximum rows to scan for sampling. 0 means unlimited.
-    pub max_sample_rows: usize,
+    pub(crate) max_sample_rows: usize,
     /// Whether to compute histograms.
-    pub compute_histograms: bool,
+    pub(crate) compute_histograms: bool,
 }
 
 impl Default for StatsComputeConfig {
@@ -64,7 +120,7 @@ impl Default for StatsComputeConfig {
 
 impl StatsComputeConfig {
     /// Creates a config for fast approximate statistics.
-    pub fn fast() -> Self {
+    pub(crate) fn fast() -> Self {
         Self {
             histogram_buckets: 20,
             sample_rate: 0.1,
@@ -74,7 +130,7 @@ impl StatsComputeConfig {
     }
 
     /// Creates a config for full accurate statistics.
-    pub fn full() -> Self {
+    pub(crate) fn full() -> Self {
         Self {
             histogram_buckets: 100,
             sample_rate: 1.0,
@@ -210,62 +266,6 @@ impl ColumnStatsCollector {
     }
 }
 
-/// Converts bytes to f64 for histogram building.
-fn bytes_to_f64(bytes: &[u8], dtype: DataTypeKind) -> Option<f64> {
-    match dtype {
-        DataTypeKind::Byte | DataTypeKind::SmallUInt | DataTypeKind::Char => {
-            let value = UInt8::try_from(bytes).ok()?;
-            Some(u8::from(value) as f64)
-        }
-        DataTypeKind::SmallInt => {
-            let value = Int8::try_from(bytes).ok()?;
-            Some(i8::from(value) as f64)
-        }
-        DataTypeKind::Int => {
-            let value = Int32::try_from(bytes).ok()?;
-            Some(i32::from(value) as f64)
-        }
-        DataTypeKind::HalfInt => {
-            let value = Int16::try_from(bytes).ok()?;
-            Some(i16::from(value) as f64)
-        }
-        DataTypeKind::BigInt => {
-            let value = Int64::try_from(bytes).ok()?;
-            Some(i64::from(value) as f64)
-        }
-        DataTypeKind::BigUInt => {
-            let value = UInt64::try_from(bytes).ok()?;
-            Some(u64::from(value) as f64)
-        }
-        DataTypeKind::UInt => {
-            let value = UInt32::try_from(bytes).ok()?;
-            Some(u32::from(value) as f64)
-        }
-        DataTypeKind::Date => {
-            let value = Date::try_from(bytes).ok()?;
-            Some(u32::from(value) as f64)
-        }
-        DataTypeKind::DateTime => {
-            let value = DateTime::try_from(bytes).ok()?;
-            Some(u64::from(value) as f64)
-        }
-        DataTypeKind::HalfUInt => {
-            let value = UInt16::try_from(bytes).ok()?;
-            Some(u16::from(value) as f64)
-        }
-        DataTypeKind::Float => {
-            let value = Float32::try_from(bytes).ok()?;
-            Some(f32::from(value) as f64)
-        }
-        DataTypeKind::Double => {
-            let value = Float64::try_from(bytes).ok()?;
-            Some(f64::from(value) as f64)
-        }
-        DataTypeKind::Text | DataTypeKind::Blob => Some(murmur_hash(bytes) as f64),
-        _ => None,
-    }
-}
-
 /// Builds an equi-depth histogram from sample values.
 fn build_equidepth_histogram(values: &mut Vec<f64>, num_buckets: usize) -> Histogram {
     if values.is_empty() {
@@ -340,7 +340,7 @@ fn current_timestamp() -> u64 {
 
 impl Catalog {
     /// Recomputes statistics for a single table.
-    pub fn recompute_table_statistics(
+    pub(crate) fn recompute_table_statistics(
         &self,
         table_name: &str,
         worker: Worker,
@@ -370,7 +370,7 @@ impl Catalog {
     }
 
     /// Recomputes statistics for a single index.
-    pub fn recompute_index_statistics(
+    pub(crate) fn recompute_index_statistics(
         &self,
         index_name: &str,
         worker: Worker,
@@ -604,7 +604,7 @@ impl Catalog {
         Ok(stats)
     }
 
-    pub fn analyze(
+    pub(crate) fn analyze(
         &self,
         worker: Worker,
         config: &StatsComputeConfig,
@@ -680,20 +680,20 @@ impl Catalog {
 
 /// Result of a batch statistics computation.
 #[derive(Debug, Default)]
-pub struct StatsComputation {
-    pub tables_updated: usize,
-    pub indexes_updated: usize,
-    pub table_stats: HashMap<String, TableStatistics>,
-    pub index_stats: HashMap<String, IndexStatistics>,
-    pub errors: Vec<String>,
+pub(crate) struct StatsComputation {
+    pub(crate) tables_updated: usize,
+    pub(crate) indexes_updated: usize,
+    pub(crate) table_stats: HashMap<String, TableStatistics>,
+    pub(crate) index_stats: HashMap<String, IndexStatistics>,
+    pub(crate) errors: Vec<String>,
 }
 
 impl StatsComputation {
-    pub fn is_success(&self) -> bool {
+    pub(crate) fn is_success(&self) -> bool {
         self.errors.is_empty()
     }
 
-    pub fn total_updated(&self) -> usize {
+    pub(crate) fn total_updated(&self) -> usize {
         self.tables_updated + self.indexes_updated
     }
 }

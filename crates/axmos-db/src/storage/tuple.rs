@@ -201,7 +201,7 @@ impl TupleParser {
 }
 
 /// Immutable view of a tuple at a specific point in time.
-pub struct TupleRef<'a, 'b> {
+pub(crate) struct TupleRef<'a, 'b> {
     data: &'a [u8],
     schema: &'b Schema,
     layout: TupleLayout,
@@ -210,7 +210,7 @@ pub struct TupleRef<'a, 'b> {
 
 impl<'a, 'b> TupleRef<'a, 'b> {
     /// Reads the latest version of the tuple.
-    pub fn read(buffer: &'a [u8], schema: &'b Schema) -> io::Result<Self> {
+    pub(crate) fn read(buffer: &'a [u8], schema: &'b Schema) -> io::Result<Self> {
         let (layout, header) = TupleParser::parse(buffer, schema)?;
         Ok(Self {
             data: buffer,
@@ -221,7 +221,11 @@ impl<'a, 'b> TupleRef<'a, 'b> {
     }
 
     /// Reads a specific version of the tuple.
-    pub fn read_version(buffer: &'a [u8], schema: &'b Schema, version: u8) -> io::Result<Self> {
+    pub(crate) fn read_version(
+        buffer: &'a [u8],
+        schema: &'b Schema,
+        version: u8,
+    ) -> io::Result<Self> {
         let (layout, header) = TupleParser::parse_version(buffer, schema, version)?;
         Ok(Self {
             data: buffer,
@@ -232,37 +236,37 @@ impl<'a, 'b> TupleRef<'a, 'b> {
     }
 
     #[inline]
-    pub fn schema(&self) -> &'b Schema {
+    pub(crate) fn schema(&self) -> &'b Schema {
         self.schema
     }
 
     #[inline]
-    pub fn num_fields(&self) -> usize {
+    pub(crate) fn num_fields(&self) -> usize {
         self.layout.offsets.len()
     }
 
     #[inline]
-    pub fn version(&self) -> u8 {
+    pub(crate) fn version(&self) -> u8 {
         self.header.version
     }
 
     #[inline]
-    pub fn xmin(&self) -> TransactionId {
+    pub(crate) fn xmin(&self) -> TransactionId {
         self.header.xmin
     }
 
     #[inline]
-    pub fn xmax(&self) -> TransactionId {
+    pub(crate) fn xmax(&self) -> TransactionId {
         self.header.xmax
     }
 
     #[inline]
-    pub fn is_deleted(&self) -> bool {
+    pub(crate) fn is_deleted(&self) -> bool {
         self.header.xmax != TRANSACTION_ZERO
     }
 
     #[inline]
-    pub fn is_visible(&self, xid: TransactionId) -> bool {
+    pub(crate) fn is_visible(&self, xid: TransactionId) -> bool {
         self.header.xmin <= xid && (self.header.xmax == TRANSACTION_ZERO || self.header.xmax > xid)
     }
 
@@ -278,14 +282,14 @@ impl<'a, 'b> TupleRef<'a, 'b> {
         TupleParser::check_null(self.null_bitmap(), val_idx)
     }
 
-    pub fn key(&self, index: usize) -> io::Result<DataTypeRef<'_>> {
+    pub(crate) fn key(&self, index: usize) -> io::Result<DataTypeRef<'_>> {
         let dtype = self.schema.keys()[index].dtype;
         let offset = self.layout.offsets[index] as usize;
         let (value, _) = reinterpret_cast(dtype, &self.data[offset..])?;
         Ok(value)
     }
 
-    pub fn value(&self, index: usize) -> io::Result<DataTypeRef<'_>> {
+    pub(crate) fn value(&self, index: usize) -> io::Result<DataTypeRef<'_>> {
         if self.is_null(index) {
             return Ok(DataTypeRef::Null);
         }
@@ -298,7 +302,7 @@ impl<'a, 'b> TupleRef<'a, 'b> {
     }
 
     /// Gets the xmin for a specific version
-    pub fn version_xmin(&self, version: u8) -> io::Result<TransactionId> {
+    pub(crate) fn version_xmin(&self, version: u8) -> io::Result<TransactionId> {
         if version == self.header.version {
             return Ok(self.header.xmin);
         }
@@ -333,7 +337,7 @@ impl<'a, 'b> TupleRef<'a, 'b> {
     }
 
     /// Reads the visible version of the tuple for the provided snapshot.
-    pub fn read_for_snapshot(
+    pub(crate) fn read_for_snapshot(
         buffer: &'a [u8],
         schema: &'b Schema,
         snapshot: &crate::transactions::Snapshot,
@@ -405,7 +409,7 @@ impl<'a, 'b> TupleRef<'a, 'b> {
 }
 
 /// Mutable view of a tuple at a specific point in the version chain.
-pub struct TupleRefMut<'a, 'b> {
+pub(crate) struct TupleRefMut<'a, 'b> {
     data: &'a mut [u8],
     schema: &'b Schema,
     layout: TupleLayout,
@@ -414,7 +418,7 @@ pub struct TupleRefMut<'a, 'b> {
 
 impl<'a, 'b> TupleRefMut<'a, 'b> {
     /// Reads the latest version of the tuple.
-    pub fn read(buffer: &'a mut [u8], schema: &'b Schema) -> io::Result<Self> {
+    pub(crate) fn read(buffer: &'a mut [u8], schema: &'b Schema) -> io::Result<Self> {
         // Parse immutably first, then take mutable reference
         let (layout, header) = TupleParser::parse(buffer, schema)?;
         Ok(Self {
@@ -426,7 +430,11 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
     }
 
     /// Reads a specific version of the tuple.
-    pub fn read_version(buffer: &'a mut [u8], schema: &'b Schema, version: u8) -> io::Result<Self> {
+    pub(crate) fn read_version(
+        buffer: &'a mut [u8],
+        schema: &'b Schema,
+        version: u8,
+    ) -> io::Result<Self> {
         let (layout, header) = TupleParser::parse_version(buffer, schema, version)?;
         Ok(Self {
             data: buffer,
@@ -437,37 +445,37 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
     }
 
     #[inline]
-    pub fn schema(&self) -> &'b Schema {
+    pub(crate) fn schema(&self) -> &'b Schema {
         self.schema
     }
 
     #[inline]
-    pub fn num_fields(&self) -> usize {
+    pub(crate) fn num_fields(&self) -> usize {
         self.layout.offsets.len()
     }
 
     #[inline]
-    pub fn version(&self) -> u8 {
+    pub(crate) fn version(&self) -> u8 {
         self.header.version
     }
 
     #[inline]
-    pub fn xmin(&self) -> TransactionId {
+    pub(crate) fn xmin(&self) -> TransactionId {
         self.header.xmin
     }
 
     #[inline]
-    pub fn xmax(&self) -> TransactionId {
+    pub(crate) fn xmax(&self) -> TransactionId {
         self.header.xmax
     }
 
     #[inline]
-    pub fn is_deleted(&self) -> bool {
+    pub(crate) fn is_deleted(&self) -> bool {
         self.header.xmax != TRANSACTION_ZERO
     }
 
     #[inline]
-    pub fn is_visible(&self, xid: TransactionId) -> bool {
+    pub(crate) fn is_visible(&self, xid: TransactionId) -> bool {
         self.header.xmin <= xid && (self.header.xmax == TRANSACTION_ZERO || self.header.xmax > xid)
     }
 
@@ -490,7 +498,7 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
         TupleParser::check_null(self.null_bitmap(), val_idx)
     }
 
-    pub fn key(&self, index: usize) -> io::Result<DataTypeRef<'_>> {
+    pub(crate) fn key(&self, index: usize) -> io::Result<DataTypeRef<'_>> {
         let dtype = self.schema.keys()[index].dtype;
         let offset = self.layout.offsets[index] as usize;
         let (value, _) = reinterpret_cast(dtype, &self.data[offset..])?;
@@ -504,7 +512,7 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
         Ok(value)
     }
 
-    pub fn value(&self, index: usize) -> io::Result<DataTypeRef<'_>> {
+    pub(crate) fn value(&self, index: usize) -> io::Result<DataTypeRef<'_>> {
         if self.is_null(index) {
             return Ok(DataTypeRef::Null);
         }
@@ -529,21 +537,21 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
     }
 
     /// Sets a value to null in the bitmap
-    pub fn set_null_unchecked(&mut self, index: usize) {
+    pub(crate) fn set_null_unchecked(&mut self, index: usize) {
         let byte_idx = index / 8;
         let bit_idx = index % 8;
         self.null_bitmap_mut()[byte_idx] |= 1 << bit_idx;
     }
 
     /// Clears the null flag for a value
-    pub fn clear_null(&mut self, index: usize) {
+    pub(crate) fn clear_null(&mut self, index: usize) {
         let byte_idx = index / 8;
         let bit_idx = index % 8;
         self.null_bitmap_mut()[byte_idx] &= !(1 << bit_idx);
     }
 
     /// Update a value in place
-    pub fn update_value<F>(&mut self, index: usize, updater: F) -> io::Result<()>
+    pub(crate) fn update_value<F>(&mut self, index: usize, updater: F) -> io::Result<()>
     where
         F: FnOnce(DataTypeRefMut<'_>),
     {
@@ -553,7 +561,7 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
     }
 
     /// Sets the item at a specified index to the corresponding value.
-    pub fn set_value(&mut self, index: usize, value: DataType) -> io::Result<()> {
+    pub(crate) fn set_value(&mut self, index: usize, value: DataType) -> io::Result<()> {
         let dtype = self.schema.columns[index].dtype;
         let offset = self.layout.offsets[index] as usize;
 
@@ -664,7 +672,7 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
     }
 
     /// Marks the tuple as deleted.
-    pub fn delete(&mut self, xid: TransactionId) -> io::Result<()> {
+    pub(crate) fn delete(&mut self, xid: TransactionId) -> io::Result<()> {
         if self.header.xmax != TRANSACTION_ZERO {
             return Err(IoError::new(
                 ErrorKind::InvalidInput,
@@ -678,7 +686,7 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
     }
 
     /// Gets the xmin for a specific version
-    pub fn version_xmin(&self, version: u8) -> io::Result<TransactionId> {
+    pub(crate) fn version_xmin(&self, version: u8) -> io::Result<TransactionId> {
         if version == self.header.version {
             return Ok(self.header.xmin);
         }
@@ -712,7 +720,7 @@ impl<'a, 'b> TupleRefMut<'a, 'b> {
     }
 
     /// Reads the visible version of the tuple for the provided snapshot.
-    pub fn read_for_snapshot(
+    pub(crate) fn read_for_snapshot(
         buffer: &'a mut [u8],
         schema: &'b Schema,
         snapshot: &crate::transactions::Snapshot,
@@ -779,7 +787,7 @@ impl Delta {
 /// Owned tuple structure.
 /// Tuples are generally a [COPY-ON-WRITE] data structure.
 #[derive(Clone)]
-pub struct Tuple<'schema> {
+pub(crate) struct Tuple<'schema> {
     data: Vec<DataType>,
     schema: &'schema Schema,
     version: u8,
@@ -789,7 +797,7 @@ pub struct Tuple<'schema> {
 }
 
 impl<'schema> Tuple<'schema> {
-    pub fn new(
+    pub(crate) fn new(
         values: &[DataType],
         schema: &'schema Schema,
         xmin: TransactionId,
@@ -834,63 +842,63 @@ impl<'schema> Tuple<'schema> {
     }
 
     #[inline]
-    pub fn num_fields(&self) -> usize {
+    pub(crate) fn num_fields(&self) -> usize {
         self.data.len()
     }
 
     #[inline]
-    pub fn version(&self) -> u8 {
+    pub(crate) fn version(&self) -> u8 {
         self.version
     }
 
     #[inline]
-    pub fn set_version(&mut self, version: u8) {
+    pub(crate) fn set_version(&mut self, version: u8) {
         self.version = version;
     }
 
     #[inline]
-    pub fn keys(&self) -> &[DataType] {
+    pub(crate) fn keys(&self) -> &[DataType] {
         &self.data[..self.schema.num_keys as usize]
     }
 
     #[inline]
-    pub fn values(&self) -> &[DataType] {
+    pub(crate) fn values(&self) -> &[DataType] {
         &self.data[self.schema.num_keys as usize..]
     }
 
     #[inline]
-    pub fn values_mut(&mut self) -> &mut [DataType] {
+    pub(crate) fn values_mut(&mut self) -> &mut [DataType] {
         &mut self.data[self.schema.num_keys as usize..]
     }
 
     #[inline]
-    pub fn set_value(&mut self, index: usize, new: DataType) -> Option<DataType> {
+    pub(crate) fn set_value(&mut self, index: usize, new: DataType) -> Option<DataType> {
         self.values_mut()
             .get_mut(index)
             .map(|slot| mem::replace(slot, new))
     }
 
     #[inline]
-    pub fn xmin(&self) -> TransactionId {
+    pub(crate) fn xmin(&self) -> TransactionId {
         self.xmin
     }
 
     #[inline]
-    pub fn xmax(&self) -> TransactionId {
+    pub(crate) fn xmax(&self) -> TransactionId {
         self.xmax
     }
 
     #[inline]
-    pub fn is_deleted(&self) -> bool {
+    pub(crate) fn is_deleted(&self) -> bool {
         self.xmax != TRANSACTION_ZERO
     }
 
     #[inline]
-    pub fn is_visible(&self, xid: TransactionId) -> bool {
+    pub(crate) fn is_visible(&self, xid: TransactionId) -> bool {
         self.xmin <= xid && (self.xmax == TRANSACTION_ZERO || self.xmax > xid)
     }
 
-    pub fn add_version(
+    pub(crate) fn add_version(
         &mut self,
         modified: &[(usize, DataType)],
         xmin: TransactionId,
@@ -924,7 +932,7 @@ impl<'schema> Tuple<'schema> {
         Ok(())
     }
 
-    pub fn delete(&mut self, xid: TransactionId) -> io::Result<()> {
+    pub(crate) fn delete(&mut self, xid: TransactionId) -> io::Result<()> {
         if self.xmax != TRANSACTION_ZERO {
             return Err(IoError::new(
                 ErrorKind::InvalidInput,
@@ -938,25 +946,31 @@ impl<'schema> Tuple<'schema> {
 
 /// Serialized tuple as raw bytes
 #[derive(Clone, Debug)]
-pub struct OwnedTuple(Box<[u8]>);
+pub(crate) struct OwnedTuple(Box<[u8]>);
+
+impl From<&[u8]> for OwnedTuple {
+    fn from(value: &[u8]) -> Self {
+        Self(Box::from(value))
+    }
+}
 
 impl OwnedTuple {
-    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+    pub(crate) fn from_bytes(bytes: Vec<u8>) -> Self {
         Self(bytes.into_boxed_slice())
     }
 
     #[inline]
-    pub fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
     #[inline]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.0.len()
     }
 
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 }

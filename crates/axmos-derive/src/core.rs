@@ -52,6 +52,14 @@ impl VariantInfo {
             if attr.path().is_ident("non_arith") {
                 self.attrs.insert("non_arith".to_string());
             }
+
+            if attr.path().is_ident("non_hash") {
+                self.attrs.insert("non_hash".to_string());
+            }
+
+            if attr.path().is_ident("non_copy") {
+                self.attrs.insert("non_copy".to_string());
+            }
         }
         self
     }
@@ -79,6 +87,14 @@ impl VariantInfo {
 
     fn is_arith(&self) -> bool {
         !self.attrs.contains("non_arith")
+    }
+
+    fn is_copy(&self) -> bool {
+        !self.attrs.contains("non_copy")
+    }
+
+    fn is_hashable(&self) -> bool {
+        !self.attrs.contains("non_hash")
     }
 }
 
@@ -198,6 +214,43 @@ impl EnumInfo {
         }
     }
 
+    fn gen_is_numeric_arms(&self) -> Vec<TokenStream> {
+        // is_numeric
+        let is_numeric_arms: Vec<_> = self
+            .variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if let Some(ty) = &v.inner_type {
+                    // <Type as AxmosValueType>::IS_NUMERIC
+                    quote! { Self::#vn => <#ty as AxmosValueType>::IS_NUMERIC }
+                } else {
+                    // Unit variants (Null) are not numeric
+                    quote! { Self::#vn => false }
+                }
+            })
+            .collect();
+
+        is_numeric_arms
+    }
+
+    fn gen_is_signed_arms(&self) -> Vec<TokenStream> {
+        let is_signed_arms: Vec<_> = self
+            .variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if let Some(ty) = &v.inner_type {
+                    quote! { Self::#vn => <#ty as AxmosValueType>::IS_SIGNED }
+                } else {
+                    quote! { Self::#vn => false }
+                }
+            })
+            .collect();
+
+        is_signed_arms
+    }
+
     fn gen_kind_enum(&self) -> TokenStream {
         let name = self.kind_name();
         let vis = &self.vis;
@@ -227,34 +280,9 @@ impl EnumInfo {
             .collect();
 
         // is_numeric
-        let is_numeric_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if let Some(ty) = &v.inner_type {
-                    // <Type as AxmosValueType>::IS_NUMERIC
-                    quote! { Self::#vn => <#ty as AxmosValueType>::IS_NUMERIC }
-                } else {
-                    // Unit variants (Null) are not numeric
-                    quote! { Self::#vn => false }
-                }
-            })
-            .collect();
-
+        let is_numeric_arms: Vec<_> = self.gen_is_numeric_arms();
         // is_signed
-        let is_signed_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if let Some(ty) = &v.inner_type {
-                    quote! { Self::#vn => <#ty as AxmosValueType>::IS_SIGNED }
-                } else {
-                    quote! { Self::#vn => false }
-                }
-            })
-            .collect();
+        let is_signed_arms: Vec<_> = self.gen_is_signed_arms();
 
         // [size_of_val] using the FIXED_SIZE constant from AxmosValueType trait
         let size_of_val_arms: Vec<_> = self
@@ -583,6 +611,51 @@ impl EnumInfo {
         }
     }
 
+    fn gen_to_f64_method(&self) -> TokenStream {
+        let name = &self.name;
+
+        let arms: Vec<_> = self
+            .variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+
+                if v.inner_type.is_some() && v.is_copy() {
+                    quote! {
+                        Self::#vn(v) => {
+
+                            let value: f64 = (*v).into();
+                            value
+                        }
+                    }
+                } else if v.inner_type.is_some() {
+
+                    quote! {
+                        Self::#vn(_) => f64::NAN
+                    }
+                } else {
+                    quote! {
+                        Self::#vn => f64::NAN
+                    }
+                }
+            })
+            .collect();
+
+        quote! {
+            impl #name {
+
+                pub fn to_f64(&self) -> f64 {
+                    match self {
+                        #(#arms,)*
+                    }
+                }
+
+
+            }
+
+        }
+    }
+
     fn gen_impl_block(&self) -> TokenStream {
         let name = &self.name;
         let kind_name = self.kind_name();
@@ -649,6 +722,19 @@ impl EnumInfo {
                         #(#kind_arms,)*
                     }
                 }
+
+                #[inline]
+                pub fn is_numeric(&self) -> bool {
+                    self.kind().is_numeric()
+                }
+
+                #[inline]
+                pub fn is_signed(&self) -> bool {
+                    self.kind().is_signed()
+                }
+
+
+
 
                 #[inline]
                 pub fn size(&self) -> usize {
@@ -1335,69 +1421,6 @@ impl EnumInfo {
             #trait_impls
         }
     }
-
-    fn gen_ordering(&self) -> TokenStream {
-        let name = &self.name;
-
-        let error_name = self.error_name();
-
-        // Generate comparison for same-variant types
-        let cmp_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if let Some(ty) = &v.inner_type {
-                    // Use PartialOrd from the inner type
-                    quote! {
-                        (Self::#vn(a), Self::#vn(b)) => {
-                            <#ty as std::cmp::PartialOrd>::partial_cmp(a, b)
-                        }
-                    }
-                } else {
-                    // Null equals Null
-                    quote! {
-                        (Self::#vn, Self::#vn) => Some(std::cmp::Ordering::Equal)
-                    }
-                }
-            })
-            .collect();
-
-        quote! {
-            impl std::cmp::PartialOrd for #name {
-                fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-                    // Only compare same variants
-                    if std::mem::discriminant(self) != std::mem::discriminant(other) {
-                        // Different variants: compare by kind discriminant
-                        return Some(self.kind().cmp(&other.kind()));
-                    }
-
-                    match (self, other) {
-                        #(#cmp_arms,)*
-                        // This shouldn't happen if discriminants match
-                        _ => None,
-                    }
-                }
-            }
-
-            impl #name {
-
-
-
-                /// Compare two values, returning error on type mismatch.
-                pub fn try_cmp(&self, other: &Self) -> Result<std::cmp::Ordering, #error_name> {
-                    if std::mem::discriminant(self) != std::mem::discriminant(other) {
-                        return Err(#error_name::TypeMismatch {
-                            left: self.kind(),
-                            right: other.kind(),
-                        });
-                    }
-
-                    self.partial_cmp(other).ok_or_else(|| #error_name::NotComparable(self.kind()))
-                }
-            }
-        }
-    }
 }
 
 pub fn data_type_impl(input: TokenStream) -> TokenStream {
@@ -1420,7 +1443,7 @@ pub fn data_type_impl(input: TokenStream) -> TokenStream {
     let impl_block = info.gen_impl_block();
     let try_cast = info.gen_try_cast();
     let arithmetic_ops = info.gen_arithmetic_ops();
-    let ordering = info.gen_ordering();
+    let as_f64 = info.gen_to_f64_method();
     let ref_impls = info.gen_ref_impls();
     let as_ref_impls = info.gen_as_ref_impls();
     let coercion_impl = info.gen_coercion_impl();
@@ -1428,6 +1451,7 @@ pub fn data_type_impl(input: TokenStream) -> TokenStream {
     quote! {
         #error_type
         #kind_enum
+        #as_f64
         #ref_enum
         #ref_mut_enum
         #reinterpret_cast
@@ -1435,7 +1459,7 @@ pub fn data_type_impl(input: TokenStream) -> TokenStream {
         #impl_block
         #try_cast
         #arithmetic_ops
-        #ordering
+
         #ref_impls
         #as_ref_impls
         #coercion_impl
