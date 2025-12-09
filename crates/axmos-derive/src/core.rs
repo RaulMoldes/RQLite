@@ -1,10 +1,4 @@
 //! Procedural macro for deriving Axmos DataType infrastructure.
-//!
-//! Generates: DataTypeKind, DataTypeRef, DataTypeRefMut, reinterpret_cast,
-//! reinterpret_cast_mut, and all helper methods using trait dispatch.
-
-use std::collections::HashSet;
-
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
@@ -12,7 +6,7 @@ use syn::{
     Variant, Visibility, parse2,
 };
 
-// Generate checked operations
+
 const ARITHMETIC_OPS: [(&str, &str, &str); 5] = [
     ("checked_add", "Add", "add"),
     ("checked_sub", "Sub", "sub"),
@@ -21,49 +15,38 @@ const ARITHMETIC_OPS: [(&str, &str, &str); 5] = [
     ("checked_rem", "Rem", "rem"),
 ];
 
-pub struct EnumInfo {
-    name: Ident,
-    vis: Visibility,
-    variants: Vec<VariantInfo>,
+#[derive(Debug, Default)]
+pub struct VariantAttrs {
+    pub is_null: bool,
+    pub non_arith: bool,
+    pub non_copy: bool,
+}
+
+impl VariantAttrs {
+    fn from_attrs(attrs: &[Attribute]) -> Self {
+        let mut result = Self::default();
+        for attr in attrs {
+            if attr.path().is_ident("null") {
+                result.is_null = true;
+            }
+            if attr.path().is_ident("non_arith") {
+                result.non_arith = true;
+            }
+            if attr.path().is_ident("non_copy") {
+                result.non_copy = true;
+            }
+        }
+        result
+    }
 }
 
 pub struct VariantInfo {
-    name: Ident,
-    inner_type: Option<Type>,
-    attrs: HashSet<String>,
+    pub name: Ident,
+    pub inner_type: Option<Type>,
+    pub attrs: VariantAttrs,
 }
 
 impl VariantInfo {
-    fn new(name: Ident, inner_type: Option<Type>) -> Self {
-        Self {
-            name,
-            inner_type,
-            attrs: HashSet::new(),
-        }
-    }
-
-    // Populate the attribute set of this enum variant
-    fn with_attrs(mut self, attrs: &[Attribute]) -> Self {
-        for attr in attrs {
-            if attr.path().is_ident("null") {
-                self.attrs.insert("null".to_string());
-            }
-
-            if attr.path().is_ident("non_arith") {
-                self.attrs.insert("non_arith".to_string());
-            }
-
-            if attr.path().is_ident("non_hash") {
-                self.attrs.insert("non_hash".to_string());
-            }
-
-            if attr.path().is_ident("non_copy") {
-                self.attrs.insert("non_copy".to_string());
-            }
-        }
-        self
-    }
-
     fn from_variant(variant: Variant) -> SynResult<Self> {
         let name = variant.ident;
         let inner_type = match variant.fields {
@@ -78,28 +61,40 @@ impl VariantInfo {
                 ));
             }
         };
-        Ok(VariantInfo::new(name, inner_type).with_attrs(&variant.attrs))
+
+        Ok(Self {
+            attrs: VariantAttrs::from_attrs(&variant.attrs),
+            name,
+            inner_type,
+        })
     }
 
-    fn is_null(&self) -> bool {
-        self.attrs.contains("is_null")
+    #[inline]
+    pub fn is_null(&self) -> bool {
+        self.attrs.is_null
     }
 
-    fn is_arith(&self) -> bool {
-        !self.attrs.contains("non_arith")
+    #[inline]
+    pub fn is_arith(&self) -> bool {
+        !self.attrs.non_arith
     }
 
-    fn is_copy(&self) -> bool {
-        !self.attrs.contains("non_copy")
+    #[inline]
+    pub fn is_copy(&self) -> bool {
+        !self.attrs.non_copy
     }
 
-    fn is_hashable(&self) -> bool {
-        !self.attrs.contains("non_hash")
-    }
+
+}
+
+pub struct EnumInfo {
+    pub name: Ident,
+    pub vis: Visibility,
+    pub variants: Vec<VariantInfo>,
 }
 
 impl EnumInfo {
-    fn from_input(input: DeriveInput) -> SynResult<Self> {
+    pub fn from_input(input: DeriveInput) -> SynResult<Self> {
         let Data::Enum(data) = input.data else {
             return Err(SynError::new_spanned(
                 input.ident,
@@ -113,148 +108,52 @@ impl EnumInfo {
             .map(VariantInfo::from_variant)
             .collect::<SynResult<Vec<_>>>()?;
 
-        Ok(EnumInfo {
+        Ok(Self {
             name: input.ident,
             vis: input.vis,
             variants,
         })
     }
 
-    fn kind_name(&self) -> Ident {
+    pub fn kind_name(&self) -> Ident {
         format_ident!("{}Kind", &self.name)
     }
 
-    fn ref_name(&self) -> Ident {
+    pub fn ref_name(&self) -> Ident {
         format_ident!("{}Ref", &self.name)
     }
 
-    fn ref_mut_name(&self) -> Ident {
+    pub fn ref_mut_name(&self) -> Ident {
         format_ident!("{}RefMut", &self.name)
     }
 
-    fn error_name(&self) -> Ident {
-        format_ident!("{}Error", &self.name)
+    pub fn variant_names(&self) -> Vec<&Ident> {
+        self.variants.iter().map(|v| &v.name).collect()
     }
+}
 
-    // Generates the [is_null] function
-    fn gen_is_null(&self) -> TokenStream {
-        // [is_null] using the [null] type attr
-        let is_null_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if v.is_null() {
-                    quote! { Self::#vn => true }
-                } else {
-                    quote! { Self::#vn => false }
-                }
-            })
-            .collect();
 
-        quote! { #[inline]
-        pub const fn is_null(self) -> bool {
-            match self {
-                #(#is_null_arms,)*
-            }
-        }}
-    }
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TypeVariant {
+    Owned,
+    Ref,
+    RefMut,
+}
 
-    fn gen_type_err(&self) -> TokenStream {
-        let error_name = self.error_name();
-        let kind_name = self.kind_name();
-        let vis = &self.vis;
 
-        quote! {
-            /// Error type for DataType operations
-            #[derive(Debug, Clone, PartialEq, Eq)]
-            #vis enum #error_name {
-                /// Attempted operation on Null variant
-                NullOperation,
-                /// Type mismatch between operands
-                TypeMismatch {
-                    left: #kind_name,
-                    right: #kind_name,
-                },
-                /// Cannot cast between types
-                CastError {
-                    from: #kind_name,
-                    to: #kind_name,
-                },
-                /// Type is not comparable
-                NotComparable(#kind_name),
-                /// Type does not support this operation
-                UnsupportedOperation {
-                    kind: #kind_name,
-                    operation: &'static str,
-                },
-            }
+trait Generator {
+    fn generate(&self, info: &EnumInfo) -> TokenStream;
+}
 
-            impl std::fmt::Display for #error_name {
-                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    match self {
-                        Self::NullOperation => write!(f, "cannot perform operation on Null"),
-                        Self::TypeMismatch { left, right } => {
-                            write!(f, "type mismatch: {} vs {}", left, right)
-                        }
-                        Self::CastError { from, to } => {
-                            write!(f, "cannot cast {} to {}", from, to)
-                        }
-                        Self::NotComparable(k) => {
-                            write!(f, "type {} is not comparable", k)
-                        }
-                        Self::UnsupportedOperation { kind, operation } => {
-                            write!(f, "type {} does not support {}", kind, operation)
-                        }
-                    }
-                }
-            }
 
-            impl std::error::Error for #error_name {}
-        }
-    }
 
-    fn gen_is_numeric_arms(&self) -> Vec<TokenStream> {
-        // is_numeric
-        let is_numeric_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if let Some(ty) = &v.inner_type {
-                    // <Type as AxmosValueType>::IS_NUMERIC
-                    quote! { Self::#vn => <#ty as AxmosValueType>::IS_NUMERIC }
-                } else {
-                    // Unit variants (Null) are not numeric
-                    quote! { Self::#vn => false }
-                }
-            })
-            .collect();
+struct KindEnumGenerator;
 
-        is_numeric_arms
-    }
-
-    fn gen_is_signed_arms(&self) -> Vec<TokenStream> {
-        let is_signed_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if let Some(ty) = &v.inner_type {
-                    quote! { Self::#vn => <#ty as AxmosValueType>::IS_SIGNED }
-                } else {
-                    quote! { Self::#vn => false }
-                }
-            })
-            .collect();
-
-        is_signed_arms
-    }
-
-    fn gen_kind_enum(&self) -> TokenStream {
-        let name = self.kind_name();
-        let vis = &self.vis;
-        let variant_names: Vec<_> = self.variants.iter().map(|v| &v.name).collect();
+impl Generator for KindEnumGenerator {
+    fn generate(&self, info: &EnumInfo) -> TokenStream {
+        let kind_name = info.kind_name();
+        let vis = &info.vis;
+        let variant_names = info.variant_names();
         let variant_values: Vec<u8> = (0..variant_names.len() as u8).collect();
 
         let variant_defs: Vec<_> = variant_names
@@ -263,54 +162,20 @@ impl EnumInfo {
             .map(|(vn, &val)| quote! { #vn = #val })
             .collect();
 
-        // is_fixed_size
-        let is_fixed_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if let Some(ty) = &v.inner_type {
-                    // FIXED_SIZE.is_some() means fixed
-                    quote! { Self::#vn => <#ty as AxmosValueType>::FIXED_SIZE.is_some() }
-                } else {
-                    // Unit variants (Null) are considered fixed with size 0
-                    quote! { Self::#vn => true }
-                }
-            })
-            .collect();
-
-        // is_numeric
-        let is_numeric_arms: Vec<_> = self.gen_is_numeric_arms();
-        // is_signed
-        let is_signed_arms: Vec<_> = self.gen_is_signed_arms();
-
-        // [size_of_val] using the FIXED_SIZE constant from AxmosValueType trait
-        let size_of_val_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if let Some(ty) = &v.inner_type {
-                    //  <Type as AxmosValueType>::FIXED_SIZE
-                    quote! { Self::#vn => <#ty as AxmosValueType>::FIXED_SIZE }
-                } else {
-                    // Unit variants (Null) have size 0
-                    quote! { Self::#vn => Some(0) }
-                }
-            })
-            .collect();
-
-        // [is_null] using the [null] type attr
-        let is_null_fn = self.gen_is_null();
+        let is_null_arms = self.gen_is_null_arms(info);
+        let is_numeric_arms = self.gen_is_numeric_arms(info);
+        let class_arms = self.gen_class_arms(info);
+        let is_fixed_arms = self.gen_is_fixed_arms(info);
+        let size_of_val_arms = self.gen_size_of_val_arms(info);
 
         quote! {
             #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
             #[repr(u8)]
-            #vis enum #name {
+            #vis enum #kind_name {
                 #(#variant_defs,)*
             }
 
-            impl #name {
+            impl #kind_name {
                 #[inline]
                 pub const fn as_repr(self) -> u8 {
                     self as u8
@@ -321,17 +186,17 @@ impl EnumInfo {
                     self as u8
                 }
 
+                #[inline]
+                pub const fn is_null(self) -> bool {
+                    match self {
+                        #(#is_null_arms,)*
+                    }
+                }
 
-                #is_null_fn
-
-
-                pub fn from_repr(value: u8) -> std::io::Result<Self> {
+                pub fn from_repr(value: u8) -> crate::database::errors::TypeResult<Self> {
                     match value {
                         #(#variant_values => Ok(Self::#variant_names),)*
-                        _ => Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("Invalid {} value: {}", stringify!(#name), value),
-                        )),
+                        _ => Err(crate::database::errors::TypeError::Other(format!("Cannot convert from value {value} to DataType"))),
                     }
                 }
 
@@ -349,12 +214,16 @@ impl EnumInfo {
                     }
                 }
 
-
-                 #[inline]
-                pub const fn is_signed(&self) -> bool {
+                #[inline]
+                pub const fn cls(&self) -> crate::types::core::NumClass {
                     match self {
-                        #(#is_signed_arms,)*
+                        #(#class_arms,)*
                     }
+                }
+
+                #[inline]
+                pub const fn is_signed(&self) -> bool {
+                    matches!(self.cls(), crate::types::core::NumClass::Signed | crate::types::core::NumClass::Float)
                 }
 
                 pub fn size_of_val(&self) -> Option<usize> {
@@ -372,43 +241,140 @@ impl EnumInfo {
                         #(Self::#variant_names => stringify!(#variant_names),)*
                     }
                 }
+
+                /// Check if this type can be coerced to the target type.
+                pub fn can_be_coerced(&self, other: Self) -> bool {
+                    if std::mem::discriminant(self) == std::mem::discriminant(&other) {
+                        return true;
+                    }
+                    if self.is_fixed_size() || self.is_null() || other.is_null() {
+                        return true;
+                    }
+                    false
+                }
             }
 
-            impl From<#name> for u8 {
+            impl From<#kind_name> for u8 {
                 #[inline]
-                fn from(value: #name) -> Self {
+                fn from(value: #kind_name) -> Self {
                     value as u8
                 }
             }
 
-            impl TryFrom<u8> for #name {
-                type Error = std::io::Error;
+            impl TryFrom<u8> for #kind_name {
+                type Error = crate::database::errors::TypeError;
 
                 fn try_from(value: u8) -> Result<Self, Self::Error> {
                     Self::from_repr(value)
                 }
             }
 
-            impl std::fmt::Display for #name {
+            impl std::fmt::Display for #kind_name {
                 fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     write!(f, "{}", self.name())
                 }
             }
         }
     }
+}
 
-    fn gen_ref_enum(&self) -> TokenStream {
-        let name = self.ref_name();
-        let vis = &self.vis;
+impl KindEnumGenerator {
+    fn gen_is_null_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+        info.variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                let is_null = v.is_null();
+                quote! { Self::#vn => #is_null }
+            })
+            .collect()
+    }
 
-        let variants: Vec<_> = self
+    fn gen_is_numeric_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+        info.variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if let Some(ty) = &v.inner_type {
+                    quote! { Self::#vn => <#ty as crate::types::core::AxmosValueType>::IS_NUMERIC }
+                } else {
+                    quote! { Self::#vn => false }
+                }
+            })
+            .collect()
+    }
+
+    fn gen_class_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+        info.variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if let Some(ty) = &v.inner_type {
+                    quote! { Self::#vn => <#ty as crate::types::core::AxmosValueType>::NUM_CLASS }
+                } else {
+                    quote! { Self::#vn => crate::types::core::NumClass::Unknown }
+                }
+            })
+            .collect()
+    }
+
+    fn gen_is_fixed_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+        info.variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if let Some(ty) = &v.inner_type {
+                    quote! { Self::#vn => <#ty as crate::types::core::AxmosValueType>::FIXED_SIZE.is_some() }
+                } else {
+                    quote! { Self::#vn => true }
+                }
+            })
+            .collect()
+    }
+
+    fn gen_size_of_val_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+        info.variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if let Some(ty) = &v.inner_type {
+                    quote! { Self::#vn => <#ty as crate::types::core::AxmosValueType>::FIXED_SIZE }
+                } else {
+                    quote! { Self::#vn => Some(0) }
+                }
+            })
+            .collect()
+    }
+}
+
+
+
+struct RefEnumsGenerator;
+
+impl Generator for RefEnumsGenerator {
+    fn generate(&self, info: &EnumInfo) -> TokenStream {
+        let ref_enum = self.gen_ref_enum(info);
+        let ref_mut_enum = self.gen_ref_mut_enum(info);
+
+        quote! {
+            #ref_enum
+            #ref_mut_enum
+        }
+    }
+}
+
+impl RefEnumsGenerator {
+    fn gen_ref_enum(&self, info: &EnumInfo) -> TokenStream {
+        let ref_name = info.ref_name();
+        let vis = &info.vis;
+
+        let variants: Vec<_> = info
             .variants
             .iter()
             .map(|v| {
                 let vn = &v.name;
                 if let Some(ty) = &v.inner_type {
-                    // Use trait associated type: <Type as AxmosValueType>::Ref<'a>
-                    quote! { #vn(<#ty as AxmosValueType>::Ref<'a>) }
+                    quote! { #vn(<#ty as crate::types::core::AxmosValueType>::Ref<'a>) }
                 } else {
                     quote! { #vn }
                 }
@@ -416,25 +382,24 @@ impl EnumInfo {
             .collect();
 
         quote! {
-            #[derive(Debug, PartialEq)]
-            #vis enum #name<'a> {
+            #[derive(Debug)]
+            #vis enum #ref_name<'a> {
                 #(#variants,)*
             }
         }
     }
 
-    fn gen_ref_mut_enum(&self) -> TokenStream {
-        let name = self.ref_mut_name();
-        let vis = &self.vis;
+    fn gen_ref_mut_enum(&self, info: &EnumInfo) -> TokenStream {
+        let ref_mut_name = info.ref_mut_name();
+        let vis = &info.vis;
 
-        let variants: Vec<_> = self
+        let variants: Vec<_> = info
             .variants
             .iter()
             .map(|v| {
                 let vn = &v.name;
                 if let Some(ty) = &v.inner_type {
-                    // Use trait associated type: <Type as AxmosValueType>::RefMut<'a>
-                    quote! { #vn(<#ty as AxmosValueType>::RefMut<'a>) }
+                    quote! { #vn(<#ty as crate::types::core::AxmosValueType>::RefMut<'a>) }
                 } else {
                     quote! { #vn }
                 }
@@ -442,18 +407,38 @@ impl EnumInfo {
             .collect();
 
         quote! {
-            #[derive(Debug, PartialEq)]
-            #vis enum #name<'a> {
+            #[derive(Debug)]
+            #vis enum #ref_mut_name<'a> {
                 #(#variants,)*
             }
         }
     }
+}
 
-    fn gen_reinterpret_cast(&self) -> TokenStream {
-        let kind_name = self.kind_name();
-        let ref_name = self.ref_name();
 
-        let arms: Vec<_> = self
+
+struct CastGenerator;
+
+impl Generator for CastGenerator {
+    fn generate(&self, info: &EnumInfo) -> TokenStream {
+        let reinterpret = self.gen_reinterpret_cast(info);
+        let reinterpret_mut = self.gen_reinterpret_cast_mut(info);
+        let try_cast = self.gen_try_cast(info);
+
+        quote! {
+            #reinterpret
+            #reinterpret_mut
+            #try_cast
+        }
+    }
+}
+
+impl CastGenerator {
+    fn gen_reinterpret_cast(&self, info: &EnumInfo) -> TokenStream {
+        let kind_name = info.kind_name();
+        let ref_name = info.ref_name();
+
+        let arms: Vec<_> = info
             .variants
             .iter()
             .map(|v| {
@@ -461,12 +446,11 @@ impl EnumInfo {
                 if let Some(ty) = &v.inner_type {
                     quote! {
                         #kind_name::#vn => {
-                            let (value, size) = <#ty as AxmosValueType>::reinterpret(buffer)?;
+                            let (value, size) = <#ty as crate::types::core::AxmosValueType>::reinterpret(buffer)?;
                             Ok((#ref_name::#vn(value), size))
                         }
                     }
                 } else {
-                    // Unit variant (Null)
                     quote! {
                         #kind_name::#vn => Ok((#ref_name::#vn, 0))
                     }
@@ -486,11 +470,11 @@ impl EnumInfo {
         }
     }
 
-    fn gen_reinterpret_cast_mut(&self) -> TokenStream {
-        let kind_name = self.kind_name();
-        let ref_mut_name = self.ref_mut_name();
+    fn gen_reinterpret_cast_mut(&self, info: &EnumInfo) -> TokenStream {
+        let kind_name = info.kind_name();
+        let ref_mut_name = info.ref_mut_name();
 
-        let arms: Vec<_> = self
+        let arms: Vec<_> = info
             .variants
             .iter()
             .map(|v| {
@@ -498,12 +482,11 @@ impl EnumInfo {
                 if let Some(ty) = &v.inner_type {
                     quote! {
                         #kind_name::#vn => {
-                            let (value, size) = <#ty as AxmosValueType>::reinterpret_mut(buffer)?;
+                            let (value, size) = <#ty as crate::types::core::AxmosValueType>::reinterpret_mut(buffer)?;
                             Ok((#ref_mut_name::#vn(value), size))
                         }
                     }
                 } else {
-                    // Unit variant (Null)
                     quote! {
                         #kind_name::#vn => Ok((#ref_mut_name::#vn, 0))
                     }
@@ -523,21 +506,17 @@ impl EnumInfo {
         }
     }
 
-    fn gen_try_cast(&self) -> TokenStream {
-        let name = &self.name;
-        let kind_name = self.kind_name();
-        let error_name = self.error_name();
+    fn gen_try_cast(&self, info: &EnumInfo) -> TokenStream {
+        let name = &info.name;
+        let kind_name = info.kind_name();
 
-        // Generate match arms for casting
-        // Each variant tries to cast via the AxmosCastable trait
-        let cast_arms: Vec<_> = self
+        let cast_arms: Vec<_> = info
             .variants
             .iter()
             .map(|v| {
                 let vn = &v.name;
                 if let Some(ty) = &v.inner_type {
-                    // For each target variant, try casting
-                    let target_arms: Vec<_> = self
+                    let target_arms: Vec<_> = info
                         .variants
                         .iter()
                         .filter(|tv| tv.inner_type.is_some())
@@ -546,9 +525,9 @@ impl EnumInfo {
                             let tty = tv.inner_type.as_ref().unwrap();
                             quote! {
                                 #kind_name::#tvn => {
-                                    <#ty as AxmosCastable<#tty>>::try_cast(inner)
+                                    <#ty as crate::types::core::AxmosCastable<#tty>>::try_cast(inner)
                                         .map(#name::#tvn)
-                                        .ok_or_else(|| #error_name::CastError {
+                                        .ok_or_else(|| crate::database::errors::TypeError::CastError {
                                             from: #kind_name::#vn,
                                             to: target,
                                         })
@@ -561,7 +540,7 @@ impl EnumInfo {
                         Self::#vn(inner) => {
                             match target {
                                 #(#target_arms)*
-                                _ => Err(#error_name::CastError {
+                                _ => Err(crate::database::errors::TypeError::CastError {
                                     from: self.kind(),
                                     to: target,
                                 }),
@@ -569,13 +548,12 @@ impl EnumInfo {
                         }
                     }
                 } else {
-                    // Null variant
                     quote! {
                         Self::#vn => {
                             if target.is_null() {
                                 Ok(Self::#vn)
                             } else {
-                                Err(#error_name::CastError {
+                                Err(crate::database::errors::TypeError::CastError {
                                     from: #kind_name::#vn,
                                     to: target,
                                 })
@@ -589,15 +567,10 @@ impl EnumInfo {
         quote! {
             impl #name {
                 /// Try to cast this value to a different type.
-                ///
-                /// Uses the `AxmosCastable` trait for type conversion.
-                /// Returns an error if the cast is not possible.
-                pub fn try_cast(&self, target: #kind_name) -> Result<Self, #error_name> {
-                    // Same type, no cast needed
+                pub fn try_cast(&self, target: #kind_name) -> Result<Self, crate::database::errors::TypeError> {
                     if self.kind() == target {
                         return Ok(self.clone());
                     }
-
                     match self {
                         #(#cast_arms)*
                     }
@@ -610,419 +583,356 @@ impl EnumInfo {
             }
         }
     }
+}
 
-    fn gen_to_f64_method(&self) -> TokenStream {
-        let name = &self.name;
 
-        let arms: Vec<_> = self
-            .variants
+
+struct ComparisonGenerator;
+
+impl Generator for ComparisonGenerator {
+    fn generate(&self, info: &EnumInfo) -> TokenStream {
+        let owned_impls = self.gen_owned_impls(info);
+        let ref_impls = self.gen_ref_impls(info);
+        let ref_mut_impls = self.gen_ref_mut_impls(info);
+
+        quote! {
+            #owned_impls
+            #ref_impls
+            #ref_mut_impls
+        }
+    }
+}
+
+impl ComparisonGenerator {
+    fn gen_owned_impls(&self, info: &EnumInfo) -> TokenStream {
+        let name = &info.name;
+
+        let eq_arms = self.gen_eq_arms(info, TypeVariant::Owned);
+        let cmp_arms = self.gen_cmp_arms(info, TypeVariant::Owned);
+        let hash_arms = self.gen_hash_arms(info);
+
+        quote! {
+            impl Eq for #name {}
+
+            impl PartialEq for #name {
+                fn eq(&self, other: &Self) -> bool {
+                    match (self, other) {
+                        #(#eq_arms,)*
+                        // Numeric cross-type comparison
+                        (a, b) if a.is_numeric() && b.is_numeric() => a.to_f64() == b.to_f64(),
+                        _ => false,
+                    }
+                }
+            }
+
+            impl PartialOrd for #name {
+                fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                    match (self, other) {
+                        #(#cmp_arms,)*
+                        // Numeric cross-type comparison
+                        (a, b) if a.is_numeric() && b.is_numeric() => a.to_f64().partial_cmp(&b.to_f64()),
+                        _ => None,
+                    }
+                }
+            }
+
+            impl std::hash::Hash for #name {
+                fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                    std::mem::discriminant(self).hash(state);
+                    match self {
+                        #(#hash_arms,)*
+                    }
+                }
+            }
+        }
+    }
+
+    fn gen_ref_impls(&self, info: &EnumInfo) -> TokenStream {
+        let name = &info.name;
+        let ref_name = info.ref_name();
+
+        let eq_arms = self.gen_eq_arms(info, TypeVariant::Ref);
+        let cmp_arms = self.gen_cmp_arms(info, TypeVariant::Ref);
+
+        quote! {
+            impl<'a> PartialEq for #ref_name<'a> {
+                fn eq(&self, other: &Self) -> bool {
+                    match (self, other) {
+                        #(#eq_arms,)*
+                        (a, b) if a.kind().is_numeric() && b.kind().is_numeric() => {
+                            a.to_owned().to_f64() == b.to_owned().to_f64()
+                        }
+                        _ => false,
+                    }
+                }
+            }
+
+            impl<'a> Eq for #ref_name<'a> {}
+
+            impl<'a> PartialOrd for #ref_name<'a> {
+                fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                    match (self, other) {
+                        #(#cmp_arms,)*
+                        (a, b) if a.kind().is_numeric() && b.kind().is_numeric() => {
+                            a.to_owned().to_f64().partial_cmp(&b.to_owned().to_f64())
+                        }
+                        _ => None,
+                    }
+                }
+            }
+
+            impl<'a> PartialEq<#name> for #ref_name<'a> {
+                fn eq(&self, other: &#name) -> bool {
+                    self.to_owned() == *other
+                }
+            }
+
+            impl<'a> PartialEq<#ref_name<'a>> for #name {
+                fn eq(&self, other: &#ref_name<'a>) -> bool {
+                    *self == other.to_owned()
+                }
+            }
+        }
+    }
+
+    fn gen_ref_mut_impls(&self, info: &EnumInfo) -> TokenStream {
+        let name = &info.name;
+        let ref_name = info.ref_name();
+        let ref_mut_name = info.ref_mut_name();
+
+        let eq_arms = self.gen_eq_arms(info, TypeVariant::RefMut);
+        let cmp_arms = self.gen_cmp_arms(info, TypeVariant::RefMut);
+
+        quote! {
+            impl<'a> PartialEq for #ref_mut_name<'a> {
+                fn eq(&self, other: &Self) -> bool {
+                    match (self, other) {
+                        #(#eq_arms,)*
+                        (a, b) if a.kind().is_numeric() && b.kind().is_numeric() => {
+                            a.to_owned().to_f64() == b.to_owned().to_f64()
+                        }
+                        _ => false,
+                    }
+                }
+            }
+
+            impl<'a> Eq for #ref_mut_name<'a> {}
+
+            impl<'a> PartialOrd for #ref_mut_name<'a> {
+                fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                    match (self, other) {
+                        #(#cmp_arms,)*
+                        (a, b) if a.kind().is_numeric() && b.kind().is_numeric() => {
+                            a.to_owned().to_f64().partial_cmp(&b.to_owned().to_f64())
+                        }
+                        _ => None,
+                    }
+                }
+            }
+
+            impl<'a> PartialEq<#name> for #ref_mut_name<'a> {
+                fn eq(&self, other: &#name) -> bool {
+                    self.to_owned() == *other
+                }
+            }
+
+            impl<'a> PartialEq<#ref_mut_name<'a>> for #name {
+                fn eq(&self, other: &#ref_mut_name<'a>) -> bool {
+                    *self == other.to_owned()
+                }
+            }
+
+            impl<'a> PartialEq<#ref_name<'a>> for #ref_mut_name<'a> {
+                fn eq(&self, other: &#ref_name<'a>) -> bool {
+                    self.to_owned() == other.to_owned()
+                }
+            }
+
+            impl<'a> PartialEq<#ref_mut_name<'a>> for #ref_name<'a> {
+                fn eq(&self, other: &#ref_mut_name<'a>) -> bool {
+                    self.to_owned() == other.to_owned()
+                }
+            }
+        }
+    }
+
+    fn gen_eq_arms(&self, info: &EnumInfo, variant: TypeVariant) -> Vec<TokenStream> {
+        info.variants
             .iter()
             .map(|v| {
                 let vn = &v.name;
-
-                if v.inner_type.is_some() && v.is_copy() {
-                    quote! {
-                        Self::#vn(v) => {
-
-                            let value: f64 = (*v).into();
-                            value
+                match (&v.inner_type, variant) {
+                    (Some(_), TypeVariant::Owned) => {
+                        quote! { (Self::#vn(a), Self::#vn(b)) => a == b }
+                    }
+                    (Some(_), TypeVariant::Ref) => {
+                        // inner is <ty as crate::types::core::AxmosValueType>::Ref<'a>, which implements crate::types::core::AxmosValueTypeRef
+                        // Call to_owned() method directly on inner
+                        quote! {
+                            (Self::#vn(a), Self::#vn(b)) => {
+                                crate::types::core::AxmosValueTypeRef::to_owned(a) == crate::types::core::AxmosValueTypeRef::to_owned(b)
+                            }
                         }
                     }
-                } else if v.inner_type.is_some() {
+                    (Some(_), TypeVariant::RefMut) => {
+                        quote! {
+                            (Self::#vn(a), Self::#vn(b)) => {
+                                crate::types::core::AxmosValueTypeRefMut::to_owned(a) == crate::types::core::AxmosValueTypeRefMut::to_owned(b)
+                            }
+                        }
+                    }
+                    (None, _) => quote! { (Self::#vn, Self::#vn) => true },
+                }
+            })
+            .collect()
+    }
 
-                    quote! {
-                        Self::#vn(_) => f64::NAN
+    fn gen_cmp_arms(&self, info: &EnumInfo, variant: TypeVariant) -> Vec<TokenStream> {
+        let mut arms: Vec<_> = info
+            .variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                match (&v.inner_type, variant) {
+                    (Some(_), TypeVariant::Owned) => {
+                        quote! { (Self::#vn(a), Self::#vn(b)) => a.partial_cmp(b) }
                     }
-                } else {
-                    quote! {
-                        Self::#vn => f64::NAN
+                    (Some(_), TypeVariant::Ref) => {
+                        quote! {
+                            (Self::#vn(a), Self::#vn(b)) => {
+                                crate::types::core::AxmosValueTypeRef::to_owned(a).partial_cmp(&crate::types::core::AxmosValueTypeRef::to_owned(b))
+                            }
+                        }
                     }
+                    (Some(_), TypeVariant::RefMut) => {
+                        quote! {
+                            (Self::#vn(a), Self::#vn(b)) => {
+                                crate::types::core::AxmosValueTypeRefMut::to_owned(a).partial_cmp(&crate::types::core::AxmosValueTypeRefMut::to_owned(b))
+                            }
+                        }
+                    }
+                    (None, _) => quote! { (Self::#vn, Self::#vn) => Some(std::cmp::Ordering::Equal) },
+                }
+            })
+            .collect();
+
+        // Add Null comparison rules
+        if let Some(nv) = info.variants.iter().find(|v| v.is_null()) {
+            let nvn = &nv.name;
+            arms.push(quote! { (Self::#nvn, _) => Some(std::cmp::Ordering::Less) });
+            arms.push(quote! { (_, Self::#nvn) => Some(std::cmp::Ordering::Greater) });
+        }
+
+        arms
+    }
+
+    fn gen_hash_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+        info.variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                match &v.inner_type {
+                    Some(ty) => {
+                        
+                        quote! { Self::#vn(inner) => <#ty as crate::types::core::AxmosHashable>::hash128(inner).hash(state) }
+                    }
+                    None => quote! { Self::#vn => {} },
+                }
+            })
+            .collect()
+    }
+}
+
+
+
+struct ConversionGenerator;
+
+impl Generator for ConversionGenerator {
+    fn generate(&self, info: &EnumInfo) -> TokenStream {
+        let to_f64 = self.gen_to_f64(info);
+        let as_ref_impls = self.gen_as_ref_impls(info);
+
+        quote! {
+            #to_f64
+            #as_ref_impls
+        }
+    }
+}
+
+impl ConversionGenerator {
+    fn gen_to_f64(&self, info: &EnumInfo) -> TokenStream {
+        let name = &info.name;
+        let ref_name = info.ref_name();
+        let kind_name = info.kind_name();
+
+        let owned_arms: Vec<_> = info
+            .variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                match (&v.inner_type, v.is_copy()) {
+                    (Some(_), true) => quote! { Self::#vn(v) => (*v).into() },
+                    (Some(_), false) => quote! { Self::#vn(_) => f64::NAN },
+                    (None, _) => quote! { Self::#vn => f64::NAN },
+                }
+            })
+            .collect();
+
+        let ref_arms: Vec<_> = info
+            .variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                match (&v.inner_type, v.is_copy()) {
+                    (Some(_), true) => {
+                        // v implements crate::types::core::AxmosValueTypeRef, call to_owned() and convert to f64
+                        quote! { Self::#vn(v) => crate::types::core::AxmosValueTypeRef::to_owned(v).into() }
+                    }
+                    (Some(_), false) => quote! { Self::#vn(_) => f64::NAN },
+                    (None, _) => quote! { Self::#vn => f64::NAN },
                 }
             })
             .collect();
 
         quote! {
             impl #name {
-
+                /// Convert to f64 for numeric operations.
+                /// Returns NAN for non-numeric types.
                 pub fn to_f64(&self) -> f64 {
                     match self {
-                        #(#arms,)*
-                    }
-                }
-
-
-            }
-
-        }
-    }
-
-    fn gen_impl_block(&self) -> TokenStream {
-        let name = &self.name;
-        let kind_name = self.kind_name();
-
-        let kind_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if v.inner_type.is_some() {
-                    quote! { Self::#vn(_) => #kind_name::#vn }
-                } else {
-                    quote! { Self::#vn => #kind_name::#vn }
-                }
-            })
-            .collect();
-
-        // For size(), we use AxmosValueType::value_size() via trait dispatch
-        let size_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if let Some(ty) = &v.inner_type {
-                    quote! { Self::#vn(inner) => <#ty as AxmosValueType>::value_size(inner) }
-                } else {
-                    quote! { Self::#vn => 0 }
-                }
-            })
-            .collect();
-
-        // is_fixed_size: use FIXED_SIZE from AxmosValueType trait
-        let is_fixed_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if let Some(ty) = &v.inner_type {
-                    quote! { Self::#vn(_) => <#ty as AxmosValueType>::FIXED_SIZE.is_some() }
-                } else {
-                    quote! { Self::#vn => true }
-                }
-            })
-            .collect();
-
-        let matches_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if v.inner_type.is_some() {
-                    quote! { (Self::#vn(_), #kind_name::#vn) => true }
-                } else {
-                    quote! { (Self::#vn, #kind_name::#vn) => true }
-                }
-            })
-            .collect();
-
-        quote! {
-            impl #name {
-                #[inline]
-                pub fn kind(&self) -> #kind_name {
-                    match self {
-                        #(#kind_arms,)*
-                    }
-                }
-
-                #[inline]
-                pub fn is_numeric(&self) -> bool {
-                    self.kind().is_numeric()
-                }
-
-                #[inline]
-                pub fn is_signed(&self) -> bool {
-                    self.kind().is_signed()
-                }
-
-
-
-
-                #[inline]
-                pub fn size(&self) -> usize {
-                    match self {
-                        #(#size_arms,)*
-                    }
-                }
-
-
-
-                #[inline]
-                pub fn is_fixed_size(&self) -> bool {
-                    match self {
-                        #(#is_fixed_arms,)*
-                    }
-                }
-
-                #[inline]
-                pub fn is_null(&self) -> bool {
-                    self.kind().is_null()
-                }
-
-                pub fn matches(&self, other: #kind_name) -> bool {
-                    if self.is_null() {
-                        return true
-                    };
-
-                    match (self, other) {
-                        #(#matches_arms,)*
-                        _ => false,
+                        #(#owned_arms,)*
                     }
                 }
             }
-        }
-    }
 
-    fn gen_ref_impls(&self) -> TokenStream {
-        let name = &self.name;
-        let ref_name = self.ref_name();
-        let ref_mut_name = self.ref_mut_name();
-        let kind_name = self.kind_name();
-
-        let kind_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if v.inner_type.is_some() {
-                    quote! { Self::#vn(_) => #kind_name::#vn }
-                } else {
-                    quote! { Self::#vn => #kind_name::#vn }
-                }
-            })
-            .collect();
-
-        // to_owned: use AxmosValueTypeRef::to_owned() via trait dispatch
-        let ref_to_owned_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if v.inner_type.is_some() {
-                    quote! { Self::#vn(inner) => #name::#vn(AxmosValueTypeRef::to_owned(inner)) }
-                } else {
-                    quote! { Self::#vn => #name::#vn }
-                }
-            })
-            .collect();
-
-        // For size(), use AxmosValueTypeRef::size() via trait dispatch
-        let ref_size_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if v.inner_type.is_some() {
-                    quote! { Self::#vn(inner) => AxmosValueTypeRef::size(inner) }
-                } else {
-                    quote! { Self::#vn => 0 }
-                }
-            })
-            .collect();
-
-        // is_fixed_size for Ref
-        let ref_is_fixed_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if let Some(ty) = &v.inner_type {
-                    quote! { Self::#vn(_) => <#ty as AxmosValueType>::FIXED_SIZE.is_some() }
-                } else {
-                    quote! { Self::#vn => true }
-                }
-            })
-            .collect();
-
-        let ref_matches_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if v.inner_type.is_some() {
-                    quote! { (Self::#vn(_), #kind_name::#vn) => true }
-                } else {
-                    quote! { (Self::#vn, #kind_name::#vn) => true }
-                }
-            })
-            .collect();
-
-        // to_owned for RefMut
-        let ref_mut_to_owned_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if v.inner_type.is_some() {
-                    quote! { Self::#vn(inner) => #name::#vn(AxmosValueTypeRefMut::to_owned(inner)) }
-                } else {
-                    quote! { Self::#vn => #name::#vn }
-                }
-            })
-            .collect();
-
-        let ref_mut_size_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if v.inner_type.is_some() {
-                    quote! { Self::#vn(inner) => AxmosValueTypeRefMut::size(inner) }
-                } else {
-                    quote! { Self::#vn => 0 }
-                }
-            })
-            .collect();
-
-        // PartialOrd for Ref types
-        let ref_cmp_arms: Vec<_> = self
-            .variants
-            .iter()
-            .map(|v| {
-                let vn = &v.name;
-                if v.inner_type.is_some() {
-                    quote! {
-                        (Self::#vn(a), Self::#vn(b)) => a.partial_cmp(b)
-                    }
-                } else {
-                    quote! {
-                        (Self::#vn, Self::#vn) => Some(std::cmp::Ordering::Equal)
-                    }
-                }
-            })
-            .collect();
-
-        quote! {
             impl<'a> #ref_name<'a> {
-                #[inline]
-                pub fn to_owned(&self) -> #name {
+                /// Convert to f64 for numeric operations.
+                /// Returns NAN for non-numeric types.
+                pub fn to_f64(&self) -> f64 {
                     match self {
-                        #(#ref_to_owned_arms,)*
-                    }
-                }
-
-
-                 #[inline]
-                pub fn kind(&self) -> #kind_name {
-                    match self {
-                        #(#kind_arms,)*
-                    }
-                }
-
-                #[inline]
-                pub fn size(&self) -> usize {
-                    match self {
-                        #(#ref_size_arms,)*
-                    }
-                }
-
-                #[inline]
-                pub fn is_fixed_size(&self) -> bool {
-                    match self {
-                        #(#ref_is_fixed_arms,)*
-                    }
-                }
-
-                #[inline]
-                pub fn is_null(&self) -> bool {
-                    self.kind().is_null()
-                }
-
-                pub fn matches(&self, other: #kind_name) -> bool {
-                    if self.is_null(){
-                        return true;
-                    };
-
-                    match (self, other) {
-                        #(#ref_matches_arms,)*
-                        _ => false,
+                        #(#ref_arms,)*
                     }
                 }
             }
 
-
-             impl<'a> ::std::cmp::PartialOrd for #ref_name<'a> {
-                fn partial_cmp(&self, other: &Self) -> Option<::std::cmp::Ordering> {
-                    if ::std::mem::discriminant(self) != ::std::mem::discriminant(other) {
-                        return Some(self.kind().cmp(&other.kind()));
-                    }
-
-                    match (self, other) {
-                        #(#ref_cmp_arms,)*
-                        _ => None,
-                    }
-                }
-            }
-
-
-             impl<'a> std::cmp::PartialOrd for #ref_mut_name<'a> {
-                fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-                    if std::mem::discriminant(self) != std::mem::discriminant(other) {
-                        return Some(self.kind().cmp(&other.kind()));
-                    }
-
-                    match (self, other) {
-                        #(#ref_cmp_arms,)*
-                        _ => None,
-                    }
-                }
-            }
-
-
-            impl<'a> #ref_mut_name<'a> {
-                #[inline]
-                pub fn to_owned(&self) -> #name {
-                    match self {
-                        #(#ref_mut_to_owned_arms,)*
-                    }
-                }
-
-                #[inline]
-                pub fn size(&self) -> usize {
-                    match self {
-                        #(#ref_mut_size_arms,)*
-                    }
-                }
-
-                #[inline]
-                pub fn is_fixed_size(&self) -> bool {
-                    match self {
-                        #(#ref_is_fixed_arms,)*
-                    }
-                }
-
-
-                  #[inline]
-                pub fn kind(&self) -> #kind_name {
-                    match self {
-                        #(#kind_arms,)*
-                    }
-                }
-
-                #[inline]
-                pub fn is_null(&self) -> bool {
-                    self.kind().is_null()
-                }
-
-                pub fn matches(&self, other: #kind_name) -> bool {
-                    if self.is_null(){
-                        return true;
-                    };
-
-                    match (self, other) {
-                        #(#ref_matches_arms,)*
-                        _ => false,
-                    }
+            impl #kind_name {
+                /// Convert raw bytes to f64 based on this type kind.
+                /// Useful for histograms and statistics.
+                pub fn bytes_to_f64(&self, bytes: &[u8]) -> Option<f64> {
+                    let (value, _) = reinterpret_cast(*self, bytes).ok()?;
+                    let f = value.to_f64();
+                    if f.is_nan() { None } else { Some(f) }
                 }
             }
         }
     }
 
-    fn gen_as_ref_impls(&self) -> TokenStream {
-        let name = &self.name;
-        let ref_name = self.ref_name();
-        let ref_mut_name = self.ref_mut_name();
+    fn gen_as_ref_impls(&self, info: &EnumInfo) -> TokenStream {
+        let name = &info.name;
+        let ref_name = info.ref_name();
+        let ref_mut_name = info.ref_mut_name();
 
-        // For owned type, use AsRef<[u8]> which inner types implement
-        let as_ref_arms: Vec<_> = self
+        let as_ref_arms: Vec<_> = info
             .variants
             .iter()
             .map(|v| {
@@ -1035,7 +945,7 @@ impl EnumInfo {
             })
             .collect();
 
-        let as_mut_arms: Vec<_> = self
+        let as_mut_arms: Vec<_> = info
             .variants
             .iter()
             .map(|v| {
@@ -1048,41 +958,39 @@ impl EnumInfo {
             })
             .collect();
 
-        // For Ref types, use AxmosValueTypeRef::as_bytes
-        let ref_as_ref_arms: Vec<_> = self
+        let ref_as_ref_arms: Vec<_> = info
             .variants
             .iter()
             .map(|v| {
                 let vn = &v.name;
                 if v.inner_type.is_some() {
-                    quote! { Self::#vn(inner) => AxmosValueTypeRef::as_bytes(inner) }
+                    quote! { Self::#vn(inner) => crate::types::core::AxmosValueTypeRef::as_bytes(inner) }
                 } else {
                     quote! { Self::#vn => &[] }
                 }
             })
             .collect();
 
-        // For RefMut types, use AxmosValueTypeRefMut::as_bytes and as_bytes_mut
-        let ref_mut_as_ref_arms: Vec<_> = self
+        let ref_mut_as_ref_arms: Vec<_> = info
             .variants
             .iter()
             .map(|v| {
                 let vn = &v.name;
                 if v.inner_type.is_some() {
-                    quote! { Self::#vn(inner) => AxmosValueTypeRefMut::as_bytes(inner) }
+                    quote! { Self::#vn(inner) => crate::types::core::AxmosValueTypeRefMut::as_bytes(inner) }
                 } else {
                     quote! { Self::#vn => &[] }
                 }
             })
             .collect();
 
-        let ref_mut_as_mut_arms: Vec<_> = self
+        let ref_mut_as_mut_arms: Vec<_> = info
             .variants
             .iter()
             .map(|v| {
                 let vn = &v.name;
                 if v.inner_type.is_some() {
-                    quote! { Self::#vn(inner) => AxmosValueTypeRefMut::as_bytes_mut(inner) }
+                    quote! { Self::#vn(inner) => crate::types::core::AxmosValueTypeRefMut::as_bytes_mut(inner) }
                 } else {
                     quote! { Self::#vn => &mut [] }
                 }
@@ -1131,82 +1039,560 @@ impl EnumInfo {
             }
         }
     }
+}
 
-    fn gen_coercion_impl(&self) -> TokenStream {
-        let kind_name = self.kind_name();
+struct ImplBlockGenerator;
+
+impl Generator for ImplBlockGenerator {
+    fn generate(&self, info: &EnumInfo) -> TokenStream {
+        let owned_impl = self.gen_owned_impl(info);
+        let ref_impl = self.gen_ref_impl(info);
+        let ref_mut_impl = self.gen_ref_mut_impl(info);
 
         quote! {
-            impl #kind_name {
-                /// Check if this type can be coerced to the target type.
-                pub fn can_be_coerced(&self, other: Self) -> bool {
-                    if std::mem::discriminant(self) == std::mem::discriminant(&other) {
+            #owned_impl
+            #ref_impl
+            #ref_mut_impl
+        }
+    }
+}
+
+
+
+
+struct NumericOpsGenerator;
+
+impl Generator for NumericOpsGenerator {
+    fn generate(&self, info: &EnumInfo) -> TokenStream {
+        let name = &info.name;
+        let kind_name = info.kind_name();
+
+        // Generate extract_i64 arms
+        let extract_i64_arms: Vec<_> = info.variants.iter().filter_map(|v| {
+            let vn = &v.name;
+            if let Some(ty) = &v.inner_type {
+                if v.is_arith() && v.is_copy() {
+                    Some(quote! { Self::#vn(inner) => <#ty as crate::types::core::NumericType>::as_i64(inner) })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }).collect();
+
+        // Generate extract_u64 arms
+        let extract_u64_arms: Vec<_> = info.variants.iter().filter_map(|v| {
+            let vn = &v.name;
+            if let Some(ty) = &v.inner_type {
+                if v.is_arith() && v.is_copy() {
+                    Some(quote! { Self::#vn(inner) => <#ty as crate::types::core::NumericType>::as_u64(inner) })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }).collect();
+
+        // Generate extract_f64 arms
+        let extract_f64_arms: Vec<_> = info.variants.iter().filter_map(|v| {
+            let vn = &v.name;
+            if let Some(ty) = &v.inner_type {
+                if v.is_arith() && v.is_copy() {
+                    Some(quote! { Self::#vn(inner) => Some(<#ty as crate::types::core::NumericType>::as_f64(inner)) })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }).collect();
+
+        // Generate from_number arms for each variant
+        let from_signed_arms: Vec<_> = info.variants.iter().filter_map(|v| {
+            let vn = &v.name;
+            if let Some(ty) = &v.inner_type {
+                if v.is_arith() && v.is_copy() {
+                    Some(quote! { #kind_name::#vn => Self::#vn(<#ty as crate::types::core::NumericType>::from_i64(v)) })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }).collect();
+
+        let from_unsigned_arms: Vec<_> = info.variants.iter().filter_map(|v| {
+            let vn = &v.name;
+            if let Some(ty) = &v.inner_type {
+                if v.is_arith() && v.is_copy() {
+                    Some(quote! { #kind_name::#vn => Self::#vn(<#ty as crate::types::core::NumericType>::from_u64(v)) })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }).collect();
+
+        let from_float_arms: Vec<_> = info.variants.iter().filter_map(|v| {
+            let vn = &v.name;
+            if let Some(ty) = &v.inner_type {
+                if v.is_arith() && v.is_copy() {
+                    Some(quote! { #kind_name::#vn => Self::#vn(<#ty as crate::types::core::NumericType>::from_f64(v)) })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }).collect();
+
+        quote! {
+            impl #name {
+                /// Extract as signed integer if possible.
+                pub fn as_i64_checked(&self) -> Option<i64> {
+                    match self {
+                        #(#extract_i64_arms,)*
+                        _ => None,
+                    }
+                }
+
+                /// Extract as unsigned integer if possible.
+                pub fn as_u64_checked(&self) -> Option<u64> {
+                    match self {
+                        #(#extract_u64_arms,)*
+                        _ => None,
+                    }
+                }
+
+                /// Extract as float.
+                pub fn as_f64_checked(&self) -> Option<f64> {
+                    match self {
+                        #(#extract_f64_arms,)*
+                        _ => None,
+                    }
+                }
+
+                /// Create a DataType from a signed integer with the given type hint.
+                pub fn from_i64_hinted(v: i64, hint: #kind_name) -> Self {
+                    match hint {
+                        #(#from_signed_arms,)*
+                        _ => Self::BigInt(Int64::from(v)),
+                    }
+                }
+
+                /// Create a DataType from an unsigned integer with the given type hint.
+                pub fn from_u64_hinted(v: u64, hint: #kind_name) -> Self {
+                    match hint {
+                        #(#from_unsigned_arms,)*
+                        _ => Self::BigUInt(UInt64::from(v)),
+                    }
+                }
+
+                /// Create a DataType from a float with the given type hint.
+                pub fn from_f64_hinted(v: f64, hint: #kind_name) -> Self {
+                    match hint {
+                        #(#from_float_arms,)*
+                        _ => Self::Double(Float64::from(v)),
+                    }
+                }
+
+                /// Perform a binary arithmetic operation with automatic type promotion.
+                pub fn arithmetic_op<F>(&self, other: &Self, hint: Option<#kind_name>, op: F) -> crate::database::errors::TypeResult<Self>
+                where
+                    F: FnOnce(crate::types::core::Number, crate::types::core::Number) -> crate::types::core::Number,
+                {
+                    let c1 = self.cls();
+                    let c2 = other.cls();
+                    let promoted = c1.promote(c2);
+
+                    let (l, r) = match promoted {
+                        crate::types::core::NumClass::Signed => {
+                            let l = self.as_i64_checked().ok_or_else(||     crate::database::errors::TypeError::Other(
+                                "Cannot convert to signed".to_string()
+                            ))?;
+                            let r = other.as_i64_checked().ok_or_else(||     crate::database::errors::TypeError::Other(
+                                "Cannot convert to signed".to_string()
+                            ))?;
+                            (crate::types::core::Number::Signed(l), crate::types::core::Number::Signed(r))
+                        }
+                        crate::types::core::NumClass::Unsigned => {
+                            let l = self.as_u64_checked().ok_or_else(||     crate::database::errors::TypeError::Other(
+                                "Cannot convert to unsigned".to_string()
+                            ))?;
+                            let r = other.as_u64_checked().ok_or_else(||     crate::database::errors::TypeError::Other(
+                                "Cannot convert to unsigned".to_string()
+                            ))?;
+                            (crate::types::core::Number::Unsigned(l), crate::types::core::Number::Unsigned(r))
+                        }
+                        crate::types::core::NumClass::Float => {
+                            let l = self.as_f64_checked().ok_or_else(||     crate::database::errors::TypeError::Other(
+                                "Cannot convert to float".to_string()
+                            ))?;
+                            let r = other.as_f64_checked().ok_or_else(||     crate::database::errors::TypeError::Other(
+                                "Cannot convert to float".to_string()
+                            ))?;
+                            (crate::types::core::Number::Float(l), crate::types::core::Number::Float(r))
+                        },
+                        crate::types::core::NumClass::Unknown => return Err(crate::database::errors::TypeError::Other(
+                                "Invalid datatype".to_string()
+                            ))
+                    };
+
+                    let result = op(l, r);
+                    let result_hint = hint.unwrap_or_else(|| match promoted {
+                        crate::types::core::NumClass::Signed => #kind_name::BigInt,
+                        crate::types::core::NumClass::Unsigned => #kind_name::BigUInt,
+                        crate::types::core::NumClass::Float => #kind_name::Double,
+                        crate::types::core::NumClass::Unknown => panic!("Invalid datatype")
+                    });
+
+                    Ok(match result {
+                        crate::types::core::Number::Signed(v) => Self::from_i64_hinted(v, result_hint),
+                        crate::types::core::Number::Unsigned(v) => Self::from_u64_hinted(v, result_hint),
+                        crate::types::core::Number::Float(v) => Self::from_f64_hinted(v, result_hint),
+                    })
+                }
+            }
+        }
+    }
+}
+
+impl ImplBlockGenerator {
+    fn gen_kind_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+        let kind_name = info.kind_name();
+        info.variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if v.inner_type.is_some() {
+                    quote! { Self::#vn(_) => #kind_name::#vn }
+                } else {
+                    quote! { Self::#vn => #kind_name::#vn }
+                }
+            })
+            .collect()
+    }
+
+    fn gen_size_arms(&self, info: &EnumInfo, variant: TypeVariant) -> Vec<TokenStream> {
+        info.variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if let Some(ty) = &v.inner_type {
+                    match variant {
+                        TypeVariant::Owned => {
+                            quote! { Self::#vn(inner) => <#ty as crate::types::core::AxmosValueType>::value_size(inner) }
+                        }
+                        TypeVariant::Ref => {
+                            quote! { Self::#vn(inner) => crate::types::core::AxmosValueTypeRef::size(inner) }
+                        }
+                        TypeVariant::RefMut => {
+                            quote! { Self::#vn(inner) => crate::types::core::AxmosValueTypeRefMut::size(inner) }
+                        }
+                    }
+                } else {
+                    quote! { Self::#vn => 0 }
+                }
+            })
+            .collect()
+    }
+
+    fn gen_matches_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+        let kind_name = info.kind_name();
+        info.variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if v.inner_type.is_some() {
+                    quote! { (Self::#vn(_), #kind_name::#vn) => true }
+                } else {
+                    quote! { (Self::#vn, #kind_name::#vn) => true }
+                }
+            })
+            .collect()
+    }
+
+    fn gen_to_owned_arms(&self, info: &EnumInfo, variant: TypeVariant) -> Vec<TokenStream> {
+        let name = &info.name;
+        info.variants
+            .iter()
+            .filter_map(|v| {
+                let vn = &v.name;
+                match (&v.inner_type, variant) {
+                    (Some(_), TypeVariant::Ref) => {
+                        Some(quote! { Self::#vn(inner) => #name::#vn(crate::types::core::AxmosValueTypeRef::to_owned(inner)) })
+                    }
+                    (Some(_), TypeVariant::RefMut) => {
+                        Some(quote! { Self::#vn(inner) => #name::#vn(crate::types::core::AxmosValueTypeRefMut::to_owned(inner)) })
+                    }
+                    (None, TypeVariant::Ref | TypeVariant::RefMut) => {
+                        Some(quote! { Self::#vn => #name::#vn })
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    fn gen_owned_impl(&self, info: &EnumInfo) -> TokenStream {
+        let name = &info.name;
+        let kind_name = info.kind_name();
+
+        let kind_arms = self.gen_kind_arms(info);
+        let size_arms = self.gen_size_arms(info, TypeVariant::Owned);
+        let matches_arms = self.gen_matches_arms(info);
+
+        quote! {
+            impl #name {
+                #[inline]
+                pub fn kind(&self) -> #kind_name {
+                    match self {
+                        #(#kind_arms,)*
+                    }
+                }
+
+                #[inline]
+                pub fn is_numeric(&self) -> bool {
+                    self.kind().is_numeric()
+                }
+
+                #[inline]
+                pub fn is_signed(&self) -> bool {
+                    self.kind().is_signed()
+                }
+
+                #[inline]
+                pub fn size(&self) -> usize {
+                    match self {
+                        #(#size_arms,)*
+                    }
+                }
+
+
+                #[inline]
+                pub fn cls(&self) -> crate::types::core::NumClass {
+                    self.kind().cls()
+                }
+
+                #[inline]
+                pub fn is_fixed_size(&self) -> bool {
+                    self.kind().is_fixed_size()
+                }
+
+                #[inline]
+                pub fn is_null(&self) -> bool {
+                    self.kind().is_null()
+                }
+
+                pub fn matches(&self, other: #kind_name) -> bool {
+                    if self.is_null() {
                         return true;
                     }
-
-                    if self.is_fixed_size() || self.is_null() || other.is_null() {
-                        return true;
+                    match (self, other) {
+                        #(#matches_arms,)*
+                        _ => false,
                     }
-
-                    false
                 }
             }
         }
     }
 
-    fn gen_arithmetic_ops(&self) -> TokenStream {
-        let name = &self.name;
-        let error_name = self.error_name();
+    fn gen_ref_impl(&self, info: &EnumInfo) -> TokenStream {
+        let name = &info.name;
+        let ref_name = info.ref_name();
+        let kind_name = info.kind_name();
 
-        let checked_methods: Vec<_> = ARITHMETIC_OPS
+        let kind_arms = self.gen_kind_arms(info);
+        let size_arms = self.gen_size_arms(info, TypeVariant::Ref);
+        let matches_arms = self.gen_matches_arms(info);
+        let to_owned_arms = self.gen_to_owned_arms(info, TypeVariant::Ref);
+
+        quote! {
+            impl<'a> #ref_name<'a> {
+                #[inline]
+                pub fn to_owned(&self) -> #name {
+                    match self {
+                        #(#to_owned_arms,)*
+                    }
+                }
+
+                #[inline]
+                pub fn kind(&self) -> #kind_name {
+                    match self {
+                        #(#kind_arms,)*
+                    }
+                }
+
+                #[inline]
+                pub fn size(&self) -> usize {
+                    match self {
+                        #(#size_arms,)*
+                    }
+                }
+
+                #[inline]
+                pub fn is_fixed_size(&self) -> bool {
+                    self.kind().is_fixed_size()
+                }
+
+                #[inline]
+                pub fn is_null(&self) -> bool {
+                    self.kind().is_null()
+                }
+
+                pub fn matches(&self, other: #kind_name) -> bool {
+                    if self.is_null() {
+                        return true;
+                    }
+                    match (self, other) {
+                        #(#matches_arms,)*
+                        _ => false,
+                    }
+                }
+            }
+        }
+    }
+
+    fn gen_ref_mut_impl(&self, info: &EnumInfo) -> TokenStream {
+        let name = &info.name;
+        let ref_mut_name = info.ref_mut_name();
+        let kind_name = info.kind_name();
+
+        let kind_arms = self.gen_kind_arms(info);
+        let size_arms = self.gen_size_arms(info, TypeVariant::RefMut);
+        let matches_arms = self.gen_matches_arms(info);
+        let to_owned_arms = self.gen_to_owned_arms(info, TypeVariant::RefMut);
+
+        quote! {
+            impl<'a> #ref_mut_name<'a> {
+                #[inline]
+                pub fn to_owned(&self) -> #name {
+                    match self {
+                        #(#to_owned_arms,)*
+                    }
+                }
+
+                #[inline]
+                pub fn kind(&self) -> #kind_name {
+                    match self {
+                        #(#kind_arms,)*
+                    }
+                }
+
+                #[inline]
+                pub fn size(&self) -> usize {
+                    match self {
+                        #(#size_arms,)*
+                    }
+                }
+
+                #[inline]
+                pub fn is_fixed_size(&self) -> bool {
+                    self.kind().is_fixed_size()
+                }
+
+                #[inline]
+                pub fn is_null(&self) -> bool {
+                    self.kind().is_null()
+                }
+
+                pub fn matches(&self, other: #kind_name) -> bool {
+                    if self.is_null() {
+                        return true;
+                    }
+                    match (self, other) {
+                        #(#matches_arms,)*
+                        _ => false,
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+struct ArithmeticGenerator;
+
+impl Generator for ArithmeticGenerator {
+    fn generate(&self, info: &EnumInfo) -> TokenStream {
+        let name = &info.name;
+
+        let checked_methods = self.gen_checked_methods(info);
+        let trait_impls = self.gen_trait_impls(info);
+
+        quote! {
+            impl #name {
+                #checked_methods
+            }
+
+            #trait_impls
+        }
+    }
+}
+
+impl ArithmeticGenerator {
+    fn gen_checked_methods(&self, info: &EnumInfo) -> TokenStream {
+        let methods: Vec<_> = ARITHMETIC_OPS
             .iter()
             .map(|(method_name, trait_name, op_name)| {
-                let method_ident = format_ident!("{}", method_name);
-                let op_ident = format_ident!("{}", trait_name);
+                self.gen_checked_method(info, method_name, trait_name, op_name)
+            })
+            .collect();
 
-                let match_arms: Vec<_> = self
-                    .variants
-                    .iter()
-                    .map(|v| {
-                        let vn = &v.name;
-                        if v.inner_type.is_some() && v.is_arith() {
-                            quote! {
-                                (Self::#vn(a), Self::#vn(b)) => {
-                                    Ok(Self::#vn(std::ops::#op_ident::$op_ident(*a, *b)))
-                                }
-                            }
-                            .to_string()
-                            .replace("$op_ident", op_name)
-                            .parse::<TokenStream>()
-                            .unwrap()
-                        } else if v.inner_type.is_some() {
-                            quote! {
-                                (Self::#vn(_), Self::#vn(_)) => Err(#error_name::NullOperation)
-                            }
-                        } else {
-                            quote! {
-                                (Self::#vn, Self::#vn) => Err(#error_name::NullOperation)
-                            }
-                        }
-                    })
-                    .collect();
+        quote! { #(#methods)* }
+    }
 
-                quote! {
-                    /// Perform checked arithmetic, returning error on type mismatch.
-                    pub fn #method_ident(&self, rhs: &Self) -> Result<Self, #error_name> {
-                        match (self, rhs) {
-                            #(#match_arms,)*
-                            (left, right) => Err(#error_name::TypeMismatch {
-                                left: left.kind(),
-                                right: right.kind(),
-                            }),
+    fn gen_checked_method(
+        &self,
+        info: &EnumInfo,
+        method_name: &str,
+        trait_name: &str,
+        op_name: &str,
+    ) -> TokenStream {
+        let method_ident = format_ident!("{}", method_name);
+        let trait_ident = format_ident!("{}", trait_name);
+        let op_ident = format_ident!("{}", op_name);
+
+        let match_arms: Vec<_> = info
+            .variants
+            .iter()
+            .map(|v| {
+                let vn = &v.name;
+                if v.inner_type.is_some() && v.is_arith() {
+                    quote! {
+                        (Self::#vn(a), Self::#vn(b)) => {
+                            Ok(Self::#vn(std::ops::#trait_ident::#op_ident(*a, *b)))
                         }
                     }
+                } else if v.inner_type.is_some() {
+                    quote! { (Self::#vn(_), Self::#vn(_)) => Err(crate::database::errors::TypeError::NullOperation) }
+                } else {
+                    quote! { (Self::#vn, Self::#vn) => Err(crate::database::errors::TypeError::NullOperation) }
                 }
             })
             .collect();
 
-        // Generate std::ops trait implementations using the checked methods
-        let trait_impls = quote! {
+        quote! {
+            /// Perform checked arithmetic, returning error on type mismatch.
+            pub fn #method_ident(&self, rhs: &Self) -> Result<Self, crate::database::errors::TypeError> {
+                match (self, rhs) {
+                    #(#match_arms,)*
+                    (left, right) => Err(crate::database::errors::TypeError::TypeMismatch {
+                        left: left.kind(),
+                        right: right.kind(),
+                    }),
+                }
+            }
+        }
+    }
+
+    fn gen_trait_impls(&self, info: &EnumInfo) -> TokenStream {
+        let name = &info.name;
+
+        quote! {
             impl std::ops::Add for #name {
                 type Output = Self;
                 fn add(self, rhs: Self) -> Self::Output {
@@ -1221,15 +1607,14 @@ impl EnumInfo {
                 }
             }
 
-
-            impl<'a> ::std::ops::Add<#name> for &'a #name {
+            impl<'a> std::ops::Add<#name> for &'a #name {
                 type Output = #name;
                 fn add(self, rhs: #name) -> Self::Output {
                     self.checked_add(&rhs).expect("arithmetic add failed")
                 }
             }
 
-            impl<'a, 'b> ::std::ops::Add<&'b #name> for &'a #name {
+            impl<'a, 'b> std::ops::Add<&'b #name> for &'a #name {
                 type Output = #name;
                 fn add(self, rhs: &'b #name) -> Self::Output {
                     self.checked_add(rhs).expect("arithmetic add failed")
@@ -1250,15 +1635,14 @@ impl EnumInfo {
                 }
             }
 
-
-             impl<'a> ::std::ops::Sub<#name> for &'a #name {
+            impl<'a> std::ops::Sub<#name> for &'a #name {
                 type Output = #name;
                 fn sub(self, rhs: #name) -> Self::Output {
                     self.checked_sub(&rhs).expect("arithmetic sub failed")
                 }
             }
 
-            impl<'a, 'b> ::std::ops::Sub<&'b #name> for &'a #name {
+            impl<'a, 'b> std::ops::Sub<&'b #name> for &'a #name {
                 type Output = #name;
                 fn sub(self, rhs: &'b #name) -> Self::Output {
                     self.checked_sub(rhs).expect("arithmetic sub failed")
@@ -1279,16 +1663,14 @@ impl EnumInfo {
                 }
             }
 
-
-
-            impl<'a> ::std::ops::Mul<#name> for &'a #name {
+            impl<'a> std::ops::Mul<#name> for &'a #name {
                 type Output = #name;
                 fn mul(self, rhs: #name) -> Self::Output {
                     self.checked_mul(&rhs).expect("arithmetic mul failed")
                 }
             }
 
-            impl<'a, 'b> ::std::ops::Mul<&'b #name> for &'a #name {
+            impl<'a, 'b> std::ops::Mul<&'b #name> for &'a #name {
                 type Output = #name;
                 fn mul(self, rhs: &'b #name) -> Self::Output {
                     self.checked_mul(rhs).expect("arithmetic mul failed")
@@ -1309,14 +1691,14 @@ impl EnumInfo {
                 }
             }
 
-             impl<'a> ::std::ops::Div<#name> for &'a #name {
+            impl<'a> std::ops::Div<#name> for &'a #name {
                 type Output = #name;
                 fn div(self, rhs: #name) -> Self::Output {
                     self.checked_div(&rhs).expect("arithmetic div failed")
                 }
             }
 
-            impl<'a, 'b> ::std::ops::Div<&'b #name> for &'a #name {
+            impl<'a, 'b> std::ops::Div<&'b #name> for &'a #name {
                 type Output = #name;
                 fn div(self, rhs: &'b #name) -> Self::Output {
                     self.checked_div(rhs).expect("arithmetic div failed")
@@ -1337,15 +1719,14 @@ impl EnumInfo {
                 }
             }
 
-
-              impl<'a> ::std::ops::Rem<#name> for &'a #name {
+            impl<'a> std::ops::Rem<#name> for &'a #name {
                 type Output = #name;
                 fn rem(self, rhs: #name) -> Self::Output {
                     self.checked_rem(&rhs).expect("arithmetic rem failed")
                 }
             }
 
-            impl<'a, 'b> ::std::ops::Rem<&'b #name> for &'a #name {
+            impl<'a, 'b> std::ops::Rem<&'b #name> for &'a #name {
                 type Output = #name;
                 fn rem(self, rhs: &'b #name) -> Self::Output {
                     self.checked_rem(rhs).expect("arithmetic rem failed")
@@ -1411,17 +1792,11 @@ impl EnumInfo {
                     *self = self.checked_rem(rhs).expect("arithmetic rem_assign failed");
                 }
             }
-        };
-
-        quote! {
-            impl #name {
-                #(#checked_methods)*
-            }
-
-            #trait_impls
         }
     }
 }
+
+
 
 pub fn data_type_impl(input: TokenStream) -> TokenStream {
     let input = match parse2::<DeriveInput>(input) {
@@ -1434,34 +1809,23 @@ pub fn data_type_impl(input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error(),
     };
 
-    let error_type = info.gen_type_err();
-    let kind_enum = info.gen_kind_enum();
-    let ref_enum = info.gen_ref_enum();
-    let ref_mut_enum = info.gen_ref_mut_enum();
-    let reinterpret_cast = info.gen_reinterpret_cast();
-    let reinterpret_cast_mut = info.gen_reinterpret_cast_mut();
-    let impl_block = info.gen_impl_block();
-    let try_cast = info.gen_try_cast();
-    let arithmetic_ops = info.gen_arithmetic_ops();
-    let as_f64 = info.gen_to_f64_method();
-    let ref_impls = info.gen_ref_impls();
-    let as_ref_impls = info.gen_as_ref_impls();
-    let coercion_impl = info.gen_coercion_impl();
+    let kind_enum = KindEnumGenerator.generate(&info);
+    let ref_enums = RefEnumsGenerator.generate(&info);
+    let casts = CastGenerator.generate(&info);
+    let comparisons = ComparisonGenerator.generate(&info);
+    let conversions = ConversionGenerator.generate(&info);
+    let impl_blocks = ImplBlockGenerator.generate(&info);
+    let arithmetic = ArithmeticGenerator.generate(&info);
+    let cls = NumericOpsGenerator.generate(&info);
 
     quote! {
-        #error_type
         #kind_enum
-        #as_f64
-        #ref_enum
-        #ref_mut_enum
-        #reinterpret_cast
-        #reinterpret_cast_mut
-        #impl_block
-        #try_cast
-        #arithmetic_ops
-
-        #ref_impls
-        #as_ref_impls
-        #coercion_impl
+        #ref_enums
+        #casts
+        #comparisons
+        #conversions
+        #impl_blocks
+        #arithmetic
+        #cls
     }
 }

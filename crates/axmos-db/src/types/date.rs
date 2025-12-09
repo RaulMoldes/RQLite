@@ -5,7 +5,8 @@
 use crate::{
     datetime::TimeOfDay,
     types::{
-        AxmosCastable, Blob, DateTime,
+        Blob, DateTime,
+        core::AxmosCastable,
         sized_types::{Float32, Float64, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64},
     },
 };

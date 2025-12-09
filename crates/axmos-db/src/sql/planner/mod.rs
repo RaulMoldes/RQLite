@@ -8,13 +8,16 @@ pub(crate) mod prop;
 pub(crate) mod rules;
 pub(crate) mod stats;
 
-use std::{
-    error::Error,
-    fmt::{Display, Formatter, Result as FmtResult},
-    sync::Arc,
-};
+use std::sync::Arc;
 
-use crate::{database::SharedCatalog, sql::binder::ast::*, transactions::worker::Worker};
+use crate::{
+    database::{
+        SharedCatalog,
+        errors::{OptimizerError, OptimizerResult},
+    },
+    sql::binder::ast::*,
+    transactions::worker::Worker,
+};
 
 pub(crate) use memo::{ExprId, GroupId, Memo};
 pub(crate) use model::{CostModel, DerivedStats};
@@ -23,33 +26,6 @@ pub(crate) use plan::PlanBuilder;
 pub(crate) use prop::RequiredProperties;
 pub(crate) use rules::{ImplementationRule, TransformationRule};
 pub(crate) use stats::StatisticsProvider;
-
-pub(crate) type OptimizerResult<T> = Result<T, OptimizerError>;
-
-#[derive(Debug, Clone)]
-pub(crate) enum OptimizerError {
-    NoPlanFound(String),
-    Internal(String),
-    Unsupported(String),
-    InvalidState(String),
-    CostOverflow,
-    Timeout,
-}
-
-impl Display for OptimizerError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::NoPlanFound(msg) => write!(f, "No plan found: {}", msg),
-            Self::Internal(msg) => write!(f, "Internal error: {}", msg),
-            Self::Unsupported(msg) => write!(f, "Unsupported: {}", msg),
-            Self::InvalidState(msg) => write!(f, "Invalid state: {}", msg),
-            Self::CostOverflow => write!(f, "Cost overflow"),
-            Self::Timeout => write!(f, "Optimization timeout"),
-        }
-    }
-}
-
-impl Error for OptimizerError {}
 
 #[derive(Debug, Clone)]
 pub(crate) struct OptimizerConfig {

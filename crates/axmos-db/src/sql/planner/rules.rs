@@ -1,6 +1,9 @@
 //! Transformation and implementation rules for the Cascades optimizer.
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::{
     OBJECT_ZERO,
@@ -9,7 +12,7 @@ use crate::{
         ast::{BinaryOperator, JoinType},
         binder::ast::*,
     },
-    types::DataTypeKind,
+    types::{DataType, DataTypeKind, UInt8},
 };
 
 use super::logical::*;
@@ -18,7 +21,6 @@ use super::physical::*;
 use super::prop::RequiredProperties;
 use super::{OptimizerError, OptimizerResult};
 
-use crate::types::{DataType, UInt8};
 pub trait Rule {
     fn name(&self) -> &'static str;
     fn promise(&self) -> u32 {
@@ -74,6 +76,219 @@ pub fn default_implementation_rules() -> Vec<Arc<dyn ImplementationRule>> {
         Arc::new(UpdateRule),
         Arc::new(DeleteRule),
     ]
+}
+
+/// Remap column indices in an expression from old schema to new schema
+/// `mapping` maps old_column_idx -> new_column_idx
+pub fn remap_expression_columns(
+    expr: &BoundExpression,
+    mapping: &HashMap<usize, usize>,
+) -> Option<BoundExpression> {
+    match expr {
+        BoundExpression::ColumnRef(col_ref) => {
+            let new_idx = mapping.get(&col_ref.column_idx)?;
+            Some(BoundExpression::ColumnRef(BoundColumnRef {
+                column_idx: *new_idx,
+                ..*col_ref
+            }))
+        }
+        BoundExpression::Literal { .. } => Some(expr.clone()),
+        BoundExpression::BinaryOp {
+            left,
+            op,
+            right,
+            result_type,
+        } => Some(BoundExpression::BinaryOp {
+            left: Box::new(remap_expression_columns(left, mapping)?),
+            op: *op,
+            right: Box::new(remap_expression_columns(right, mapping)?),
+            result_type: *result_type,
+        }),
+        BoundExpression::UnaryOp {
+            op,
+            expr: inner,
+            result_type,
+        } => Some(BoundExpression::UnaryOp {
+            op: *op,
+            expr: Box::new(remap_expression_columns(inner, mapping)?),
+            result_type: *result_type,
+        }),
+        BoundExpression::IsNull {
+            expr: inner,
+            negated,
+        } => Some(BoundExpression::IsNull {
+            expr: Box::new(remap_expression_columns(inner, mapping)?),
+            negated: *negated,
+        }),
+        BoundExpression::InList {
+            expr,
+            list,
+            negated,
+        } => Some(BoundExpression::InList {
+            expr: Box::new(remap_expression_columns(expr, mapping)?),
+            list: list
+                .iter()
+                .map(|e| remap_expression_columns(e, mapping))
+                .collect::<Option<Vec<_>>>()?,
+            negated: *negated,
+        }),
+        BoundExpression::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => Some(BoundExpression::Between {
+            expr: Box::new(remap_expression_columns(expr, mapping)?),
+            low: Box::new(remap_expression_columns(low, mapping)?),
+            high: Box::new(remap_expression_columns(high, mapping)?),
+            negated: *negated,
+        }),
+        // Handle other cases as needed
+        _ => Some(expr.clone()),
+    }
+}
+
+/// Collect all column indices referenced in an expression
+pub fn collect_column_indices(expr: &BoundExpression, indices: &mut HashSet<usize>) {
+    match expr {
+        BoundExpression::ColumnRef(col_ref) => {
+            indices.insert(col_ref.column_idx);
+        }
+        BoundExpression::BinaryOp { left, right, .. } => {
+            collect_column_indices(left, indices);
+            collect_column_indices(right, indices);
+        }
+        BoundExpression::UnaryOp { expr, .. } => {
+            collect_column_indices(expr, indices);
+        }
+        BoundExpression::IsNull { expr, .. } => {
+            collect_column_indices(expr, indices);
+        }
+        BoundExpression::InList { expr, list, .. } => {
+            collect_column_indices(expr, indices);
+            for e in list {
+                collect_column_indices(e, indices);
+            }
+        }
+        BoundExpression::Between {
+            expr, low, high, ..
+        } => {
+            collect_column_indices(expr, indices);
+            collect_column_indices(low, indices);
+            collect_column_indices(high, indices);
+        }
+        _ => {}
+    }
+}
+
+pub struct ProjectionPushdownRule;
+
+impl Rule for ProjectionPushdownRule {
+    fn name(&self) -> &'static str {
+        "ProjectionPushdown"
+    }
+    fn promise(&self) -> u32 {
+        80
+    }
+}
+
+impl TransformationRule for ProjectionPushdownRule {
+    fn matches(&self, expr: &LogicalExpr, memo: &Memo) -> bool {
+        // Matches a pattern of project followed by seq scan , as long as the seq scan does not include a projection already.
+        if let LogicalOperator::Project(project) = &expr.op {
+            if let Some(child_group) = expr.children.first() {
+                if let Some(child) = memo.get_group(*child_group) {
+                    if let Some(child_expr) = child.logical_exprs.first() {
+                        if let LogicalOperator::TableScan(scan) = &child_expr.op {
+                            // Only push down if scan doesn't already have projection
+                            return scan.columns.is_none();
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn apply(&self, expr: &LogicalExpr, memo: &mut Memo) -> OptimizerResult<Vec<LogicalExpr>> {
+        let LogicalOperator::Project(project) = &expr.op else {
+            return Ok(vec![]);
+        };
+
+        let child_group = *expr
+            .children
+            .first()
+            .ok_or_else(|| OptimizerError::InvalidState("No child".into()))?;
+        let child = memo
+            .get_group(child_group)
+            .ok_or_else(|| OptimizerError::InvalidState("Child not found".into()))?;
+        let child_expr = child
+            .logical_exprs
+            .first()
+            .ok_or_else(|| OptimizerError::InvalidState("No expressions".into()))?;
+        let LogicalOperator::TableScan(scan) = &child_expr.op else {
+            return Ok(vec![]);
+        };
+
+        // Collect all columns needed by the projection
+        let mut needed_columns = HashSet::new();
+        for proj_expr in &project.expressions {
+            collect_column_indices(&proj_expr.expr, &mut needed_columns);
+        }
+
+        // Sort column indices for consistent output
+        let mut columns: Vec<usize> = needed_columns.into_iter().collect();
+        columns.sort();
+
+        // If we need all columns, no benefit
+        if columns.len() >= scan.schema.columns().len() {
+            return Ok(vec![]);
+        }
+
+        // Create the mapping mapping: old_idx to new_idx
+        let mapping: HashMap<usize, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(new_idx, &old_idx)| (old_idx, new_idx))
+            .collect();
+
+        // Rewrite project expressions with new indices
+        let new_expressions: Vec<ProjectExpr> = project
+            .expressions
+            .iter()
+            .map(|pe| ProjectExpr {
+                expr: remap_expression_columns(&pe.expr, &mapping)
+                    .unwrap_or_else(|| pe.expr.clone()),
+                alias: pe.alias.clone(),
+            })
+            .collect();
+
+        // Build new scan with projection
+        let new_scan =
+            TableScanOp::new(scan.table_id, scan.table_name.clone(), scan.schema.clone())
+                .with_columns(columns);
+
+        // Build new input schema (projected schema)
+        let new_input_schema = new_scan.schema.clone(); // After with_columns, this is projected
+
+        // Insert new scan
+        let scan_group = memo.insert_logical_expr(LogicalExpr::new(
+            LogicalOperator::TableScan(new_scan),
+            vec![],
+        ));
+
+        // Build new project
+        let new_project = ProjectOp::new(
+            new_expressions,
+            new_input_schema,
+            project.output_schema.clone(),
+        );
+
+        Ok(vec![
+            LogicalExpr::new(LogicalOperator::Project(new_project), vec![scan_group])
+                .with_properties(expr.properties.clone()),
+        ])
+    }
 }
 
 pub struct JoinCommutativityRule;
@@ -1220,13 +1435,17 @@ impl ImplementationRule for TableScanRule {
         let LogicalOperator::TableScan(scan) = &expr.op else {
             return Ok(vec![]);
         };
-        let mut seq_scan = SeqScanOp::new(scan.table_id, scan.schema.clone());
-        if let Some(pred) = &scan.predicate {
-            seq_scan = seq_scan.with_predicate(pred.clone());
-        }
+
+        let mut seq_scan = SeqScanOp::new(scan.table_id, scan.table_schema.clone());
+
         if let Some(cols) = &scan.columns {
             seq_scan = seq_scan.with_columns(cols.clone());
         }
+
+        if let Some(pred) = &scan.predicate {
+            seq_scan = seq_scan.with_predicate(pred.clone());
+        }
+
         Ok(vec![PhysicalExpr::new(
             PhysicalOperator::SeqScan(seq_scan),
             vec![],

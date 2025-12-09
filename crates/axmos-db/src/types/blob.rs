@@ -4,21 +4,17 @@
 //! It implements AxmosValueType as a dynamic-size type.
 
 use crate::{
-    TextEncoding, from_blob,
+    TextEncoding, from_blob, impl_axmos_hashable,
     structures::comparator::{Comparator, VarlenComparator},
     types::{
         Date, DateTime, Float32, Float64, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
         VarInt,
         core::{
-            AxmosCastable, AxmosHashable, AxmosValueType, AxmosValueTypeRef, AxmosValueTypeRefMut,
-            DynamicSizeType,
+            AxmosCastable, AxmosValueType, AxmosValueTypeRef, AxmosValueTypeRefMut, DynamicSizeType,
         },
         varint::MAX_VARINT_LEN,
     },
 };
-
-use murmur3::murmur3_x64_128;
-use std::{hash::Hash, io::Cursor};
 
 use std::{
     cmp::{Ordering, PartialEq},
@@ -594,31 +590,4 @@ from_blob!(
     UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64
 );
 
-impl AxmosHashable for Blob {
-    fn hash64(&self) -> u64 {
-        // 128-bit Murmur3, take lower 64 bits
-        let bytes: &[u8] = self.as_ref();
-        let h128 = murmur3_x64_128(&mut Cursor::new(bytes), 0).unwrap();
-        h128 as u64
-    }
-}
-
-impl<'a> AxmosHashable for BlobRef<'a> {
-    fn hash64(&self) -> u64 {
-        let h128 = murmur3_x64_128(&mut Cursor::new(self.as_ref()), 0).unwrap();
-        h128 as u64
-    }
-}
-
-impl<'a> AxmosHashable for BlobRefMut<'a> {
-    fn hash64(&self) -> u64 {
-        let h128 = murmur3_x64_128(&mut Cursor::new(self.as_ref()), 0).unwrap();
-        h128 as u64
-    }
-}
-
-impl From<Blob> for f64 {
-    fn from(value: Blob) -> Self {
-        value.hash64() as f64
-    }
-}
+impl_axmos_hashable!(Blob);

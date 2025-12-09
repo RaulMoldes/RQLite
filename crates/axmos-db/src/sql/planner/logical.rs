@@ -149,7 +149,8 @@ impl LogicalOperator {
 pub(crate) struct TableScanOp {
     pub(crate) table_id: ObjectId,
     pub(crate) table_name: String,
-    pub(crate) schema: Schema,
+    pub(crate) schema: Schema, // Output schema (may be projected)
+    pub(crate) table_schema: Schema,
     /// Columns to read (if None, read all)
     pub(crate) columns: Option<Vec<usize>>,
     /// Inline filter predicate (pushed down)
@@ -161,6 +162,7 @@ impl TableScanOp {
         Self {
             table_id,
             table_name,
+            table_schema: schema.clone(),
             schema,
             columns: None,
             predicate: None,
@@ -168,6 +170,11 @@ impl TableScanOp {
     }
 
     pub(crate) fn with_columns(mut self, columns: Vec<usize>) -> Self {
+        let projected_cols: Vec<_> = columns
+            .iter()
+            .map(|&idx| self.table_schema.columns()[idx].clone())
+            .collect();
+        self.schema = Schema::from_columns(&projected_cols, 0);
         self.columns = Some(columns);
         self
     }

@@ -19,7 +19,7 @@ use crate::{
 use regex::Regex;
 use std::collections::HashSet;
 
-pub const AGGREGATE_FUNCTORS: [&str; 5] = ["COUNT", "SUM", "AVG", "MIN", "MAX"];
+pub(crate) const AGGREGATE_FUNCTORS: [&str; 5] = ["COUNT", "SUM", "AVG", "MIN", "MAX"];
 
 fn is_date_iso(s: &str) -> bool {
     let re = Regex::new(r"^\d{4}-\d{2}-\d{2}$").unwrap();
@@ -44,14 +44,14 @@ impl AnalyzerCtx {
     }
 }
 
-pub struct Analyzer {
+pub(crate) struct Analyzer {
     catalog: SharedCatalog,
     worker: Worker,
     ctx: AnalyzerCtx,
 }
 
 impl Analyzer {
-    pub fn new(catalog: SharedCatalog, worker: Worker) -> Self {
+    pub(crate) fn new(catalog: SharedCatalog, worker: Worker) -> Self {
         Self {
             catalog,
             worker,
@@ -59,7 +59,7 @@ impl Analyzer {
         }
     }
 
-    pub fn analyze(&mut self, stmt: &Statement) -> AnalyzerResult<()> {
+    pub(crate) fn analyze(&mut self, stmt: &Statement) -> AnalyzerResult<()> {
         match stmt {
             Statement::Transaction(t) => self.analyze_transaction(t),
             Statement::Select(s) => self.analyze_select(s),

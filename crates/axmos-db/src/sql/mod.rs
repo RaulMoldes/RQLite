@@ -1,6 +1,6 @@
-mod analyzer;
+pub mod analyzer;
 pub mod ast;
-mod binder;
+pub mod binder;
 pub mod executor;
 pub mod lexer;
 pub mod parser;
@@ -21,7 +21,7 @@ use crate::{
 mod tests;
 
 /// Parse a SQL query string into an AST
-pub fn parse_sql(sql: &str) -> SQLResult<Statement> {
+pub(crate) fn parse_sql(sql: &str) -> SQLResult<Statement> {
     let lexer = Lexer::new(sql);
     let mut parser = Parser::new(lexer);
     let mut stmt = parser.parse()?;

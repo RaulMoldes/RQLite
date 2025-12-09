@@ -990,7 +990,7 @@ macro_rules! impl_axmos_value_type_fixed {
 
                 const FIXED_SIZE: Option<usize> = Some(std::mem::size_of::<$inner>());
                 const IS_NUMERIC: bool = $is_numeric;
-                const IS_SIGNED: bool  = <Self as $crate::types::core::NumericType>::IS_SIGNED;
+                const NUM_CLASS: $crate::types::core::NumClass  = <Self as $crate::types::core::NumericType>::NUM_CLASS;
                 fn reinterpret(buffer: &[u8]) -> std::io::Result<(Self::Ref<'_>, usize)> {
                     let r = [<$wrapper Ref>]::from_bytes(buffer)?;
                     Ok((r, Self::SIZE))
@@ -1113,15 +1113,57 @@ macro_rules! float {
         $crate::arith!($name, $inner);
         $crate::impl_ref!($name, $inner);
         $crate::impl_axmos_value_type_fixed!($name, $inner, numeric = true);
+        $crate::impl_axmos_hashable!($name);
 
         // Implement NumericType
+        $crate::impl_numeric!($name($inner), Float);
+
+
+
+
+    };
+}
+
+#[macro_export]
+macro_rules! impl_numeric {
+    ($name:ident($inner:ty), $class:ident) => {
         impl $crate::types::core::NumericType for $name {
-            const IS_SIGNED: bool = true;
+            const NUM_CLASS: $crate::types::core::NumClass = $crate::types::core::NumClass::$class;
+
+            fn as_i64(&self) -> Option<i64> {
+                Some(self.0 as i64)
+            }
+
+            fn as_f64(&self) -> f64 {
+                self.0 as f64
+            }
+
+            fn from_i64(v: i64) -> Self {
+                Self(v as $inner)
+            }
+
+            fn from_u64(v: u64) -> Self {
+                Self(v as $inner)
+            }
+
+            fn from_f64(v: f64) -> Self {
+                Self(v as $inner)
+            }
         }
+    };
+}
 
-
-
-
+/// Implement AxmosHashable for types that implement AsRef<[u8]>.
+/// Uses MurmurHash3 on the byte representation.
+#[macro_export]
+macro_rules! impl_axmos_hashable {
+    ($ty:ty) => {
+        impl $crate::types::core::AxmosHashable for $ty {
+            #[inline]
+            fn hash128(&self) -> u128 {
+                $crate::types::core::murmur_hash(self.as_ref())
+            }
+        }
     };
 }
 
@@ -1141,11 +1183,10 @@ macro_rules! signed_integer {
         $crate::arith!($name, $inner);
         $crate::impl_ref!($name, $inner);
         $crate::impl_axmos_value_type_fixed!($name, $inner, numeric = true);
+        $crate::impl_axmos_hashable!($name);
 
         // Implement NumericType
-        impl $crate::types::core::NumericType for $name {
-            const IS_SIGNED: bool = true;
-        }
+        $crate::impl_numeric!($name($inner), Signed);
 
         impl From<$name> for f64 {
             fn from(value: $name) -> Self {
@@ -1172,11 +1213,10 @@ macro_rules! unsigned_integer {
         $crate::arith!($name, $inner);
         $crate::impl_ref!($name, $inner);
         $crate::impl_axmos_value_type_fixed!($name, $inner, numeric = true);
+        $crate::impl_axmos_hashable!($name);
 
         // Implement NumericType
-        impl $crate::types::core::NumericType for $name {
-            const IS_SIGNED: bool = false;
-        }
+        $crate::impl_numeric!($name($inner), Unsigned);
 
         impl From<$name> for f64 {
             fn from(value: $name) -> Self {

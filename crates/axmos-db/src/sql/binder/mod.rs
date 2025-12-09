@@ -33,11 +33,11 @@ struct ScopeEntry {
 }
 
 impl ScopeEntry {
-    pub fn get_schema(&self) -> &Schema {
+    pub(crate) fn get_schema(&self) -> &Schema {
         &self.schema
     }
 
-    pub fn get_column(&self, column_name: &str) -> Option<BoundColumnRef> {
+    pub(crate) fn get_column(&self, column_name: &str) -> Option<BoundColumnRef> {
         if let Some(idx) = self.get_schema().column_idx(column_name) {
             let data_type = self.get_schema().columns[*idx].dtype;
             return Some(BoundColumnRef {
@@ -187,14 +187,14 @@ impl BinderContext {
     }
 }
 
-pub struct Binder {
+pub(crate) struct Binder {
     catalog: SharedCatalog,
     worker: Worker,
     ctx: BinderContext,
 }
 
 impl Binder {
-    pub fn new(catalog: SharedCatalog, worker: Worker) -> Self {
+    pub(crate) fn new(catalog: SharedCatalog, worker: Worker) -> Self {
         Self {
             catalog,
             worker,
@@ -202,7 +202,7 @@ impl Binder {
         }
     }
 
-    pub fn bind(&mut self, stmt: &Statement) -> BinderResult<BoundStatement> {
+    pub(crate) fn bind(&mut self, stmt: &Statement) -> BinderResult<BoundStatement> {
         self.ctx = BinderContext::new();
         self.bind_statement(stmt)
     }

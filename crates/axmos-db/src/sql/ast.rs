@@ -1,12 +1,12 @@
 use crate::types::DataTypeKind;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
-pub trait Simplify {
+pub(crate) trait Simplify {
     fn simplify(&mut self);
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Expr {
+pub(crate) enum Expr {
     // Literals
     Number(f64),
     String(String),
@@ -284,13 +284,13 @@ impl Simplify for Expr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct WhenClause {
-    pub condition: Expr,
-    pub result: Expr,
+pub(crate) struct WhenClause {
+    pub(crate) condition: Expr,
+    pub(crate) result: Expr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BinaryOperator {
+pub(crate) enum BinaryOperator {
     // Arithmetic
     Plus,
     Minus,
@@ -325,23 +325,23 @@ pub enum BinaryOperator {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum UnaryOperator {
+pub(crate) enum UnaryOperator {
     Plus,
     Minus,
     Not,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SelectStatement {
-    pub distinct: bool,
-    pub columns: Vec<SelectItem>,
-    pub from: Option<TableReference>,
-    pub where_clause: Option<Expr>,
-    pub group_by: Vec<Expr>,
-    pub having: Option<Expr>,
-    pub order_by: Vec<OrderByExpr>,
-    pub limit: Option<usize>,
-    pub offset: Option<usize>,
+pub(crate) struct SelectStatement {
+    pub(crate) distinct: bool,
+    pub(crate) columns: Vec<SelectItem>,
+    pub(crate) from: Option<TableReference>,
+    pub(crate) where_clause: Option<Expr>,
+    pub(crate) group_by: Vec<Expr>,
+    pub(crate) having: Option<Expr>,
+    pub(crate) order_by: Vec<OrderByExpr>,
+    pub(crate) limit: Option<usize>,
+    pub(crate) offset: Option<usize>,
 }
 
 impl Simplify for SelectStatement {
@@ -369,7 +369,7 @@ impl Simplify for SelectStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum SelectItem {
+pub(crate) enum SelectItem {
     Star,
     ExprWithAlias { expr: Expr, alias: Option<String> },
 }
@@ -382,7 +382,7 @@ impl Simplify for SelectItem {
     }
 }
 #[derive(Debug, Clone, PartialEq)]
-pub enum TableReference {
+pub(crate) enum TableReference {
     Table {
         name: String,
         alias: Option<String>,
@@ -421,7 +421,7 @@ impl Simplify for TableReference {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum JoinType {
+pub(crate) enum JoinType {
     Inner,
     Left,
     Right,
@@ -430,9 +430,9 @@ pub enum JoinType {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct OrderByExpr {
-    pub expr: Expr,
-    pub asc: bool,
+pub(crate) struct OrderByExpr {
+    pub(crate) expr: Expr,
+    pub(crate) asc: bool,
 }
 
 impl Simplify for OrderByExpr {
@@ -442,7 +442,7 @@ impl Simplify for OrderByExpr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Statement {
+pub(crate) enum Statement {
     With(WithStatement),
     Select(SelectStatement),
     Insert(InsertStatement),
@@ -470,10 +470,10 @@ impl Simplify for Statement {
     }
 }
 #[derive(Debug, Clone, PartialEq)]
-pub struct WithStatement {
-    pub recursive: bool,
-    pub ctes: Vec<(String, SelectStatement)>,
-    pub body: Box<SelectStatement>,
+pub(crate) struct WithStatement {
+    pub(crate) recursive: bool,
+    pub(crate) ctes: Vec<(String, SelectStatement)>,
+    pub(crate) body: Box<SelectStatement>,
 }
 
 impl Simplify for WithStatement {
@@ -487,10 +487,10 @@ impl Simplify for WithStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct InsertStatement {
-    pub table: String,
-    pub columns: Option<Vec<String>>,
-    pub values: Values,
+pub(crate) struct InsertStatement {
+    pub(crate) table: String,
+    pub(crate) columns: Option<Vec<String>>,
+    pub(crate) values: Values,
 }
 
 impl Simplify for InsertStatement {
@@ -500,7 +500,7 @@ impl Simplify for InsertStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Values {
+pub(crate) enum Values {
     Values(Vec<Vec<Expr>>),
     Query(Box<SelectStatement>),
 }
@@ -522,10 +522,10 @@ impl Simplify for Values {
     }
 }
 #[derive(Debug, Clone, PartialEq)]
-pub struct UpdateStatement {
-    pub table: String,
-    pub set_clauses: Vec<SetClause>,
-    pub where_clause: Option<Expr>,
+pub(crate) struct UpdateStatement {
+    pub(crate) table: String,
+    pub(crate) set_clauses: Vec<SetClause>,
+    pub(crate) where_clause: Option<Expr>,
 }
 
 impl Simplify for UpdateStatement {
@@ -541,9 +541,9 @@ impl Simplify for UpdateStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SetClause {
-    pub column: String,
-    pub value: Expr,
+pub(crate) struct SetClause {
+    pub(crate) column: String,
+    pub(crate) value: Expr,
 }
 
 impl Simplify for SetClause {
@@ -553,9 +553,9 @@ impl Simplify for SetClause {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct DeleteStatement {
-    pub table: String,
-    pub where_clause: Option<Expr>,
+pub(crate) struct DeleteStatement {
+    pub(crate) table: String,
+    pub(crate) where_clause: Option<Expr>,
 }
 
 impl Simplify for DeleteStatement {
@@ -567,10 +567,10 @@ impl Simplify for DeleteStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct CreateTableStatement {
-    pub table: String,
-    pub columns: Vec<ColumnDefExpr>,
-    pub constraints: Vec<TableConstraintExpr>,
+pub(crate) struct CreateTableStatement {
+    pub(crate) table: String,
+    pub(crate) columns: Vec<ColumnDefExpr>,
+    pub(crate) constraints: Vec<TableConstraintExpr>,
 }
 
 impl Simplify for CreateTableStatement {
@@ -585,10 +585,10 @@ impl Simplify for CreateTableStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ColumnDefExpr {
-    pub name: String,
-    pub data_type: DataTypeKind,
-    pub constraints: Vec<ColumnConstraintExpr>,
+pub(crate) struct ColumnDefExpr {
+    pub(crate) name: String,
+    pub(crate) data_type: DataTypeKind,
+    pub(crate) constraints: Vec<ColumnConstraintExpr>,
 }
 
 impl Simplify for ColumnDefExpr {
@@ -600,7 +600,7 @@ impl Simplify for ColumnDefExpr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ColumnConstraintExpr {
+pub(crate) enum ColumnConstraintExpr {
     NotNull,
     Unique,
     PrimaryKey,
@@ -619,7 +619,7 @@ impl Simplify for ColumnConstraintExpr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum TableConstraintExpr {
+pub(crate) enum TableConstraintExpr {
     PrimaryKey(Vec<String>),
     Unique(Vec<String>),
     ForeignKey {
@@ -639,9 +639,9 @@ impl Simplify for TableConstraintExpr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct AlterTableStatement {
-    pub table: String,
-    pub action: AlterAction,
+pub(crate) struct AlterTableStatement {
+    pub(crate) table: String,
+    pub(crate) action: AlterAction,
 }
 
 impl Simplify for AlterTableStatement {
@@ -651,9 +651,9 @@ impl Simplify for AlterTableStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct AlterColumnStatement {
-    pub name: String,
-    pub action: AlterColumnAction,
+pub(crate) struct AlterColumnStatement {
+    pub(crate) name: String,
+    pub(crate) action: AlterColumnAction,
 }
 
 impl Simplify for AlterColumnStatement {
@@ -663,7 +663,7 @@ impl Simplify for AlterColumnStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum AlterAction {
+pub(crate) enum AlterAction {
     AddColumn(ColumnDefExpr),
     DropColumn(String),
     AlterColumn(AlterColumnStatement),
@@ -683,7 +683,7 @@ impl Simplify for AlterAction {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum AlterColumnAction {
+pub(crate) enum AlterColumnAction {
     SetDataType(DataTypeKind),
     SetDefault(Expr),
     DropDefault,
@@ -700,35 +700,35 @@ impl Simplify for AlterColumnAction {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct DropTableStatement {
-    pub table: String,
-    pub if_exists: bool,
-    pub cascade: bool,
+pub(crate) struct DropTableStatement {
+    pub(crate) table: String,
+    pub(crate) if_exists: bool,
+    pub(crate) cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct CreateIndexStatement {
-    pub name: String,
-    pub table: String,
-    pub columns: Vec<IndexColumn>,
-    pub unique: bool,
-    pub if_not_exists: bool,
+pub(crate) struct CreateIndexStatement {
+    pub(crate) name: String,
+    pub(crate) table: String,
+    pub(crate) columns: Vec<IndexColumn>,
+    pub(crate) unique: bool,
+    pub(crate) if_not_exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct IndexColumn {
-    pub name: String,
-    pub order: Option<OrderDirection>,
+pub(crate) struct IndexColumn {
+    pub(crate) name: String,
+    pub(crate) order: Option<OrderDirection>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum OrderDirection {
+pub(crate) enum OrderDirection {
     Asc,
     Desc,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum TransactionStatement {
+pub(crate) enum TransactionStatement {
     Begin,
     Commit,
     Rollback,

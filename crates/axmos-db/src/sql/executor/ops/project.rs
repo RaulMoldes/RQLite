@@ -1,12 +1,15 @@
 // src/sql/executor/ops/project.rs
 //! Project executor that evaluates output expressions.
-
-use std::io::{self, Error as IoError, ErrorKind};
-
-use crate::database::schema::Schema;
-use crate::sql::binder::ast::BoundExpression;
-use crate::sql::executor::eval::ExpressionEvaluator;
-use crate::sql::executor::{ExecutionStats, Executor, Row};
+use crate::{
+    database::{
+        errors::{EvalResult, ExecutionResult, QueryExecutionError},
+        schema::Schema,
+    },
+    sql::{
+        binder::ast::BoundExpression,
+        executor::{ExecutionState, ExecutionStats, Executor, Row, eval::ExpressionEvaluator},
+    },
+};
 
 /// Project operator that computes output expressions for each input row.
 pub(crate) struct Project {
@@ -19,7 +22,7 @@ pub(crate) struct Project {
     /// Execution statistics
     stats: ExecutionStats,
     /// Whether the executor is open
-    is_open: bool,
+    state: ExecutionState,
 }
 
 impl Project {
@@ -39,7 +42,7 @@ impl Project {
             expressions,
             output_schema,
             stats: ExecutionStats::default(),
-            is_open: false,
+            state: ExecutionState::Closed,
         }
     }
 
@@ -49,11 +52,11 @@ impl Project {
     }
 
     /// Evaluate all projection expressions against a row.
-    fn project_row(&self, input_row: &Row) -> io::Result<Row> {
+    fn project_row(&self, input_row: &Row) -> EvalResult<Row> {
         let input_schema = self.child.schema();
         let evaluator = ExpressionEvaluator::new(input_row, input_schema);
 
-        let mut output_row = Vec::with_capacity(self.expressions.len());
+        let mut output_row = Row::with_capacity(self.expressions.len());
         for expr in &self.expressions {
             let value = evaluator.evaluate(expr.clone())?;
             output_row.push(value);
@@ -64,24 +67,23 @@ impl Project {
 }
 
 impl Executor for Project {
-    fn open(&mut self) -> io::Result<()> {
-        if self.is_open {
-            return Err(IoError::new(
-                ErrorKind::InvalidInput,
-                "Project already open",
-            ));
+    fn open(&mut self) -> ExecutionResult<()> {
+        if matches!(self.state, ExecutionState::Open | ExecutionState::Running) {
+            return Err(QueryExecutionError::InvalidState(self.state));
         }
 
         self.child.open()?;
-        self.is_open = true;
+        self.state = ExecutionState::Open;
         self.stats = ExecutionStats::default();
 
         Ok(())
     }
 
-    fn next(&mut self) -> io::Result<Option<Row>> {
-        if !self.is_open {
-            return Err(IoError::new(ErrorKind::InvalidInput, "Project not opened"));
+    fn next(&mut self) -> ExecutionResult<Option<Row>> {
+        match self.state {
+            ExecutionState::Closed => return Ok(None),
+            ExecutionState::Open => self.state = ExecutionState::Running,
+            _ => {}
         }
 
         match self.child.next()? {
@@ -95,13 +97,13 @@ impl Executor for Project {
         }
     }
 
-    fn close(&mut self) -> io::Result<()> {
-        if !self.is_open {
+    fn close(&mut self) -> ExecutionResult<()> {
+        if matches!(self.state, ExecutionState::Closed) {
             return Ok(());
         }
 
         self.child.close()?;
-        self.is_open = false;
+        self.state = ExecutionState::Closed;
 
         Ok(())
     }

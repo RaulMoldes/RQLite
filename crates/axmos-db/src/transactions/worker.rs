@@ -2,7 +2,7 @@ use crate::{
     DataType,
     database::{
         META_INDEX, META_TABLE, SharedCatalog,
-        errors::{TransactionError, TransactionResult},
+        errors::{AlreadyExists, QueryExecutionError, TransactionError, TransactionResult},
         meta_idx_schema,
         schema::{Column, Index, IndexInfo, ObjectType, Relation, Schema, Table},
     },
@@ -390,8 +390,8 @@ impl WorkerPool {
         // Check if relation already exists
         if let Ok(SearchResult::Found(_)) = self.catalog.lookup_relation(table_name, worker.clone())
         {
-            return Err(TransactionError::RelationAlreadyExists(
-                table_name.to_string(),
+            return Err(TransactionError::QueryExecution(
+                QueryExecutionError::AlreadyExists(AlreadyExists::Table(table_name.to_string())),
             ));
         }
 
@@ -439,19 +439,20 @@ impl WorkerPool {
         let mut relation = self.catalog.get_relation(table_name, worker.clone())?;
 
         if !matches!(relation, Relation::TableRel(_)) {
-            return Err(TransactionError::InvalidObjectType(
-                relation.id(),
-                ObjectType::Table,
-                ObjectType::Index,
+            return Err(TransactionError::QueryExecution(
+                QueryExecutionError::InvalidObjectType(ObjectType::Table),
             ));
         }
 
         // Check column doesn't already exist
         if relation.schema().has_column(column.name()) {
             let name_str = column.name().to_string();
-            return Err(TransactionError::Other(format!(
-                "Column {name_str} already exists"
-            )));
+            return Err(TransactionError::QueryExecution(
+                QueryExecutionError::AlreadyExists(AlreadyExists::Column(
+                    table_name.to_string(),
+                    name_str,
+                )),
+            ));
         }
 
         // Get old tuple for WAL
@@ -487,10 +488,8 @@ impl WorkerPool {
         let mut relation = self.catalog.get_relation(table_name, worker.clone())?;
 
         if !matches!(relation, Relation::TableRel(_)) {
-            return Err(TransactionError::InvalidObjectType(
-                relation.id(),
-                ObjectType::Table,
-                ObjectType::Index,
+            return Err(TransactionError::QueryExecution(
+                QueryExecutionError::InvalidObjectType(ObjectType::Table),
             ));
         }
 
@@ -601,10 +600,8 @@ impl WorkerPool {
         let mut relation = self.catalog.get_relation(table_name, worker.clone())?;
 
         if !matches!(relation, Relation::TableRel(_)) {
-            return Err(TransactionError::InvalidObjectType(
-                relation.id(),
-                ObjectType::Table,
-                ObjectType::Index,
+            return Err(TransactionError::QueryExecution(
+                QueryExecutionError::InvalidObjectType(ObjectType::Index),
             ));
         }
 
@@ -654,8 +651,8 @@ impl WorkerPool {
         // Check if index already exists
         if let Ok(SearchResult::Found(_)) = self.catalog.lookup_relation(index_name, worker.clone())
         {
-            return Err(TransactionError::RelationAlreadyExists(
-                index_name.to_string(),
+            return Err(TransactionError::QueryExecution(
+                QueryExecutionError::AlreadyExists(AlreadyExists::Index(index_name.to_string())),
             ));
         }
 
@@ -663,10 +660,8 @@ impl WorkerPool {
         let mut table_relation = self.catalog.get_relation(table_name, worker.clone())?;
 
         if !matches!(table_relation, Relation::TableRel(_)) {
-            return Err(TransactionError::InvalidObjectType(
-                table_relation.id(),
-                ObjectType::Table,
-                ObjectType::Index,
+            return Err(TransactionError::QueryExecution(
+                QueryExecutionError::InvalidObjectType(ObjectType::Table),
             ));
         }
 
@@ -1026,7 +1021,9 @@ impl WorkerPool {
         // Check if already deleted
         if tuple_ref.xmax() != crate::TRANSACTION_ZERO {
             btree.clear_worker_stack();
-            return Err(TransactionError::AlreadyDeleted(logical_id));
+            return Err(TransactionError::QueryExecution(
+                QueryExecutionError::AlreadyDeleted(logical_id),
+            ));
         }
 
         let mut tuple = Tuple::try_from((payload.as_ref(), schema))?;
@@ -1358,8 +1355,9 @@ mod worker_pool_tests {
         assert!(
             matches!(
                 result,
-                Err(TransactionError::AlreadyDeleted(_))
-                    | Err(TransactionError::TupleNotVisible(_, _))
+                Err(TransactionError::QueryExecution(
+                    QueryExecutionError::AlreadyDeleted(_)
+                )) | Err(TransactionError::TupleNotVisible(_, _))
             ),
             "Deleting already-deleted tuple should fail, got: {:?}",
             result

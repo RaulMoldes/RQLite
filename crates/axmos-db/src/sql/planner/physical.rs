@@ -4,7 +4,10 @@
 //! describe HOW the query will be executed. Each physical operator corresponds to
 //! a specific iterator implementation.
 
-use std::fmt::{Debug, Display};
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Display},
+};
 
 use crate::{
     database::schema::Schema,
@@ -151,7 +154,7 @@ impl PhysicalOperator {
     /// Get the output schema
     pub(crate) fn output_schema(&self) -> &Schema {
         match self {
-            Self::SeqScan(op) => &op.schema,
+            Self::SeqScan(op) => &op.output_schema,
             Self::IndexScan(op) => &op.schema,
             Self::IndexOnlyScan(op) => &op.schema,
             Self::Filter(op) => &op.schema,
@@ -245,23 +248,30 @@ impl PhysicalOperator {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SeqScanOp {
     pub(crate) table_id: ObjectId,
-    pub(crate) schema: Schema,
+    pub(crate) table_schema: Schema, // Input table schema for reading tuples.
+    pub(crate) output_schema: Schema,
     pub(crate) columns: Option<Vec<usize>>,
     pub(crate) predicate: Option<BoundExpression>,
 }
 
 impl SeqScanOp {
-    pub(crate) fn new(table_id: ObjectId, schema: Schema) -> Self {
+    pub(crate) fn new(table_id: ObjectId, input_schema: Schema) -> Self {
         Self {
             table_id,
-
-            schema,
+            table_schema: input_schema.clone(),
+            output_schema: input_schema, // By default, the output schema matches the input schema
             columns: None,
             predicate: None,
         }
     }
 
     pub(crate) fn with_columns(mut self, columns: Vec<usize>) -> Self {
+        // Build projected schema from selected columns
+        let projected_cols: Vec<_> = columns
+            .iter()
+            .map(|&idx| self.table_schema.columns()[idx].clone())
+            .collect();
+        self.output_schema = Schema::from_columns(&projected_cols, 0);
         self.columns = Some(columns);
         self
     }
@@ -269,6 +279,21 @@ impl SeqScanOp {
     pub(crate) fn with_predicate(mut self, predicate: BoundExpression) -> Self {
         self.predicate = Some(predicate);
         self
+    }
+
+    /// Get the mapping from output column index to table column index
+    pub(crate) fn column_mapping(&self) -> Option<&Vec<usize>> {
+        self.columns.as_ref()
+    }
+
+    /// Get inverse mapping: table column index -> output column index
+    pub(crate) fn inverse_column_mapping(&self) -> Option<HashMap<usize, usize>> {
+        self.columns.as_ref().map(|cols| {
+            cols.iter()
+                .enumerate()
+                .map(|(output_idx, &table_idx)| (table_idx, output_idx))
+                .collect()
+        })
     }
 }
 

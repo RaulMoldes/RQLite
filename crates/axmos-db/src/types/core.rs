@@ -4,8 +4,9 @@
 //! to participate in the DataType system. The derive macro uses trait
 //! dispatch exclusively
 
-use std::io::Result;
-
+use crate::impl_number_op;
+use murmur3::murmur3_x64_128;
+use std::io::{Cursor, Result};
 /// Core trait for all Axmos value types.
 ///
 /// The derive macro dispatches all operations through this trait,
@@ -29,7 +30,7 @@ pub trait AxmosValueType: Sized {
     const IS_NUMERIC: bool = false;
 
     /// Wether this type is signed or not
-    const IS_SIGNED: bool = false;
+    const NUM_CLASS: NumClass = NumClass::Unknown;
 
     /// Reinterpret a byte buffer as this type's reference.
     /// Returns the reference and the number of bytes consumed.
@@ -92,10 +93,61 @@ pub trait FixedSizeType: AxmosValueType {
 /// Marker trait for dynamic-size types.
 pub trait DynamicSizeType: AxmosValueType {}
 
-/// Marker trait for numeric types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NumClass {
+    Signed,
+    Unsigned,
+    Float,
+    Unknown,
+}
+
+impl NumClass {
+    /// Promote two classes to a common class
+    pub(crate) fn promote(self, other: Self) -> Self {
+        match (self, other) {
+            (NumClass::Float, _) | (_, NumClass::Float) => NumClass::Float,
+            (NumClass::Signed, NumClass::Unsigned) | (NumClass::Unsigned, NumClass::Signed) => {
+                NumClass::Signed
+            }
+            (NumClass::Signed, NumClass::Signed) => NumClass::Signed,
+            (NumClass::Unsigned, NumClass::Unsigned) => NumClass::Unsigned,
+            (_, _) => panic!("Unknown numeric class. Cannot promote"),
+        }
+    }
+}
+
+/// Trait for numeric types.
 pub trait NumericType: AxmosValueType {
-    /// Whether this numeric type is signed (true) or unsigned (false)
-    const IS_SIGNED: bool = <Self as AxmosValueType>::IS_SIGNED;
+    /// Classification for type promotion
+    const NUM_CLASS: NumClass;
+
+    /// Extract as i64 (for signed types)
+    fn as_i64(&self) -> Option<i64> {
+        None
+    }
+
+    /// Extract as u64 (for unsigned types)
+    fn as_u64(&self) -> Option<u64> {
+        None
+    }
+
+    /// Extract as f64 (for all numeric types)
+    fn as_f64(&self) -> f64;
+
+    /// Create from i64
+    fn from_i64(v: i64) -> Self
+    where
+        Self: Sized;
+
+    /// Create from u64
+    fn from_u64(v: u64) -> Self
+    where
+        Self: Sized;
+
+    /// Create from f64
+    fn from_f64(v: f64) -> Self
+    where
+        Self: Sized;
 }
 
 /// Trait for type casting between Axmos value types.
@@ -137,5 +189,62 @@ pub trait AxmosComparable: PartialOrd {}
 impl<T: PartialOrd> AxmosComparable for T {}
 
 pub trait AxmosHashable {
-    fn hash64(&self) -> u64;
+    fn hash128(&self) -> u128;
+}
+
+/// MurmurHash3 (128-bit x64 variant).
+pub(crate) fn murmur_hash(bytes: &[u8]) -> u128 {
+    let mut cursor = Cursor::new(bytes);
+    let buf = [0u8; 16];
+    let hash128 = murmur3_x64_128(&mut cursor, 0).unwrap();
+    hash128
+}
+
+pub(crate) enum Number {
+    Signed(i64),
+    Unsigned(u64),
+    Float(f64),
+}
+
+impl_number_op!(number_add, +);
+impl_number_op!(number_sub, -);
+impl_number_op!(number_mul, *);
+impl_number_op!(number_div, /);
+impl_number_op!(number_mod, %);
+
+use std::ops::{Add, Div, Mul, Rem, Sub};
+
+impl Add for Number {
+    type Output = Number;
+    fn add(self, rhs: Number) -> Number {
+        number_add(self, rhs)
+    }
+}
+
+impl Sub for Number {
+    type Output = Number;
+    fn sub(self, rhs: Number) -> Number {
+        number_sub(self, rhs)
+    }
+}
+
+impl Mul for Number {
+    type Output = Number;
+    fn mul(self, rhs: Number) -> Number {
+        number_mul(self, rhs)
+    }
+}
+
+impl Div for Number {
+    type Output = Number;
+    fn div(self, rhs: Number) -> Number {
+        number_div(self, rhs)
+    }
+}
+
+impl Rem for Number {
+    type Output = Number;
+    fn rem(self, rhs: Number) -> Number {
+        number_mod(self, rhs)
+    }
 }

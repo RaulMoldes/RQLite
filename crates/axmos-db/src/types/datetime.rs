@@ -4,7 +4,8 @@
 
 use crate::types::date::Date;
 use crate::types::{
-    AxmosCastable, Blob,
+    Blob,
+    core::AxmosCastable,
     sized_types::{Float32, Float64, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64},
 };
 use crate::{direct_axmos_cast, scalar, unsigned_integer};

@@ -1,31 +1,64 @@
 // src/sql/executor/mod.rs
+pub mod build;
 pub mod context;
 pub mod eval;
 pub mod ops;
 
-use std::io;
+use crate::{
+    database::{errors::ExecutionResult, schema::Schema},
+    types::DataType,
+    vector,
+};
 
-use crate::database::schema::Schema;
-use crate::sql::executor::context::ExecutionContext;
-use crate::sql::executor::ops::{filter::Filter, project::Project, seq_scan::SeqScanExecutor};
-use crate::sql::planner::physical::{PhysicalOperator, PhysicalPlan};
-use crate::types::DataType;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
-use std::io::{Error as IoError, ErrorKind};
+vector!(Row, DataType);
 
-/// Result of a single row fetch
-pub(crate) type Row = Vec<DataType>;
+impl From<&[DataType]> for Row {
+    fn from(value: &[DataType]) -> Self {
+        Self(value.to_vec())
+    }
+}
+
+impl Display for Row {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        for (i, value) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, " | ")?;
+            }
+            write!(f, "{}", value)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum ExecutionState {
+    Open,
+    Closed,
+    Running,
+}
+
+impl Display for ExecutionState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Open => f.write_str("OPEN"),
+            Self::Closed => f.write_str("CLOSED"),
+            Self::Running => f.write_str("RUNNING"),
+        }
+    }
+}
 
 /// The Volcano/Iterator model trait
 pub(crate) trait Executor {
     /// Initialize the operator and its children
-    fn open(&mut self) -> io::Result<()>;
+    fn open(&mut self) -> ExecutionResult<()>;
 
     /// Fetch the next row, returns None when exhausted
-    fn next(&mut self) -> io::Result<Option<Row>>;
+    fn next(&mut self) -> ExecutionResult<Option<Row>>;
 
     /// Clean up resources
-    fn close(&mut self) -> io::Result<()>;
+    fn close(&mut self) -> ExecutionResult<()>;
 
     /// Get the output schema for this operator
     fn schema(&self) -> &Schema;
@@ -39,137 +72,40 @@ pub struct ExecutionStats {
     pub pages_read: u64,
 }
 
-/// Builds an executor tree from a physical plan.
-pub(crate) struct ExecutorBuilder {
-    ctx: ExecutionContext,
-}
-
-impl ExecutorBuilder {
-    pub(crate) fn new(ctx: ExecutionContext) -> Self {
-        Self { ctx }
-    }
-
-    /// Build an executor tree from a physical plan.
-    pub(crate) fn build(&self, plan: &PhysicalPlan) -> io::Result<Box<dyn Executor>> {
-        self.build_operator(&plan.op, &plan.children)
-    }
-
-    fn build_operator(
-        &self,
-        op: &PhysicalOperator,
-        children: &[PhysicalPlan],
-    ) -> io::Result<Box<dyn Executor>> {
-        match op {
-            PhysicalOperator::SeqScan(scan_op) => {
-                let executor = SeqScanExecutor::new(scan_op.clone(), self.ctx.clone());
-                Ok(Box::new(executor))
-            }
-
-            PhysicalOperator::Filter(filter_op) => {
-                if children.len() != 1 {
-                    return Err(IoError::new(
-                        ErrorKind::InvalidInput,
-                        "Filter requires exactly 1 child",
-                    ));
-                }
-                let child = self.build(&children[0])?;
-                let executor = Filter::new(child, filter_op.predicate.clone());
-                Ok(Box::new(executor))
-            }
-
-            PhysicalOperator::Project(project_op) => {
-                if children.len() != 1 {
-                    return Err(IoError::new(
-                        ErrorKind::InvalidInput,
-                        "Project requires exactly 1 child",
-                    ));
-                }
-                let child = self.build(&children[0])?;
-                let expressions: Vec<_> = project_op
-                    .expressions
-                    .iter()
-                    .map(|pe| pe.expr.clone())
-                    .collect();
-
-                let executor = Project::new(child, expressions, project_op.output_schema.clone());
-                Ok(Box::new(executor))
-            }
-
-            _ => Err(IoError::new(
-                ErrorKind::Unsupported,
-                format!("{} executor not yet implemented", op.name()),
-            )),
-        }
-    }
-}
-
-/// Pretty prints a row of data types
-fn pretty_print_row(row: &[DataType]) -> String {
-    let values: Vec<String> = row
-        .iter()
-        .map(|dt| match dt {
-            DataType::Null => "NULL".to_string(),
-            DataType::Char(u) => char::from(u.0).to_string(),
-
-            DataType::Boolean(b) => if b.0 != 0 { "true" } else { "false" }.to_string(),
-            DataType::SmallInt(v) => v.0.to_string(),
-            DataType::HalfInt(v) => v.0.to_string(),
-            DataType::Int(v) => v.0.to_string(),
-            DataType::BigInt(v) => v.0.to_string(),
-            DataType::SmallUInt(v) | DataType::Byte(v) => v.0.to_string(),
-            DataType::HalfUInt(v) => v.0.to_string(),
-            DataType::UInt(v) => v.0.to_string(),
-            DataType::BigUInt(v) => v.0.to_string(),
-            DataType::Float(v) => v.0.to_string(),
-            DataType::Double(v) => v.0.to_string(),
-            DataType::Text(blob) => {
-                format!("'{}'", blob.as_str(crate::TextEncoding::Utf8))
-            }
-            DataType::Blob(blob) => format!("<blob {} bytes>", blob.len()),
-            DataType::Date(d) => format!("DATE({})", d.0),
-            DataType::DateTime(dt) => format!("DATETIME({})", dt.0),
-        })
-        .collect();
-
-    format!("({})", values.join(", "))
-}
-
-/// Pretty prints multiple rows as a table
-fn pretty_print_results(rows: &[Vec<DataType>]) {
-    println!("┌─────────────────────────────────────┐");
-    println!("│ Results: {} row(s)                  │", rows.len());
-    println!("├─────────────────────────────────────┤");
-    for (i, row) in rows.iter().enumerate() {
-        println!("│ [{}] {}", i, pretty_print_row(row));
-    }
-    println!("└─────────────────────────────────────┘");
-}
-
 #[cfg(test)]
 mod query_execution_tests {
     use super::*;
     use serial_test::serial;
     use std::path::Path;
 
-    use crate::database::Database;
-    use crate::database::schema::{Column, Schema};
-    use crate::database::stats::CatalogStatsProvider;
-    use crate::io::pager::{Pager, SharedPager};
-    use crate::sql::binder::Binder;
-    // use crate::sql::executor::builder::ExecutorBuilder;
-    use crate::sql::executor::Executor;
-    use crate::sql::lexer::Lexer;
-    use crate::sql::parser::Parser;
-    use crate::sql::planner::model::AxmosCostModel;
-    use crate::sql::planner::{CascadesOptimizer, OptimizerConfig};
-    use crate::transactions::worker::WorkerPool;
-    use crate::types::{Blob, DataType, DataTypeKind, UInt64};
-    use crate::{AxmosDBConfig, IncrementalVaccum, TextEncoding};
+    use crate::{
+        AxmosDBConfig, IncrementalVaccum, TextEncoding,
+        database::{
+            Database,
+            errors::TransactionResult,
+            schema::{Column, Schema},
+            stats::CatalogStatsProvider,
+        },
+        io::pager::{Pager, SharedPager},
+        sql::{
+            binder::Binder,
+            executor::build::ExecutorBuilder,
+            lexer::Lexer,
+            parser::Parser,
+            planner::{CascadesOptimizer, OptimizerConfig, model::AxmosCostModel},
+        },
+        transactions::worker::WorkerPool,
+        types::{Blob, DataType, DataTypeKind, UInt64},
+    };
 
-    fn setup_db(path: impl AsRef<Path>) -> std::io::Result<Database> {
+    fn create_db(
+        page_size: usize,
+        cache_size: usize,
+        path: impl AsRef<Path>,
+    ) -> std::io::Result<Database> {
         let config = AxmosDBConfig {
-            page_size: 4096,
-            cache_size: Some(100),
+            page_size: page_size as u32,
+            cache_size: Some(cache_size as u16),
             incremental_vacuum_mode: IncrementalVaccum::Disabled,
             min_keys: 3,
             text_encoding: TextEncoding::Utf8,
@@ -218,19 +154,15 @@ mod query_execution_tests {
     }
 
     /// Execute a SQL query and return all result rows.
-    fn execute_query(db: &Database, sql: &str) -> std::io::Result<Vec<Vec<DataType>>> {
+    fn execute_query(db: &Database, sql: &str) -> TransactionResult<Vec<Row>> {
         // 1. Parse
         let lexer = Lexer::new(sql);
         let mut parser = Parser::new(lexer);
-        let stmt = parser
-            .parse()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+        let stmt = parser.parse()?;
 
         // 2. Bind
         let mut binder = Binder::new(db.catalog(), db.main_worker_cloned());
-        let bound_stmt = binder
-            .bind(&stmt)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+        let bound_stmt = binder.bind(&stmt)?;
 
         // 3. Optimize
         let catalog = db.catalog();
@@ -246,22 +178,18 @@ mod query_execution_tests {
             stats_provider,
         );
 
-        let physical_plan = optimizer
-            .optimize(&bound_stmt)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let physical_plan = optimizer.optimize(&bound_stmt)?;
+
+        println!("{physical_plan}");
 
         // 4. Build executor from physical plan
-        let handle = db
-            .coordinator()
-            .begin()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let handle = db.coordinator().begin()?;
         let pool = WorkerPool::from(handle);
-        pool.begin()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        pool.begin()?;
 
         let ctx = pool.execution_context();
         let builder = ExecutorBuilder::new(ctx);
-        println!("EXPLAIN {physical_plan}");
+
         let mut executor = builder.build(&physical_plan)?;
 
         // 5. Execute and collect results
@@ -273,8 +201,7 @@ mod query_execution_tests {
         }
 
         executor.close()?;
-        pool.try_commit()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        pool.try_commit()?;
 
         Ok(results)
     }
@@ -283,10 +210,12 @@ mod query_execution_tests {
     #[serial]
     fn test_select_all() {
         let dir = tempfile::tempdir().unwrap();
-        let db = setup_db(dir.path().join("test.db")).unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
 
         let results = execute_query(&db, "SELECT * FROM users").unwrap();
-        pretty_print_results(&results);
+        for row in &results {
+            println!("{row}");
+        }
         assert_eq!(results.len(), 5, "Should return all 5 users");
     }
 
@@ -294,10 +223,12 @@ mod query_execution_tests {
     #[serial]
     fn test_select_with_where_greater_than() {
         let dir = tempfile::tempdir().unwrap();
-        let db = setup_db(dir.path().join("test.db")).unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
 
         let results = execute_query(&db, "SELECT * FROM users WHERE age > 28").unwrap();
-        pretty_print_results(&results);
+        for row in &results {
+            println!("{row}");
+        }
 
         //Bob(30), Charlie(35) pass the filter
         assert_eq!(results.len(), 2, "Should return 2 users with age > 28");
@@ -313,7 +244,7 @@ mod query_execution_tests {
     #[serial]
     fn test_select_with_where_equality() {
         let dir = tempfile::tempdir().unwrap();
-        let db = setup_db(dir.path().join("test.db")).unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
 
         let results = execute_query(&db, "SELECT * FROM users WHERE age = 25").unwrap();
 
@@ -325,7 +256,7 @@ mod query_execution_tests {
     #[serial]
     fn test_select_with_where_no_matches() {
         let dir = tempfile::tempdir().unwrap();
-        let db = setup_db(dir.path().join("test.db")).unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
 
         let results = execute_query(&db, "SELECT * FROM users WHERE age > 100").unwrap();
 
@@ -336,7 +267,7 @@ mod query_execution_tests {
     #[serial]
     fn test_select_with_compound_where() {
         let dir = tempfile::tempdir().unwrap();
-        let db = setup_db(dir.path().join("test.db")).unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
 
         let results =
             execute_query(&db, "SELECT * FROM users WHERE age >= 25 AND age <= 30").unwrap();
@@ -347,5 +278,254 @@ mod query_execution_tests {
             3,
             "Should return 3 users with 25 <= age <= 30"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_insert_single_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
+
+        // Insert a new user
+        let results =
+            execute_query(&db, "INSERT INTO users (name, age) VALUES ('Frank', 40)").unwrap();
+
+        // Should return 1 row with affected count
+        assert_eq!(results.len(), 1, "Insert should return one result row");
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
+            assert_eq!(*count, 1, "Should have inserted 1 row");
+        } else {
+            panic!("Expected BigUInt for affected row count");
+        }
+
+        // Verify the row was inserted
+        let select_results = execute_query(&db, "SELECT * FROM users WHERE age = 40").unwrap();
+        assert_eq!(select_results.len(), 1, "Should find the inserted user");
+    }
+
+    #[test]
+    #[serial]
+    fn test_insert_multiple_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
+
+        // Insert multiple users
+        let results = execute_query(
+            &db,
+            "INSERT INTO users (name, age) VALUES ('Frank', 40), ('Grace', 45), ('Henry', 50)",
+        )
+        .unwrap();
+
+        // Should return affected count of 3
+        assert_eq!(results.len(), 1);
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
+            assert_eq!(*count, 3, "Should have inserted 3 rows");
+        }
+
+        // Verify all rows were inserted
+        let select_results = execute_query(&db, "SELECT * FROM users WHERE age >= 40").unwrap();
+        assert_eq!(select_results.len(), 3, "Should find all 3 inserted users");
+    }
+
+    #[test]
+    #[serial]
+    fn test_update_single_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
+
+        // Update Alice's age from 25 to 26
+        let results = execute_query(&db, "UPDATE users SET age = 26 WHERE age = 25").unwrap();
+
+        // Should return affected count
+        assert_eq!(results.len(), 1);
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
+            assert_eq!(*count, 1, "Should have updated 1 row");
+        }
+
+        // Verify the update
+        let select_results = execute_query(&db, "SELECT * FROM users WHERE age = 26").unwrap();
+        assert_eq!(select_results.len(), 1, "Should find user with updated age");
+
+        // Verify old value is gone
+        let old_results = execute_query(&db, "SELECT * FROM users WHERE age = 25").unwrap();
+        assert_eq!(old_results.len(), 0, "Should not find user with old age");
+    }
+
+    #[test]
+    #[serial]
+    fn test_update_multiple_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
+
+        // Update all users with age < 30 to age = 29
+        let results = execute_query(&db, "UPDATE users SET age = 29 WHERE age < 30").unwrap();
+
+        // Alice(25), Diana(28), Eve(22) should be updated
+        assert_eq!(results.len(), 1);
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
+            assert_eq!(*count, 3, "Should have updated 3 rows");
+        }
+
+        // Verify the updates
+        let select_results = execute_query(&db, "SELECT * FROM users WHERE age = 29").unwrap();
+        assert_eq!(select_results.len(), 3, "Should find 3 users with age 29");
+    }
+
+    #[test]
+    #[serial]
+    fn test_update_no_matching_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
+
+        // Try to update non-existent rows
+        let results = execute_query(&db, "UPDATE users SET age = 100 WHERE age > 1000").unwrap();
+
+        assert_eq!(results.len(), 1);
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
+            assert_eq!(*count, 0, "Should have updated 0 rows");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_delete_single_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
+
+        // Delete Alice (age = 25)
+        let results = execute_query(&db, "DELETE FROM users WHERE age = 25").unwrap();
+
+        assert_eq!(results.len(), 1);
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
+            assert_eq!(*count, 1, "Should have deleted 1 row");
+        }
+
+        // Verify deletion
+        let select_results = execute_query(&db, "SELECT * FROM users WHERE age = 25").unwrap();
+        assert_eq!(select_results.len(), 0, "Should not find deleted user");
+
+        // Verify others remain
+        let all_results = execute_query(&db, "SELECT * FROM users").unwrap();
+        assert_eq!(all_results.len(), 4, "Should have 4 remaining users");
+    }
+
+    #[test]
+    #[serial]
+    fn test_delete_multiple_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
+
+        // Delete all users with age < 30
+        let results = execute_query(&db, "DELETE FROM users WHERE age < 30").unwrap();
+
+        // Alice(25), Diana(28), Eve(22) should be deleted
+        assert_eq!(results.len(), 1);
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
+            assert_eq!(*count, 3, "Should have deleted 3 rows");
+        }
+
+        // Verify deletions
+        let select_results = execute_query(&db, "SELECT * FROM users").unwrap();
+        assert_eq!(select_results.len(), 2, "Should have 2 remaining users");
+
+        // Verify remaining users are Bob(30) and Charlie(35)
+        for row in &select_results {
+            if let DataType::BigUInt(UInt64(age)) = &row[2] {
+                assert!(*age >= 30, "Remaining users should have age >= 30");
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_delete_no_matching_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
+
+        // Try to delete non-existent rows
+        let results = execute_query(&db, "DELETE FROM users WHERE age > 1000").unwrap();
+
+        assert_eq!(results.len(), 1);
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
+            assert_eq!(*count, 0, "Should have deleted 0 rows");
+        }
+
+        // Verify all users remain
+        let all_results = execute_query(&db, "SELECT * FROM users").unwrap();
+        assert_eq!(all_results.len(), 5, "Should still have all 5 users");
+    }
+
+    #[test]
+    #[serial]
+    fn test_delete_all_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
+
+        // Delete all users
+        let results = execute_query(&db, "DELETE FROM users").unwrap();
+
+        assert_eq!(results.len(), 1);
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
+            assert_eq!(*count, 5, "Should have deleted 5 rows");
+        }
+
+        // Verify table is empty
+        let select_results = execute_query(&db, "SELECT * FROM users").unwrap();
+        assert_eq!(select_results.len(), 0, "Table should be empty");
+    }
+
+    #[test]
+    #[serial]
+    fn test_insert_then_update_then_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
+
+        // Insert a new user
+        execute_query(&db, "INSERT INTO users (name, age) VALUES ('Zara', 99)").unwrap();
+
+        // Verify insert
+        let results = execute_query(&db, "SELECT * FROM users WHERE age = 99").unwrap();
+        assert_eq!(results.len(), 1, "Should find inserted user");
+
+        // Update the user
+        execute_query(&db, "UPDATE users SET age = 100 WHERE age = 99").unwrap();
+
+        // Verify update
+        let results = execute_query(&db, "SELECT * FROM users WHERE age = 100").unwrap();
+        assert_eq!(results.len(), 1, "Should find updated user");
+
+        // Delete the user
+        execute_query(&db, "DELETE FROM users WHERE age = 100").unwrap();
+
+        // Verify delete
+        let results = execute_query(&db, "SELECT * FROM users WHERE age = 100").unwrap();
+        assert_eq!(results.len(), 0, "Should not find deleted user");
+
+        // Original users should still be there
+        let all_results = execute_query(&db, "SELECT * FROM users").unwrap();
+        assert_eq!(all_results.len(), 5, "Should still have original 5 users");
+    }
+
+    #[test]
+    #[serial]
+    fn test_update_with_expression() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
+
+        // Update age to age + 1 for all users
+        let results = execute_query(&db, "UPDATE users SET age = age + 1").unwrap();
+
+        assert_eq!(results.len(), 1);
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
+            assert_eq!(*count, 5, "Should have updated 5 rows");
+        }
+
+        // Verify: Alice should now be 26 (was 25)
+        let select_results = execute_query(&db, "SELECT * FROM users WHERE age = 26").unwrap();
+        assert_eq!(select_results.len(), 1, "Alice should now have age 26");
+
+        // Verify: No one should have age 25 anymore
+        let old_results = execute_query(&db, "SELECT * FROM users WHERE age = 25").unwrap();
+        assert_eq!(old_results.len(), 0, "No one should have age 25");
     }
 }

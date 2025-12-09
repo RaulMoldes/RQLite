@@ -1,13 +1,13 @@
 //! Types module.
-mod core;
+pub(crate) mod core;
 
-use core::{AxmosCastable, AxmosValueType, AxmosValueTypeRef, AxmosValueTypeRefMut};
+use std::{
+    fmt::{Display, Formatter, Result as FmtResult},
+    hash::Hash,
+};
 
 use axmos_derive::AxmosDataType;
-use std::cmp::Ordering;
-use std::fmt;
-use std::hash::{Hash, Hasher};
-use std::mem;
+
 pub mod blob;
 pub mod date;
 pub mod datetime;
@@ -16,6 +16,7 @@ pub mod sized_types;
 pub mod varint;
 
 use crate::TextEncoding;
+
 pub use blob::{Blob, BlobRef, BlobRefMut};
 pub use date::{Date, DateRef, DateRefMut};
 pub use datetime::{DateTime, DateTimeRef, DateTimeRefMut};
@@ -32,7 +33,7 @@ pub use varint::VarInt;
 mod tests;
 
 #[derive(AxmosDataType, Debug, Clone, Default)]
-pub enum DataType {
+pub(crate) enum DataType {
     #[default]
     #[null]
     Null,
@@ -53,9 +54,8 @@ pub enum DataType {
 
     BigUInt(UInt64),
 
-    #[non_hash]
     Float(Float32),
-    #[non_hash]
+
     Double(Float64),
 
     Byte(UInt8),
@@ -77,128 +77,8 @@ pub enum DataType {
     DateTime(DateTime),
 }
 
-impl Eq for DataType {}
-
-// Custom PartialEq and PartialOrd implementations.
-impl PartialEq for DataType {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (DataType::Null, DataType::Null) => true,
-
-            (DataType::Blob(a), DataType::Blob(b)) => a == b,
-            (DataType::Text(a), DataType::Text(b)) => a == b,
-            (DataType::Text(a), DataType::Blob(b)) => a == b,
-            (DataType::Blob(a), DataType::Text(b)) => a == b,
-            (num_a, num_b) if num_a.is_numeric() && num_b.is_numeric() => {
-                num_a.to_f64() == num_b.to_f64()
-            }
-
-            // Para el mismo tipo específico
-            (DataType::SmallInt(a), DataType::SmallInt(b)) => a == b,
-            (DataType::HalfInt(a), DataType::HalfInt(b)) => a == b,
-            (DataType::Int(a), DataType::Int(b)) => a == b,
-            (DataType::BigInt(a), DataType::BigInt(b)) => a == b,
-            (DataType::SmallUInt(a), DataType::SmallUInt(b)) => a == b,
-            (DataType::HalfUInt(a), DataType::HalfUInt(b)) => a == b,
-            (DataType::UInt(a), DataType::UInt(b)) => a == b,
-            (DataType::BigUInt(a), DataType::BigUInt(b)) => a == b,
-            (DataType::Float(a), DataType::Float(b)) => a == b,
-            (DataType::Double(a), DataType::Double(b)) => a == b,
-            (DataType::Byte(a), DataType::Byte(b)) => a == b,
-            (DataType::Boolean(a), DataType::Boolean(b)) => a == b,
-            (DataType::Char(a), DataType::Char(b)) => a == b,
-            (DataType::Date(a), DataType::Date(b)) => a == b,
-            (DataType::DateTime(a), DataType::DateTime(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-impl PartialOrd for DataType {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match (self, other) {
-            (DataType::Null, DataType::Null) => Some(Ordering::Equal),
-            (DataType::Null, _) => Some(Ordering::Less),
-            (_, DataType::Null) => Some(Ordering::Greater),
-
-            (DataType::Blob(a), DataType::Blob(b)) => a.partial_cmp(b),
-            (DataType::Text(a), DataType::Text(b)) => a.partial_cmp(b),
-            (DataType::Text(a), DataType::Blob(b)) => a.partial_cmp(b),
-            (DataType::Blob(a), DataType::Text(b)) => a.partial_cmp(b),
-
-            (num_a, num_b) if num_a.is_numeric() && num_b.is_numeric() => {
-                num_a.to_f64().partial_cmp(&num_b.to_f64())
-            }
-
-            (DataType::SmallInt(a), DataType::SmallInt(b)) => a.partial_cmp(b),
-            (DataType::HalfInt(a), DataType::HalfInt(b)) => a.partial_cmp(b),
-            (DataType::Int(a), DataType::Int(b)) => a.partial_cmp(b),
-            (DataType::BigInt(a), DataType::BigInt(b)) => a.partial_cmp(b),
-            (DataType::SmallUInt(a), DataType::SmallUInt(b)) => a.partial_cmp(b),
-            (DataType::HalfUInt(a), DataType::HalfUInt(b)) => a.partial_cmp(b),
-            (DataType::UInt(a), DataType::UInt(b)) => a.partial_cmp(b),
-            (DataType::BigUInt(a), DataType::BigUInt(b)) => a.partial_cmp(b),
-            (DataType::Float(a), DataType::Float(b)) => a.partial_cmp(b),
-            (DataType::Double(a), DataType::Double(b)) => a.partial_cmp(b),
-            (DataType::Byte(a), DataType::Byte(b)) => a.partial_cmp(b),
-            (DataType::Boolean(a), DataType::Boolean(b)) => a.partial_cmp(b),
-            (DataType::Char(a), DataType::Char(b)) => a.partial_cmp(b),
-            (DataType::Date(a), DataType::Date(b)) => a.partial_cmp(b),
-            (DataType::DateTime(a), DataType::DateTime(b)) => a.partial_cmp(b),
-            _ => None,
-        }
-    }
-}
-
-impl Hash for DataType {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // Hash the enum discriminant first.
-        mem::discriminant(self).hash(state);
-
-        match self {
-            DataType::Null => {}
-            DataType::SmallInt(v) => i8::from(*v).hash(state),
-            DataType::HalfInt(v) => i16::from(*v).hash(state),
-            DataType::Int(v) => i32::from(*v).hash(state),
-            DataType::BigInt(v) => i64::from(*v).hash(state),
-            DataType::SmallUInt(v) => u8::from(*v).hash(state),
-            DataType::HalfUInt(v) => u16::from(*v).hash(state),
-            DataType::UInt(v) => u32::from(*v).hash(state),
-            DataType::BigUInt(v) => u64::from(*v).hash(state),
-
-            // IMPORTANT: For floats we need to handle the possibility of NaNs appearing
-            DataType::Float(v) => {
-                let f = f32::from(*v);
-                if f.is_nan() {
-                    0x7FC00000u32.hash(state);
-                } else {
-                    f.to_bits().hash(state);
-                }
-            }
-            DataType::Double(v) => {
-                let f = f64::from(*v);
-                if f.is_nan() {
-                    // All nans should have the same hashed representation
-                    0x7FF8000000000000u64.hash(state);
-                } else {
-                    f.to_bits().hash(state);
-                }
-            }
-
-            DataType::Byte(v) => u8::from(*v).hash(state),
-            DataType::Boolean(v) => bool::from(*v).hash(state),
-            DataType::Char(v) => char::from(*v).hash(state),
-
-            DataType::Blob(b) => b.content().hash(state),
-            DataType::Text(b) => b.content().hash(state),
-            DataType::Date(d) => u32::from(*d).hash(state),
-            DataType::DateTime(dt) => u64::from(*dt).hash(state),
-        }
-    }
-}
-
-impl fmt::Display for DataType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for DataType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             DataType::Null => write!(f, "Null"),
 

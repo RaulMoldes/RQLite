@@ -1,12 +1,18 @@
 // src/sql/executor/ops/filter.rs
 //! Filter executor that applies predicates to input rows.
-
-use std::io::{self, Error as IoError, ErrorKind};
-
-use crate::database::schema::Schema;
-use crate::sql::binder::ast::BoundExpression;
-use crate::sql::executor::eval::ExpressionEvaluator;
-use crate::sql::executor::{ExecutionStats, Executor, Row};
+use crate::{
+    database::{
+        errors::{EvalResult, ExecutionResult, QueryExecutionError},
+        schema::Schema,
+    },
+    sql::{
+        binder::ast::BoundExpression,
+        executor::{
+            eval::ExpressionEvaluator,
+            {ExecutionState, ExecutionStats, Executor, Row},
+        },
+    },
+};
 
 /// Filter operator that evaluates a predicate on each input row.
 /// Only rows where the predicate evaluates to true are passed through.
@@ -18,7 +24,7 @@ pub(crate) struct Filter {
     /// Execution statistics
     stats: ExecutionStats,
     /// Whether the executor is open
-    is_open: bool,
+    state: ExecutionState,
 }
 
 impl Filter {
@@ -32,7 +38,7 @@ impl Filter {
             child,
             predicate,
             stats: ExecutionStats::default(),
-            is_open: false,
+            state: ExecutionState::Closed,
         }
     }
 
@@ -42,32 +48,30 @@ impl Filter {
     }
 
     /// Evaluate the predicate against a row.
-    fn evaluate_predicate(&self, row: &Row) -> io::Result<bool> {
+    fn evaluate_predicate(&self, row: &Row) -> EvalResult<bool> {
         let schema = self.child.schema();
         let evaluator = ExpressionEvaluator::new(row, schema);
-        dbg!("EVALUATING PREDICATE");
-        dbg!(row);
-        dbg!(schema);
         evaluator.evaluate_as_bool(self.predicate.clone())
     }
 }
 
 impl Executor for Filter {
-    fn open(&mut self) -> io::Result<()> {
-        if self.is_open {
-            return Err(IoError::new(ErrorKind::InvalidInput, "Filter already open"));
+    fn open(&mut self) -> ExecutionResult<()> {
+        if matches!(self.state, ExecutionState::Open | ExecutionState::Running) {
+            return Err(QueryExecutionError::InvalidState(self.state));
         }
-
         self.child.open()?;
-        self.is_open = true;
+        self.state = ExecutionState::Open;
         self.stats = ExecutionStats::default();
 
         Ok(())
     }
 
-    fn next(&mut self) -> io::Result<Option<Row>> {
-        if !self.is_open {
-            return Err(IoError::new(ErrorKind::InvalidInput, "Filter not opened"));
+    fn next(&mut self) -> ExecutionResult<Option<Row>> {
+        match self.state {
+            ExecutionState::Closed => return Ok(None),
+            ExecutionState::Open => self.state = ExecutionState::Running,
+            _ => {}
         }
 
         // Keep fetching from child until we find a matching row or exhaust input
@@ -87,13 +91,13 @@ impl Executor for Filter {
         }
     }
 
-    fn close(&mut self) -> io::Result<()> {
-        if !self.is_open {
+    fn close(&mut self) -> ExecutionResult<()> {
+        if matches!(self.state, ExecutionState::Closed) {
             return Ok(());
         }
 
         self.child.close()?;
-        self.is_open = false;
+        self.state = ExecutionState::Closed;
 
         Ok(())
     }
