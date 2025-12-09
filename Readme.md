@@ -14,3 +14,5 @@ MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test
     - JOIN TODO.
 
 7. Make workerpools run on actual threads.
+
+8. Complete the rest of functions.

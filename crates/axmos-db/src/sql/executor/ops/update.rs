@@ -1,11 +1,11 @@
 // src/sql/executor/ops/update.rs
-//! Update executor that modifies existing rows in a table.
-
 use crate::{
+    PAGE_ZERO,
     database::{
         errors::{ExecutionResult, QueryExecutionError, TypeError},
         schema::Schema,
     },
+    io::frames::{FrameAccessMode, Position},
     sql::{
         executor::{
             ExecutionState, ExecutionStats, Executor, Row, context::ExecutionContext,
@@ -13,29 +13,21 @@ use crate::{
         },
         planner::physical::PhysUpdateOp,
     },
-    storage::tuple::{OwnedTuple, Tuple, TupleRef},
+    storage::{
+        cell::Slot,
+        tuple::{OwnedTuple, Tuple, TupleRef},
+    },
     transactions::LogicalId,
     types::{DataType, DataTypeKind, UInt64},
 };
 
-/// Update operator that modifies rows matching a predicate.
-///
-/// The child executor should provide rows to update (typically from a scan with filter).
-/// Each row must include the row_id as the first column for identifying which tuple to update.
 pub(crate) struct Update {
-    /// Physical operator definition
     op: PhysUpdateOp,
-    /// Execution context
     ctx: ExecutionContext,
-    /// Child executor providing rows to update
     child: Box<dyn Executor>,
-    /// Current execution state
     state: ExecutionState,
-    /// Execution statistics
     stats: ExecutionStats,
-    /// Number of rows updated
     rows_affected: u64,
-    /// Whether we've returned the result row
     returned_result: bool,
 }
 
@@ -52,14 +44,12 @@ impl Update {
         }
     }
 
-    /// Get execution statistics
     pub(crate) fn stats(&self) -> &ExecutionStats {
         &self.stats
     }
 
-    /// Update a single row
-    fn update_row(&mut self, row: &Row) -> ExecutionResult<()> {
-        // Extract row_id from the first column
+    /// Update a single row using the position from the scan
+    fn update_row(&mut self, position: Position, row: &Row) -> ExecutionResult<()> {
         let row_id = match &row[0] {
             DataType::BigUInt(id) => *id,
             _ => {
@@ -84,64 +74,43 @@ impl Update {
 
         let logical_id = LogicalId::new(self.op.table_id, row_id);
 
-        // Search for the tuple
-        let current_position =
-            btree.search_from_root(row_id.as_ref(), crate::io::frames::FrameAccessMode::Read)?;
+        // Use position directly - no need to search from root
+        let payload = btree.with_cell_at(position, |bytes| bytes.to_vec())?;
 
-        let Some(payload) = btree.get_payload(current_position)? else {
-            btree.clear_worker_stack();
+        let Some(_tuple_ref) = TupleRef::read_for_snapshot(&payload, schema, snapshot)? else {
             return Err(QueryExecutionError::TupleNotFound(logical_id));
         };
 
-        // Check visibility
-        let Some(tuple_ref) = TupleRef::read_for_snapshot(payload.as_ref(), schema, snapshot)?
-        else {
-            btree.clear_worker_stack();
-            return Err(QueryExecutionError::TupleNotFound(logical_id));
-        };
-
-        // Evaluate assignment expressions to get new values
+        // Evaluate assignment expressions
         let child_schema = self.child.schema();
         let evaluator = ExpressionEvaluator::new(row, child_schema);
 
-         let mut updates: Vec<(usize, DataType)> = Vec::new();
+        let mut updates: Vec<(usize, DataType)> = Vec::new();
         for (col_idx, expr) in &self.op.assignments {
             let new_value = evaluator.evaluate(expr.clone())?;
-
-            // Cast to the expected column type
             let expected_type = schema_columns[*col_idx].dtype;
             let casted_value = Self::cast_to_column_type(new_value, expected_type)?;
 
-            // Convert schema column index to value index for add_version
-            // add_version expects indices into the values array, not the full schema
             if *col_idx >= num_keys {
                 let value_idx = *col_idx - num_keys;
                 updates.push((value_idx, casted_value));
             } else {
-                // Updating a key column is not supported via add_version
                 return Err(QueryExecutionError::Other(
                     "Cannot update key columns".to_string(),
                 ));
             }
         }
 
-        // Load current tuple and apply updates
-        let mut tuple = Tuple::try_from((payload.as_ref(), schema))?;
-
-        //btree.clear_worker_stack();
-
-        // Add new version with updates
+        let mut tuple = Tuple::try_from((payload.as_slice(), schema))?;
         tuple.add_version(&updates, tx_id)?;
         let new_bytes: OwnedTuple = tuple.into();
 
-        // Update in B-tree
-        btree.update(relation.root(), new_bytes.as_ref())?;
-       // btree.clear_worker_stack();
+        // Update at known position
+        btree.update_at(position, new_bytes.as_ref())?;
 
-        // Handle index updates for modified indexed columns
+        // Handle index updates
         let indexed_cols = schema.get_indexed_columns();
         for (col_idx, idx_info) in &indexed_cols {
-            // Check if this column was updated
             if let Some((_, new_value)) = updates.iter().find(|(idx, _)| idx == col_idx) {
                 let index_relation = catalog.get_relation(idx_info.name(), worker.clone())?;
                 let mut index_btree = catalog.index_btree(
@@ -165,31 +134,30 @@ impl Update {
         Ok(())
     }
 
-
-     /// Cast a value to the expected column type if needed
     fn cast_to_column_type(
         value: DataType,
         expected_kind: DataTypeKind,
     ) -> ExecutionResult<DataType> {
-        // If already the correct type, return as-is
         if value.kind() == expected_kind {
             return Ok(value);
         }
-
-        // Try to cast to the expected type
-        value.try_cast(expected_kind).map_err(|e| {
-            QueryExecutionError::Type(TypeError::CastError { from: value.kind(), to: expected_kind })
+        value.try_cast(expected_kind).map_err(|_| {
+            QueryExecutionError::Type(TypeError::CastError {
+                from: value.kind(),
+                to: expected_kind,
+            })
         })
     }
 }
 
 impl Executor for Update {
-    fn open(&mut self) -> ExecutionResult<()> {
+    fn open(&mut self, _access_mode: FrameAccessMode) -> ExecutionResult<()> {
         if matches!(self.state, ExecutionState::Open | ExecutionState::Running) {
             return Err(QueryExecutionError::InvalidState(self.state));
         }
 
-        self.child.open()?;
+        // Open child with write access for DML
+        self.child.open(FrameAccessMode::Write)?;
         self.state = ExecutionState::Open;
         self.stats = ExecutionStats::default();
         self.rows_affected = 0;
@@ -198,7 +166,7 @@ impl Executor for Update {
         Ok(())
     }
 
-    fn next(&mut self) -> ExecutionResult<Option<Row>> {
+    fn next(&mut self) -> ExecutionResult<Option<(Position, Row)>> {
         match self.state {
             ExecutionState::Closed => return Ok(None),
             ExecutionState::Open => self.state = ExecutionState::Running,
@@ -206,20 +174,18 @@ impl Executor for Update {
         }
 
         if !self.returned_result {
-            // Process all rows from child
-            while let Some(row) = self.child.next()? {
+            while let Some((position, row)) = self.child.next()? {
                 self.stats.rows_scanned += 1;
-                self.update_row(&row)?;
+                self.update_row(position, &row)?;
                 self.rows_affected += 1;
                 self.stats.rows_produced += 1;
             }
 
             self.returned_result = true;
 
-            // Return affected row count
             let mut result = Row::new();
             result.push(DataType::BigUInt(UInt64::from(self.rows_affected)));
-            return Ok(Some(result));
+            return Ok(Some((Position::new(PAGE_ZERO, Slot(0)), result)));
         }
 
         Ok(None)
@@ -229,7 +195,6 @@ impl Executor for Update {
         if matches!(self.state, ExecutionState::Closed) {
             return Ok(());
         }
-
         self.child.close()?;
         self.state = ExecutionState::Closed;
         Ok(())
@@ -237,5 +202,9 @@ impl Executor for Update {
 
     fn schema(&self) -> &Schema {
         &self.op.table_schema
+    }
+
+    fn required_access_mode(&self) -> FrameAccessMode {
+        FrameAccessMode::Write
     }
 }

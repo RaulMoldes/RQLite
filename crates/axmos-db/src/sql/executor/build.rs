@@ -7,7 +7,7 @@ use crate::{
             context::ExecutionContext,
             ops::{
                 delete::Delete, filter::Filter, insert::Insert, project::Project,
-                seq_scan::SeqScan, update::Update, values::Values
+                seq_scan::SeqScan, update::Update, values::Values,
             },
         },
         planner::physical::{PhysicalOperator, PhysicalPlan},

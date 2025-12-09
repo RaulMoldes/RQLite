@@ -111,8 +111,19 @@ impl<'a> ExpressionEvaluator<'a> {
                     arg_list.push(evaluated);
                 }
                 match func {
-                    Function::Abs => todo!("Functions not implemented"),
-                    Function::Cast => todo!("Functions not implemented"),
+                    Function::Abs => {
+                        let result = Abs::call(arg_list)?;
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    }
+                    Function::Cast => {
+                        if arg_list.len() != 1 {
+                            return Err(EvaluationError::InvalidArguments(Function::Cast));
+                        };
+
+                        let result = arg_list[0].try_cast(return_type)?;
+                        Ok(result)
+                    }
                     Function::Ceil => todo!("Functions not implemented"),
                     Function::Coalesce => todo!("Functions not implemented"),
                     Function::Concat => todo!("Functions not implemented"),
@@ -132,6 +143,7 @@ impl<'a> ExpressionEvaluator<'a> {
                     Function::Length => todo!("Functions not implemented"),
                     Function::Lower => todo!("Functions not implemented"),
                     Function::Upper => todo!("Functions not implemented"),
+                    Function::NullIf => todo!("Functions not implemented"),
                     _ => todo!("Functions not implemented"),
                 }
             }
@@ -390,5 +402,22 @@ impl<'a> ExpressionEvaluator<'a> {
             },
             UnaryOperator::Plus => Ok(operand), // Unary plus is a no-op
         }
+    }
+}
+
+pub(crate) trait Callable {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType>;
+}
+
+struct Abs;
+
+impl Callable for Abs {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType> {
+        if args.len() != 1 || args[0].is_numeric() {
+            return Err(EvaluationError::InvalidArguments(Function::Abs));
+        };
+
+        let first = &args[0];
+        Ok(first.abs())
     }
 }

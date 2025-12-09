@@ -4,6 +4,7 @@ use crate::{
         errors::{EvalResult, ExecutionResult, QueryExecutionError},
         schema::Schema,
     },
+    io::frames::{FrameAccessMode, Position},
     sql::{
         executor::{
             ExecutionState, ExecutionStats, Executor, Row, context::ExecutionContext,
@@ -15,20 +16,11 @@ use crate::{
     structures::{bplustree::BPlusTreePositionIterator, comparator::NumericComparator},
 };
 
-/// Sequential scan executor (iterates over all visible tuples in a table).
-///
-/// This executor performs a full table scan using the B+tree leaf page linked list.
-/// It respects MVCC visibility rules through the transaction's snapshot.
 pub(crate) struct SeqScan {
-    /// Physical operator definition
     op: SeqScanOp,
-    /// Execution context with worker, catalog, and snapshot
     ctx: ExecutionContext,
-    /// Current scan state
     state: ExecutionState,
-    /// Btree cursor (unset if not opened)
     cursor: Option<BPlusTreePositionIterator<NumericComparator>>,
-    /// Execution statistics
     stats: ExecutionStats,
 }
 
@@ -43,7 +35,6 @@ impl SeqScan {
         }
     }
 
-    /// Convert a TupleRef to a Row, applying projection if specified
     fn tuple_to_row(&self, bytes: &[u8]) -> ExecutionResult<Option<Row>> {
         let maybe_tuple =
             TupleRef::read_for_snapshot(&bytes, &self.op.table_schema, self.ctx.snapshot())?;
@@ -56,9 +47,7 @@ impl SeqScan {
         let mut row = Row::new();
 
         if let Some(ref columns) = self.op.columns {
-            // Project specific columns - indices are into table schema
             for &col_idx in columns {
-                // Determine if this is a key or value column
                 let num_keys = self.op.table_schema.num_keys as usize;
                 let value = if col_idx < num_keys {
                     tuple.key(col_idx)?
@@ -68,7 +57,6 @@ impl SeqScan {
                 row.push(value.to_owned());
             }
         } else {
-            // Return all columns
             let num_keys = self.op.table_schema.num_keys as usize;
             for i in 0..num_keys {
                 let value = tuple.key(i)?;
@@ -82,9 +70,6 @@ impl SeqScan {
             }
         }
 
-        // Apply predicate filter if present
-        // NOTE: Predicate column indices must already be remapped to output schema.
-        // See ProjectionPushdown in [rules.rs] (optimizer module)
         if !self.evaluate_predicate(&row)? {
             return Ok(None);
         }
@@ -92,9 +77,6 @@ impl SeqScan {
         Ok(Some(row))
     }
 
-    /// Evaluate a filter predicate against a row
-    /// Evaluate the predicate against a row.
-    /// Returns true if the row passes the filter (or if there's no predicate).
     fn evaluate_predicate(&self, row: &Row) -> EvalResult<bool> {
         match &self.op.predicate {
             None => Ok(true),
@@ -105,18 +87,17 @@ impl SeqScan {
         }
     }
 
-    /// Get current execution statistics
     pub fn stats(&self) -> &ExecutionStats {
         &self.stats
     }
 }
 
 impl Executor for SeqScan {
-    fn open(&mut self) -> ExecutionResult<()> {
+    fn open(&mut self, access_mode: FrameAccessMode) -> ExecutionResult<()> {
         if matches!(self.state, ExecutionState::Open | ExecutionState::Running) {
             return Err(QueryExecutionError::InvalidState(self.state));
         }
-        // Get table root page from catalog
+
         let relation = self
             .ctx
             .catalog()
@@ -124,14 +105,20 @@ impl Executor for SeqScan {
 
         let root_page = relation.root();
         let mut table = self.ctx.table(root_page)?;
-        let iterator = table.iter_positions()?;
+
+        let iterator = match access_mode {
+            FrameAccessMode::Write => table.iter_positions_mut()?,
+            _ => table.iter_positions()?,
+        };
+
         self.cursor = Some(iterator);
         self.state = ExecutionState::Open;
+        self.stats = ExecutionStats::default();
 
         Ok(())
     }
 
-    fn next(&mut self) -> ExecutionResult<Option<Row>> {
+    fn next(&mut self) -> ExecutionResult<Option<(Position, Row)>> {
         match self.state {
             ExecutionState::Closed => return Ok(None),
             ExecutionState::Open => self.state = ExecutionState::Running,
@@ -140,11 +127,9 @@ impl Executor for SeqScan {
 
         loop {
             if let Some(cursor) = self.cursor.as_mut() {
-                // Try to advance the cursor
                 let next_pos = match cursor.next() {
-                    Some(res) => res?, // propagate io::Error
+                    Some(res) => res?,
                     None => {
-                        // end of scan → close and return None
                         self.state = ExecutionState::Closed;
                         return Ok(None);
                     }
@@ -152,22 +137,18 @@ impl Executor for SeqScan {
 
                 self.stats.rows_scanned += 1;
 
-                // Access tuple at this position
                 let tree = cursor.get_tree();
                 let maybe_row = tree
                     .with_cell_at(next_pos, |bytes| self.tuple_to_row(bytes))?
                     .and_then(|result| Ok(result))?;
 
-                // Row filtered out
                 if maybe_row.is_none() {
                     continue;
                 }
 
-                // Row is produced
                 self.stats.rows_produced += 1;
-                return Ok(maybe_row);
+                return Ok(Some((next_pos, maybe_row.unwrap())));
             } else {
-                // Cannot be open or running without an iterator.
                 return Err(QueryExecutionError::InvalidState(self.state));
             }
         }
@@ -179,6 +160,7 @@ impl Executor for SeqScan {
         }
 
         self.state = ExecutionState::Closed;
+        self.cursor = None;
         Ok(())
     }
 

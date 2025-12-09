@@ -1973,7 +1973,10 @@ where
     }
 
     /// Creates an iterator over cell slots from the leftmost position in the tree.
-    pub(crate) fn iter_positions(&mut self) -> io::Result<BPlusTreePositionIterator<Cmp>> {
+    fn iter_positions_with_access_mode(
+        &mut self,
+        access_mode: FrameAccessMode,
+    ) -> io::Result<BPlusTreePositionIterator<Cmp>> {
         let mut current = self.root;
 
         loop {
@@ -2000,6 +2003,7 @@ where
                     self.clone(),
                     current,
                     0,
+                    access_mode,
                     IterDirection::Forward,
                 );
             }
@@ -2010,6 +2014,7 @@ where
                     self.clone(),
                     current,
                     0,
+                    access_mode,
                     IterDirection::Forward,
                 );
             }
@@ -2019,7 +2024,10 @@ where
     }
 
     /// Iterates the tree backward, starting from the right most slot and visiting leaf pages in reverse order.
-    pub(crate) fn iter_positions_rev(&mut self) -> io::Result<BPlusTreePositionIterator<Cmp>> {
+    fn iter_positions_rev_wth_access_mode(
+        &mut self,
+        access_mode: FrameAccessMode,
+    ) -> io::Result<BPlusTreePositionIterator<Cmp>> {
         let mut current = self.root;
 
         loop {
@@ -2050,6 +2058,7 @@ where
                     self.clone(),
                     current,
                     start_slot,
+                    access_mode,
                     IterDirection::Backward,
                 );
             }
@@ -2066,6 +2075,7 @@ where
                     self.clone(),
                     current,
                     start_slot,
+                    access_mode,
                     IterDirection::Backward,
                 );
             }
@@ -2075,10 +2085,11 @@ where
     }
 
     /// Creates an iterator over cell slots from the provided position in the tree.
-    pub(crate) fn iter_positions_from(
+    fn iter_positions_from_with_access_mode(
         &mut self,
         key: &[u8],
         direction: IterDirection,
+        access_mode: FrameAccessMode,
     ) -> io::Result<BPlusTreePositionIterator<Cmp>> {
         let start_pos = Position::start_pos(self.root);
         let position = self.search(&start_pos, key, FrameAccessMode::Read)?;
@@ -2086,7 +2097,45 @@ where
             SearchResult::Found(pos) | SearchResult::NotFound(pos) => pos,
         };
         let slot: u16 = pos.slot().into();
-        BPlusTreePositionIterator::from_position(self.clone(), pos.page(), slot as i16, direction)
+        BPlusTreePositionIterator::from_position(
+            self.clone(),
+            pos.page(),
+            slot as i16,
+            access_mode,
+            direction,
+        )
+    }
+
+    pub(crate) fn iter_positions(&mut self) -> io::Result<BPlusTreePositionIterator<Cmp>> {
+        self.iter_positions_with_access_mode(FrameAccessMode::Read)
+    }
+
+    pub(crate) fn iter_positions_mut(&mut self) -> io::Result<BPlusTreePositionIterator<Cmp>> {
+        self.iter_positions_with_access_mode(FrameAccessMode::Write)
+    }
+
+    pub(crate) fn iter_positions_from(
+        &mut self,
+        key: &[u8],
+        direction: IterDirection,
+    ) -> io::Result<BPlusTreePositionIterator<Cmp>> {
+        self.iter_positions_from_with_access_mode(key, direction, FrameAccessMode::Read)
+    }
+
+    pub(crate) fn iter_positions_from_mut(
+        &mut self,
+        key: &[u8],
+        direction: IterDirection,
+    ) -> io::Result<BPlusTreePositionIterator<Cmp>> {
+        self.iter_positions_from_with_access_mode(key, direction, FrameAccessMode::Write)
+    }
+
+    pub(crate) fn iter_positions_rev(&mut self) -> io::Result<BPlusTreePositionIterator<Cmp>> {
+        self.iter_positions_with_access_mode(FrameAccessMode::Read)
+    }
+
+    pub(crate) fn iter_positions_rev_mut(&mut self) -> io::Result<BPlusTreePositionIterator<Cmp>> {
+        self.iter_positions_with_access_mode(FrameAccessMode::Write)
     }
 
     /// Deallocates the entire tree using BFS traversal.
@@ -2178,6 +2227,13 @@ where
 
         Ok(())
     }
+
+    /// Updates a cell at a known position without traversal.
+    /// Assumes the caller already holds appropriate latches (via DML scan).
+    pub(crate) fn update_at(&mut self, pos: Position, data: &[u8]) -> io::Result<()> {
+        self.update_cell(pos, data)
+        // Note: don't clear_worker_stack() here (let the scan manage it)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2195,6 +2251,7 @@ where
 {
     tree: BPlusTree<Cmp>,
     current_page: Option<PageId>,
+    access_mode: FrameAccessMode,
     current_slot: i16,
     direction: IterDirection,
     _phantom: PhantomData<Cmp>,
@@ -2212,15 +2269,16 @@ where
         tree: BPlusTree<Cmp>,
         page: PageId,
         slot: i16,
+        access_mode: FrameAccessMode,
         direction: IterDirection,
     ) -> io::Result<Self> {
-        tree.worker_mut()
-            .acquire::<BtreePage>(page, FrameAccessMode::Read)?;
+        tree.worker_mut().acquire::<BtreePage>(page, access_mode)?;
 
         Ok(Self {
             tree,
             current_page: Some(page),
             current_slot: slot,
+            access_mode,
             direction,
             _phantom: PhantomData,
         })
@@ -2238,7 +2296,7 @@ where
             if next_page.is_valid() {
                 self.tree
                     .worker_mut()
-                    .acquire::<BtreePage>(next_page, FrameAccessMode::Read)?;
+                    .acquire::<BtreePage>(next_page, self.access_mode)?;
                 self.tree.worker_mut().release_latch(current);
                 self.current_page = Some(next_page);
                 self.current_slot = 0;
@@ -2264,7 +2322,7 @@ where
             if prev_page.is_valid() {
                 self.tree
                     .worker_mut()
-                    .acquire::<BtreePage>(prev_page, FrameAccessMode::Read)?;
+                    .acquire::<BtreePage>(prev_page, self.access_mode)?;
                 self.current_slot = self
                     .tree
                     .worker()

@@ -55,6 +55,42 @@ pub enum Function {
     Unknown,
 }
 
+impl Display for Function {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let name = match self {
+            Function::Length => "Length",
+            Function::Upper => "Upper",
+            Function::Lower => "Lower",
+            Function::Trim => "Trim",
+            Function::LTrim => "LTrim",
+            Function::RTrim => "RTrim",
+            Function::Substr => "Substr",
+            Function::Concat => "Concat",
+            Function::Replace => "Replace",
+            Function::Abs => "Abs",
+            Function::Round => "Round",
+            Function::Ceil => "Ceil",
+            Function::Floor => "Floor",
+            Function::Trunc => "Trunc",
+            Function::Mod => "Mod",
+            Function::Power => "Power",
+            Function::Sqrt => "Sqrt",
+            Function::Now => "Now",
+            Function::CurrentDate => "CurrentDate",
+            Function::CurrentTime => "CurrentTime",
+            Function::CurrentTimestamp => "CurrentTimestamp",
+            Function::Extract => "Extract",
+            Function::DatePart => "DatePart",
+            Function::Coalesce => "Coalesce",
+            Function::NullIf => "NullIf",
+            Function::IfNull => "IfNull",
+            Function::Cast => "Cast",
+            Function::Unknown => "Unknown",
+        };
+        write!(f, "{}", name)
+    }
+}
+
 impl BoundExpression {
     pub fn is_equi_condition(&self) -> bool {
         match self {

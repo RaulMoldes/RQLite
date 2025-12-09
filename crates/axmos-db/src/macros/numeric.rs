@@ -1118,6 +1118,12 @@ macro_rules! float {
         // Implement NumericType
         $crate::impl_numeric!($name($inner), Float);
 
+        impl $crate::types::core::AxmosOps for $name {
+            fn abs(&self) -> Self {
+                Self(self.0.abs())
+            }
+        }
+
 
 
 
@@ -1194,6 +1200,12 @@ macro_rules! signed_integer {
             }
         }
 
+        impl $crate::types::core::AxmosOps for $name {
+            fn abs(&self) -> Self {
+                Self(self.0.abs())
+            }
+        }
+
     };
 }
 
@@ -1221,6 +1233,13 @@ macro_rules! unsigned_integer {
         impl From<$name> for f64 {
             fn from(value: $name) -> Self {
                 value.0 as f64
+            }
+        }
+
+
+        impl $crate::types::core::AxmosOps for $name {
+            fn abs(&self) -> Self {
+                *self
             }
         }
 

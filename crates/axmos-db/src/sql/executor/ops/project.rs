@@ -1,37 +1,25 @@
 // src/sql/executor/ops/project.rs
-//! Project executor that evaluates output expressions.
 use crate::{
     database::{
         errors::{EvalResult, ExecutionResult, QueryExecutionError},
         schema::Schema,
     },
+    io::frames::{FrameAccessMode, Position},
     sql::{
         binder::ast::BoundExpression,
         executor::{ExecutionState, ExecutionStats, Executor, Row, eval::ExpressionEvaluator},
     },
 };
 
-/// Project operator that computes output expressions for each input row.
 pub(crate) struct Project {
-    /// Child executor providing input rows
     child: Box<dyn Executor>,
-    /// Expressions to evaluate for output columns
     expressions: Vec<BoundExpression>,
-    /// Output schema (after projection)
     output_schema: Schema,
-    /// Execution statistics
     stats: ExecutionStats,
-    /// Whether the executor is open
     state: ExecutionState,
 }
 
 impl Project {
-    /// Creates a new Project executor.
-    ///
-    /// # Arguments
-    /// * `child` - The input executor
-    /// * `expressions` - Expressions to evaluate for each output column
-    /// * `output_schema` - The schema of the projected output
     pub(crate) fn new(
         child: Box<dyn Executor>,
         expressions: Vec<BoundExpression>,
@@ -46,40 +34,34 @@ impl Project {
         }
     }
 
-    /// Get execution statistics
     pub(crate) fn stats(&self) -> &ExecutionStats {
         &self.stats
     }
 
-    /// Evaluate all projection expressions against a row.
     fn project_row(&self, input_row: &Row) -> EvalResult<Row> {
         let input_schema = self.child.schema();
         let evaluator = ExpressionEvaluator::new(input_row, input_schema);
-
         let mut output_row = Row::with_capacity(self.expressions.len());
         for expr in &self.expressions {
             let value = evaluator.evaluate(expr.clone())?;
             output_row.push(value);
         }
-
         Ok(output_row)
     }
 }
 
 impl Executor for Project {
-    fn open(&mut self) -> ExecutionResult<()> {
+    fn open(&mut self, access_mode: FrameAccessMode) -> ExecutionResult<()> {
         if matches!(self.state, ExecutionState::Open | ExecutionState::Running) {
             return Err(QueryExecutionError::InvalidState(self.state));
         }
-
-        self.child.open()?;
+        self.child.open(access_mode)?;
         self.state = ExecutionState::Open;
         self.stats = ExecutionStats::default();
-
         Ok(())
     }
 
-    fn next(&mut self) -> ExecutionResult<Option<Row>> {
+    fn next(&mut self) -> ExecutionResult<Option<(Position, Row)>> {
         match self.state {
             ExecutionState::Closed => return Ok(None),
             ExecutionState::Open => self.state = ExecutionState::Running,
@@ -88,11 +70,11 @@ impl Executor for Project {
 
         match self.child.next()? {
             None => Ok(None),
-            Some(input_row) => {
+            Some((position, input_row)) => {
                 self.stats.rows_scanned += 1;
                 let output_row = self.project_row(&input_row)?;
                 self.stats.rows_produced += 1;
-                Ok(Some(output_row))
+                Ok(Some((position, output_row)))
             }
         }
     }
@@ -101,10 +83,8 @@ impl Executor for Project {
         if matches!(self.state, ExecutionState::Closed) {
             return Ok(());
         }
-
         self.child.close()?;
         self.state = ExecutionState::Closed;
-
         Ok(())
     }
 

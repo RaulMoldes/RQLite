@@ -1,35 +1,28 @@
 // src/sql/executor/ops/insert.rs
-//! Insert executor that inserts rows into a table.
-
 use crate::{
+    PAGE_ZERO,
     database::{
         errors::{ExecutionResult, QueryExecutionError, TypeError},
         schema::{ObjectType, Schema},
     },
+    io::frames::{FrameAccessMode, Position},
     sql::{
         executor::{ExecutionState, ExecutionStats, Executor, Row, context::ExecutionContext},
         planner::physical::PhysInsertOp,
     },
+    storage::cell::Slot,
     storage::tuple::{OwnedTuple, Tuple},
     transactions::LogicalId,
-    types::{DataType, DataTypeKind,  UInt64},
+    types::{DataType, DataTypeKind, UInt64},
 };
 
-/// Insert operator that takes rows from a child executor and inserts them into a table.
 pub(crate) struct Insert {
-    /// Physical operator definition
     op: PhysInsertOp,
-    /// Execution context
     ctx: ExecutionContext,
-    /// Child executor providing rows to insert
     child: Box<dyn Executor>,
-    /// Current execution state
     state: ExecutionState,
-    /// Execution statistics
     stats: ExecutionStats,
-    /// Number of rows inserted (returned as result)
     rows_affected: u64,
-    /// Whether we've returned the result row
     returned_result: bool,
 }
 
@@ -46,21 +39,17 @@ impl Insert {
         }
     }
 
-    /// Get execution statistics
     pub(crate) fn stats(&self) -> &ExecutionStats {
         &self.stats
     }
 
-    /// Insert a single row into the table
     fn insert_row(&mut self, row: &Row) -> ExecutionResult<LogicalId> {
         let catalog = self.ctx.catalog();
         let worker = self.ctx.worker().clone();
         let tx_id = self.ctx.transaction_id();
 
-        // Get the relation
         let mut relation = catalog.get_relation_unchecked(self.op.table_id, worker.clone())?;
 
-        // Get next row ID
         let next_row = if let crate::database::schema::Relation::TableRel(ref mut tab) = relation {
             let next = tab.get_next();
             tab.add_row();
@@ -72,15 +61,9 @@ impl Insert {
         let schema = relation.schema();
         let schema_columns = schema.columns();
 
-        // Build the full row with row_id prepended
-        // Schema is: [row_id, col1, col2, ...]
-        // op.columns contains indices into the non-row_id columns (1-based in schema)
         let mut full_values: Vec<DataType> = vec![DataType::Null; schema_columns.len()];
-
-        // Set row_id at position 0
         full_values[0] = DataType::BigUInt(next_row);
 
-        // Map input columns to table columns with type casting
         for (input_idx, &schema_col_idx) in self.op.columns.iter().enumerate() {
             if input_idx < row.len() && schema_col_idx < schema_columns.len() {
                 let expected_type = schema_columns[schema_col_idx].dtype;
@@ -90,19 +73,15 @@ impl Insert {
             }
         }
 
-
         let logical_id = LogicalId::new(self.op.table_id, next_row);
 
-        // Create tuple with transaction ID as xmin
         let tuple = Tuple::new(&full_values, schema, tx_id)?;
         let bytes: OwnedTuple = tuple.into();
 
-        // Get btree and insert
         let mut btree = catalog.table_btree(relation.root(), worker.clone())?;
         btree.insert(relation.root(), bytes.as_ref())?;
         btree.clear_worker_stack();
 
-        // Handle index updates
         let indexed_cols = schema.get_indexed_columns();
         for (col_idx, idx_info) in indexed_cols {
             if col_idx < full_values.len() {
@@ -127,37 +106,35 @@ impl Insert {
             }
         }
 
-        // Update relation in catalog
         catalog.update_relation(relation, worker)?;
 
         Ok(logical_id)
     }
 
-
-     /// Cast a value to the expected column type if needed
     fn cast_to_column_type(
         value: DataType,
         expected_kind: DataTypeKind,
     ) -> ExecutionResult<DataType> {
-        // If already the correct type, return as-is
         if value.kind() == expected_kind {
             return Ok(value);
         }
-
-        // Try to cast to the expected type
-        value.try_cast(expected_kind).map_err(|e| {
-            QueryExecutionError::Type(TypeError::CastError { from: value.kind(), to: expected_kind })
+        value.try_cast(expected_kind).map_err(|_| {
+            QueryExecutionError::Type(TypeError::CastError {
+                from: value.kind(),
+                to: expected_kind,
+            })
         })
     }
 }
 
 impl Executor for Insert {
-    fn open(&mut self) -> ExecutionResult<()> {
+    fn open(&mut self, _access_mode: FrameAccessMode) -> ExecutionResult<()> {
         if matches!(self.state, ExecutionState::Open | ExecutionState::Running) {
             return Err(QueryExecutionError::InvalidState(self.state));
         }
 
-        self.child.open()?;
+        // Insert's child (typically Values) doesn't need write access
+        self.child.open(FrameAccessMode::Read)?;
         self.state = ExecutionState::Open;
         self.stats = ExecutionStats::default();
         self.rows_affected = 0;
@@ -166,17 +143,15 @@ impl Executor for Insert {
         Ok(())
     }
 
-    fn next(&mut self) -> ExecutionResult<Option<Row>> {
+    fn next(&mut self) -> ExecutionResult<Option<(Position, Row)>> {
         match self.state {
             ExecutionState::Closed => return Ok(None),
             ExecutionState::Open => self.state = ExecutionState::Running,
             _ => {}
         }
 
-        // If we haven't processed all input rows yet, do so
         if !self.returned_result {
-            // Process all rows from child
-            while let Some(row) = self.child.next()? {
+            while let Some((_position, row)) = self.child.next()? {
                 self.stats.rows_scanned += 1;
                 self.insert_row(&row)?;
                 self.rows_affected += 1;
@@ -185,10 +160,9 @@ impl Executor for Insert {
 
             self.returned_result = true;
 
-            // Return a row with the count of affected rows
             let mut result = Row::new();
             result.push(DataType::BigUInt(UInt64::from(self.rows_affected)));
-            return Ok(Some(result));
+            return Ok(Some((Position::new(PAGE_ZERO, Slot(0)), result)));
         }
 
         Ok(None)
@@ -198,7 +172,6 @@ impl Executor for Insert {
         if matches!(self.state, ExecutionState::Closed) {
             return Ok(());
         }
-
         self.child.close()?;
         self.state = ExecutionState::Closed;
         Ok(())

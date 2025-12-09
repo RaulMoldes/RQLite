@@ -6,7 +6,6 @@ use syn::{
     Variant, Visibility, parse2,
 };
 
-
 const ARITHMETIC_OPS: [(&str, &str, &str); 5] = [
     ("checked_add", "Add", "add"),
     ("checked_sub", "Sub", "sub"),
@@ -83,8 +82,6 @@ impl VariantInfo {
     pub fn is_copy(&self) -> bool {
         !self.attrs.non_copy
     }
-
-
 }
 
 pub struct EnumInfo {
@@ -132,7 +129,6 @@ impl EnumInfo {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum TypeVariant {
     Owned,
@@ -140,12 +136,9 @@ enum TypeVariant {
     RefMut,
 }
 
-
 trait Generator {
     fn generate(&self, info: &EnumInfo) -> TokenStream;
 }
-
-
 
 struct KindEnumGenerator;
 
@@ -347,8 +340,6 @@ impl KindEnumGenerator {
     }
 }
 
-
-
 struct RefEnumsGenerator;
 
 impl Generator for RefEnumsGenerator {
@@ -414,8 +405,6 @@ impl RefEnumsGenerator {
         }
     }
 }
-
-
 
 struct CastGenerator;
 
@@ -584,8 +573,6 @@ impl CastGenerator {
         }
     }
 }
-
-
 
 struct ComparisonGenerator;
 
@@ -833,7 +820,6 @@ impl ComparisonGenerator {
                 let vn = &v.name;
                 match &v.inner_type {
                     Some(ty) => {
-                        
                         quote! { Self::#vn(inner) => <#ty as crate::types::core::AxmosHashable>::hash128(inner).hash(state) }
                     }
                     None => quote! { Self::#vn => {} },
@@ -842,8 +828,6 @@ impl ComparisonGenerator {
             .collect()
     }
 }
-
-
 
 struct ConversionGenerator;
 
@@ -1057,12 +1041,47 @@ impl Generator for ImplBlockGenerator {
     }
 }
 
+struct OpsGenerator;
 
+impl OpsGenerator {
+    pub fn generate_abs_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+        info.variants.iter().map(|v| {
+            let vn = &v.name;
+            if let Some(ty) = &v.inner_type {
+                if v.is_arith() && v.is_copy() {
+                    quote! { Self::#vn(inner) => Self::#vn(<#ty as crate::types::core::AxmosOps>::abs(inner)) }
+                } else {
+                    quote! { Self::#vn(inner) => DataType::Null }
+                }
+            } else {
+                quote! { Self::#vn => DataType::Null }
+            }
+        }).collect()
+    }
+}
+impl Generator for OpsGenerator {
+    fn generate(&self, info: &EnumInfo) -> TokenStream {
+        let name = &info.name;
 
+        let abs_arms: Vec<_> = self.generate_abs_arms(info);
 
-struct NumericOpsGenerator;
+        quote! {
+            impl #name {
+                /// Extract as signed integer if possible.
+                pub(crate) fn abs(&self) -> Self {
+                    match self {
+                        #(#abs_arms,)*
 
-impl Generator for NumericOpsGenerator {
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct NumericTypeGenerator;
+
+impl Generator for NumericTypeGenerator {
     fn generate(&self, info: &EnumInfo) -> TokenStream {
         let name = &info.name;
         let kind_name = info.kind_name();
@@ -1513,7 +1532,6 @@ impl ImplBlockGenerator {
     }
 }
 
-
 struct ArithmeticGenerator;
 
 impl Generator for ArithmeticGenerator {
@@ -1796,8 +1814,6 @@ impl ArithmeticGenerator {
     }
 }
 
-
-
 pub fn data_type_impl(input: TokenStream) -> TokenStream {
     let input = match parse2::<DeriveInput>(input) {
         Ok(input) => input,
@@ -1816,7 +1832,8 @@ pub fn data_type_impl(input: TokenStream) -> TokenStream {
     let conversions = ConversionGenerator.generate(&info);
     let impl_blocks = ImplBlockGenerator.generate(&info);
     let arithmetic = ArithmeticGenerator.generate(&info);
-    let cls = NumericOpsGenerator.generate(&info);
+    let functions = OpsGenerator.generate(&info);
+    let cls = NumericTypeGenerator.generate(&info);
 
     quote! {
         #kind_enum
@@ -1824,6 +1841,7 @@ pub fn data_type_impl(input: TokenStream) -> TokenStream {
         #casts
         #comparisons
         #conversions
+        #functions
         #impl_blocks
         #arithmetic
         #cls

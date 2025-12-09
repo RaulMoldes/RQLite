@@ -9,7 +9,9 @@ use crate::{
     ObjectId,
     database::schema::ObjectType,
     sql::{
-        binder::ast::BoundExpression, executor::ExecutionState, lexer::Token,
+        binder::ast::{BoundExpression, Function},
+        executor::ExecutionState,
+        lexer::Token,
         planner::physical::PhysicalOperator,
     },
     transactions::LogicalId,
@@ -28,7 +30,7 @@ pub(crate) enum QueryExecutionError {
     TupleNotFound(LogicalId),
     AlreadyExists(AlreadyExists),
     InvalidState(ExecutionState),
-    Other(String)
+    Other(String),
 }
 
 impl Display for QueryExecutionError {
@@ -46,12 +48,10 @@ impl Display for QueryExecutionError {
             Self::ObjectNotFound(id) => write!(f, "Object with id {id} was anot found"),
             Self::InvalidObjectType(o) => write!(f, "Invalid object type {o}"),
             Self::AlreadyExists(str) => write!(f, "Object {str}, already exists"),
-            Self::Other(str) => write!(f, "Runtime error {str}")
+            Self::Other(str) => write!(f, "Runtime error {str}"),
         }
     }
 }
-
-impl Error for QueryExecutionError {}
 
 impl From<IoError> for QueryExecutionError {
     fn from(value: IoError) -> Self {
@@ -70,8 +70,6 @@ impl From<BuilderError> for QueryExecutionError {
         Self::Build(value)
     }
 }
-
-pub(crate) type ExecutionResult<T> = Result<T, QueryExecutionError>;
 
 #[derive(Debug)]
 pub(crate) enum ParsingError {
@@ -128,10 +126,6 @@ impl Display for BuilderError {
         }
     }
 }
-
-impl Error for BuilderError {}
-
-pub(crate) type BuilderResult<T> = Result<T, BuilderError>;
 
 /// Error type for DataType operations
 #[derive(Debug)]
@@ -196,10 +190,6 @@ impl From<TypeError> for IoError {
     }
 }
 
-impl Error for TypeError {}
-
-pub(crate) type TypeResult<T> = Result<T, TypeError>;
-
 impl From<ParsingError> for TypeError {
     fn from(value: ParsingError) -> Self {
         Self::ParseError(value)
@@ -222,6 +212,7 @@ impl From<ParseIntError> for TypeError {
 pub(crate) enum EvaluationError {
     TypeError(TypeError),
     InvalidExpression(BoundExpression),
+    InvalidArguments(Function),
     ColumnOutOfBounds(usize, usize),
 }
 
@@ -233,19 +224,16 @@ impl Display for EvaluationError {
             Self::ColumnOutOfBounds(i, u) => {
                 write!(f, "Column {i} out of bounds. (row has {u} columns)")
             }
+            Self::InvalidArguments(func) => write!(f, "invalid iput arguments for {func}"),
         }
     }
 }
-
-impl Error for EvaluationError {}
 
 impl From<TypeError> for EvaluationError {
     fn from(value: TypeError) -> Self {
         Self::TypeError(value)
     }
 }
-
-pub(crate) type EvalResult<T> = Result<T, EvaluationError>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AnalyzerError {
@@ -414,8 +402,6 @@ impl Display for BinderError {
     }
 }
 
-impl Error for BinderError {}
-
 /// Errors that can occur during planning
 #[derive(Debug)]
 pub(crate) enum PlanError {
@@ -452,15 +438,17 @@ impl Display for PlanError {
     }
 }
 
-impl Error for PlanError {}
-
 impl From<IoError> for PlanError {
     fn from(e: IoError) -> Self {
         PlanError::Internal(e.to_string())
     }
 }
 
-pub(crate) type OptimizerResult<T> = Result<T, OptimizerError>;
+impl From<String> for PlanError {
+    fn from(value: String) -> Self {
+        Self::Internal(value)
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum OptimizerError {
@@ -484,8 +472,6 @@ impl Display for OptimizerError {
         }
     }
 }
-
-impl Error for OptimizerError {}
 
 #[derive(Debug)]
 pub(crate) enum SQLError {
@@ -536,68 +522,6 @@ impl From<PlanError> for SQLError {
 impl From<BinderError> for SQLError {
     fn from(value: BinderError) -> Self {
         Self::BinderError(value)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum DatabaseError {
-    TypeError(TypeError),
-    IOError(IoError),
-    TransactionError(TransactionError),
-    Sql(SQLError),
-    Other(String),
-}
-
-impl From<TypeError> for DatabaseError {
-    fn from(value: TypeError) -> Self {
-        Self::TypeError(value)
-    }
-}
-
-impl From<IoError> for DatabaseError {
-    fn from(value: IoError) -> Self {
-        Self::IOError(value)
-    }
-}
-
-impl From<SQLError> for DatabaseError {
-    fn from(value: SQLError) -> Self {
-        Self::Sql(value)
-    }
-}
-
-impl From<TransactionError> for DatabaseError {
-    fn from(value: TransactionError) -> Self {
-        Self::TransactionError(value)
-    }
-}
-
-impl Display for DatabaseError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            DatabaseError::TypeError(err) => write!(f, "Type error: {}", err),
-
-            DatabaseError::IOError(err) => write!(f, "IO error: {}", err),
-
-            DatabaseError::Sql(err) => write!(f, "SQL error: {}", err),
-
-            DatabaseError::Other(msg) => write!(f, "Other error: {}", msg),
-            DatabaseError::TransactionError(msg) => {
-                write!(f, "Transaction error {}", msg)
-            }
-        }
-    }
-}
-
-impl Error for DatabaseError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            DatabaseError::TypeError(err) => Some(err),
-            DatabaseError::IOError(err) => Some(err),
-            DatabaseError::TransactionError(err) => Some(err),
-            DatabaseError::Sql(err) => Some(err),
-            DatabaseError::Other(_) => None,
-        }
     }
 }
 
@@ -661,6 +585,18 @@ impl From<BuilderError> for TransactionError {
     }
 }
 
+impl From<String> for TransactionError {
+    fn from(value: String) -> Self {
+        Self::Other(value.to_string())
+    }
+}
+
+impl From<IoError> for TransactionError {
+    fn from(value: IoError) -> Self {
+        Self::QueryExecution(QueryExecutionError::Io(value))
+    }
+}
+
 impl Display for TransactionError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
@@ -687,24 +623,23 @@ impl Display for TransactionError {
     }
 }
 
-impl Error for TransactionError {}
-impl Error for SQLError {}
-
-impl From<TransactionError> for String {
-    fn from(value: TransactionError) -> Self {
-        value.to_string()
-    }
-}
-
-impl From<IoError> for TransactionError {
-    fn from(value: IoError) -> Self {
-        Self::QueryExecution(QueryExecutionError::Io(value))
-    }
-}
-
 pub(crate) type ParseResult<T> = Result<T, ParserError>;
 pub(crate) type AnalyzerResult<T> = Result<T, AnalyzerError>;
 pub(crate) type BinderResult<T> = Result<T, BinderError>;
 pub(crate) type SQLResult<T> = Result<T, SQLError>;
-pub(crate) type DatabaseResult<T> = Result<T, DatabaseError>;
 pub(crate) type TransactionResult<T> = Result<T, TransactionError>;
+pub(crate) type BuilderResult<T> = Result<T, BuilderError>;
+pub(crate) type OptimizerResult<T> = Result<T, OptimizerError>;
+pub(crate) type EvalResult<T> = Result<T, EvaluationError>;
+pub(crate) type TypeResult<T> = Result<T, TypeError>;
+pub(crate) type ExecutionResult<T> = Result<T, QueryExecutionError>;
+
+impl Error for BuilderError {}
+impl Error for TransactionError {}
+impl Error for SQLError {}
+impl Error for PlanError {}
+impl Error for OptimizerError {}
+impl Error for BinderError {}
+impl Error for EvaluationError {}
+impl Error for QueryExecutionError {}
+impl Error for TypeError {}
