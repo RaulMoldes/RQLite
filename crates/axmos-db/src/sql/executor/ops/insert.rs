@@ -1,16 +1,12 @@
-// src/sql/executor/ops/insert.rs
 use crate::{
-    PAGE_ZERO,
     database::{
         errors::{ExecutionResult, QueryExecutionError, TypeError},
-        schema::{ObjectType, Schema},
+        schema::{ObjectType, Relation, Schema},
     },
-    io::frames::{FrameAccessMode, Position},
     sql::{
         executor::{ExecutionState, ExecutionStats, Executor, Row, context::ExecutionContext},
         planner::physical::PhysInsertOp,
     },
-    storage::cell::Slot,
     storage::tuple::{OwnedTuple, Tuple},
     transactions::LogicalId,
     types::{DataType, DataTypeKind, UInt64},
@@ -22,7 +18,6 @@ pub(crate) struct Insert {
     child: Box<dyn Executor>,
     state: ExecutionState,
     stats: ExecutionStats,
-    rows_affected: u64,
     returned_result: bool,
 }
 
@@ -34,7 +29,6 @@ impl Insert {
             child,
             state: ExecutionState::Closed,
             stats: ExecutionStats::default(),
-            rows_affected: 0,
             returned_result: false,
         }
     }
@@ -50,7 +44,7 @@ impl Insert {
 
         let mut relation = catalog.get_relation_unchecked(self.op.table_id, worker.clone())?;
 
-        let next_row = if let crate::database::schema::Relation::TableRel(ref mut tab) = relation {
+        let next_row = if let Relation::TableRel(ref mut tab) = relation {
             let next = tab.get_next();
             tab.add_row();
             next
@@ -128,22 +122,21 @@ impl Insert {
 }
 
 impl Executor for Insert {
-    fn open(&mut self, _access_mode: FrameAccessMode) -> ExecutionResult<()> {
+    fn open(&mut self) -> ExecutionResult<()> {
         if matches!(self.state, ExecutionState::Open | ExecutionState::Running) {
             return Err(QueryExecutionError::InvalidState(self.state));
         }
 
-        // Insert's child (typically Values) doesn't need write access
-        self.child.open(FrameAccessMode::Read)?;
+        self.child.open()?;
         self.state = ExecutionState::Open;
         self.stats = ExecutionStats::default();
-        self.rows_affected = 0;
+
         self.returned_result = false;
 
         Ok(())
     }
 
-    fn next(&mut self) -> ExecutionResult<Option<(Position, Row)>> {
+    fn next(&mut self) -> ExecutionResult<Option<Row>> {
         match self.state {
             ExecutionState::Closed => return Ok(None),
             ExecutionState::Open => self.state = ExecutionState::Running,
@@ -151,18 +144,17 @@ impl Executor for Insert {
         }
 
         if !self.returned_result {
-            while let Some((_position, row)) = self.child.next()? {
+            while let Some(row) = self.child.next()? {
                 self.stats.rows_scanned += 1;
                 self.insert_row(&row)?;
-                self.rows_affected += 1;
                 self.stats.rows_produced += 1;
             }
 
             self.returned_result = true;
 
             let mut result = Row::new();
-            result.push(DataType::BigUInt(UInt64::from(self.rows_affected)));
-            return Ok(Some((Position::new(PAGE_ZERO, Slot(0)), result)));
+            result.push(DataType::BigUInt(UInt64::from(self.stats.rows_produced)));
+            return Ok(Some(result));
         }
 
         Ok(None)

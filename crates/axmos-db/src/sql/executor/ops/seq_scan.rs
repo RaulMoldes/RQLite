@@ -1,10 +1,8 @@
-// src/sql/executor/operators/seq_scan.rs
 use crate::{
     database::{
         errors::{EvalResult, ExecutionResult, QueryExecutionError},
         schema::Schema,
     },
-    io::frames::{FrameAccessMode, Position},
     sql::{
         executor::{
             ExecutionState, ExecutionStats, Executor, Row, context::ExecutionContext,
@@ -93,7 +91,7 @@ impl SeqScan {
 }
 
 impl Executor for SeqScan {
-    fn open(&mut self, access_mode: FrameAccessMode) -> ExecutionResult<()> {
+    fn open(&mut self) -> ExecutionResult<()> {
         if matches!(self.state, ExecutionState::Open | ExecutionState::Running) {
             return Err(QueryExecutionError::InvalidState(self.state));
         }
@@ -106,10 +104,7 @@ impl Executor for SeqScan {
         let root_page = relation.root();
         let mut table = self.ctx.table(root_page)?;
 
-        let iterator = match access_mode {
-            FrameAccessMode::Write => table.iter_positions_mut()?,
-            _ => table.iter_positions()?,
-        };
+        let iterator = table.iter_positions()?;
 
         self.cursor = Some(iterator);
         self.state = ExecutionState::Open;
@@ -118,7 +113,7 @@ impl Executor for SeqScan {
         Ok(())
     }
 
-    fn next(&mut self) -> ExecutionResult<Option<(Position, Row)>> {
+    fn next(&mut self) -> ExecutionResult<Option<Row>> {
         match self.state {
             ExecutionState::Closed => return Ok(None),
             ExecutionState::Open => self.state = ExecutionState::Running,
@@ -147,7 +142,7 @@ impl Executor for SeqScan {
                 }
 
                 self.stats.rows_produced += 1;
-                return Ok(Some((next_pos, maybe_row.unwrap())));
+                return Ok(Some(maybe_row.unwrap()));
             } else {
                 return Err(QueryExecutionError::InvalidState(self.state));
             }
@@ -155,11 +150,11 @@ impl Executor for SeqScan {
     }
 
     fn close(&mut self) -> ExecutionResult<()> {
-        if matches!(self.state, ExecutionState::Closed) {
-            return Ok(());
-        }
-
         self.state = ExecutionState::Closed;
+        if let Some(iterator) = self.cursor.as_mut() {
+            iterator.get_tree().clear_worker_stack();
+        };
+
         self.cursor = None;
         Ok(())
     }

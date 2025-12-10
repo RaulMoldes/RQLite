@@ -45,6 +45,7 @@ pub trait ImplementationRule: Rule + Send + Sync {
 
 pub fn default_transformation_rules() -> Vec<Arc<dyn TransformationRule>> {
     vec![
+        Arc::new(AggregateProjectMergeRule),
         Arc::new(JoinCommutativityRule),
         Arc::new(JoinAssociativityRule),
         Arc::new(FilterMergeRule),
@@ -67,6 +68,7 @@ pub fn default_implementation_rules() -> Vec<Arc<dyn ImplementationRule>> {
         Arc::new(JoinRule),
         Arc::new(AggregateRule),
         Arc::new(SortRule),
+        Arc::new(MaterializeRule),
         Arc::new(LimitRule),
         Arc::new(DistinctRule),
         Arc::new(SetOperationRule),
@@ -2004,6 +2006,255 @@ impl ImplementationRule for DeleteRule {
             )),
             expr.children.clone(),
         )])
+    }
+}
+
+pub struct MaterializeRule;
+
+impl Rule for MaterializeRule {
+    fn name(&self) -> &'static str {
+        "Materialize"
+    }
+}
+
+impl ImplementationRule for MaterializeRule {
+    fn matches(&self, expr: &LogicalExpr, _memo: &Memo) -> bool {
+        matches!(&expr.op, LogicalOperator::Materialize(_))
+    }
+
+    fn implement(
+        &self,
+        expr: &LogicalExpr,
+        _required: &RequiredProperties,
+        _memo: &Memo,
+    ) -> OptimizerResult<Vec<PhysicalExpr>> {
+        let LogicalOperator::Materialize(mat) = &expr.op else {
+            return Ok(vec![]);
+        };
+
+        Ok(vec![PhysicalExpr::new(
+            PhysicalOperator::Materialize(PhysMaterializeOp::new(mat.schema.clone())),
+            expr.children.clone(),
+        )])
+    }
+}
+
+/// Rule to merge a Project into an Aggregate when the Project just references
+/// aggregate output columns. This avoids having a Project that tries to
+/// re-evaluate aggregate expressions.
+///
+/// Transforms:
+/// ```text
+/// Project([name, COUNT(*)])
+///   └─ Aggregate(group_by=[name], aggregates=[COUNT(*)])
+/// ```
+/// Into:
+/// ```text
+/// Project([ColumnRef(0), ColumnRef(1)])  // References aggregate output
+///   └─ Aggregate(group_by=[name], aggregates=[COUNT(*)])
+/// ```
+///
+/// Or eliminates the Project entirely if it's an identity projection.
+pub struct AggregateProjectMergeRule;
+
+impl Rule for AggregateProjectMergeRule {
+    fn name(&self) -> &'static str {
+        "AggregateProjectMerge"
+    }
+    fn promise(&self) -> u32 {
+        95 // High priority to run before other rules
+    }
+}
+
+impl TransformationRule for AggregateProjectMergeRule {
+    fn matches(&self, expr: &LogicalExpr, memo: &Memo) -> bool {
+        // Match: Project -> Aggregate
+        if let LogicalOperator::Project(project) = &expr.op {
+            if let Some(child_group) = expr.children.first() {
+                if let Some(child) = memo.get_group(*child_group) {
+                    if let Some(child_expr) = child.logical_exprs.first() {
+                        if matches!(&child_expr.op, LogicalOperator::Aggregate(_)) {
+                            // Only match if project contains aggregate expressions
+                            return project
+                                .expressions
+                                .iter()
+                                .any(|e| matches!(&e.expr, BoundExpression::Aggregate { .. }));
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn apply(&self, expr: &LogicalExpr, memo: &mut Memo) -> OptimizerResult<Vec<LogicalExpr>> {
+        let LogicalOperator::Project(project) = &expr.op else {
+            return Ok(vec![]);
+        };
+
+        let child_group = *expr
+            .children
+            .first()
+            .ok_or_else(|| OptimizerError::InvalidState("No child".into()))?;
+        let child = memo
+            .get_group(child_group)
+            .ok_or_else(|| OptimizerError::InvalidState("Child not found".into()))?;
+        let child_expr = child
+            .logical_exprs
+            .first()
+            .ok_or_else(|| OptimizerError::InvalidState("No expressions".into()))?;
+        let LogicalOperator::Aggregate(agg) = &child_expr.op else {
+            return Ok(vec![]);
+        };
+
+        // Build a mapping: for each project expression, determine what aggregate output column it maps to
+        let mut rewritten_exprs = Vec::new();
+
+        for proj_expr in project.expressions.iter() {
+            match &proj_expr.expr {
+                // Direct column reference to aggregate output - keep as is
+                BoundExpression::ColumnRef(_) => {
+                    rewritten_exprs.push(proj_expr.clone());
+                }
+                // Aggregate expression - convert to column reference
+                BoundExpression::Aggregate { func, arg, .. } => {
+                    // Find which aggregate in the agg.aggregates this matches
+                    let agg_idx = agg.aggregates.iter().position(|a| {
+                        a.func == *func && Self::args_match(a.arg.as_ref(), arg.as_deref())
+                    });
+
+                    if let Some(idx) = agg_idx {
+                        // The aggregate output columns come after group_by columns
+                        let output_col_idx = agg.group_by.len() + idx;
+                        let dtype = agg
+                            .output_schema
+                            .columns()
+                            .get(output_col_idx)
+                            .map(|c| c.dtype)
+                            .unwrap_or(DataTypeKind::Null);
+
+                        rewritten_exprs.push(ProjectExpr {
+                            expr: BoundExpression::ColumnRef(BoundColumnRef {
+                                table_id: OBJECT_ZERO,
+                                scope_table_index: 0,
+                                column_idx: output_col_idx,
+                                data_type: dtype,
+                            }),
+                            alias: proj_expr.alias.clone(),
+                        });
+                    } else {
+                        // Aggregate not found in child - can't rewrite
+                        return Ok(vec![]);
+                    }
+                }
+                // Other expressions - check if they reference group_by columns
+                other => {
+                    // Try to find matching group_by expression
+                    let group_idx = agg
+                        .group_by
+                        .iter()
+                        .position(|g| Self::exprs_equal(g, other));
+
+                    if let Some(idx) = group_idx {
+                        let dtype = agg
+                            .output_schema
+                            .columns()
+                            .get(idx)
+                            .map(|c| c.dtype)
+                            .unwrap_or(DataTypeKind::Null);
+
+                        rewritten_exprs.push(ProjectExpr {
+                            expr: BoundExpression::ColumnRef(BoundColumnRef {
+                                table_id: OBJECT_ZERO,
+                                scope_table_index: 0,
+                                column_idx: idx,
+                                data_type: dtype,
+                            }),
+                            alias: proj_expr.alias.clone(),
+                        });
+                    } else {
+                        // Can't rewrite this expression - keep as is but this might fail at runtime
+                        // A better approach would be to reject this case
+                        return Ok(vec![]);
+                    }
+                }
+            }
+        }
+
+        // Check if it's an identity projection (just selecting all columns in order)
+        let is_identity = rewritten_exprs.len() == agg.output_schema.columns().len()
+            && rewritten_exprs.iter().enumerate().all(|(idx, e)| {
+                if let BoundExpression::ColumnRef(cr) = &e.expr {
+                    cr.column_idx == idx
+                } else {
+                    false
+                }
+            });
+
+        // If it's an identity projection, eliminate it by not producing alternatives
+        // The optimizer should pick the child directly
+        if is_identity {
+            return Ok(vec![]);
+        }
+
+        // Create new project with rewritten expressions
+        let new_project = ProjectOp::new(
+            rewritten_exprs,
+            agg.output_schema.clone(), // Input is now the aggregate output
+            project.output_schema.clone(),
+        );
+
+        Ok(vec![
+            LogicalExpr::new(LogicalOperator::Project(new_project), vec![child_group])
+                .with_properties(expr.properties.clone()),
+        ])
+    }
+}
+
+impl AggregateProjectMergeRule {
+    /// Check if aggregate arguments match
+    fn args_match(agg_arg: Option<&BoundExpression>, proj_arg: Option<&BoundExpression>) -> bool {
+        match (agg_arg, proj_arg) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Self::exprs_equal(a, b),
+            _ => false,
+        }
+    }
+
+    /// Simple expression equality check
+    fn exprs_equal(a: &BoundExpression, b: &BoundExpression) -> bool {
+        match (a, b) {
+            (BoundExpression::Star, BoundExpression::Star) => true,
+            (BoundExpression::ColumnRef(ca), BoundExpression::ColumnRef(cb)) => {
+                ca.column_idx == cb.column_idx
+            }
+            (BoundExpression::Literal { value: va }, BoundExpression::Literal { value: vb }) => {
+                va == vb
+            }
+            (
+                BoundExpression::BinaryOp {
+                    left: la,
+                    op: opa,
+                    right: ra,
+                    ..
+                },
+                BoundExpression::BinaryOp {
+                    left: lb,
+                    op: opb,
+                    right: rb,
+                    ..
+                },
+            ) => opa == opb && Self::exprs_equal(la, lb) && Self::exprs_equal(ra, rb),
+            (
+                BoundExpression::UnaryOp {
+                    op: opa, expr: ea, ..
+                },
+                BoundExpression::UnaryOp {
+                    op: opb, expr: eb, ..
+                },
+            ) => opa == opb && Self::exprs_equal(ea, eb),
+            _ => false,
+        }
     }
 }
 

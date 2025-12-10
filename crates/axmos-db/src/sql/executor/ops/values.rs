@@ -1,21 +1,18 @@
-// src/sql/executor/ops/values.rs
 use crate::{
-    PAGE_ZERO,
     database::{
         errors::{ExecutionResult, QueryExecutionError},
         schema::Schema,
     },
-    io::frames::{FrameAccessMode, Position},
     sql::{
         executor::{ExecutionState, ExecutionStats, Executor, Row, eval::ExpressionEvaluator},
         planner::physical::PhysValuesOp,
     },
-    storage::cell::Slot,
 };
 
+// Values operator are intended to just pass the evaluated values
 pub(crate) struct Values {
     op: PhysValuesOp,
-    current_row: usize,
+    current_row: usize, // Internal cursor for handling multiple rows.
     state: ExecutionState,
     stats: ExecutionStats,
 }
@@ -36,7 +33,7 @@ impl Values {
 }
 
 impl Executor for Values {
-    fn open(&mut self, _access_mode: FrameAccessMode) -> ExecutionResult<()> {
+    fn open(&mut self) -> ExecutionResult<()> {
         if matches!(self.state, ExecutionState::Open | ExecutionState::Running) {
             return Err(QueryExecutionError::InvalidState(self.state));
         }
@@ -46,7 +43,7 @@ impl Executor for Values {
         Ok(())
     }
 
-    fn next(&mut self) -> ExecutionResult<Option<(Position, Row)>> {
+    fn next(&mut self) -> ExecutionResult<Option<Row>> {
         match self.state {
             ExecutionState::Closed => return Ok(None),
             ExecutionState::Open => self.state = ExecutionState::Running,
@@ -70,8 +67,8 @@ impl Executor for Values {
         }
 
         self.stats.rows_produced += 1;
-        // Values don't come from storage, use dummy position
-        Ok(Some((Position::new(PAGE_ZERO, Slot(0)), output_row)))
+
+        Ok(Some(output_row))
     }
 
     fn close(&mut self) -> ExecutionResult<()> {

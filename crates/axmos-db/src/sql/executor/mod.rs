@@ -6,7 +6,6 @@ pub mod ops;
 
 use crate::{
     database::{errors::ExecutionResult, schema::Schema},
-    io::frames::{FrameAccessMode, Position},
     types::DataType,
     vector,
 };
@@ -53,22 +52,16 @@ impl Display for ExecutionState {
 /// The Volcano/Iterator model trait
 pub(crate) trait Executor {
     /// Initialize the operator and its children
-    fn open(&mut self, access_mode: FrameAccessMode) -> ExecutionResult<()>;
+    fn open(&mut self) -> ExecutionResult<()>;
 
     /// Fetch the next row, returns None when exhausted
-    fn next(&mut self) -> ExecutionResult<Option<(Position, Row)>>;
+    fn next(&mut self) -> ExecutionResult<Option<Row>>;
 
     /// Clean up resources
     fn close(&mut self) -> ExecutionResult<()>;
 
     /// Get the output schema for this operator
     fn schema(&self) -> &Schema;
-
-    /// Returns the access mode this executor requires.
-    /// DML operators return Write, queries return Read.
-    fn required_access_mode(&self) -> FrameAccessMode {
-        FrameAccessMode::Read // default for most operators
-    }
 }
 
 /// Execution statistics for profiling
@@ -143,7 +136,7 @@ mod query_execution_tests {
             ("Bob", 30),
             ("Charlie", 35),
             ("Diana", 28),
-            ("Eve", 22),
+            ("Diana", 22),
         ] {
             pool.insert_one(
                 "users",
@@ -161,7 +154,7 @@ mod query_execution_tests {
     }
 
     /// Execute a SQL query and return all result rows.
-    fn execute_query(db: &Database, sql: &str) -> TransactionResult<Vec<(Position, Row)>> {
+    fn execute_query(db: &Database, sql: &str) -> TransactionResult<Vec<Row>> {
         // 1. Parse
         let lexer = Lexer::new(sql);
         let mut parser = Parser::new(lexer);
@@ -199,8 +192,7 @@ mod query_execution_tests {
 
         let mut executor = builder.build(&physical_plan)?;
 
-        let access_mode = executor.required_access_mode();
-        executor.open(access_mode)?;
+        executor.open()?;
         let mut results = Vec::new();
         while let Some(row) = executor.next()? {
             results.push(row);
@@ -219,11 +211,43 @@ mod query_execution_tests {
         let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
 
         let results = execute_query(&db, "SELECT * FROM users").unwrap();
-        for (p, row) in &results {
+        for row in &results {
             println!("{row}");
         }
         assert_eq!(results.len(), 5, "Should return all 5 users");
     }
+
+
+
+    #[test]
+    #[serial]
+    fn test_select_order_by() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
+
+        let results = execute_query(&db, "SELECT * FROM users ORDER BY name DESC LIMIT 1").unwrap();
+        for row in &results {
+            println!("{row}");
+        }
+        assert_eq!(results.len(), 1, "Should return all 5 users");
+    }
+
+    #[test]
+    #[serial]
+    fn test_select_group_by() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
+
+        let results = execute_query(&db, "SELECT name, COUNT(*) FROM users GROUP BY name").unwrap();
+        for row in &results {
+            println!("{row}");
+        }
+        assert_eq!(results.len(), 4, "Should return all 5 users");
+    }
+
+
+
+
 
     #[test]
     #[serial]
@@ -232,14 +256,14 @@ mod query_execution_tests {
         let db = create_db(4096, 100, dir.path().join("test.db")).unwrap();
 
         let results = execute_query(&db, "SELECT * FROM users WHERE age > 28").unwrap();
-        for (p, row) in &results {
+        for row in &results {
             println!("{row}");
         }
 
         //Bob(30), Charlie(35) pass the filter
         assert_eq!(results.len(), 2, "Should return 2 users with age > 28");
 
-        for (p, row) in &results {
+        for row in &results {
             if let DataType::BigUInt(UInt64(age)) = &row[2] {
                 assert!(*age > 28, "All returned rows should have age > 28");
             }
@@ -298,7 +322,7 @@ mod query_execution_tests {
 
         // Should return 1 row with affected count
         assert_eq!(results.len(), 1, "Insert should return one result row");
-        if let DataType::BigUInt(UInt64(count)) = &results[0].1[0] {
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
             assert_eq!(*count, 1, "Should have inserted 1 row");
         } else {
             panic!("Expected BigUInt for affected row count");
@@ -324,7 +348,7 @@ mod query_execution_tests {
 
         // Should return affected count of 3
         assert_eq!(results.len(), 1);
-        if let DataType::BigUInt(UInt64(count)) = &results[0].1[0] {
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
             assert_eq!(*count, 3, "Should have inserted 3 rows");
         }
 
@@ -344,7 +368,7 @@ mod query_execution_tests {
 
         // Should return affected count
         assert_eq!(results.len(), 1);
-        if let DataType::BigUInt(UInt64(count)) = &results[0].1[0] {
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
             assert_eq!(*count, 1, "Should have updated 1 row");
         }
 
@@ -368,7 +392,7 @@ mod query_execution_tests {
 
         // Alice(25), Diana(28), Eve(22) should be updated
         assert_eq!(results.len(), 1);
-        if let DataType::BigUInt(UInt64(count)) = &results[0].1[0] {
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
             assert_eq!(*count, 3, "Should have updated 3 rows");
         }
 
@@ -387,7 +411,7 @@ mod query_execution_tests {
         let results = execute_query(&db, "UPDATE users SET age = 100 WHERE age > 1000").unwrap();
 
         assert_eq!(results.len(), 1);
-        if let DataType::BigUInt(UInt64(count)) = &results[0].1[0] {
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
             assert_eq!(*count, 0, "Should have updated 0 rows");
         }
     }
@@ -402,7 +426,7 @@ mod query_execution_tests {
         let results = execute_query(&db, "DELETE FROM users WHERE age = 25").unwrap();
 
         assert_eq!(results.len(), 1);
-        if let DataType::BigUInt(UInt64(count)) = &results[0].1[0] {
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
             assert_eq!(*count, 1, "Should have deleted 1 row");
         }
 
@@ -426,7 +450,7 @@ mod query_execution_tests {
 
         // Alice(25), Diana(28), Eve(22) should be deleted
         assert_eq!(results.len(), 1);
-        if let DataType::BigUInt(UInt64(count)) = &results[0].1[0] {
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
             assert_eq!(*count, 3, "Should have deleted 3 rows");
         }
 
@@ -435,7 +459,7 @@ mod query_execution_tests {
         assert_eq!(select_results.len(), 2, "Should have 2 remaining users");
 
         // Verify remaining users are Bob(30) and Charlie(35)
-        for (p,row) in &select_results {
+        for row in &select_results {
             if let DataType::BigUInt(UInt64(age)) = &row[2] {
                 assert!(*age >= 30, "Remaining users should have age >= 30");
             }
@@ -452,7 +476,7 @@ mod query_execution_tests {
         let results = execute_query(&db, "DELETE FROM users WHERE age > 1000").unwrap();
 
         assert_eq!(results.len(), 1);
-        if let DataType::BigUInt(UInt64(count)) = &results[0].1[0] {
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
             assert_eq!(*count, 0, "Should have deleted 0 rows");
         }
 
@@ -471,7 +495,7 @@ mod query_execution_tests {
         let results = execute_query(&db, "DELETE FROM users").unwrap();
 
         assert_eq!(results.len(), 1);
-        if let DataType::BigUInt(UInt64(count)) = &results[0].1[0] {
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
             assert_eq!(*count, 5, "Should have deleted 5 rows");
         }
 
@@ -522,7 +546,7 @@ mod query_execution_tests {
         let results = execute_query(&db, "UPDATE users SET age = age + 1").unwrap();
 
         assert_eq!(results.len(), 1);
-        if let DataType::BigUInt(UInt64(count)) = &results[0].1[0] {
+        if let DataType::BigUInt(UInt64(count)) = &results[0][0] {
             assert_eq!(*count, 5, "Should have updated 5 rows");
         }
 

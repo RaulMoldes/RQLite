@@ -89,7 +89,12 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
             None => aggregated_group,
         };
 
-        let projected_group = self.build_project(having_group, &select.columns, &select.schema)?;
+        // In case there are aggregates, the projection is handled by the aggregate node itself.
+        let projected_group = if !self.has_aggregates(&select.columns) {
+            self.build_project(having_group, &select.columns, &select.schema)?
+        } else {
+            aggregated_group
+        };
 
         let distinct_group = if select.distinct {
             self.build_distinct(projected_group, &select.schema)?
@@ -346,7 +351,10 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
             None => scan_group,
         };
 
-        let filtered_props = self.get_group_properties(filtered_group)?;
+        // INSERT MATERIALIZE HERE to solve the Halloween Problem
+        let materialized_group = self.build_materialize(filtered_group)?;
+
+        let materialized_props = self.get_group_properties(materialized_group)?;
 
         let assignments: Vec<(usize, BoundExpression)> = update
             .assignments
@@ -359,8 +367,18 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
             assignments,
             update.table_schema.clone(),
         ));
-        let props = self.deriver.derive(&op, &[&filtered_props]);
-        let expr = LogicalExpr::new(op, vec![filtered_group]).with_properties(props);
+        let props = self.deriver.derive(&op, &[&materialized_props]);
+        let expr = LogicalExpr::new(op, vec![materialized_group]).with_properties(props);
+        Ok(self.memo.insert_logical_expr(expr))
+    }
+
+    fn build_materialize(&mut self, input: GroupId) -> OptimizerResult<GroupId> {
+        let input_props = self.get_group_properties(input)?;
+        let schema = input_props.schema.clone();
+
+        let op = LogicalOperator::Materialize(MaterializeOp::new(schema));
+        let props = self.deriver.derive(&op, &[&input_props]);
+        let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 
@@ -375,12 +393,15 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
             None => scan_group,
         };
 
-        let filtered_props = self.get_group_properties(filtered_group)?;
+        // INSERT MATERIALIZE HERE to solve the Halloween Problem
+        let materialized_group = self.build_materialize(filtered_group)?;
+
+        let materialized_props = self.get_group_properties(materialized_group)?;
 
         let op =
             LogicalOperator::Delete(DeleteOp::new(delete.table_id, delete.table_schema.clone()));
-        let props = self.deriver.derive(&op, &[&filtered_props]);
-        let expr = LogicalExpr::new(op, vec![filtered_group]).with_properties(props);
+        let props = self.deriver.derive(&op, &[&materialized_props]);
+        let expr = LogicalExpr::new(op, vec![materialized_group]).with_properties(props);
         Ok(self.memo.insert_logical_expr(expr))
     }
 

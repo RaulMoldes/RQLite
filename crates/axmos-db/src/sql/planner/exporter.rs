@@ -469,6 +469,7 @@ impl Display for LogicalOperator {
                     write!(f, "Union")
                 }
             }
+            LogicalOperator::Materialize(_) => write!(f, "Materialize"),
             LogicalOperator::Intersect(i) => {
                 if i.all {
                     write!(f, "Intersect All")
@@ -519,6 +520,7 @@ impl Display for PhysicalOperator {
             PhysicalOperator::IndexOnlyScan(s) => {
                 write!(f, "IndexOnlyScan({}.{})", s.table_id, s.index_id)
             }
+            PhysicalOperator::Materialize(_) => write!(f, "Materialize"),
             PhysicalOperator::Filter(_) => write!(f, "Filter"),
             PhysicalOperator::Project(_) => write!(f, "Project"),
             PhysicalOperator::NestedLoopJoin(j) => write!(f, "NLJoin({:?})", j.join_type),
@@ -579,6 +581,7 @@ impl DrawableNode for PhysicalOperator {
             PhysicalOperator::Update(_) => "[M]",
             PhysicalOperator::Delete(_) => "[-]",
             PhysicalOperator::Exchange(_) => "[X]",
+            PhysicalOperator::Materialize(_) => "[Mt]",
             PhysicalOperator::Values(_) => "[V]",
             PhysicalOperator::Empty(_) => "[ ]",
         }
@@ -640,7 +643,7 @@ impl DrawableNode for PhysicalOperator {
             PhysicalOperator::Insert(_)
             | PhysicalOperator::Update(_)
             | PhysicalOperator::Delete(_) => "doubleoctagon",
-            PhysicalOperator::Values(_) => "note",
+            PhysicalOperator::Values(_) | PhysicalOperator::Materialize(_) => "note",
             PhysicalOperator::Empty(_) => "point",
             PhysicalOperator::Exchange(_) => "octagon",
         }
@@ -653,7 +656,9 @@ impl DrawableNode for PhysicalOperator {
             PhysicalOperator::Insert(_)
             | PhysicalOperator::Update(_)
             | PhysicalOperator::Delete(_) => "#f0f0f0",
-            PhysicalOperator::Values(_) | PhysicalOperator::Empty(_) => "#f0f0f0",
+            PhysicalOperator::Values(_)
+            | PhysicalOperator::Empty(_)
+            | PhysicalOperator::Materialize(_) => "#f0f0f0",
 
             PhysicalOperator::Filter(_) | PhysicalOperator::Project(_) => "#d4edda",
             PhysicalOperator::HashDistinct(_) | PhysicalOperator::SortDistinct(_) => "#d4edda",
@@ -697,6 +702,7 @@ impl DrawableNode for LogicalOperator {
             LogicalOperator::Update(_) => "[M]",
             LogicalOperator::Delete(_) => "[-]",
             LogicalOperator::Values(_) => "[V]",
+            LogicalOperator::Materialize(_) => "[Mt]",
             LogicalOperator::Empty(_) => "[ ]",
         }
     }
@@ -747,31 +753,32 @@ impl DrawableNode for LogicalOperator {
             LogicalOperator::Insert(_)
             | LogicalOperator::Update(_)
             | LogicalOperator::Delete(_) => "doubleoctagon",
-            LogicalOperator::Values(_) => "note",
+            LogicalOperator::Values(_) | LogicalOperator::Materialize(_) => "note",
             LogicalOperator::Empty(_) => "point",
         }
     }
     fn color(&self) -> &'static str {
         match self {
-            LogicalOperator::TableScan(_) | LogicalOperator::IndexScan(_) => "#f0f0f0",
             LogicalOperator::Insert(_)
             | LogicalOperator::Update(_)
-            | LogicalOperator::Delete(_) => "#f0f0f0",
+            | LogicalOperator::Delete(_)
+            | LogicalOperator::Values(_)
+            | LogicalOperator::Empty(_)
+            | LogicalOperator::Materialize(_)
+            | LogicalOperator::TableScan(_)
+            | LogicalOperator::IndexScan(_) => "#f0f0f0",
 
-            LogicalOperator::Filter(_) | LogicalOperator::Project(_) => "#d4edda",
-            LogicalOperator::Distinct(_) | LogicalOperator::Sort(_) => "#d4edda",
+            LogicalOperator::Filter(_)
+            | LogicalOperator::Project(_)
+            | LogicalOperator::Distinct(_)
+            | LogicalOperator::Sort(_)
+            | LogicalOperator::Aggregate(_) => "#d4edda",
 
-            LogicalOperator::Join(_) => "#ffe5cc",
-            LogicalOperator::Union(_)
+            LogicalOperator::Join(_)
+            | LogicalOperator::Union(_)
             | LogicalOperator::Intersect(_)
-            | LogicalOperator::Except(_) => "#ffe5cc",
-
-            LogicalOperator::Aggregate(_) => "#d4edda",
-
-            LogicalOperator::Limit(_) => "#ffe5cc",
-
-            LogicalOperator::Values(_) => "#f0f0f0",
-            LogicalOperator::Empty(_) => "#f0f0f0",
+            | LogicalOperator::Except(_)
+            | LogicalOperator::Limit(_) => "#ffe5cc",
         }
     }
 }

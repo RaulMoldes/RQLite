@@ -21,6 +21,12 @@ impl PageId {
     }
 }
 
+impl TransactionId {
+    pub fn is_valid(&self) -> bool {
+        self.0 != 0
+    }
+}
+
 pub const PAGE_ZERO: PageId = PageId(0);
 pub const OBJECT_ZERO: ObjectId = ObjectId(0);
 pub const TRANSACTION_ZERO: TransactionId = TransactionId(0);

@@ -120,6 +120,21 @@ impl CostModel for AxmosCostModel {
                 io_cost + cpu_cost + filter_cost
             }
 
+            PhysicalOperator::Materialize(_) => {
+                let input = children_stats
+                    .first()
+                    .cloned()
+                    .unwrap_or(DerivedStats::unknown());
+
+                // Materialize has memory cost for buffering all rows
+                // Plus CPU cost for copying each row
+                let memory_pages = self.estimate_pages(input.row_count, input.avg_row_size);
+                let memory_cost = memory_pages * self.page_io_cost * 0.1; // Memory is cheaper than disk
+                let cpu_cost = input.row_count * self.cpu_tuple_cost;
+
+                memory_cost + cpu_cost
+            }
+
             PhysicalOperator::IndexScan(scan) => {
                 let table_stats = provider.get_table_stats(scan.table_id);
                 let index_stats = provider.get_index_stats(scan.index_id);
@@ -608,6 +623,13 @@ impl CostModel for AxmosCostModel {
                 let size_ratio =
                     proj.expressions.len() as f64 / proj.input_schema.columns().len().max(1) as f64;
                 DerivedStats::new(input.row_count, input.avg_row_size * size_ratio.min(1.0))
+            }
+            PhysicalOperator::Materialize(_) => {
+                // Materialize preserves all stats from input
+                children_stats
+                    .first()
+                    .cloned()
+                    .unwrap_or(DerivedStats::unknown())
             }
 
             PhysicalOperator::NestedLoopJoin(_)

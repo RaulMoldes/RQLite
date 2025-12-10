@@ -1,53 +1,57 @@
 use crate::{
     database::{
-        errors::{EvalResult, ExecutionResult, QueryExecutionError},
+        errors::{ExecutionResult, QueryExecutionError},
         schema::Schema,
     },
     sql::{
-        binder::ast::BoundExpression,
-        executor::{
-            eval::ExpressionEvaluator,
-            {ExecutionState, ExecutionStats, Executor, Row},
-        },
+        executor::{ExecutionState, ExecutionStats, Executor, Row},
+        planner::physical::PhysLimitOp,
     },
 };
 
-pub(crate) struct Filter {
+/// Limit executor for LIMIT/OFFSET queries.
+pub(crate) struct Limit {
+    op: PhysLimitOp,
     child: Box<dyn Executor>,
-    predicate: BoundExpression,
-    stats: ExecutionStats,
     state: ExecutionState,
+    stats: ExecutionStats,
+
+    /// Number of rows skipped so far (for offset).
+    skipped: usize,
+
+    /// Number of rows returned so far (for limit).
+    returned: usize,
 }
 
-impl Filter {
-    pub(crate) fn new(child: Box<dyn Executor>, predicate: BoundExpression) -> Self {
+impl Limit {
+    pub(crate) fn new(op: PhysLimitOp, child: Box<dyn Executor>) -> Self {
         Self {
+            op,
             child,
-            predicate,
-            stats: ExecutionStats::default(),
             state: ExecutionState::Closed,
+            stats: ExecutionStats::default(),
+            skipped: 0,
+            returned: 0,
         }
     }
 
     pub(crate) fn stats(&self) -> &ExecutionStats {
         &self.stats
     }
-
-    fn evaluate_predicate(&self, row: &Row) -> EvalResult<bool> {
-        let schema = self.child.schema();
-        let evaluator = ExpressionEvaluator::new(row, schema);
-        evaluator.evaluate_as_bool(self.predicate.clone())
-    }
 }
 
-impl Executor for Filter {
+impl Executor for Limit {
     fn open(&mut self) -> ExecutionResult<()> {
         if matches!(self.state, ExecutionState::Open | ExecutionState::Running) {
             return Err(QueryExecutionError::InvalidState(self.state));
         }
+
         self.child.open()?;
         self.state = ExecutionState::Open;
         self.stats = ExecutionStats::default();
+        self.skipped = 0;
+        self.returned = 0;
+
         Ok(())
     }
 
@@ -58,15 +62,29 @@ impl Executor for Filter {
             _ => {}
         }
 
+        // Check if we've already returned enough rows
+        if self.returned >= self.op.limit {
+            return Ok(None);
+        }
+
+        let offset = self.op.offset.unwrap_or(0);
+
         loop {
             match self.child.next()? {
                 None => return Ok(None),
                 Some(row) => {
                     self.stats.rows_scanned += 1;
-                    if self.evaluate_predicate(&row)? {
-                        self.stats.rows_produced += 1;
-                        return Ok(Some(row));
+
+                    // Skip rows for offset
+                    if self.skipped < offset {
+                        self.skipped += 1;
+                        continue;
                     }
+
+                    // Return row if within limit
+                    self.returned += 1;
+                    self.stats.rows_produced += 1;
+                    return Ok(Some(row));
                 }
             }
         }
@@ -82,6 +100,6 @@ impl Executor for Filter {
     }
 
     fn schema(&self) -> &Schema {
-        self.child.schema()
+        &self.op.schema
     }
 }

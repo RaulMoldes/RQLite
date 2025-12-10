@@ -1,10 +1,8 @@
-// src/sql/executor/ops/project.rs
 use crate::{
     database::{
         errors::{EvalResult, ExecutionResult, QueryExecutionError},
         schema::Schema,
     },
-    io::frames::{FrameAccessMode, Position},
     sql::{
         binder::ast::BoundExpression,
         executor::{ExecutionState, ExecutionStats, Executor, Row, eval::ExpressionEvaluator},
@@ -41,6 +39,7 @@ impl Project {
     fn project_row(&self, input_row: &Row) -> EvalResult<Row> {
         let input_schema = self.child.schema();
         let evaluator = ExpressionEvaluator::new(input_row, input_schema);
+   
         let mut output_row = Row::with_capacity(self.expressions.len());
         for expr in &self.expressions {
             let value = evaluator.evaluate(expr.clone())?;
@@ -51,17 +50,17 @@ impl Project {
 }
 
 impl Executor for Project {
-    fn open(&mut self, access_mode: FrameAccessMode) -> ExecutionResult<()> {
+    fn open(&mut self) -> ExecutionResult<()> {
         if matches!(self.state, ExecutionState::Open | ExecutionState::Running) {
             return Err(QueryExecutionError::InvalidState(self.state));
         }
-        self.child.open(access_mode)?;
+        self.child.open()?;
         self.state = ExecutionState::Open;
         self.stats = ExecutionStats::default();
         Ok(())
     }
 
-    fn next(&mut self) -> ExecutionResult<Option<(Position, Row)>> {
+    fn next(&mut self) -> ExecutionResult<Option<Row>> {
         match self.state {
             ExecutionState::Closed => return Ok(None),
             ExecutionState::Open => self.state = ExecutionState::Running,
@@ -70,11 +69,11 @@ impl Executor for Project {
 
         match self.child.next()? {
             None => Ok(None),
-            Some((position, input_row)) => {
+            Some(input_row) => {
                 self.stats.rows_scanned += 1;
                 let output_row = self.project_row(&input_row)?;
                 self.stats.rows_produced += 1;
-                Ok(Some((position, output_row)))
+                Ok(Some(output_row))
             }
         }
     }

@@ -6,11 +6,15 @@ use crate::{
             Executor,
             context::ExecutionContext,
             ops::{
-                delete::Delete, filter::Filter, insert::Insert, project::Project,
-                seq_scan::SeqScan, update::Update, values::Values,
+                agg::HashAggregate, delete::Delete, filter::Filter, insert::Insert,
+                materialize::Materialize, project::Project, seq_scan::SeqScan, update::Update,
+                values::Values,
+                sort::Sort,
+                top_n::TopN,
+                limit::Limit
             },
         },
-        planner::physical::{PhysicalOperator, PhysicalPlan},
+        planner::physical::{PhysicalOperator, PhysicalPlan, ExternalSortOp, PhysValuesOp},
     },
 };
 
@@ -86,6 +90,24 @@ impl ExecutorBuilder {
                 Ok(Box::new(executor))
             }
 
+            PhysicalOperator::Materialize(materialize_op) => {
+                if children.len() != 1 {
+                    return Err(BuilderError::NumChildrenMismatch(children.len(), 1));
+                }
+                let child = self.build(&children[0])?;
+                let executor = Materialize::new(materialize_op.clone(), child);
+                Ok(Box::new(executor))
+            }
+
+            PhysicalOperator::HashAggregate(agg_op) => {
+                if children.len() != 1 {
+                    return Err(BuilderError::NumChildrenMismatch(children.len(), 1));
+                }
+                let child = self.build(&children[0])?;
+                let executor = HashAggregate::new(agg_op.clone(), child);
+                Ok(Box::new(executor))
+            }
+
             PhysicalOperator::Delete(delete_op) => {
                 if children.len() != 1 {
                     return Err(BuilderError::NumChildrenMismatch(children.len(), 1));
@@ -94,6 +116,65 @@ impl ExecutorBuilder {
                 let executor = Delete::new(delete_op.clone(), self.ctx.clone(), child);
                 Ok(Box::new(executor))
             }
+
+
+            // Sort operators
+            PhysicalOperator::ExternalSort(sort_op) => {
+                if children.len() != 1 {
+                    return Err(BuilderError::NumChildrenMismatch(children.len(), 1));
+                }
+                let child = self.build(&children[0])?;
+                let executor = Sort::new(sort_op.clone(), child);
+                Ok(Box::new(executor))
+            }
+
+            PhysicalOperator::Sort(sort_op) => {
+                // EnforcerSortOp uses the same Sort executor
+                if children.len() != 1 {
+                    return Err(BuilderError::NumChildrenMismatch(children.len(), 1));
+                }
+                let child = self.build(&children[0])?;
+
+                // Convert EnforcerSortOp to ExternalSortOp
+
+                let external_sort_op = ExternalSortOp {
+                    order_by: sort_op.order_by.clone(),
+                    schema: sort_op.schema.clone(),
+                    memory_limit: None,
+                };
+                let executor = Sort::new(external_sort_op, child);
+                Ok(Box::new(executor))
+            }
+
+            PhysicalOperator::TopN(topn_op) => {
+                if children.len() != 1 {
+                    return Err(BuilderError::NumChildrenMismatch(children.len(), 1));
+                }
+                let child = self.build(&children[0])?;
+                let executor = TopN::new(topn_op.clone(), child);
+                Ok(Box::new(executor))
+            }
+
+            // Limit operator
+            PhysicalOperator::Limit(limit_op) => {
+                if children.len() != 1 {
+                    return Err(BuilderError::NumChildrenMismatch(children.len(), 1));
+                }
+                let child = self.build(&children[0])?;
+                let executor = Limit::new(limit_op.clone(), child);
+                Ok(Box::new(executor))
+            }
+            // Empty result operator
+            PhysicalOperator::Empty(empty_op) => {
+                let values_op = PhysValuesOp {
+                    rows: Vec::new(),
+                    schema: empty_op.schema.clone(),
+                };
+                let executor = Values::new(values_op);
+                Ok(Box::new(executor))
+            }
+
+
 
             _ => unimplemented!(
                 "Execution build is only implemented for Project, Scan, Filter, Insert, Update, and Delete"

@@ -114,9 +114,22 @@ pub(crate) enum PhysicalOperator {
     // Empty result
     Empty(PhysEmptyOp),
 
+    Materialize(PhysMaterializeOp),
+
     // Enforcers (to satisfy required properties)
     Sort(EnforcerSortOp),
     Exchange(ExchangeOp),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PhysMaterializeOp {
+    pub(crate) schema: Schema,
+}
+
+impl PhysMaterializeOp {
+    pub(crate) fn new(schema: Schema) -> Self {
+        Self { schema }
+    }
 }
 
 impl PhysicalOperator {
@@ -124,6 +137,7 @@ impl PhysicalOperator {
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::SeqScan(_) => "SeqScan",
+            Self::Materialize(_) => "Materialize",
             Self::IndexScan(_) => "IndexScan",
             Self::IndexOnlyScan(_) => "IndexOnlyScan",
             Self::Filter(_) => "Filter",
@@ -166,6 +180,7 @@ impl PhysicalOperator {
             Self::SortAggregate(op) => &op.output_schema,
             Self::ExternalSort(op) => &op.schema,
             Self::TopN(op) => &op.schema,
+            Self::Materialize(op) => &op.schema,
             Self::HashUnion(op) => &op.schema,
             Self::HashIntersect(op) => &op.schema,
             Self::HashExcept(op) => &op.schema,

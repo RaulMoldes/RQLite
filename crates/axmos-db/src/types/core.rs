@@ -126,14 +126,10 @@ pub trait NumericType: AxmosValueType + Copy {
     const NUM_CLASS: NumClass;
 
     /// Extract as i64 (for signed types)
-    fn as_i64(&self) -> Option<i64> {
-        None
-    }
+    fn as_i64(&self) -> Option<i64>;
 
     /// Extract as u64 (for unsigned types)
-    fn as_u64(&self) -> Option<u64> {
-        None
-    }
+    fn as_u64(&self) -> Option<u64>;
 
     /// Extract as f64 (for all numeric types)
     fn as_f64(&self) -> f64;

@@ -510,6 +510,29 @@ impl<'a, P: StatisticsProvider> PropertyDeriver<'a, P> {
             LogicalOperator::Insert(insert) => self.derive_insert(insert, children_props),
             LogicalOperator::Update(update) => self.derive_update(update, children_props),
             LogicalOperator::Delete(delete) => self.derive_delete(delete, children_props),
+            LogicalOperator::Materialize(mat) => self.derive_materialize(mat, children_props),
+        }
+    }
+
+    fn derive_materialize(
+        &self,
+        mat: &MaterializeOp,
+        children: &[&LogicalProperties],
+    ) -> LogicalProperties {
+        let input = children
+            .first()
+            .copied()
+            .expect("Materialize requires one child");
+
+        // Materialize preserves all properties from input
+        LogicalProperties {
+            schema: mat.schema.clone(),
+            cardinality: input.cardinality,
+            avg_row_size: input.avg_row_size,
+            unique: input.unique,
+            unique_columns: input.unique_columns.clone(),
+            not_null_columns: input.not_null_columns.clone(),
+            functional_deps: input.functional_deps.clone(),
         }
     }
 

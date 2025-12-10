@@ -76,6 +76,8 @@ pub(crate) enum LogicalOperator {
     // Values (for INSERT ... VALUES)
     Values(ValuesOp),
 
+    Materialize(MaterializeOp),
+
     // Empty relation (for queries with no FROM)
     Empty(EmptyOp),
 }
@@ -115,6 +117,7 @@ impl LogicalOperator {
             Self::Delete(op) => &op.table_schema,
             Self::Values(op) => &op.schema,
             Self::Empty(op) => &op.schema,
+            Self::Materialize(op) => &op.schema,
         }
     }
 
@@ -138,7 +141,8 @@ impl LogicalOperator {
             | Self::Aggregate(_)
             | Self::Insert(_)
             | Self::Update(_)
-            | Self::Delete(_) => 1,
+            | Self::Delete(_)
+            | Self::Materialize(_) => 1,
             Self::Join(_) | Self::Union(_) | Self::Intersect(_) | Self::Except(_) => 2,
         }
     }
@@ -182,6 +186,17 @@ impl TableScanOp {
     pub(crate) fn with_predicate(mut self, predicate: BoundExpression) -> Self {
         self.predicate = Some(predicate);
         self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MaterializeOp {
+    pub(crate) schema: Schema,
+}
+
+impl MaterializeOp {
+    pub(crate) fn new(schema: Schema) -> Self {
+        Self { schema }
     }
 }
 
