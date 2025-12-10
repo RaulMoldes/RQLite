@@ -1073,7 +1073,6 @@ impl OpsGenerator {
         }).collect()
     }
 
-
     pub fn generate_sqrt_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
         info.variants.iter().map(|v| {
             let vn = &v.name;
@@ -1088,7 +1087,6 @@ impl OpsGenerator {
             }
         }).collect()
     }
-
 
     pub fn generate_round_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
         info.variants.iter().map(|v| {
@@ -1105,13 +1103,7 @@ impl OpsGenerator {
         }).collect()
     }
 
-
-
-
-
-
-
-     pub fn generate_floor_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+    pub fn generate_floor_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
         info.variants.iter().map(|v| {
             let vn = &v.name;
             if let Some(ty) = &v.inner_type {

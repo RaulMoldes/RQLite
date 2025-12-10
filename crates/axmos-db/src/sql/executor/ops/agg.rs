@@ -211,7 +211,7 @@ impl HashAggregate {
         aggregates: &[AggregateExpr],
     ) -> ExecutionResult<()> {
         let evaluator = ExpressionEvaluator::new(row, schema);
-        let mut skip_nulls = true; // Skip nulls by default
+
         for (i, agg_expr) in aggregates.iter().enumerate() {
             let value = if agg_expr.arg.is_none() {
                 DataType::Null // Value doesn't matter for COUNT(*)

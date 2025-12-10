@@ -7,11 +7,11 @@ use crate::{
             context::ExecutionContext,
             ops::{
                 agg::HashAggregate, delete::Delete, filter::Filter, insert::Insert, limit::Limit,
-                materialize::Materialize, project::Project, seq_scan::SeqScan, sort::Sort,
+                materialize::Materialize, project::Project, seq_scan::SeqScan, sort::QuickSort,
                 top_n::TopN, update::Update, values::Values,
             },
         },
-        planner::physical::{ExternalSortOp, PhysValuesOp, PhysicalOperator, PhysicalPlan},
+        planner::physical::{PhysValuesOp, PhysicalOperator, PhysicalPlan},
     },
 };
 
@@ -114,16 +114,6 @@ impl ExecutorBuilder {
                 Ok(Box::new(executor))
             }
 
-            // Sort operators
-            PhysicalOperator::ExternalSort(sort_op) => {
-                if children.len() != 1 {
-                    return Err(BuilderError::NumChildrenMismatch(children.len(), 1));
-                }
-                let child = self.build(&children[0])?;
-                let executor = Sort::new(sort_op.clone(), child);
-                Ok(Box::new(executor))
-            }
-
             PhysicalOperator::Sort(sort_op) => {
                 // EnforcerSortOp uses the same Sort executor
                 if children.len() != 1 {
@@ -131,14 +121,7 @@ impl ExecutorBuilder {
                 }
                 let child = self.build(&children[0])?;
 
-                // Convert EnforcerSortOp to ExternalSortOp
-
-                let external_sort_op = ExternalSortOp {
-                    order_by: sort_op.order_by.clone(),
-                    schema: sort_op.schema.clone(),
-                    memory_limit: None,
-                };
-                let executor = Sort::new(external_sort_op, child);
+                let executor = QuickSort::new(sort_op.clone(), child);
                 Ok(Box::new(executor))
             }
 

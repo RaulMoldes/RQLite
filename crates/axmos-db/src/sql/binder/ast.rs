@@ -62,7 +62,6 @@ impl Display for Function {
             Function::Ceil => "Ceil",
             Function::Floor => "Floor",
 
-
             Function::Sqrt => "Sqrt",
 
             Function::CurrentDate => "CurrentDate",
@@ -72,7 +71,6 @@ impl Display for Function {
             Function::Coalesce => "Coalesce",
             Function::NullIf => "NullIf",
             Function::Cast => "Cast",
-
         };
         write!(f, "{}", name)
     }

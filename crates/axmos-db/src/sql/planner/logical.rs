@@ -148,7 +148,7 @@ impl LogicalOperator {
     }
 }
 
-/// Table scan operator - reads all rows from a table
+/// Table scan operator (reads all rows from a table)
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TableScanOp {
     pub(crate) table_id: ObjectId,

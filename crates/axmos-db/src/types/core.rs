@@ -123,7 +123,6 @@ pub trait AxmosOps: AxmosValueType {
     fn sqrt(&self) -> Self;
     fn round(&self) -> Self;
     fn pow(&self, other: Self) -> Self;
-
 }
 
 /// Trait for numeric types.

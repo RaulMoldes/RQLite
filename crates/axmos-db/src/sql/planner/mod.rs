@@ -17,6 +17,7 @@ use crate::{
     },
     sql::binder::ast::*,
     transactions::worker::Worker,
+    sql::executor::ddl::{DdlExecutor, DdlOutcome}
 };
 
 pub(crate) use memo::{ExprId, GroupId, Memo};
@@ -44,6 +45,16 @@ impl Default for OptimizerConfig {
             upper_bound: f64::MAX,
         }
     }
+}
+
+
+/// Result of processing a statement
+#[derive(Debug)]
+pub(crate) enum ProcessedStatement {
+    /// A physical plan ready for execution
+    Plan(PhysicalPlan),
+    /// DDL was executed directly, here's the result
+    DdlExecuted(DdlOutcome),
 }
 
 #[derive(Debug, Default, Clone)]
@@ -106,6 +117,23 @@ impl<C: CostModel, P: StatisticsProvider> CascadesOptimizer<C, P> {
         self
     }
 
+
+    /// Process a bound statement.
+    /// - DDL statements are executed immediately
+    /// - DML/DQL statements are optimized into physical plans
+    pub(crate) fn process(&mut self, stmt: &BoundStatement) -> OptimizerResult<ProcessedStatement> {
+        // DDL doesn't need optimization (execute directly)
+        if DdlExecutor::is_ddl(stmt) {
+            let ddl_executor = DdlExecutor::new(self.catalog.clone(), self.worker.clone());
+            let result = ddl_executor.execute(stmt)?;
+            return Ok(ProcessedStatement::DdlExecuted(result));
+        }
+
+        // DML/DQL goes through the optimizer
+        let plan = self.optimize(stmt)?;
+        Ok(ProcessedStatement::Plan(plan))
+    }
+
     /// Main optimization function.
     /// Takes in an [`BoundStatement`] produced by the binder and optimizes it
     /// in the following steps:
@@ -122,7 +150,7 @@ impl<C: CostModel, P: StatisticsProvider> CascadesOptimizer<C, P> {
     /// The [optimize_group] function, explores each group in the memo table starting from the root. Each group is made up of logical expressions that can be optimized. The [explore_group] call explores logical expressions by means of identifying opportunities to apply transformation rules to each group. Once it finds an opportunity to optimize, applies the transformation rule, which will generate a new group that is inserted again in the meta-table and optimized. Finally, the group is [implemented] by means of applying [ImplementationRules] to it, that is, by identifying the most optimal physical operators for each group.
     ///
     /// Once all groups have been implemented, we are done.
-    pub(crate) fn optimize(&mut self, stmt: &BoundStatement) -> OptimizerResult<PhysicalPlan> {
+    fn optimize(&mut self, stmt: &BoundStatement) -> OptimizerResult<PhysicalPlan> {
         let start = std::time::Instant::now();
 
         self.memo = Memo::new();

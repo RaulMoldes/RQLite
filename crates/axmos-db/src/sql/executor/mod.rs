@@ -1,6 +1,7 @@
 // src/sql/executor/mod.rs
 pub mod build;
 pub mod context;
+pub mod ddl;
 pub mod eval;
 pub mod ops;
 
@@ -92,7 +93,7 @@ mod query_execution_tests {
             executor::build::ExecutorBuilder,
             lexer::Lexer,
             parser::Parser,
-            planner::{CascadesOptimizer, OptimizerConfig, model::AxmosCostModel},
+            planner::{CascadesOptimizer,ProcessedStatement, OptimizerConfig, model::AxmosCostModel},
         },
         transactions::worker::WorkerPool,
         types::{Blob, DataType, DataTypeKind, UInt64},
@@ -153,7 +154,6 @@ mod query_execution_tests {
         Ok(db)
     }
 
-    /// Execute a SQL query and return all result rows.
     fn execute_query(db: &Database, sql: &str) -> TransactionResult<Vec<Row>> {
         // 1. Parse
         let lexer = Lexer::new(sql);
@@ -164,7 +164,7 @@ mod query_execution_tests {
         let mut binder = Binder::new(db.catalog(), db.main_worker_cloned());
         let bound_stmt = binder.bind(&stmt)?;
 
-        // 3. Optimize
+        // 3. Process (handles both DDL and queries)
         let catalog = db.catalog();
         let worker = db.main_worker_cloned();
         let cost_model = AxmosCostModel::new(4096);
@@ -178,30 +178,29 @@ mod query_execution_tests {
             stats_provider,
         );
 
-        let physical_plan = optimizer.optimize(&bound_stmt)?;
+        match optimizer.process(&bound_stmt)? {
+            ProcessedStatement::DdlExecuted(result) => Ok(vec![result.to_row()]),
+            ProcessedStatement::Plan(physical_plan) => {
+                // 4. Build and execute the plan
+                let handle = db.coordinator().begin()?;
+                let pool = WorkerPool::from(handle);
+                pool.begin()?;
 
-        println!("{physical_plan}");
+                let ctx = pool.execution_context();
+                let builder = ExecutorBuilder::new(ctx);
+                let mut executor = builder.build(&physical_plan)?;
 
-        // 4. Build executor from physical plan
-        let handle = db.coordinator().begin()?;
-        let pool = WorkerPool::from(handle);
-        pool.begin()?;
+                executor.open()?;
+                let mut results = Vec::new();
+                while let Some(row) = executor.next()? {
+                    results.push(row);
+                }
+                executor.close()?;
 
-        let ctx = pool.execution_context();
-        let builder = ExecutorBuilder::new(ctx);
-
-        let mut executor = builder.build(&physical_plan)?;
-
-        executor.open()?;
-        let mut results = Vec::new();
-        while let Some(row) = executor.next()? {
-            results.push(row);
+                pool.try_commit()?;
+                Ok(results)
+            }
         }
-
-        executor.close()?;
-        pool.try_commit()?;
-
-        Ok(results)
     }
 
     #[test]

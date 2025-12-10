@@ -138,35 +138,35 @@ impl<'a> ExpressionEvaluator<'a> {
                         let result = Concat::call(arg_list)?;
                         let result = result.try_cast(return_type)?;
                         Ok(result)
-                    },
+                    }
                     Function::CurrentDate => {
                         let result = DataType::Date(crate::Date::today());
                         let result = result.try_cast(return_type)?;
                         Ok(result)
-                    },
+                    }
                     Function::CurrentTime => {
                         let result = DataType::DateTime(crate::DateTime::now());
                         let result = result.try_cast(return_type)?;
                         Ok(result)
-                    },
+                    }
 
                     Function::CurrentTimestamp => {
                         let result = DataType::DateTime(crate::DateTime::now());
                         let result = result.try_cast(return_type)?;
                         Ok(result)
-                    },
+                    }
                     Function::Floor => {
                         let result = Floor::call(arg_list)?;
                         let result = result.try_cast(return_type)?;
                         Ok(result)
-                    },
+                    }
                     Function::NullIf => {
                         let result = NullIf::call(arg_list)?;
                         let result = result.try_cast(return_type)?;
                         Ok(result)
-                    },
+                    }
                     Function::Round => {
-                         let result = Round::call(arg_list)?;
+                        let result = Round::call(arg_list)?;
                         let result = result.try_cast(return_type)?;
                         Ok(result)
                     }
@@ -174,32 +174,32 @@ impl<'a> ExpressionEvaluator<'a> {
                         let result = LTrim::call(arg_list)?;
                         let result = result.try_cast(return_type)?;
                         Ok(result)
-                    },
-                    Function::RTrim =>  {
+                    }
+                    Function::RTrim => {
                         let result = RTrim::call(arg_list)?;
                         let result = result.try_cast(return_type)?;
                         Ok(result)
-                    },
-                    Function::Length =>  {
+                    }
+                    Function::Length => {
                         let result = Length::call(arg_list)?;
                         let result = result.try_cast(return_type)?;
                         Ok(result)
-                    },
-                    Function::Lower =>  {
+                    }
+                    Function::Lower => {
                         let result = Lower::call(arg_list)?;
                         let result = result.try_cast(return_type)?;
                         Ok(result)
-                    },
-                    Function::Upper =>  {
+                    }
+                    Function::Upper => {
                         let result = Upper::call(arg_list)?;
                         let result = result.try_cast(return_type)?;
                         Ok(result)
-                    },
+                    }
                     Function::Sqrt => {
                         let result = Sqrt::call(arg_list)?;
                         let result = result.try_cast(return_type)?;
                         Ok(result)
-                    },
+                    }
 
                     _ => todo!("Functions not implemented"),
                 }
@@ -492,7 +492,6 @@ impl Callable for Ceil {
     }
 }
 
-
 struct Floor;
 
 impl Callable for Floor {
@@ -505,7 +504,6 @@ impl Callable for Floor {
         Ok(first.floor())
     }
 }
-
 
 struct Round;
 
@@ -520,9 +518,6 @@ impl Callable for Round {
     }
 }
 
-
-
-
 struct Sqrt;
 
 impl Callable for Sqrt {
@@ -535,7 +530,6 @@ impl Callable for Sqrt {
         Ok(first.sqrt())
     }
 }
-
 
 struct Coalesce;
 
@@ -585,15 +579,11 @@ impl Callable for Concat {
     }
 }
 
-
-
-
-
 struct NullIf;
 
 impl Callable for NullIf {
     fn call(args: Vec<DataType>) -> EvalResult<DataType> {
-         if args.len() != 1 || !matches!(args[1], DataType::Boolean(_)) {
+        if args.len() != 1 || !matches!(args[1], DataType::Boolean(_)) {
             return Err(EvaluationError::InvalidArguments(Function::NullIf));
         };
 
@@ -604,12 +594,11 @@ impl Callable for NullIf {
         let condition = bool::from(u);
 
         if condition {
-            return Ok(DataType::Null)
+            return Ok(DataType::Null);
         }
         Ok(args[0].clone())
     }
 }
-
 
 struct LTrim;
 struct RTrim;
@@ -704,7 +693,9 @@ impl Callable for Length {
         match &args[0] {
             DataType::Text(blob) => {
                 let s = blob.to_string(crate::TextEncoding::Utf8);
-                Ok(DataType::BigUInt(crate::UInt64::from(s.chars().count() as u64)))
+                Ok(DataType::BigUInt(crate::UInt64::from(
+                    s.chars().count() as u64
+                )))
             }
             other => Err(EvaluationError::TypeError(TypeError::TypeMismatch {
                 left: other.kind(),

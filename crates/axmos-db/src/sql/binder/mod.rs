@@ -1184,8 +1184,6 @@ impl Binder {
             "CEIL" | "CEILING" => Function::Ceil,
             "FLOOR" => Function::Floor,
 
-
-
             "SQRT" => Function::Sqrt,
 
             "CURRENT_DATE" => Function::CurrentDate,
@@ -1195,8 +1193,7 @@ impl Binder {
             "COALESCE" => Function::Coalesce,
             "NULLIF" => Function::NullIf,
             "CAST" => Function::Cast,
-            _ => panic!("Unexpected function name")
-
+            _ => panic!("Unexpected function name"),
         }
     }
 
@@ -1260,10 +1257,7 @@ impl Binder {
             | Function::LTrim
             | Function::RTrim
             | Function::Concat => DataTypeKind::Text,
-            Function::Abs
-            | Function::Round
-            | Function::Ceil
-            | Function::Floor => args
+            Function::Abs | Function::Round | Function::Ceil | Function::Floor => args
                 .first()
                 .map(|a| a.data_type())
                 .unwrap_or(DataTypeKind::Double),
@@ -1274,7 +1268,7 @@ impl Binder {
                 .first()
                 .map(|a| a.data_type())
                 .unwrap_or(DataTypeKind::Null),
-            Function::Cast  => DataTypeKind::Null,
+            Function::Cast => DataTypeKind::Null,
         }
     }
 

@@ -1,10 +1,4 @@
 // src/sql/executor/ops/top_n.rs
-//! TopN executor for ORDER BY ... LIMIT queries.
-//!
-//! Uses a bounded max-heap to efficiently find the top N rows without
-//! sorting the entire dataset. Time complexity: O(n log k) where n is
-//! input size and k is the limit.
-
 use std::{cmp::Ordering, collections::BinaryHeap};
 
 use crate::{

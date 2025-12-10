@@ -8,7 +8,11 @@ MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test
 
 4. Implement the executor (order of priority):
 
-    - DDL operators.
+    - DDL operators (almost).
+        - Integrate with executor and add transaction statements.
+        - Implement multi column indexes.
+        - Implement check constraints (can wait)
+
 
     - JOIN
 
@@ -16,6 +20,6 @@ MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test
 
     - SORT (PARTIALLY DONE):
         - Currently, an in memory quicksort + limit is implemented and tested.
-        - Top N operator + external K way merge sort for large inputs are kind of mid-done but not fully tested. However since these are optimizations we can keep this task in the back log for now.
+        - We should add external merge sort or some other way of performing sort on disk.
 
 7. Make workerpools run on actual threads.

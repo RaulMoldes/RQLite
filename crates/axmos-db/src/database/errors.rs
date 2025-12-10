@@ -457,6 +457,7 @@ pub(crate) enum OptimizerError {
     Unsupported(String),
     InvalidState(String),
     CostOverflow,
+    Ddl(DdlError),
     Timeout,
 }
 
@@ -469,7 +470,14 @@ impl Display for OptimizerError {
             Self::InvalidState(msg) => write!(f, "Invalid state: {}", msg),
             Self::CostOverflow => write!(f, "Cost overflow"),
             Self::Timeout => write!(f, "Optimization timeout"),
+            Self::Ddl(err) => write!(f, "DDL error: {}", err),
         }
+    }
+}
+
+impl From<DdlError> for OptimizerError {
+    fn from(value: DdlError) -> Self {
+        Self::Ddl(value)
     }
 }
 
@@ -623,6 +631,54 @@ impl Display for TransactionError {
     }
 }
 
+
+
+#[derive(Debug)]
+pub(crate) enum DdlError {
+    AlreadyExists(AlreadyExists),
+    NotFound(String),
+    InvalidObjectType(ObjectType),
+    ConstraintViolation(String),
+    CatalogError(String),
+    Io(IoError),
+    Other(String),
+}
+
+impl Display for DdlError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::AlreadyExists(exists) => write!(f, "{}", exists),
+            Self::NotFound(name) => write!(f, "Object not found: {}", name),
+            Self::InvalidObjectType(obj_type) => write!(f, "Invalid object type: {}", obj_type),
+            Self::ConstraintViolation(msg) => write!(f, "Constraint violation: {}", msg),
+            Self::CatalogError(msg) => write!(f, "Catalog error: {}", msg),
+            Self::Io(err) => write!(f, "IO error: {}", err),
+            Self::Other(msg) => write!(f, "DDL error: {}", msg),
+        }
+    }
+}
+
+
+
+impl From<IoError> for DdlError {
+    fn from(value: IoError) -> Self {
+        Self::Io(value)
+    }
+}
+
+impl From<String> for DdlError {
+    fn from(value: String) -> Self {
+        Self::Other(value)
+    }
+}
+
+impl From<AlreadyExists> for DdlError {
+    fn from(value: AlreadyExists) -> Self {
+        Self::AlreadyExists(value)
+    }
+}
+
+pub(crate) type DdlResult<T> = Result<T, DdlError>;
 pub(crate) type ParseResult<T> = Result<T, ParserError>;
 pub(crate) type AnalyzerResult<T> = Result<T, AnalyzerError>;
 pub(crate) type BinderResult<T> = Result<T, BinderError>;
@@ -634,6 +690,9 @@ pub(crate) type EvalResult<T> = Result<T, EvaluationError>;
 pub(crate) type TypeResult<T> = Result<T, TypeError>;
 pub(crate) type ExecutionResult<T> = Result<T, QueryExecutionError>;
 
+
+
+impl Error for DdlError {}
 impl Error for BuilderError {}
 impl Error for TransactionError {}
 impl Error for SQLError {}
