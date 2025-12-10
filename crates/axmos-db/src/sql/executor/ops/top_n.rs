@@ -13,13 +13,8 @@ use crate::{
         schema::Schema,
     },
     sql::{
-
-        executor::{
-            eval::ExpressionEvaluator, ExecutionState, ExecutionStats, Executor, Row,
-        },
-        planner::{physical::TopNOp,
-            logical::SortExpr
-        },
+        executor::{ExecutionState, ExecutionStats, Executor, Row, eval::ExpressionEvaluator},
+        planner::{logical::SortExpr, physical::TopNOp},
     },
     types::DataType,
 };

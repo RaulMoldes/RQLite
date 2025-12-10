@@ -124,26 +124,83 @@ impl<'a> ExpressionEvaluator<'a> {
                         let result = arg_list[0].try_cast(return_type)?;
                         Ok(result)
                     }
-                    Function::Ceil => todo!("Functions not implemented"),
-                    Function::Coalesce => todo!("Functions not implemented"),
-                    Function::Concat => todo!("Functions not implemented"),
-                    Function::CurrentDate => todo!("Functions not implemented"),
-                    Function::CurrentTime => todo!("Functions not implemented"),
-                    Function::Extract => todo!("Functions not implemented"),
-                    Function::CurrentTimestamp => todo!("Functions not implemented"),
-                    Function::DatePart => todo!("Functions not implemented"),
-                    Function::Floor => todo!("Functions not implemented"),
-                    Function::IfNull => todo!("Functions not implemented"),
-                    Function::LTrim => todo!("Functions not implemented"),
-                    Function::RTrim => todo!("Functions not implemented"),
-                    Function::Mod => todo!("Functions not implemented"),
-                    Function::Sqrt => todo!("Functions not implemented"),
-                    Function::Trunc => todo!("Functions not implemented"),
-                    Function::Now => todo!("Functions not implemented"),
-                    Function::Length => todo!("Functions not implemented"),
-                    Function::Lower => todo!("Functions not implemented"),
-                    Function::Upper => todo!("Functions not implemented"),
-                    Function::NullIf => todo!("Functions not implemented"),
+                    Function::Ceil => {
+                        let result = Ceil::call(arg_list)?;
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    }
+                    Function::Coalesce => {
+                        let result = Coalesce::call(arg_list)?;
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    }
+                    Function::Concat => {
+                        let result = Concat::call(arg_list)?;
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    },
+                    Function::CurrentDate => {
+                        let result = DataType::Date(crate::Date::today());
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    },
+                    Function::CurrentTime => {
+                        let result = DataType::DateTime(crate::DateTime::now());
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    },
+
+                    Function::CurrentTimestamp => {
+                        let result = DataType::DateTime(crate::DateTime::now());
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    },
+                    Function::Floor => {
+                        let result = Floor::call(arg_list)?;
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    },
+                    Function::NullIf => {
+                        let result = NullIf::call(arg_list)?;
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    },
+                    Function::Round => {
+                         let result = Round::call(arg_list)?;
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    }
+                    Function::LTrim => {
+                        let result = LTrim::call(arg_list)?;
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    },
+                    Function::RTrim =>  {
+                        let result = RTrim::call(arg_list)?;
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    },
+                    Function::Length =>  {
+                        let result = Length::call(arg_list)?;
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    },
+                    Function::Lower =>  {
+                        let result = Lower::call(arg_list)?;
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    },
+                    Function::Upper =>  {
+                        let result = Upper::call(arg_list)?;
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    },
+                    Function::Sqrt => {
+                        let result = Sqrt::call(arg_list)?;
+                        let result = result.try_cast(return_type)?;
+                        Ok(result)
+                    },
+
                     _ => todo!("Functions not implemented"),
                 }
             }
@@ -413,11 +470,246 @@ struct Abs;
 
 impl Callable for Abs {
     fn call(args: Vec<DataType>) -> EvalResult<DataType> {
-        if args.len() != 1 || args[0].is_numeric() {
+        if args.len() != 1 || !args[0].is_numeric() {
             return Err(EvaluationError::InvalidArguments(Function::Abs));
         };
 
         let first = &args[0];
         Ok(first.abs())
+    }
+}
+
+struct Ceil;
+
+impl Callable for Ceil {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType> {
+        if args.len() != 1 || !args[0].is_numeric() {
+            return Err(EvaluationError::InvalidArguments(Function::Ceil));
+        };
+
+        let first = &args[0];
+        Ok(first.ceil())
+    }
+}
+
+
+struct Floor;
+
+impl Callable for Floor {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType> {
+        if args.len() != 1 || !args[0].is_numeric() {
+            return Err(EvaluationError::InvalidArguments(Function::Ceil));
+        };
+
+        let first = &args[0];
+        Ok(first.floor())
+    }
+}
+
+
+struct Round;
+
+impl Callable for Round {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType> {
+        if args.len() != 1 || !args[0].is_numeric() {
+            return Err(EvaluationError::InvalidArguments(Function::Ceil));
+        };
+
+        let first = &args[0];
+        Ok(first.round())
+    }
+}
+
+
+
+
+struct Sqrt;
+
+impl Callable for Sqrt {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType> {
+        if args.len() != 1 || !args[0].is_numeric() {
+            return Err(EvaluationError::InvalidArguments(Function::Ceil));
+        };
+
+        let first = &args[0];
+        Ok(first.sqrt())
+    }
+}
+
+
+struct Coalesce;
+
+impl Callable for Coalesce {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType> {
+        if args.len() != 2 {
+            return Err(EvaluationError::InvalidArguments(Function::Ceil));
+        };
+
+        if matches!(args[0], DataType::Null) {
+            return Ok(args[1].clone());
+        }
+        Ok(args[0].clone())
+    }
+}
+
+struct Concat;
+
+impl Callable for Concat {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType> {
+        if args.is_empty() {
+            return Ok(DataType::Text(Blob::from("")));
+        }
+
+        if !args.iter().all(|p| matches!(p, DataType::Text(_))) {
+            return Err(EvaluationError::InvalidArguments(Function::Ceil));
+        };
+
+        let mut result = String::new();
+
+        for arg in args {
+            match arg {
+                DataType::Text(blob) => {
+                    let s = blob.to_string(crate::TextEncoding::Utf8);
+                    result.push_str(&s);
+                }
+                other => {
+                    return Err(EvaluationError::TypeError(TypeError::TypeMismatch {
+                        left: other.kind(),
+                        right: DataTypeKind::Text,
+                    }));
+                }
+            }
+        }
+
+        Ok(DataType::Text(Blob::from(result.as_str())))
+    }
+}
+
+
+
+
+
+struct NullIf;
+
+impl Callable for NullIf {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType> {
+         if args.len() != 1 || !matches!(args[1], DataType::Boolean(_)) {
+            return Err(EvaluationError::InvalidArguments(Function::NullIf));
+        };
+
+        let DataType::Boolean(u) = args[1] else {
+            return Err(EvaluationError::InvalidArguments(Function::NullIf));
+        };
+
+        let condition = bool::from(u);
+
+        if condition {
+            return Ok(DataType::Null)
+        }
+        Ok(args[0].clone())
+    }
+}
+
+
+struct LTrim;
+struct RTrim;
+struct Lower;
+struct Upper;
+struct Length;
+
+impl Callable for LTrim {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType> {
+        if args.len() != 1 {
+            return Err(EvaluationError::InvalidArguments(Function::LTrim));
+        }
+
+        match &args[0] {
+            DataType::Text(blob) => {
+                let s = blob.to_string(crate::TextEncoding::Utf8);
+                let trimmed = s.trim_start(); // left trim
+                Ok(DataType::Text(Blob::from(trimmed)))
+            }
+            other => Err(EvaluationError::TypeError(TypeError::TypeMismatch {
+                left: other.kind(),
+                right: DataTypeKind::Text,
+            })),
+        }
+    }
+}
+
+impl Callable for RTrim {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType> {
+        if args.len() != 1 {
+            return Err(EvaluationError::InvalidArguments(Function::RTrim));
+        }
+
+        match &args[0] {
+            DataType::Text(blob) => {
+                let s = blob.to_string(crate::TextEncoding::Utf8);
+                let trimmed = s.trim_end(); // right trim
+                Ok(DataType::Text(Blob::from(trimmed)))
+            }
+            other => Err(EvaluationError::TypeError(TypeError::TypeMismatch {
+                left: other.kind(),
+                right: DataTypeKind::Text,
+            })),
+        }
+    }
+}
+
+impl Callable for Lower {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType> {
+        if args.len() != 1 {
+            return Err(EvaluationError::InvalidArguments(Function::Lower));
+        }
+
+        match &args[0] {
+            DataType::Text(blob) => {
+                let s = blob.to_string(crate::TextEncoding::Utf8);
+                Ok(DataType::Text(Blob::from(s.to_lowercase().as_str())))
+            }
+            other => Err(EvaluationError::TypeError(TypeError::TypeMismatch {
+                left: other.kind(),
+                right: DataTypeKind::Text,
+            })),
+        }
+    }
+}
+
+impl Callable for Upper {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType> {
+        if args.len() != 1 {
+            return Err(EvaluationError::InvalidArguments(Function::Upper));
+        }
+
+        match &args[0] {
+            DataType::Text(blob) => {
+                let s = blob.to_string(crate::TextEncoding::Utf8);
+                Ok(DataType::Text(Blob::from(s.to_uppercase().as_str())))
+            }
+            other => Err(EvaluationError::TypeError(TypeError::TypeMismatch {
+                left: other.kind(),
+                right: DataTypeKind::Text,
+            })),
+        }
+    }
+}
+
+impl Callable for Length {
+    fn call(args: Vec<DataType>) -> EvalResult<DataType> {
+        if args.len() != 1 {
+            return Err(EvaluationError::InvalidArguments(Function::Length));
+        }
+
+        match &args[0] {
+            DataType::Text(blob) => {
+                let s = blob.to_string(crate::TextEncoding::Utf8);
+                Ok(DataType::BigUInt(crate::UInt64::from(s.chars().count() as u64)))
+            }
+            other => Err(EvaluationError::TypeError(TypeError::TypeMismatch {
+                left: other.kind(),
+                right: DataTypeKind::Text,
+            })),
+        }
     }
 }

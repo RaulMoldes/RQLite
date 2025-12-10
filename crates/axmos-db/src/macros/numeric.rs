@@ -1122,6 +1122,26 @@ macro_rules! float {
             fn abs(&self) -> Self {
                 Self(self.0.abs())
             }
+
+            fn ceil(&self) -> Self {
+                Self(self.0.ceil())
+            }
+
+            fn floor(&self) -> Self {
+                Self(self.0.floor())
+            }
+
+            fn sqrt(&self) -> Self {
+                Self(self.0.sqrt())
+            }
+
+            fn round(&self) -> Self {
+                Self(self.0.round())
+            }
+
+            fn pow(&self, other: Self) -> Self {
+                Self((self.0.powf(other.0)))
+            }
         }
 
 
@@ -1208,6 +1228,26 @@ macro_rules! signed_integer {
             fn abs(&self) -> Self {
                 Self(self.0.abs())
             }
+
+             fn ceil(&self) -> Self {
+                *self
+            }
+
+            fn floor(&self) -> Self {
+                *self
+            }
+
+            fn round(&self) -> Self {
+                *self
+            }
+
+            fn pow(&self, other: Self) -> Self {
+                Self((self.0.pow(other.0 as u32)))
+            }
+
+            fn sqrt(&self) -> Self {
+                Self((self.0 as f64).sqrt() as $inner)
+            }
         }
 
     };
@@ -1245,6 +1285,30 @@ macro_rules! unsigned_integer {
             fn abs(&self) -> Self {
                 *self
             }
+
+            fn ceil(&self) -> Self {
+                *self
+            }
+
+            fn floor(&self) -> Self {
+                *self
+            }
+
+            fn pow(&self, other: Self) -> Self {
+                Self((self.0.pow(other.0 as u32)))
+            }
+
+            fn round(&self) -> Self {
+                *self
+            }
+
+            fn sqrt(&self) -> Self {
+                Self((self.0 as f64).sqrt() as $inner)
+            }
+
+
+
+
         }
 
     };

@@ -1176,28 +1176,27 @@ impl Binder {
             "TRIM" => Function::Trim,
             "LTRIM" => Function::LTrim,
             "RTRIM" => Function::RTrim,
-            "SUBSTR" | "SUBSTRING" => Function::Substr,
+
             "CONCAT" => Function::Concat,
-            "REPLACE" => Function::Replace,
+
             "ABS" => Function::Abs,
             "ROUND" => Function::Round,
             "CEIL" | "CEILING" => Function::Ceil,
             "FLOOR" => Function::Floor,
-            "TRUNC" | "TRUNCATE" => Function::Trunc,
-            "MOD" => Function::Mod,
-            "POWER" | "POW" => Function::Power,
+
+
+
             "SQRT" => Function::Sqrt,
-            "NOW" => Function::Now,
+
             "CURRENT_DATE" => Function::CurrentDate,
             "CURRENT_TIME" => Function::CurrentTime,
             "CURRENT_TIMESTAMP" => Function::CurrentTimestamp,
-            "EXTRACT" => Function::Extract,
-            "DATE_PART" => Function::DatePart,
+
             "COALESCE" => Function::Coalesce,
             "NULLIF" => Function::NullIf,
-            "IFNULL" => Function::IfNull,
             "CAST" => Function::Cast,
-            _ => Function::Unknown,
+            _ => panic!("Unexpected function name")
+
         }
     }
 
@@ -1260,27 +1259,22 @@ impl Binder {
             | Function::Trim
             | Function::LTrim
             | Function::RTrim
-            | Function::Substr
-            | Function::Concat
-            | Function::Replace => DataTypeKind::Text,
+            | Function::Concat => DataTypeKind::Text,
             Function::Abs
             | Function::Round
             | Function::Ceil
-            | Function::Floor
-            | Function::Trunc => args
+            | Function::Floor => args
                 .first()
                 .map(|a| a.data_type())
                 .unwrap_or(DataTypeKind::Double),
-            Function::Mod | Function::Power | Function::Sqrt => DataTypeKind::Double,
-            Function::Now | Function::CurrentTimestamp => DataTypeKind::DateTime,
+            Function::Sqrt => DataTypeKind::Double,
             Function::CurrentDate => DataTypeKind::Date,
-            Function::CurrentTime => DataTypeKind::DateTime,
-            Function::Extract | Function::DatePart => DataTypeKind::Int,
-            Function::Coalesce | Function::IfNull | Function::NullIf => args
+            Function::CurrentTime | Function::CurrentTimestamp => DataTypeKind::DateTime,
+            Function::Coalesce | Function::NullIf => args
                 .first()
                 .map(|a| a.data_type())
                 .unwrap_or(DataTypeKind::Null),
-            Function::Cast | Function::Unknown => DataTypeKind::Null,
+            Function::Cast  => DataTypeKind::Null,
         }
     }
 

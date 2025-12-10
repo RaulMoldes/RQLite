@@ -20,15 +20,10 @@ use crate::{
     },
     sql::{
         binder::ast::BoundExpression,
-        executor::{
-            eval::ExpressionEvaluator, ExecutionState, ExecutionStats, Executor, Row,
-        },
-        planner::{
-            logical::SortExpr,
-            physical::ExternalSortOp,
-        }
+        executor::{ExecutionState, ExecutionStats, Executor, Row, eval::ExpressionEvaluator},
+        planner::{logical::SortExpr, physical::ExternalSortOp},
     },
-    types::{DataType, Blob, reinterpret_cast, DataTypeKind}
+    types::{Blob, DataType, DataTypeKind, reinterpret_cast},
 };
 
 /// Default memory limit for in-memory sorting (64 MB).
@@ -188,7 +183,10 @@ impl Sort {
     }
 
     /// Perform in-memory quicksort.
-    fn in_memory_sort(&mut self, mut rows_with_keys: Vec<(Row, Vec<DataType>)>) -> ExecutionResult<()> {
+    fn in_memory_sort(
+        &mut self,
+        mut rows_with_keys: Vec<(Row, Vec<DataType>)>,
+    ) -> ExecutionResult<()> {
         // Sort using the comparison function
         rows_with_keys.sort_by(|a, b| self.compare_rows(&a.1, &b.1));
 
@@ -220,26 +218,25 @@ impl Sort {
             .unwrap()
             .join(format!("run_{}.dat", self.run_files.len()));
 
-        let file = File::create(&run_file).map_err(|e| {
-            QueryExecutionError::Other(format!("Failed to create run file: {}", e))
-        })?;
+        let file = File::create(&run_file)
+            .map_err(|e| QueryExecutionError::Other(format!("Failed to create run file: {}", e)))?;
 
         let mut writer = BufWriter::new(file);
 
         // Write number of rows
         let num_rows = run.len() as u64;
-        writer.write_all(&num_rows.to_le_bytes()).map_err(|e| {
-            QueryExecutionError::Other(format!("Failed to write run file: {}", e))
-        })?;
+        writer
+            .write_all(&num_rows.to_le_bytes())
+            .map_err(|e| QueryExecutionError::Other(format!("Failed to write run file: {}", e)))?;
 
         // Write each row
         for (row, _) in run.drain(..) {
             Self::serialize_row(&mut writer, &row)?;
         }
 
-        writer.flush().map_err(|e| {
-            QueryExecutionError::Other(format!("Failed to flush run file: {}", e))
-        })?;
+        writer
+            .flush()
+            .map_err(|e| QueryExecutionError::Other(format!("Failed to flush run file: {}", e)))?;
 
         self.run_files.push(run_file);
         Ok(())
@@ -265,9 +262,9 @@ impl Sort {
     fn serialize_row<W: Write>(writer: &mut W, row: &Row) -> ExecutionResult<()> {
         // Write number of columns
         let num_cols = row.len() as u32;
-        writer.write_all(&num_cols.to_le_bytes()).map_err(|e| {
-            QueryExecutionError::Other(format!("Serialization error: {}", e))
-        })?;
+        writer
+            .write_all(&num_cols.to_le_bytes())
+            .map_err(|e| QueryExecutionError::Other(format!("Serialization error: {}", e)))?;
 
         // Write each column
         for value in row.iter() {
@@ -288,7 +285,7 @@ impl Sort {
                 return Err(QueryExecutionError::Other(format!(
                     "Deserialization error: {}",
                     e
-                )))
+                )));
             }
         }
 
@@ -309,9 +306,9 @@ impl Sort {
     fn serialize_datatype<W: Write>(writer: &mut W, value: &DataType) -> ExecutionResult<()> {
         // Write type discriminant using DataTypeKind's as_repr()
         let type_id = value.kind().as_repr();
-        writer.write_all(&[type_id]).map_err(|e| {
-            QueryExecutionError::Other(format!("Serialization error: {}", e))
-        })?;
+        writer
+            .write_all(&[type_id])
+            .map_err(|e| QueryExecutionError::Other(format!("Serialization error: {}", e)))?;
 
         // For fixed-size types, just write the bytes directly
         // For variable-size types (Text, Blob), write length first
@@ -320,26 +317,25 @@ impl Sort {
         if !value.kind().is_fixed_size() {
             // Variable-length: write length prefix
             let len = bytes.len() as u32;
-            writer.write_all(&len.to_le_bytes()).map_err(|e| {
-                QueryExecutionError::Other(format!("Serialization error: {}", e))
-            })?;
+            writer
+                .write_all(&len.to_le_bytes())
+                .map_err(|e| QueryExecutionError::Other(format!("Serialization error: {}", e)))?;
         }
 
-        writer.write_all(bytes).map_err(|e| {
-            QueryExecutionError::Other(format!("Serialization error: {}", e))
-        })?;
+        writer
+            .write_all(bytes)
+            .map_err(|e| QueryExecutionError::Other(format!("Serialization error: {}", e)))?;
 
         Ok(())
     }
 
     /// Deserialize a DataType value.
     fn deserialize_datatype<R: Read>(reader: &mut R) -> ExecutionResult<DataType> {
-
         // Read type discriminant
         let mut type_id = [0u8; 1];
-        reader.read_exact(&mut type_id).map_err(|e| {
-            QueryExecutionError::Other(format!("Deserialization error: {}", e))
-        })?;
+        reader
+            .read_exact(&mut type_id)
+            .map_err(|e| QueryExecutionError::Other(format!("Deserialization error: {}", e)))?;
 
         let kind = DataTypeKind::from_repr(type_id[0]).map_err(|e| {
             QueryExecutionError::Other(format!("Unknown type id {}: {}", type_id[0], e))
@@ -354,28 +350,27 @@ impl Sort {
         // For variable-size types, read length first
         if let Some(size) = kind.size_of_val() {
             let mut buf = vec![0u8; size];
-            reader.read_exact(&mut buf).map_err(|e| {
-                QueryExecutionError::Other(format!("Deserialization error: {}", e))
-            })?;
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| QueryExecutionError::Other(format!("Deserialization error: {}", e)))?;
 
             // Use reinterpret_cast to convert bytes back to DataType
-            let (value_ref, _) = reinterpret_cast(kind, &buf).map_err(|e| {
-                QueryExecutionError::Other(format!("Reinterpret error: {}", e))
-            })?;
+            let (value_ref, _) = reinterpret_cast(kind, &buf)
+                .map_err(|e| QueryExecutionError::Other(format!("Reinterpret error: {}", e)))?;
 
             Ok(value_ref.to_owned())
         } else {
             // Variable-length type: read length then data
             let mut len_buf = [0u8; 4];
-            reader.read_exact(&mut len_buf).map_err(|e| {
-                QueryExecutionError::Other(format!("Deserialization error: {}", e))
-            })?;
+            reader
+                .read_exact(&mut len_buf)
+                .map_err(|e| QueryExecutionError::Other(format!("Deserialization error: {}", e)))?;
             let len = u32::from_le_bytes(len_buf) as usize;
 
             let mut data = vec![0u8; len];
-            reader.read_exact(&mut data).map_err(|e| {
-                QueryExecutionError::Other(format!("Deserialization error: {}", e))
-            })?;
+            reader
+                .read_exact(&mut data)
+                .map_err(|e| QueryExecutionError::Other(format!("Deserialization error: {}", e)))?;
 
             // Reconstruct based on kind
             let blob = Blob::from(data.as_slice());
@@ -383,7 +378,8 @@ impl Sort {
                 DataTypeKind::Text => Ok(DataType::Text(blob)),
                 DataTypeKind::Blob => Ok(DataType::Blob(blob)),
                 _ => Err(QueryExecutionError::Other(format!(
-                    "Unexpected variable-length type: {:?}", kind
+                    "Unexpected variable-length type: {:?}",
+                    kind
                 ))),
             }
         }
@@ -487,9 +483,9 @@ impl RunReader {
     fn new(mut reader: BufReader<File>, schema: &Schema) -> ExecutionResult<Self> {
         // Read number of rows
         let mut num_rows_bytes = [0u8; 8];
-        reader.read_exact(&mut num_rows_bytes).map_err(|e| {
-            QueryExecutionError::Other(format!("Failed to read run file: {}", e))
-        })?;
+        reader
+            .read_exact(&mut num_rows_bytes)
+            .map_err(|e| QueryExecutionError::Other(format!("Failed to read run file: {}", e)))?;
         let remaining = u64::from_le_bytes(num_rows_bytes);
 
         let mut run_reader = Self {

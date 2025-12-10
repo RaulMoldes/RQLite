@@ -217,8 +217,6 @@ mod query_execution_tests {
         assert_eq!(results.len(), 5, "Should return all 5 users");
     }
 
-
-
     #[test]
     #[serial]
     fn test_select_order_by() {
@@ -244,10 +242,6 @@ mod query_execution_tests {
         }
         assert_eq!(results.len(), 4, "Should return all 5 users");
     }
-
-
-
-
 
     #[test]
     #[serial]

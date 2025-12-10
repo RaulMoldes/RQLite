@@ -31,28 +31,19 @@ pub enum Function {
     Trim,
     LTrim,
     RTrim,
-    Substr,
     Concat,
-    Replace,
     Abs,
     Round,
     Ceil,
     Floor,
-    Trunc,
-    Mod,
-    Power,
     Sqrt,
-    Now,
     CurrentDate,
     CurrentTime,
     CurrentTimestamp,
-    Extract,
-    DatePart,
+
     Coalesce,
     NullIf,
-    IfNull,
     Cast,
-    Unknown,
 }
 
 impl Display for Function {
@@ -64,28 +55,24 @@ impl Display for Function {
             Function::Trim => "Trim",
             Function::LTrim => "LTrim",
             Function::RTrim => "RTrim",
-            Function::Substr => "Substr",
             Function::Concat => "Concat",
-            Function::Replace => "Replace",
+
             Function::Abs => "Abs",
             Function::Round => "Round",
             Function::Ceil => "Ceil",
             Function::Floor => "Floor",
-            Function::Trunc => "Trunc",
-            Function::Mod => "Mod",
-            Function::Power => "Power",
+
+
             Function::Sqrt => "Sqrt",
-            Function::Now => "Now",
+
             Function::CurrentDate => "CurrentDate",
             Function::CurrentTime => "CurrentTime",
             Function::CurrentTimestamp => "CurrentTimestamp",
-            Function::Extract => "Extract",
-            Function::DatePart => "DatePart",
+
             Function::Coalesce => "Coalesce",
             Function::NullIf => "NullIf",
-            Function::IfNull => "IfNull",
             Function::Cast => "Cast",
-            Function::Unknown => "Unknown",
+
         };
         write!(f, "{}", name)
     }

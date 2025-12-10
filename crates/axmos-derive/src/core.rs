@@ -1044,6 +1044,20 @@ impl Generator for ImplBlockGenerator {
 struct OpsGenerator;
 
 impl OpsGenerator {
+    pub fn generate_ceil_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+        info.variants.iter().map(|v| {
+            let vn = &v.name;
+            if let Some(ty) = &v.inner_type {
+                if v.is_arith() && v.is_copy() {
+                    quote! { Self::#vn(inner) => Self::#vn(<#ty as crate::types::core::AxmosOps>::ceil(inner)) }
+                } else {
+                    quote! { Self::#vn(inner) => DataType::Null }
+                }
+            } else {
+                quote! { Self::#vn => DataType::Null }
+            }
+        }).collect()
+    }
     pub fn generate_abs_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
         info.variants.iter().map(|v| {
             let vn = &v.name;
@@ -1058,12 +1072,69 @@ impl OpsGenerator {
             }
         }).collect()
     }
+
+
+    pub fn generate_sqrt_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+        info.variants.iter().map(|v| {
+            let vn = &v.name;
+            if let Some(ty) = &v.inner_type {
+                if v.is_arith() && v.is_copy() {
+                    quote! { Self::#vn(inner) => Self::#vn(<#ty as crate::types::core::AxmosOps>::sqrt(inner)) }
+                } else {
+                    quote! { Self::#vn(inner) => DataType::Null }
+                }
+            } else {
+                quote! { Self::#vn => DataType::Null }
+            }
+        }).collect()
+    }
+
+
+    pub fn generate_round_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+        info.variants.iter().map(|v| {
+            let vn = &v.name;
+            if let Some(ty) = &v.inner_type {
+                if v.is_arith() && v.is_copy() {
+                    quote! { Self::#vn(inner) => Self::#vn(<#ty as crate::types::core::AxmosOps>::round(inner)) }
+                } else {
+                    quote! { Self::#vn(inner) => DataType::Null }
+                }
+            } else {
+                quote! { Self::#vn => DataType::Null }
+            }
+        }).collect()
+    }
+
+
+
+
+
+
+
+     pub fn generate_floor_arms(&self, info: &EnumInfo) -> Vec<TokenStream> {
+        info.variants.iter().map(|v| {
+            let vn = &v.name;
+            if let Some(ty) = &v.inner_type {
+                if v.is_arith() && v.is_copy() {
+                    quote! { Self::#vn(inner) => Self::#vn(<#ty as crate::types::core::AxmosOps>::floor(inner)) }
+                } else {
+                    quote! { Self::#vn(inner) => DataType::Null }
+                }
+            } else {
+                quote! { Self::#vn => DataType::Null }
+            }
+        }).collect()
+    }
 }
 impl Generator for OpsGenerator {
     fn generate(&self, info: &EnumInfo) -> TokenStream {
         let name = &info.name;
 
         let abs_arms: Vec<_> = self.generate_abs_arms(info);
+        let sqrt_arms: Vec<_> = self.generate_sqrt_arms(info);
+        let ceil_arms: Vec<_> = self.generate_ceil_arms(info);
+        let floor_arms: Vec<_> = self.generate_floor_arms(info);
+        let round_arms: Vec<_> = self.generate_round_arms(info);
 
         quote! {
             impl #name {
@@ -1071,6 +1142,41 @@ impl Generator for OpsGenerator {
                 pub(crate) fn abs(&self) -> Self {
                     match self {
                         #(#abs_arms,)*
+
+                    }
+                }
+
+                /// Extract as signed integer if possible.
+                pub(crate) fn ceil(&self) -> Self {
+                    match self {
+                        #(#ceil_arms,)*
+
+                    }
+                }
+
+
+                /// Extract as signed integer if possible.
+                pub(crate) fn floor(&self) -> Self {
+                    match self {
+                        #(#floor_arms,)*
+
+                    }
+                }
+
+
+                 /// Extract as signed integer if possible.
+                pub(crate) fn round(&self) -> Self {
+                    match self {
+                        #(#round_arms,)*
+
+                    }
+                }
+
+
+                /// Extract as signed integer if possible.
+                pub(crate) fn sqrt(&self) -> Self {
+                    match self {
+                        #(#sqrt_arms,)*
 
                     }
                 }

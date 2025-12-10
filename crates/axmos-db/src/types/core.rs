@@ -118,6 +118,12 @@ impl NumClass {
 
 pub trait AxmosOps: AxmosValueType {
     fn abs(&self) -> Self;
+    fn ceil(&self) -> Self;
+    fn floor(&self) -> Self;
+    fn sqrt(&self) -> Self;
+    fn round(&self) -> Self;
+    fn pow(&self, other: Self) -> Self;
+
 }
 
 /// Trait for numeric types.

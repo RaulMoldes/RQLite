@@ -39,7 +39,7 @@ impl Project {
     fn project_row(&self, input_row: &Row) -> EvalResult<Row> {
         let input_schema = self.child.schema();
         let evaluator = ExpressionEvaluator::new(input_row, input_schema);
-   
+
         let mut output_row = Row::with_capacity(self.expressions.len());
         for expr in &self.expressions {
             let value = evaluator.evaluate(expr.clone())?;

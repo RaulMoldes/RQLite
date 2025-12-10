@@ -6,15 +6,12 @@ use crate::{
             Executor,
             context::ExecutionContext,
             ops::{
-                agg::HashAggregate, delete::Delete, filter::Filter, insert::Insert,
-                materialize::Materialize, project::Project, seq_scan::SeqScan, update::Update,
-                values::Values,
-                sort::Sort,
-                top_n::TopN,
-                limit::Limit
+                agg::HashAggregate, delete::Delete, filter::Filter, insert::Insert, limit::Limit,
+                materialize::Materialize, project::Project, seq_scan::SeqScan, sort::Sort,
+                top_n::TopN, update::Update, values::Values,
             },
         },
-        planner::physical::{PhysicalOperator, PhysicalPlan, ExternalSortOp, PhysValuesOp},
+        planner::physical::{ExternalSortOp, PhysValuesOp, PhysicalOperator, PhysicalPlan},
     },
 };
 
@@ -117,7 +114,6 @@ impl ExecutorBuilder {
                 Ok(Box::new(executor))
             }
 
-
             // Sort operators
             PhysicalOperator::ExternalSort(sort_op) => {
                 if children.len() != 1 {
@@ -173,8 +169,6 @@ impl ExecutorBuilder {
                 let executor = Values::new(values_op);
                 Ok(Box::new(executor))
             }
-
-
 
             _ => unimplemented!(
                 "Execution build is only implemented for Project, Scan, Filter, Insert, Update, and Delete"
