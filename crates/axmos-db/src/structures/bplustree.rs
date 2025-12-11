@@ -5,7 +5,7 @@ use crate::{
         cell::{CELL_HEADER_SIZE, Cell, Slot},
         page::{BTREE_PAGE_HEADER_SIZE, BtreePage, OverflowPage},
     },
-    transactions::worker::{ThreadWorker, Worker},
+    transactions::accessor::{PageAccessor, RcPageAccessor},
     types::{PAGE_ZERO, PageId, VarInt},
 };
 
@@ -90,7 +90,7 @@ where
     Cmp: Comparator,
 {
     pub(crate) root: PageId,
-    pub(crate) worker: Worker,
+    pub(crate) accessor: RcPageAccessor,
     pub(crate) min_keys: usize,
     pub(crate) num_siblings_per_side: usize,
     comparator: Cmp,
@@ -101,15 +101,15 @@ where
     Cmp: Comparator + Clone,
 {
     pub(crate) fn new(
-        worker: Worker,
+        accessor: RcPageAccessor,
         min_keys: usize,
         num_siblings_per_side: usize,
         comparator: Cmp,
     ) -> io::Result<Self> {
-        let root = worker.borrow_mut().alloc_page::<BtreePage>()?;
+        let root = accessor.borrow_mut().alloc_page::<BtreePage>()?;
         Ok(Self::from_existent(
             root,
-            worker,
+            accessor,
             min_keys,
             num_siblings_per_side,
             comparator,
@@ -118,7 +118,7 @@ where
 
     pub(crate) fn from_existent(
         root: PageId,
-        worker: Worker,
+        accessor: RcPageAccessor,
         min_keys: usize,
         num_siblings_per_side: usize,
         comparator: Cmp,
@@ -126,7 +126,7 @@ where
         debug_assert!(min_keys >= 3, "Invalid argument. Minimum allowed keys is 3");
         Self {
             root,
-            worker,
+            accessor,
             min_keys,
             num_siblings_per_side,
             comparator,
@@ -153,16 +153,16 @@ where
         self.root
     }
 
-    pub(crate) fn worker(&self) -> Ref<'_, ThreadWorker> {
-        self.worker.borrow()
+    pub(crate) fn accessor(&self) -> Ref<'_, PageAccessor> {
+        self.accessor.borrow()
     }
 
-    pub(crate) fn worker_mut(&self) -> RefMut<'_, ThreadWorker> {
-        self.worker.borrow_mut()
+    pub(crate) fn accessor_mut(&self) -> RefMut<'_, PageAccessor> {
+        self.accessor.borrow_mut()
     }
 
-    pub(crate) fn clear_worker_stack(&self) {
-        self.worker_mut().clear_stack();
+    pub(crate) fn clear_accessor_stack(&self) {
+        self.accessor_mut().clear_stack();
     }
 
     /// Helper that acquires overflow latches, reassembles payload, and returns it.
@@ -175,7 +175,7 @@ where
 
             // Release overflow latches
             for ovf_page in overflow_pages {
-                self.worker_mut().release_latch(ovf_page);
+                self.accessor_mut().release_latch(ovf_page);
             }
 
             Ok(payload)
@@ -197,11 +197,11 @@ where
         let mut accumulated = initial_bytes.saturating_sub(mem::size_of::<PageId>());
 
         while current.is_valid() && accumulated < required_size {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<OverflowPage>(current, FrameAccessMode::Read)?;
 
             let (next, num_bytes) = self
-                .worker()
+                .accessor()
                 .read_page::<OverflowPage, _, _>(current, |ovf| {
                     (ovf.metadata().next, ovf.metadata().num_bytes as usize)
                 })?;
@@ -224,7 +224,7 @@ where
                 let page_id = position.page();
                 let slot = position.slot();
                 let cell = self
-                    .worker()
+                    .accessor()
                     .read_page::<BtreePage, _, _>(page_id, |p| p.cell(slot).clone())?;
                 Ok(Some(self.get_cell_payload(&cell)?))
             }
@@ -250,19 +250,19 @@ where
         access_mode: FrameAccessMode,
     ) -> io::Result<SearchResult> {
         let start_page = start.page();
-        self.worker_mut()
+        self.accessor_mut()
             .acquire::<BtreePage>(start_page, access_mode)?;
 
-        let last = self.worker().last().cloned();
+        let last = self.accessor().last().cloned();
         // As we are reading, we can safely release the latch on the parent.
         if let Some(parent_node) = last
             && matches!(access_mode, FrameAccessMode::Read)
         {
-            self.worker_mut().release_latch(parent_node.page());
+            self.accessor_mut().release_latch(parent_node.page());
         };
 
         let is_leaf = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(start_page, |p| p.is_leaf())?;
 
         if is_leaf {
@@ -273,7 +273,7 @@ where
         let child = self.find_child(start_page, entry)?;
         match child {
             SearchResult::NotFound(position) | SearchResult::Found(position) => {
-                self.worker_mut()
+                self.accessor_mut()
                     .visit(Position::new(start_page, position.slot()))?;
                 self.search(&position, entry, access_mode)
             }
@@ -283,14 +283,14 @@ where
     /// Finds the most suitable child to store a particular entry at a given page.
     fn find_child(&self, page_id: PageId, search_key: &[u8]) -> io::Result<SearchResult> {
         let (num_slots, right_child) = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(page_id, |p| (p.num_slots(), p.metadata().right_child))?;
 
         let mut result = SearchResult::NotFound(Position::new(right_child, Slot(num_slots)));
 
         for i in 0..num_slots {
             let is_overflow =
-                self.worker()
+                self.accessor()
                     .try_read_page::<BtreePage, _, _>(page_id, |btreepage| {
                         let cell = btreepage.cell(Slot(i));
 
@@ -317,7 +317,7 @@ where
                 if flag {
                     // If the cell is overflow, then we have to clone, there is no way around.
                     let cell =
-                        self.worker()
+                        self.accessor()
                             .read_page::<BtreePage, _, _>(page_id, |btreepage| {
                                 let cell = btreepage.cell(Slot(i));
                                 cell.clone()
@@ -360,7 +360,7 @@ where
     /// [`SlotSearchResult::NotFound`]: The slot was not found in the slot array, then the key should be inserted at the end of the page or an error will be thrown (depends on the case).
     fn find_slot(&self, page_id: PageId, search_key: &[u8]) -> io::Result<SlotSearchResult> {
         let num_slots = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(page_id, |p| p.num_slots())?;
 
         if num_slots == 0 {
@@ -371,7 +371,7 @@ where
         for i in 0..num_slots {
             // First we check if the cell is an overflow cell, stopping the search if not
             let is_overflow =
-                self.worker()
+                self.accessor()
                     .try_read_page::<BtreePage, _, _>(page_id, |btreepage| {
                         let cell = btreepage.cell(Slot(i));
 
@@ -404,7 +404,7 @@ where
                 if flag {
                     // If the cell is overflow, then we have to clone, there is no way around.
                     let cell =
-                        self.worker()
+                        self.accessor()
                             .read_page::<BtreePage, _, _>(page_id, |btreepage| {
                                 let cell = btreepage.cell(Slot(i));
                                 cell.clone()
@@ -459,7 +459,7 @@ where
     /// - [SearchResult::NotFound] if it does not find the key it is looking for.  The position will include the last slot index in the page.
     fn binary_search_key(&self, page_id: PageId, search_key: &[u8]) -> io::Result<SearchResult> {
         let mut slot_count: Slot = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(page_id, |p| p.num_slots())?
             .into();
 
@@ -472,7 +472,7 @@ where
             let mid = left + slot_count / Slot(2);
             // First we check if the cell is an overflow cell, stopping the search if not
             let is_overflow =
-                self.worker()
+                self.accessor()
                     .try_read_page::<BtreePage, _, _>(page_id, |btreepage| {
                         let cell = btreepage.cell(mid);
 
@@ -497,7 +497,7 @@ where
                 if flag {
                     // If the cell is overflow, then we have to clone, there is no way around.
                     let cell =
-                        self.worker()
+                        self.accessor()
                             .read_page::<BtreePage, _, _>(page_id, |btreepage| {
                                 let cell = btreepage.cell(mid);
                                 cell.clone()
@@ -557,7 +557,7 @@ where
         }?;
 
         // Cleanup traversal here.
-        self.worker_mut().clear_stack();
+        self.accessor_mut().clear_stack();
 
         Ok(())
     }
@@ -571,7 +571,7 @@ where
         let slot_result = self.find_slot(page_id, data)?;
 
         let free_space = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(page_id, |btreepage| {
                 min(
                     btreepage.max_allowed_payload_size(),
@@ -585,7 +585,7 @@ where
         match slot_result {
             // Slot not found so we just append the cell at the end of the page.
             SlotSearchResult::NotFound => {
-                self.worker_mut()
+                self.accessor_mut()
                     .write_page::<BtreePage, _, _>(page_id, |btreepage| {
                         let index = btreepage.max_slot_index();
                         btreepage.insert(index, cell);
@@ -594,7 +594,7 @@ where
             // Best fit slot is found between two existing slots.
             SlotSearchResult::FoundBetween(pos) => {
                 let slot = pos.slot();
-                self.worker_mut()
+                self.accessor_mut()
                     .write_page::<BtreePage, _, _>(page_id, |btreepage| {
                         btreepage.insert(slot, cell);
                     })?;
@@ -617,7 +617,7 @@ where
         let page_id = pos.page();
         let slot = pos.slot();
         let free_space = self
-            .worker_mut()
+            .accessor_mut()
             .read_page::<BtreePage, _, _>(page_id, |btreepage| {
                 btreepage.max_allowed_payload_size()
             })? as usize;
@@ -626,7 +626,7 @@ where
 
         // Replace the contents of the page.
         let old_cell = self
-            .worker_mut()
+            .accessor_mut()
             .write_page::<BtreePage, _, _>(page_id, |btreepage| {
                 let index = btreepage.max_slot_index();
                 btreepage.replace(slot, cell)
@@ -660,7 +660,7 @@ where
         };
 
         // Cleanup traversal here.
-        self.worker_mut().clear_stack();
+        self.accessor_mut().clear_stack();
         Ok(())
     }
 
@@ -678,7 +678,7 @@ where
         }?;
 
         // Cleanup traversal here.
-        self.worker_mut().clear_stack();
+        self.accessor_mut().clear_stack();
         Ok(())
     }
 
@@ -697,7 +697,7 @@ where
                 let page_id = pos.page();
                 let slot = pos.slot();
                 let cell = self
-                    .worker_mut()
+                    .accessor_mut()
                     .write_page::<BtreePage, _, _>(page_id, |btreepage| btreepage.remove(slot))?;
                 self.free_cell(cell)?;
 
@@ -711,11 +711,11 @@ where
         }?;
 
         // Cleanup traversal here.
-        self.worker_mut().clear_stack();
+        self.accessor_mut().clear_stack();
         Ok(())
     }
 
-    /// Deallocates a cell, the current worker will be responsible for deallocating all overflow pages.
+    /// Deallocates a cell, the current RcPageAccessor will be responsible for deallocating all overflow pages.
     fn free_cell(&self, cell: Cell) -> io::Result<()> {
         if !cell.metadata().is_overflow() {
             return Ok(());
@@ -724,16 +724,16 @@ where
         let mut overflow_page = cell.overflow_page();
 
         while overflow_page.is_valid() {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<OverflowPage>(overflow_page, FrameAccessMode::Read)?;
 
             let next = self
-                .worker()
+                .accessor()
                 .read_page::<OverflowPage, _, _>(overflow_page, |overflow| {
                     overflow.metadata().next
                 })?;
 
-            self.worker_mut()
+            self.accessor_mut()
                 .dealloc_page::<OverflowPage>(overflow_page)?;
 
             overflow_page = next;
@@ -743,7 +743,7 @@ where
     }
 
     fn build_cell(&self, remaining_space: usize, payload: &[u8]) -> io::Result<Cell> {
-        let page_size = self.worker().get_page_size();
+        let page_size = self.accessor().get_page_size();
 
         let v = remaining_space.saturating_sub(Slot::SIZE);
 
@@ -767,7 +767,7 @@ where
             return Ok(Cell::new(payload));
         }
 
-        let mut overflow_page_number = self.worker_mut().alloc_page::<OverflowPage>()?;
+        let mut overflow_page_number = self.accessor_mut().alloc_page::<OverflowPage>()?;
 
         let cell = Cell::new_overflow(&payload[..max_payload_size], overflow_page_number);
 
@@ -775,7 +775,7 @@ where
 
         // Note that here we cannot release the latch on an overflow page until all the chain is written. This might waste a lot of memory  as it will keep overflow pages pinned. It is a tradeoff between correctness and efficiency, and for a database, we prefer to play the correctness side of the story.
         loop {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<OverflowPage>(overflow_page_number, FrameAccessMode::Write)?;
 
             let overflow_bytes = min(
@@ -783,7 +783,7 @@ where
                 payload[stored_bytes..].len(),
             );
 
-            self.worker_mut().write_page::<OverflowPage, _, _>(
+            self.accessor_mut().write_page::<OverflowPage, _, _>(
                 overflow_page_number,
                 |overflow_page| {
                     overflow_page.data_mut()[..overflow_bytes]
@@ -797,9 +797,9 @@ where
                 break;
             }
 
-            let next_overflow_page = self.worker_mut().alloc_page::<OverflowPage>()?;
+            let next_overflow_page = self.accessor_mut().alloc_page::<OverflowPage>()?;
 
-            self.worker_mut().write_page::<OverflowPage, _, _>(
+            self.accessor_mut().write_page::<OverflowPage, _, _>(
                 overflow_page_number,
                 |overflow_page| {
                     overflow_page.metadata_mut().next = next_overflow_page;
@@ -824,7 +824,7 @@ where
     /// 4. The right grandchild becomes the new right-child.
     fn balance_shallower(&mut self) -> io::Result<()> {
         let (is_underflow, is_leaf) = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(self.root, |p| (p.is_empty(), p.is_leaf()))?;
 
         if !is_underflow || is_leaf {
@@ -832,24 +832,24 @@ where
         };
 
         let child_page = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(self.root, |p| p.metadata().right_child)?;
 
         // TODO: REVIEW IF THIS CAN FAIL DUE TO THE CHILD PAGE LATCH NOT BEING ACQUIRED BY THE CURRENT TRANSACTION
         let grand_child = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(child_page, |p| p.metadata().right_child)?;
 
         let cells = self
-            .worker_mut()
+            .accessor_mut()
             .write_page::<BtreePage, _, _>(child_page, |p| p.drain(..).collect::<Vec<_>>())?;
 
         // Release the child latch and deallocate the page
-        self.worker_mut().release_latch(child_page);
-        self.worker_mut().dealloc_page::<BtreePage>(child_page)?;
+        self.accessor_mut().release_latch(child_page);
+        self.accessor_mut().dealloc_page::<BtreePage>(child_page)?;
 
         // Refill the old root.
-        self.worker_mut()
+        self.accessor_mut()
             .write_page::<BtreePage, _, _>(self.root, |node| {
                 cells.into_iter().for_each(|cell| node.push(cell));
                 node.metadata_mut().right_child = grand_child;
@@ -887,22 +887,22 @@ where
     /// The cell in the middle gets propagated upwards.
     /// We also need to fix the pointers in the frontiers between the two new nodes to maintain the leaf node's linked list.
     fn balance_deeper(&mut self) -> io::Result<()> {
-        let new_left = self.worker_mut().alloc_page::<BtreePage>()?;
-        self.worker_mut()
+        let new_left = self.accessor_mut().alloc_page::<BtreePage>()?;
+        self.accessor_mut()
             .acquire::<BtreePage>(new_left, FrameAccessMode::Write)?;
-        let new_right = self.worker_mut().alloc_page::<BtreePage>()?;
-        self.worker_mut()
+        let new_right = self.accessor_mut().alloc_page::<BtreePage>()?;
+        self.accessor_mut()
             .acquire::<BtreePage>(new_right, FrameAccessMode::Write)?;
 
         let old_right_child = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(self.root, |node| node.metadata().right_child)?;
 
         let was_leaf = !old_right_child.is_valid();
-        let page_size = self.worker().get_page_size();
+        let page_size = self.accessor().get_page_size();
 
         let mut cells = self
-            .worker_mut()
+            .accessor_mut()
             .write_page::<BtreePage, _, _>(self.root, |node| {
                 node.metadata_mut().free_space_ptr = (page_size - BTREE_PAGE_HEADER_SIZE) as u32;
                 node.drain(..).collect::<Vec<_>>()
@@ -918,13 +918,13 @@ where
         propagated_cell.metadata_mut().left_child = new_left;
 
         // Now we move part of the cells to one node and the other part to the other node.
-        self.worker_mut()
+        self.accessor_mut()
             .write_page::<BtreePage, _, _>(self.root, |node| {
                 node.metadata_mut().right_child = new_right;
                 node.push(propagated_cell);
             })?;
 
-        self.worker_mut()
+        self.accessor_mut()
             .write_page::<BtreePage, _, _>(new_left, |node| {
                 if !was_leaf {
                     if let Some((last, rest)) = left_cells.split_last() {
@@ -939,7 +939,7 @@ where
                 node.metadata_mut().previous_sibling = PAGE_ZERO;
             })?;
 
-        self.worker_mut()
+        self.accessor_mut()
             .write_page::<BtreePage, _, _>(new_right, |node| {
                 right_cells.iter().for_each(|cell| node.push(cell.clone()));
                 node.metadata_mut().right_child = old_right_child;
@@ -950,28 +950,28 @@ where
         // Fix the frontier links.
         // The right child of the left page must be linked with the left most child of the right page to maintain proper ordering.
         let left_right_most = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(new_left, |node| node.metadata().right_child)?;
 
         let right_left_most = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(new_right, |node| {
                 node.cell(Slot(0)).metadata().left_child()
             })?;
 
         if left_right_most.is_valid() {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<BtreePage>(left_right_most, FrameAccessMode::Write)?;
-            self.worker_mut()
+            self.accessor_mut()
                 .write_page::<BtreePage, _, _>(left_right_most, |p| {
                     p.metadata_mut().next_sibling = right_left_most;
                 })?;
         };
 
         if right_left_most.is_valid() {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<BtreePage>(right_left_most, FrameAccessMode::Write)?;
-            self.worker_mut()
+            self.accessor_mut()
                 .write_page::<BtreePage, _, _>(right_left_most, |node| {
                     node.metadata_mut().previous_sibling = left_right_most;
                 })?;
@@ -988,7 +988,7 @@ where
         let is_root = self.is_root(page_id);
 
         let is_leaf = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(page_id, |p| p.is_leaf())?;
 
         let status = self.check_node_status(page_id)?;
@@ -1008,7 +1008,7 @@ where
             return self.balance_deeper();
         };
 
-        let parent_position = self.worker_mut().pop().ok_or(IoError::new(
+        let parent_position = self.accessor_mut().pop().ok_or(IoError::new(
             ErrorKind::NotFound,
             "Parent not found on traversal stack!",
         ))?;
@@ -1025,7 +1025,7 @@ where
 
         // Obtain the parent and its siblings (uncles) of the current node.
         let (parent_prev, last_parent_slot, parent_next) = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(parent_page, |node| {
                 (
                     node.metadata().previous_sibling,
@@ -1036,9 +1036,9 @@ where
 
         // Obtain the right most child of the parent's left sibling (right most cousin)
         let parent_prev_last = if parent_prev.is_valid() {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<BtreePage>(parent_prev, FrameAccessMode::Write)?;
-            self.worker_mut()
+            self.accessor_mut()
                 .write_page::<BtreePage, _, _>(parent_prev, |p| p.metadata().right_child)?
         } else {
             PAGE_ZERO
@@ -1046,9 +1046,9 @@ where
 
         // Obtain the first child of the parent's next sibling (left most cousin)
         let parent_next_first = if parent_next.is_valid() {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<BtreePage>(parent_next, FrameAccessMode::Write)?;
-            self.worker()
+            self.accessor()
                 .read_page::<BtreePage, _, _>(parent_next, |p| {
                     p.cell(Slot(0)).metadata().left_child()
                 })?
@@ -1081,7 +1081,7 @@ where
         };
 
         // Read the page size from the pager.
-        let page_size = self.worker().get_page_size();
+        let page_size = self.accessor().get_page_size();
         let mut cells = std::collections::VecDeque::new();
 
         // As we remove cells from the parent, slots shrink towards the left.
@@ -1091,12 +1091,12 @@ where
         // Make copies of cells in order.
         for (i, sibling) in siblings.iter().enumerate() {
             // As always, when visiting sibling nodes we need to remember to acquire their corresponding latches, as they might have not been visited before.
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<BtreePage>(sibling.pointer, FrameAccessMode::Write)?;
 
             // Extract this node's cells and return the right child.
             let right_child =
-                self.worker_mut()
+                self.accessor_mut()
                     .write_page::<BtreePage, _, _>(sibling.pointer, |node| {
                         // Extract the cells and reset the free space pointer on this node.
                         cells.extend(node.drain(..));
@@ -1122,22 +1122,22 @@ where
             // extract the first cell of the first child on our next sibling and allocate a new cell.
             // This always happens on interior nodes rebalancing, as right_child is not set on leaf nodes.
             if right_child.is_valid() && next_sibling.is_valid() {
-                self.worker_mut()
+                self.accessor_mut()
                     .acquire::<BtreePage>(next_sibling, FrameAccessMode::Write)?;
 
                 // Obtain the first child
                 let first_child_next = self
-                    .worker()
+                    .accessor()
                     .read_page::<BtreePage, _, _>(next_sibling, |node| {
                         node.cell(Slot(0)).metadata().left_child()
                     })?;
 
-                self.worker_mut()
+                self.accessor_mut()
                     .acquire::<BtreePage>(first_child_next, FrameAccessMode::Write)?;
 
                 // Obtain the first cell of the first child of our sibling.
                 let mut first_cell_child = self
-                    .worker()
+                    .accessor()
                     .read_page::<BtreePage, _, _>(first_child_next, |node| {
                         node.cell(Slot(0)).clone()
                     })?;
@@ -1148,7 +1148,7 @@ where
             };
 
             // Remove our entry from the parent node.
-            self.worker_mut()
+            self.accessor_mut()
                 .write_page::<BtreePage, _, _>(parent_page, |node| {
                     // Bounds checking just for safety.
                     if slot_to_remove.0 < node.num_slots() {
@@ -1208,7 +1208,7 @@ where
         // Take the last right child of the siblings chain.
         // For interior pages this is required in order to unfuck the last pointer.
         let old_right_child = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(siblings.iter().last().unwrap().pointer, |node| {
                 node.metadata().right_child
             })?;
@@ -1216,11 +1216,11 @@ where
         // Allocate missing pages.
         while siblings.len() < number_of_cells_per_page.len() {
             let parent_index = siblings.iter().last().unwrap().slot + 1usize;
-            let new_page = self.worker_mut().alloc_page::<BtreePage>()?;
+            let new_page = self.accessor_mut().alloc_page::<BtreePage>()?;
 
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<BtreePage>(new_page, FrameAccessMode::Write)?;
-            self.worker()
+            self.accessor()
                 .read_page::<BtreePage, _, _>(new_page, |node| {
                     debug_assert!(
                         node.metadata().num_slots == 0,
@@ -1236,15 +1236,15 @@ where
             let slot = sibling.slot;
             let page = sibling.pointer;
 
-            self.worker().read_page::<BtreePage, _, _>(page, |node| {
+            self.accessor().read_page::<BtreePage, _, _>(page, |node| {
                 debug_assert!(
                     node.metadata().num_slots == 0,
                     "About to deallocated page: {page} is not empty"
                 );
             })?;
 
-            self.worker_mut().release_latch(page);
-            self.worker_mut().dealloc_page::<BtreePage>(page)?;
+            self.accessor_mut().release_latch(page);
+            self.accessor_mut().dealloc_page::<BtreePage>(page)?;
         }
 
         // Put pages in ascending order to favor sequential IO where possible.
@@ -1255,7 +1255,7 @@ where
 
         // Fix the last child pointer.
         let last_sibling = siblings[siblings.len() - 1];
-        self.worker_mut()
+        self.accessor_mut()
             .write_page::<BtreePage, _, _>(last_sibling.pointer, |node| {
                 node.metadata_mut().right_child = old_right_child;
             })?;
@@ -1263,7 +1263,7 @@ where
         // If there is no right frontier, it means the last sibling in the chain is also the parent's right most.
         if right_frontier.is_none() {
             // Fix pointers in the parent in case we have allocated new pages.
-            self.worker_mut()
+            self.accessor_mut()
                 .write_page::<BtreePage, _, _>(parent_page, |node| {
                     node.metadata_mut().right_child = last_sibling.pointer;
                 })?;
@@ -1271,7 +1271,7 @@ where
 
         // Begin redistribution.
         for (i, n) in number_of_cells_per_page.iter().enumerate() {
-            let propagated = self.worker_mut().try_write_page::<BtreePage, _, _>(
+            let propagated = self.accessor_mut().try_write_page::<BtreePage, _, _>(
                 siblings[i].pointer,
                 |node| {
                     // Push all the cells to the child.
@@ -1330,7 +1330,7 @@ where
 
             // Fix the pointer in the parent
             if let Some(divider) = propagated {
-                self.worker_mut()
+                self.accessor_mut()
                     .write_page::<BtreePage, _, _>(parent_page, |node| {
                         node.insert(siblings[i].slot, divider);
                     })?;
@@ -1340,9 +1340,9 @@ where
         // Fix the frontier links.
         // Right frontier
         let frontier_divider = if let Some(frontier) = right_frontier {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<BtreePage>(frontier.pointer, FrameAccessMode::Write)?;
-            self.worker_mut()
+            self.accessor_mut()
                 .try_write_page::<BtreePage, _, _>(frontier.pointer, |node| {
                     // Maintain linked with the last sibling in the chain
                     node.metadata_mut().previous_sibling = last_sibling.pointer;
@@ -1365,9 +1365,9 @@ where
 
         // Left frontier.
         if let Some(frontier) = left_frontier {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<BtreePage>(frontier.pointer, FrameAccessMode::Write)?;
-            self.worker_mut()
+            self.accessor_mut()
                 .write_page::<BtreePage, _, _>(frontier.pointer, |node| {
                     // Maintain linked with the last sibling in the chain
                     node.metadata_mut().next_sibling = siblings[0].pointer;
@@ -1382,7 +1382,7 @@ where
 
         //  Push the right frontier divider to the parent.
         if let Some(mut divider) = frontier_divider {
-            self.worker_mut()
+            self.accessor_mut()
                 .write_page::<BtreePage, _, _>(parent_page, |node| {
                     divider.metadata_mut().left_child = last_sibling.pointer;
                     node.insert(last_sibling.slot, divider);
@@ -1396,7 +1396,7 @@ where
     }
 
     fn load_child(&self, page: PageId, slot: Slot) -> Option<Child> {
-        self.worker()
+        self.accessor()
             .read_page::<BtreePage, _, _>(page, |node| {
                 let last_slot = node.max_slot_index();
                 if slot >= Slot(0) && slot <= last_slot {
@@ -1417,7 +1417,7 @@ where
         let slot = parent_position.slot();
         let parent = parent_position.page();
         let last_child = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(parent, |node| node.max_slot_index())?;
 
         let mut loaded: HashSet<PageId> = HashSet::new();
@@ -1468,7 +1468,7 @@ where
         let is_root = self.is_root(page_id);
 
         let (is_underflow, is_overflow) =
-            self.worker()
+            self.accessor()
                 .read_page::<BtreePage, _, _>(page_id, |node| {
                     (
                         (node.has_underflown() && !is_root) || (is_root && node.is_empty()),
@@ -1488,7 +1488,7 @@ where
     // See SQLite 3.0 balance siblings algorithm: https://sqlite.org/btreemodule.html
     fn balance_siblings(&mut self, page_id: PageId, parent_pos: &Position) -> io::Result<()> {
         let is_leaf = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(page_id, |node| node.is_leaf())?;
 
         if !is_leaf {
@@ -1510,18 +1510,18 @@ where
                 if let Some(sibling_left) = siblings.pop_front()
                     && sibling_left.pointer != page_id
                 {
-                    self.worker_mut()
+                    self.accessor_mut()
                         .acquire::<BtreePage>(sibling_left.pointer, FrameAccessMode::Write)?;
                     // The load siblings function can return invalid pointers. we need to check for the validity ourselves.
                     let first_cell_size = self
-                        .worker()
+                        .accessor()
                         .read_page::<BtreePage, _, _>(page_id, |node| {
                             node.cell(Slot(0)).storage_size()
                         })?;
 
                     // Check if we can fit the cell there
                     let has_space = self
-                        .worker()
+                        .accessor()
                         .read_page::<BtreePage, _, _>(sibling_left.pointer, |node| {
                             node.has_space_for(first_cell_size as usize)
                         })?;
@@ -1530,10 +1530,10 @@ where
                     // Lets push our cell there.
                     if has_space {
                         let removed_cell = self
-                            .worker_mut()
+                            .accessor_mut()
                             .write_page::<BtreePage, _, _>(page_id, |node| node.remove(Slot(0)))?;
 
-                        self.worker_mut().write_page::<BtreePage, _, _>(
+                        self.accessor_mut().write_page::<BtreePage, _, _>(
                             sibling_left.pointer,
                             |node| {
                                 node.push(removed_cell);
@@ -1559,11 +1559,11 @@ where
                     && sibling_right.pointer != page_id
                     && matches!(status, NodeStatus::Overflow)
                 {
-                    self.worker_mut()
+                    self.accessor_mut()
                         .acquire::<BtreePage>(sibling_right.pointer, FrameAccessMode::Write)?;
 
                     let last_cell_size =
-                        self.worker()
+                        self.accessor()
                             .read_page::<BtreePage, _, _>(page_id, |node| {
                                 let last_index = node.max_slot_index() - 1usize;
                                 node.cell(last_index).storage_size()
@@ -1571,7 +1571,7 @@ where
 
                     // Check if we can fit the cell there
                     let has_space = self
-                        .worker()
+                        .accessor()
                         .read_page::<BtreePage, _, _>(sibling_right.pointer, |node| {
                             node.has_space_for(last_cell_size as usize)
                         })?;
@@ -1580,12 +1580,12 @@ where
                     // Lets push our cell there.
                     if has_space {
                         let removed_cell = self
-                            .worker_mut()
+                            .accessor_mut()
                             .write_page::<BtreePage, _, _>(page_id, |node| {
                                 node.remove(node.max_slot_index() - 1usize)
                             })?;
 
-                        self.worker_mut().write_page::<BtreePage, _, _>(
+                        self.accessor_mut().write_page::<BtreePage, _, _>(
                             sibling_right.pointer,
                             |node| {
                                 // It must go to the first slot
@@ -1610,9 +1610,9 @@ where
                 if let Some(sibling_right) = siblings.pop_back()
                     && sibling_right.pointer != page_id
                 {
-                    self.worker_mut()
+                    self.accessor_mut()
                         .acquire::<BtreePage>(sibling_right.pointer, FrameAccessMode::Write)?;
-                    let can_borrow = self.worker().read_page::<BtreePage, _, _>(
+                    let can_borrow = self.accessor().read_page::<BtreePage, _, _>(
                         sibling_right.pointer,
                         |node| {
                             let first_cell_size = node.cell(Slot(0)).storage_size() as usize;
@@ -1624,12 +1624,12 @@ where
                     // Lets steal the cell.
                     if can_borrow {
                         let removed_cell = self
-                            .worker_mut()
+                            .accessor_mut()
                             .write_page::<BtreePage, _, _>(sibling_right.pointer, |node| {
                                 node.remove(Slot(0))
                             })?;
 
-                        self.worker_mut()
+                        self.accessor_mut()
                             .write_page::<BtreePage, _, _>(page_id, |node| {
                                 node.push(removed_cell);
                             })?;
@@ -1647,9 +1647,9 @@ where
                 if let Some(sibling_left) = siblings.pop_front() {
                     let status = self.check_node_status(page_id)?;
                     if sibling_left.pointer != page_id && matches!(status, NodeStatus::Overflow) {
-                        self.worker_mut()
+                        self.accessor_mut()
                             .acquire::<BtreePage>(sibling_left.pointer, FrameAccessMode::Write)?;
-                        let can_borrow = self.worker().read_page::<BtreePage, _, _>(
+                        let can_borrow = self.accessor().read_page::<BtreePage, _, _>(
                             sibling_left.pointer,
                             |node| {
                                 let last_cell_size =
@@ -1662,12 +1662,12 @@ where
                         // Lets steal the cell.
                         if can_borrow {
                             let removed_cell = self
-                                .worker_mut()
+                                .accessor_mut()
                                 .write_page::<BtreePage, _, _>(sibling_left.pointer, |node| {
                                     node.remove(node.max_slot_index())
                                 })?;
 
-                            self.worker_mut()
+                            self.accessor_mut()
                                 .write_page::<BtreePage, _, _>(page_id, |node| {
                                     node.insert(Slot(0), removed_cell);
                                 })?;
@@ -1699,12 +1699,12 @@ where
         separator_idx: Slot,
     ) -> io::Result<()> {
         let mut separator = self
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(right_child, |node| node.cell(Slot(0)).clone())?;
 
         separator.metadata_mut().left_child = left_child;
 
-        self.worker_mut()
+        self.accessor_mut()
             .write_page::<BtreePage, _, _>(parent, |node| {
                 if node.num_slots() == separator_idx {
                     node.metadata_mut().right_child = separator.metadata().left_child();
@@ -1717,9 +1717,9 @@ where
     /// Reads a node into memory
     fn read_into_mem(&self, root: PageId, buf: &mut Vec<(PageId, BtreePage)>) -> io::Result<()> {
         // Must acquire the page in read mode in order to read it
-        self.worker_mut()
+        self.accessor_mut()
             .acquire::<BtreePage>(root, FrameAccessMode::Read)?;
-        let children = self.worker().read_page::<BtreePage, _, _>(root, |node| {
+        let children = self.accessor().read_page::<BtreePage, _, _>(root, |node| {
             buf.push((root, node.clone()));
             node.iter_children().collect::<Vec<_>>()
         })?;
@@ -1789,7 +1789,7 @@ where
         let mut payload = Vec::from(&cell.used()[..cell.len() - std::mem::size_of::<PageId>()]);
 
         for &ovf_page in overflow_pages {
-            self.worker()
+            self.accessor()
                 .read_page::<OverflowPage, _, _>(ovf_page, |ovfpage| {
                     payload.extend_from_slice(ovfpage.payload());
                 })
@@ -1808,12 +1808,12 @@ where
         let page_id = pos.page();
         let slot = pos.slot();
 
-        self.worker_mut()
+        self.accessor_mut()
             .acquire::<BtreePage>(page_id, FrameAccessMode::Read)?;
 
         // First, check if it's an overflow cell and get the overflow page if needed
         let (is_overflow, overflow_start) =
-            self.worker()
+            self.accessor()
                 .read_page::<BtreePage, _, _>(page_id, |btree| {
                     let cell = btree.cell(slot);
                     if cell.metadata().is_overflow() {
@@ -1829,7 +1829,7 @@ where
 
             // Now reassemble with all latches held
             let payload = self
-                .worker()
+                .accessor()
                 .read_page::<BtreePage, _, _>(page_id, |btree| {
                     let cell = btree.cell(slot);
                     self.reassemble_payload(&cell, &overflow_pages)
@@ -1839,12 +1839,12 @@ where
 
             // Release overflow latches
             for ovf_page in overflow_pages {
-                self.worker_mut().release_latch(ovf_page);
+                self.accessor_mut().release_latch(ovf_page);
             }
 
             result
         } else {
-            self.worker()
+            self.accessor()
                 .read_page::<BtreePage, _, _>(page_id, |btree| {
                     let cell = btree.cell(slot);
                     f(cell.used())
@@ -1852,7 +1852,7 @@ where
         };
 
         // We cannot release the latch here!
-        // self.worker_mut().release_latch(page_id);
+        // self.accessor_mut().release_latch(page_id);
         Ok(result)
     }
 
@@ -1878,12 +1878,12 @@ where
         let mut indexed_results: Vec<(usize, R)> = Vec::with_capacity(positions.len());
 
         for (page_id, slots) in grouped {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<BtreePage>(page_id, FrameAccessMode::Read)?;
 
             // First pass: identify overflow cells and collect their chains
             let cell_info: Vec<(usize, Slot, bool, PageId)> = self
-                .worker()
+                .accessor()
                 .read_page::<BtreePage, _, _>(page_id, |btree| {
                     slots
                         .iter()
@@ -1909,23 +1909,23 @@ where
                     let overflow_pages = self.acquire_overflow_chain(ovf_start, usize::MAX, 0)?;
 
                     // Reassemble with latches held
-                    let payload = self
-                        .worker()
-                        .read_page::<BtreePage, _, _>(page_id, |btree| {
-                            let cell = btree.cell(slot);
-                            self.reassemble_payload(&cell, &overflow_pages)
-                        })?;
+                    let payload =
+                        self.accessor()
+                            .read_page::<BtreePage, _, _>(page_id, |btree| {
+                                let cell = btree.cell(slot);
+                                self.reassemble_payload(&cell, &overflow_pages)
+                            })?;
 
                     let result = f(pos, payload.as_ref());
 
                     // Release overflow latches
                     for ovf_page in overflow_pages {
-                        self.worker_mut().release_latch(ovf_page);
+                        self.accessor_mut().release_latch(ovf_page);
                     }
 
                     result
                 } else {
-                    self.worker()
+                    self.accessor()
                         .read_page::<BtreePage, _, _>(page_id, |btree| {
                             let cell = btree.cell(slot);
                             f(pos, cell.used())
@@ -1935,7 +1935,7 @@ where
                 indexed_results.push((original_idx, result));
             }
 
-            //  self.worker_mut().release_latch(page_id);
+            //  self.accessor_mut().release_latch(page_id);
         }
 
         // Sort by original index and extract results
@@ -1950,11 +1950,11 @@ where
         let mut height = 1usize;
         let mut current = self.root;
         loop {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<BtreePage>(current, FrameAccessMode::Read)?;
 
             let (is_leaf, first_child) =
-                self.worker()
+                self.accessor()
                     .read_page::<BtreePage, _, _>(current, |btreepage| {
                         (
                             btreepage.is_leaf(),
@@ -1962,7 +1962,7 @@ where
                         )
                     })?;
 
-            self.worker_mut().release_latch(current);
+            self.accessor_mut().release_latch(current);
 
             if is_leaf {
                 return Ok(height);
@@ -1980,11 +1980,11 @@ where
         let mut current = self.root;
 
         loop {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<BtreePage>(current, FrameAccessMode::Read)?;
 
             let (is_leaf, first_child) =
-                self.worker()
+                self.accessor()
                     .read_page::<BtreePage, _, _>(current, |btreepage| {
                         let num_slots = btreepage.num_slots();
                         let first_child = if num_slots > 0 {
@@ -1995,7 +1995,7 @@ where
                         (btreepage.is_leaf(), first_child)
                     })?;
 
-            self.worker_mut().release_latch(current);
+            self.accessor_mut().release_latch(current);
 
             if is_leaf {
                 // For empty trees, return an iterator that will immediately return None
@@ -2031,11 +2031,11 @@ where
         let mut current = self.root;
 
         loop {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<BtreePage>(current, FrameAccessMode::Read)?;
 
             let (is_leaf, num_slots, last_child) =
-                self.worker()
+                self.accessor()
                     .read_page::<BtreePage, _, _>(current, |btree_page| {
                         (
                             btree_page.is_leaf(),
@@ -2044,7 +2044,7 @@ where
                         )
                     })?;
 
-            self.worker_mut().release_latch(current);
+            self.accessor_mut().release_latch(current);
 
             if is_leaf {
                 // Start at last slot
@@ -2158,11 +2158,11 @@ where
             }
             visited.insert(page_id);
 
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<BtreePage>(page_id, FrameAccessMode::Read)?;
 
             let (children, overflows) =
-                self.worker()
+                self.accessor()
                     .read_page::<BtreePage, _, _>(page_id, |btree| {
                         let children: Vec<PageId> = btree.iter_children().collect();
 
@@ -2180,7 +2180,7 @@ where
                         (children, overflows)
                     })?;
 
-            self.worker_mut().release_latch(page_id);
+            self.accessor_mut().release_latch(page_id);
 
             for child in children {
                 if child.is_valid() && !visited.contains(&child) {
@@ -2201,7 +2201,7 @@ where
 
         // Deallocate btree pages
         for page_id in visited {
-            self.worker_mut().dealloc_page::<BtreePage>(page_id)?;
+            self.accessor_mut().dealloc_page::<BtreePage>(page_id)?;
         }
 
         Ok(())
@@ -2212,15 +2212,15 @@ where
         let mut current = start;
 
         while current.is_valid() {
-            self.worker_mut()
+            self.accessor_mut()
                 .acquire::<OverflowPage>(current, FrameAccessMode::Read)?;
 
             let next = self
-                .worker()
+                .accessor()
                 .read_page::<OverflowPage, _, _>(current, |overflow| overflow.metadata().next)?;
 
-            self.worker_mut().release_latch(current);
-            self.worker_mut().dealloc_page::<OverflowPage>(current)?;
+            self.accessor_mut().release_latch(current);
+            self.accessor_mut().dealloc_page::<OverflowPage>(current)?;
 
             current = next;
         }
@@ -2232,7 +2232,7 @@ where
     /// Assumes the caller already holds appropriate latches (via DML scan).
     pub(crate) fn update_at(&mut self, pos: Position, data: &[u8]) -> io::Result<()> {
         self.update_cell(pos, data)
-        // Note: don't clear_worker_stack() here (let the scan manage it)
+        // Note: don't clear_accessor_stack() here (let the scan manage it)
     }
 }
 
@@ -2272,7 +2272,8 @@ where
         access_mode: FrameAccessMode,
         direction: IterDirection,
     ) -> io::Result<Self> {
-        tree.worker_mut().acquire::<BtreePage>(page, access_mode)?;
+        tree.accessor_mut()
+            .acquire::<BtreePage>(page, access_mode)?;
 
         Ok(Self {
             tree,
@@ -2288,22 +2289,22 @@ where
         if let Some(current) = self.current_page {
             let next_page = self
                 .tree
-                .worker()
+                .accessor()
                 .read_page::<BtreePage, _, _>(current, |btree_page| {
                     btree_page.metadata().next_sibling
                 })?;
 
             if next_page.is_valid() {
                 self.tree
-                    .worker_mut()
+                    .accessor_mut()
                     .acquire::<BtreePage>(next_page, self.access_mode)?;
-                self.tree.worker_mut().release_latch(current);
+                self.tree.accessor_mut().release_latch(current);
                 self.current_page = Some(next_page);
                 self.current_slot = 0;
                 return Ok(true);
             }
 
-            self.tree.worker_mut().release_latch(current);
+            self.tree.accessor_mut().release_latch(current);
         }
 
         self.current_page = None;
@@ -2314,28 +2315,28 @@ where
         if let Some(current) = self.current_page {
             let prev_page = self
                 .tree
-                .worker()
+                .accessor()
                 .read_page::<BtreePage, _, _>(current, |btree_page| {
                     btree_page.metadata().previous_sibling
                 })?;
 
             if prev_page.is_valid() {
                 self.tree
-                    .worker_mut()
+                    .accessor_mut()
                     .acquire::<BtreePage>(prev_page, self.access_mode)?;
                 self.current_slot = self
                     .tree
-                    .worker()
+                    .accessor()
                     .read_page::<BtreePage, _, _>(prev_page, |btree| {
                         btree.num_slots() as i16 - 1
                     })?;
 
-                self.tree.worker_mut().release_latch(current);
+                self.tree.accessor_mut().release_latch(current);
                 self.current_page = Some(prev_page);
                 return Ok(true);
             }
 
-            self.tree.worker_mut().release_latch(current);
+            self.tree.accessor_mut().release_latch(current);
         }
 
         self.current_page = None;
@@ -2356,7 +2357,7 @@ where
             IterDirection::Forward => {
                 let num_slots = match self
                     .tree
-                    .worker()
+                    .accessor()
                     .read_page::<BtreePage, _, _>(page, |btree| btree.num_slots() as i16)
                 {
                     Ok(n) => n,
@@ -2398,7 +2399,7 @@ where
 {
     fn drop(&mut self) {
         if let Some(page) = self.current_page {
-            self.tree.worker_mut().release_latch(page);
+            self.tree.accessor_mut().release_latch(page);
         }
     }
 }

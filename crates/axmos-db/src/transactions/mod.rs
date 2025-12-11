@@ -17,7 +17,9 @@ use std::{
     },
 };
 
-pub mod worker;
+pub mod accessor;
+pub mod logger;
+pub mod threadpool;
 
 pub type Version = u16;
 pub type RowId = UInt64;
@@ -469,6 +471,9 @@ impl TransactionHandle {
     }
 }
 
+
+
+
 #[cfg(test)]
 mod coordinator_tests {
     use super::*;
@@ -494,7 +499,7 @@ mod coordinator_tests {
 
         let pager = Pager::from_config(config, &path).unwrap();
 
-        Database::new(SharedPager::from(pager), 3, 2)
+        Database::new(SharedPager::from(pager), 3, 2, 5)
     }
 
     /// Test: A transaction can see tuples it created itself.

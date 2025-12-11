@@ -12,7 +12,7 @@ use crate::{
         Statement, TableConstraintExpr, TableReference, TransactionStatement, Values,
     },
     structures::bplustree::SearchResult,
-    transactions::worker::Worker,
+    transactions::accessor::RcPageAccessor,
     types::DataTypeKind,
 };
 
@@ -46,15 +46,15 @@ impl AnalyzerCtx {
 
 pub(crate) struct Analyzer {
     catalog: SharedCatalog,
-    worker: Worker,
+    accessor: RcPageAccessor,
     ctx: AnalyzerCtx,
 }
 
 impl Analyzer {
-    pub(crate) fn new(catalog: SharedCatalog, worker: Worker) -> Self {
+    pub(crate) fn new(catalog: SharedCatalog, accessor: RcPageAccessor) -> Self {
         Self {
             catalog,
-            worker,
+            accessor,
             ctx: AnalyzerCtx::new(),
         }
     }
@@ -187,7 +187,7 @@ impl Analyzer {
         // Check table doesn't already exist
         if let Ok(SearchResult::Found(_)) = self
             .catalog
-            .lookup_relation(&stmt.table, self.worker.clone())
+            .lookup_relation(&stmt.table, self.accessor.clone())
         {
             return Err(AnalyzerError::AlreadyExists(AlreadyExists::Table(
                 stmt.table.clone(),
@@ -245,7 +245,6 @@ impl Analyzer {
                             return Err(AnalyzerError::NotFound(column.to_string()));
                         }
                     }
-                    _ => {}
                 }
             }
         }
@@ -286,7 +285,6 @@ impl Analyzer {
                         return Err(AnalyzerError::MissingColumns);
                     }
                 }
-                _ => {}
             }
         }
 
@@ -456,10 +454,6 @@ impl Analyzer {
 
         Ok(())
     }
-
-    // ========================================================================
-    // Helper Methods
-    // ========================================================================
 
     fn validate_table_ref(&self, table_ref: &TableReference) -> AnalyzerResult<()> {
         match table_ref {
@@ -649,7 +643,7 @@ impl Analyzer {
 
     fn get_relation(&self, name: &str) -> AnalyzerResult<Relation> {
         self.catalog
-            .get_relation(name, self.worker.clone())
+            .get_relation(name, self.accessor.clone())
             .map_err(|_| AnalyzerError::NotFound(name.to_string()))
     }
 }
@@ -659,14 +653,35 @@ mod analyzer_tests {
     use super::*;
     use crate::{
         AxmosDBConfig, IncrementalVaccum, TextEncoding,
-        database::{Database, schema::Schema},
+        database::{Database, errors::IntoBoxError, schema::Schema},
         io::pager::{Pager, SharedPager},
         sql::{lexer::Lexer, parser::Parser},
     };
     use serial_test::serial;
     use std::path::Path;
 
-    fn create_db(path: impl AsRef<Path>) -> std::io::Result<Database> {
+
+    fn users_schema() -> Schema {
+        let mut users_schema = Schema::new();
+        users_schema.add_column("id", DataTypeKind::Int, true, true, false);
+        users_schema.add_column("name", DataTypeKind::Text, false, false, false);
+        users_schema.add_column("email", DataTypeKind::Text, false, true, false); // NOT NULL
+        users_schema.add_column("age", DataTypeKind::Int, false, false, false);
+        users_schema.add_column("created_at", DataTypeKind::DateTime, false, false, false);
+        users_schema
+
+    }
+
+
+    fn orders_schema() -> Schema {
+        let mut orders_schema = Schema::new();
+        orders_schema.add_column("id", DataTypeKind::Int, true, true, false);
+        orders_schema.add_column("user_id", DataTypeKind::Int, false, false, false);
+        orders_schema.add_column("amount", DataTypeKind::Double, false, false, false);
+        orders_schema
+    }
+
+     fn create_db(path: impl AsRef<Path>) -> std::io::Result<Database> {
         let config = AxmosDBConfig {
             page_size: 4096,
             cache_size: Some(100),
@@ -676,34 +691,38 @@ mod analyzer_tests {
         };
 
         let pager = Pager::from_config(config, &path)?;
-        let db = Database::new(SharedPager::from(pager), 3, 2)?;
+        let db = Database::new(SharedPager::from(pager), 3, 2, 5)?;
 
-        let mut users_schema = Schema::new();
-        users_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        users_schema.add_column("name", DataTypeKind::Text, false, false, false);
-        users_schema.add_column("email", DataTypeKind::Text, false, true, false); // NOT NULL
-        users_schema.add_column("age", DataTypeKind::Int, false, false, false);
-        users_schema.add_column("created_at", DataTypeKind::DateTime, false, false, false);
-        let worker = db.main_worker_cloned();
-        db.catalog()
-            .create_table("users", users_schema, worker.clone())?;
-
-        let mut orders_schema = Schema::new();
-        orders_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        orders_schema.add_column("user_id", DataTypeKind::Int, false, false, false);
-        orders_schema.add_column("amount", DataTypeKind::Double, false, false, false);
-        db.catalog().create_table("orders", orders_schema, worker)?;
+        db.task_runner()
+            .run(|ctx| {
+                let schema = users_schema();
+                ctx.catalog()
+                    .create_table("users", schema, ctx.accessor())
+                    .box_err()?;
+                let schema = orders_schema();
+                ctx.catalog()
+                    .create_table("orders", schema, ctx.accessor())
+                    .box_err()?;
+                Ok(())
+            })
+            .unwrap();
 
         Ok(db)
     }
 
-    fn analyze_sql(sql: &str, db: &Database) -> AnalyzerResult<()> {
-        let lexer = Lexer::new(sql);
-        let mut parser = Parser::new(lexer);
-        let stmt = parser.parse().expect("Parse failed");
-        let mut analyzer = Analyzer::new(db.catalog(), db.main_worker_cloned());
-        analyzer.analyze(&stmt)
+    fn analyze_sql(sql: String, db: &Database) ->  AnalyzerResult<()> {
+        db.task_runner().run(move |ctx| {
+            let lexer = Lexer::new(&sql);
+            let mut parser = Parser::new(lexer);
+            let stmt = parser.parse().box_err()?;
+            let mut analyzer = Analyzer::new(ctx.catalog(), ctx.accessor());
+            analyzer.analyze(&stmt).box_err()?;
+            Ok(())
+        })?;
+        Ok(())
     }
+
+
 
     #[test]
     #[serial]
@@ -711,7 +730,7 @@ mod analyzer_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
 
-        let result = analyze_sql("INSERT INTO users (id, unknown) VALUES (1, 'x')", &db);
+        let result = analyze_sql("INSERT INTO users (id, unknown) VALUES (1, 'x')".to_string(), &db);
         assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
     }
 
@@ -721,7 +740,7 @@ mod analyzer_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
 
-        let result = analyze_sql("UPDATE users SET unknown = 'x'", &db);
+        let result = analyze_sql("UPDATE users SET unknown = 'x'".to_string(), &db);
         assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
     }
 
@@ -732,7 +751,7 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "INSERT INTO users (id, name, email) VALUES (1, 'John', NULL)",
+            "INSERT INTO users (id, name, email) VALUES (1, 'John', NULL)".to_string(),
             &db,
         );
         assert!(matches!(
@@ -747,7 +766,7 @@ mod analyzer_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
 
-        let result = analyze_sql("UPDATE users SET email = NULL WHERE id = 1", &db);
+        let result = analyze_sql("UPDATE users SET email = NULL WHERE id = 1".to_string(), &db);
         assert!(matches!(
             result,
             Err(AnalyzerError::ConstraintViolation(_, col)) if col == "email"
@@ -761,7 +780,7 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "INSERT INTO users (id, name) VALUES (1, 'John', 'extra')",
+            "INSERT INTO users (id, name) VALUES (1, 'John', 'extra')".to_string(),
             &db,
         );
         assert!(matches!(
@@ -777,7 +796,7 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "INSERT INTO users (id, name, email, age) VALUES (1, 'John', 'j@t.com', 'not_int')",
+            "INSERT INTO users (id, name, email, age) VALUES (1, 'John', 'j@t.com', 'not_int')".to_string(),
             &db,
         );
         assert!(matches!(result, Err(AnalyzerError::InvalidValue(_))));
@@ -790,7 +809,7 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "INSERT INTO users (id, name, email, age) VALUES (9999999999999, 'John', 'j@t.com', 25)",
+            "INSERT INTO users (id, name, email, age) VALUES (9999999999999, 'John', 'j@t.com', 25)".to_string(),
             &db,
         );
         assert!(matches!(
@@ -806,7 +825,7 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "INSERT INTO users (id, name, email, age, created_at) VALUES (1, 'John', 'j@t.com', 25, 'bad-date')",
+            "INSERT INTO users (id, name, email, age, created_at) VALUES (1, 'John', 'j@t.com', 25, 'bad-date')".to_string(),
             &db,
         );
         assert!(matches!(result, Err(AnalyzerError::InvalidFormat(_, _))));
@@ -819,7 +838,7 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "INSERT INTO users (id, name, email, age, created_at) VALUES (1, 'John', 'j@t.com', 25, '2024-01-15T10:30:00')",
+            "INSERT INTO users (id, name, email, age, created_at) VALUES (1, 'John', 'j@t.com', 25, '2024-01-15T10:30:00')".to_string(),
             &db,
         );
         assert!(result.is_ok());
@@ -831,7 +850,7 @@ mod analyzer_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
 
-        let result = analyze_sql("CREATE TABLE users (id INT)", &db);
+        let result = analyze_sql("CREATE TABLE users (id INT)".to_string(), &db);
         assert!(matches!(
             result,
             Err(AnalyzerError::AlreadyExists(AlreadyExists::Table(name))) if name == "users"
@@ -844,7 +863,7 @@ mod analyzer_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
 
-        let result = analyze_sql("CREATE TABLE test (id INT, id TEXT)", &db);
+        let result = analyze_sql("CREATE TABLE test (id INT, id TEXT)".to_string(), &db);
         assert!(matches!(result, Err(AnalyzerError::DuplicatedColumn(_))));
     }
 
@@ -855,7 +874,7 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "CREATE TABLE test (id INT PRIMARY KEY, code INT PRIMARY KEY)",
+            "CREATE TABLE test (id INT PRIMARY KEY, code INT PRIMARY KEY)".to_string(),
             &db,
         );
         assert!(matches!(result, Err(AnalyzerError::MultiplePrimaryKeys)));
@@ -868,7 +887,7 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "CREATE TABLE test (id INT, user_id INT REFERENCES users(nonexistent))",
+            "CREATE TABLE test (id INT, user_id INT REFERENCES users(nonexistent))".to_string(),
             &db,
         );
         assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
@@ -880,7 +899,7 @@ mod analyzer_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
 
-        let result = analyze_sql("ALTER TABLE users ADD COLUMN name TEXT", &db);
+        let result = analyze_sql("ALTER TABLE users ADD COLUMN name TEXT".to_string(), &db);
         assert!(matches!(
             result,
             Err(AnalyzerError::AlreadyExists(AlreadyExists::Column(_, col))) if col == "name"
@@ -893,39 +912,8 @@ mod analyzer_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
 
-        let result = analyze_sql("ALTER TABLE users DROP COLUMN nonexistent", &db);
+        let result = analyze_sql("ALTER TABLE users DROP COLUMN nonexistent".to_string(), &db);
         assert!(matches!(result, Err(AnalyzerError::MissingColumns)));
-    }
-
-    #[test]
-    #[serial]
-    fn test_nested_transaction() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
-        let mut analyzer = Analyzer::new(db.catalog(), db.main_worker_cloned());
-
-        let lexer = Lexer::new("BEGIN");
-        let mut parser = Parser::new(lexer);
-        let stmt = parser.parse().unwrap();
-        assert!(analyzer.analyze(&stmt).is_ok());
-
-        let lexer = Lexer::new("BEGIN");
-        let mut parser = Parser::new(lexer);
-        let stmt = parser.parse().unwrap();
-        assert!(matches!(
-            analyzer.analyze(&stmt),
-            Err(AnalyzerError::AlreadyStarted)
-        ));
-    }
-
-    #[test]
-    #[serial]
-    fn test_commit_without_transaction() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
-
-        let result = analyze_sql("COMMIT", &db);
-        assert!(matches!(result, Err(AnalyzerError::NotStarted)));
     }
 
     #[test]
@@ -936,7 +924,7 @@ mod analyzer_tests {
 
         // Valid nested subquery
         let result = analyze_sql(
-            "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)",
+            "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)".to_string(),
             &db,
         );
         assert!(result.is_ok());
@@ -949,7 +937,7 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)",
+            "SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)".to_string(),
             &db,
         );
         assert!(result.is_ok());
@@ -963,7 +951,7 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "SELECT name,(SELECT COUNT(*) FROM orders WHERE user_id = users.id) FROM users",
+            "SELECT name,(SELECT COUNT(*) FROM orders WHERE user_id = users.id) FROM users".to_string(),
             &db,
         );
         assert!(result.is_ok());
@@ -974,7 +962,7 @@ mod analyzer_tests {
     fn test_valid_select() {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
-        assert!(analyze_sql("SELECT * FROM users WHERE age > 18", &db).is_ok());
+        assert!(analyze_sql("SELECT * FROM users WHERE age > 18".to_string(), &db).is_ok());
     }
 
     #[test]
@@ -984,7 +972,7 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
         assert!(
             analyze_sql(
-                "INSERT INTO users (id, name, email, age) VALUES (1, 'John', 'j@t.com', 25)",
+                "INSERT INTO users (id, name, email, age) VALUES (1, 'John', 'j@t.com', 25)".to_string(),
                 &db
             )
             .is_ok()
@@ -998,7 +986,7 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
         assert!(
             analyze_sql(
-                "SELECT * FROM users u JOIN orders o ON u.id = o.user_id",
+                "SELECT * FROM users u JOIN orders o ON u.id = o.user_id".to_string(),
                 &db
             )
             .is_ok()
@@ -1010,7 +998,7 @@ mod analyzer_tests {
     fn test_valid_update() {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
-        assert!(analyze_sql("UPDATE users SET name = 'Ramon'", &db).is_ok());
+        assert!(analyze_sql("UPDATE users SET name = 'Ramon'".to_string(), &db).is_ok());
     }
 
     #[test]
@@ -1018,7 +1006,7 @@ mod analyzer_tests {
     fn test_valid_delete() {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
-        assert!(analyze_sql("DELETE FROM users WHERE name = 'Ramon'", &db).is_ok());
+        assert!(analyze_sql("DELETE FROM users WHERE name = 'Ramon'".to_string(), &db).is_ok());
     }
 
     #[test]
@@ -1026,7 +1014,7 @@ mod analyzer_tests {
     fn test_valid_drop_table() {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
-        assert!(analyze_sql("DROP TABLE users", &db).is_ok());
+        assert!(analyze_sql("DROP TABLE users".to_string(), &db).is_ok());
     }
 
     #[test]
@@ -1034,7 +1022,7 @@ mod analyzer_tests {
     fn test_valid_alter() {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
-        assert!(analyze_sql("ALTER TABLE users ALTER COLUMN name SET NOT NULL", &db).is_ok());
+        assert!(analyze_sql("ALTER TABLE users ALTER COLUMN name SET NOT NULL".to_string(), &db).is_ok());
     }
 
     #[test]
@@ -1045,7 +1033,7 @@ mod analyzer_tests {
         // FAILS IF YOU ADD THE COMMA. WE ARE USING CURRENTLY THE COMMA AS A CONTINUATION MARKER FOR SUBQUERIES.
         assert!(
             analyze_sql(
-                "WITH adults as (SELECT * FROM users WHERE age > 10) SELECT * FROM adults;",
+                "WITH adults as (SELECT * FROM users WHERE age > 10) SELECT * FROM adults;".to_string(),
                 &db
             )
             .is_ok()

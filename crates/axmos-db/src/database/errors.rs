@@ -18,63 +18,81 @@ use crate::{
     types::{DataTypeKind, TransactionId},
 };
 
+/// Thread pool errors
 #[derive(Debug)]
-pub(crate) enum QueryExecutionError {
-    Io(IoError),
-    Build(BuilderError),
-    Eval(EvaluationError),
-    Type(TypeError),
-    AlreadyDeleted(LogicalId),
-    InvalidObjectType(ObjectType),
-    ObjectNotFound(ObjectId),
-    TupleNotFound(LogicalId),
-    AlreadyExists(AlreadyExists),
-    InvalidState(ExecutionState),
-    Other(String),
+pub(crate) enum ThreadPoolError {
+    ShutdownTimeout,
+    ThreadJoinError(String),
+    PoolShutdown,
 }
 
-impl Display for QueryExecutionError {
+impl Display for ThreadPoolError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            Self::Type(err) => write!(f, "Type error: {err}"),
-            Self::Eval(err) => write!(f, "Evaluation error {err}"),
-            Self::Io(err) => write!(f, "Io error {err}"),
-            Self::Build(err) => write!(f, "Builder error {err}"),
-            Self::InvalidState(state) => write!(f, "Invalid execution state: {state}"),
-            Self::AlreadyDeleted(logical) => {
-                write!(f, "Tuple {logical} is already deleted")
-            }
-            Self::TupleNotFound(id) => write!(f, "Tuple with id {id} was anot found"),
-            Self::ObjectNotFound(id) => write!(f, "Object with id {id} was anot found"),
-            Self::InvalidObjectType(o) => write!(f, "Invalid object type {o}"),
-            Self::AlreadyExists(str) => write!(f, "Object {str}, already exists"),
-            Self::Other(str) => write!(f, "Runtime error {str}"),
+            Self::ShutdownTimeout => write!(f, "Thread pool shutdown timed out"),
+            Self::ThreadJoinError(msg) => write!(f, "Failed to join thread: {}", msg),
+            Self::PoolShutdown => write!(f, "Thread pool has been shut down"),
         }
     }
 }
 
-impl From<IoError> for QueryExecutionError {
-    fn from(value: IoError) -> Self {
-        Self::Io(value)
+impl Error for ThreadPoolError {}
+
+/// Task runner errors
+#[derive(Debug)]
+pub enum TaskError {
+    Io(IoError),
+    ThreadPool(ThreadPoolError),
+    TaskFailed(String),
+}
+
+impl Display for TaskError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Io(e) => write!(f, "IO error: {}", e),
+            Self::ThreadPool(e) => write!(f, "Thread pool error: {}", e),
+            Self::TaskFailed(msg) => write!(f, "Task failed: {}", msg),
+        }
     }
 }
 
-impl From<EvaluationError> for QueryExecutionError {
-    fn from(value: EvaluationError) -> Self {
-        Self::Eval(value)
+impl Error for TaskError {}
+
+impl From<IoError> for TaskError {
+    fn from(e: IoError) -> Self {
+        Self::Io(e)
     }
 }
 
-impl From<BuilderError> for QueryExecutionError {
-    fn from(value: BuilderError) -> Self {
-        Self::Build(value)
+impl From<ThreadPoolError> for TaskError {
+    fn from(e: ThreadPoolError) -> Self {
+        Self::ThreadPool(e)
     }
 }
 
+/// Numeric parsing errors
 #[derive(Debug)]
 pub(crate) enum ParsingError {
     Int(ParseIntError),
     Float(ParseFloatError),
+}
+
+impl Display for ParsingError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Int(err) => write!(f, "Error parsing INT: {}", err),
+            Self::Float(err) => write!(f, "Error parsing FLOAT: {}", err),
+        }
+    }
+}
+
+impl Error for ParsingError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Int(err) => Some(err),
+            Self::Float(err) => Some(err),
+        }
+    }
 }
 
 impl From<ParseIntError> for ParsingError {
@@ -89,64 +107,21 @@ impl From<ParseFloatError> for ParsingError {
     }
 }
 
-impl Error for ParsingError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Int(err) => Some(err),
-            Self::Float(err) => Some(err),
-        }
-    }
-}
-
-impl Display for ParsingError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            ParsingError::Int(err) => write!(f, "Error parsing INT: {}", err),
-            ParsingError::Float(err) => write!(f, "Error parsing FLOAT: {}", err),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum BuilderError {
-    InvalidOperator(PhysicalOperator),
-    NumChildrenMismatch(usize, usize),
-    Other(String),
-}
-
-impl Display for BuilderError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::InvalidOperator(o) => write!(f, "Invalid operator found {o}"),
-            Self::NumChildrenMismatch(u, i) => write!(
-                f,
-                "Found an incorrect number of children for an operator: {u}, expected: {i}"
-            ),
-            Self::Other(str) => f.write_str(str),
-        }
-    }
-}
-
-/// Error type for DataType operations
+/// Type system errors
 #[derive(Debug)]
 pub(crate) enum TypeError {
     UnexpectedDataType(DataTypeKind),
     ParseError(ParsingError),
-    /// Attempted operation on Null variant
     NullOperation,
-    /// Type mismatch between operands
     TypeMismatch {
         left: DataTypeKind,
         right: DataTypeKind,
     },
-    /// Cannot cast between types
     CastError {
         from: DataTypeKind,
         to: DataTypeKind,
     },
-    /// Type is not comparable
     NotComparable(DataTypeKind),
-    /// Type does not support this operation
     UnsupportedOperation {
         kind: DataTypeKind,
         operation: &'static str,
@@ -157,38 +132,21 @@ pub(crate) enum TypeError {
 impl Display for TypeError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            Self::NullOperation => write!(f, "cannot perform operation on Null"),
-            Self::TypeMismatch { left, right } => {
-                write!(f, "type mismatch: {} vs {}", left, right)
-            }
-            Self::CastError { from, to } => {
-                write!(f, "cannot cast {} to {}", from, to)
-            }
-            Self::NotComparable(k) => {
-                write!(f, "type {} is not comparable", k)
-            }
+            Self::NullOperation => write!(f, "Cannot perform operation on Null"),
+            Self::TypeMismatch { left, right } => write!(f, "Type mismatch: {} vs {}", left, right),
+            Self::CastError { from, to } => write!(f, "Cannot cast {} to {}", from, to),
+            Self::NotComparable(k) => write!(f, "Type {} is not comparable", k),
             Self::UnsupportedOperation { kind, operation } => {
-                write!(f, "type {} does not support {}", kind, operation)
+                write!(f, "Type {} does not support {}", kind, operation)
             }
             Self::UnexpectedDataType(data) => write!(f, "Invalid data type: {}", data),
-
             Self::ParseError(err) => write!(f, "Parse error: {}", err),
-            Self::Other(str) => f.write_str(str),
+            Self::Other(s) => write!(f, "Type error: {}", s),
         }
     }
 }
 
-impl From<IoError> for TypeError {
-    fn from(value: IoError) -> Self {
-        Self::Other(value.to_string())
-    }
-}
-
-impl From<TypeError> for IoError {
-    fn from(value: TypeError) -> Self {
-        IoError::new(ErrorKind::InvalidData, "Type error occurred")
-    }
-}
+impl Error for TypeError {}
 
 impl From<ParsingError> for TypeError {
     fn from(value: ParsingError) -> Self {
@@ -208,35 +166,76 @@ impl From<ParseIntError> for TypeError {
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum EvaluationError {
-    TypeError(TypeError),
-    InvalidExpression(BoundExpression),
-    InvalidArguments(Function),
-    ColumnOutOfBounds(usize, usize),
+impl From<IoError> for TypeError {
+    fn from(value: IoError) -> Self {
+        Self::Other(value.to_string())
+    }
 }
 
-impl Display for EvaluationError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+impl From<TaskError> for TypeError {
+    fn from(value: TaskError) -> Self {
+        Self::Other(value.to_string())
+    }
+}
+
+impl From<TypeError> for IoError {
+    fn from(value: TypeError) -> Self {
+        IoError::new(ErrorKind::InvalidData, value.to_string())
+    }
+}
+
+/// Object already exists errors
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AlreadyExists {
+    Table(String),
+    Index(String),
+    Constraint(String),
+    Column(String, String),
+}
+
+impl Display for AlreadyExists {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match self {
-            Self::InvalidExpression(expr) => write!(f, "Invalid expression {expr}"),
-            Self::TypeError(ty) => write!(f, "Type error {ty}"),
-            Self::ColumnOutOfBounds(i, u) => {
-                write!(f, "Column {i} out of bounds. (row has {u} columns)")
+            Self::Index(index) => write!(f, "Index '{}' already exists", index),
+            Self::Table(table) => write!(f, "Table '{}' already exists", table),
+            Self::Constraint(ct) => write!(f, "Constraint '{}' already exists", ct),
+            Self::Column(table, column) => {
+                write!(f, "Column '{}' already exists on table '{}'", column, table)
             }
-            Self::InvalidArguments(func) => write!(f, "invalid iput arguments for {func}"),
         }
     }
 }
 
-impl From<TypeError> for EvaluationError {
-    fn from(value: TypeError) -> Self {
-        Self::TypeError(value)
+/// Parser errors (Step 1: SQL text -> AST)
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) enum ParserError {
+    InvalidExpression(String),
+    UnexpectedToken(Token),
+    UnexpectedEof,
+}
+
+impl Display for ParserError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::InvalidExpression(s) => write!(f, "Invalid expression: {}", s),
+            Self::UnexpectedToken(s) => write!(f, "Unexpected token: {}", s),
+            Self::UnexpectedEof => write!(f, "Unexpected end of input"),
+        }
     }
 }
 
+impl Error for ParserError {}
+
+impl From<TaskError> for ParserError {
+    fn from(value: TaskError) -> Self {
+        Self::InvalidExpression(value.to_string())
+    }
+}
+
+/// Analyzer errors (Step 2: AST validation)
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AnalyzerError {
+    Parser(ParserError),
     ConstraintViolation(String, String),
     ColumnValueCountMismatch(usize),
     MissingColumns,
@@ -253,136 +252,99 @@ pub(crate) enum AnalyzerError {
     AliasNotProvided,
     DuplicatedConstraint(String),
     InvalidValue(DataTypeKind),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum AlreadyExists {
-    Table(String),
-    Index(String),
-    Constraint(String),
-    Column(String, String),
-}
-
-impl Display for AlreadyExists {
-    fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        match self {
-            Self::Index(index) => write!(f, "index {index} already exists"),
-            Self::Table(table) => write!(f, "table {table} already exists"),
-            Self::Constraint(ct) => write!(f, "constraint {ct} already exists"),
-            Self::Column(table, column) => {
-                write!(f, "column {column} already exists on table {table}")
-            }
-        }
-    }
+    Other(String),
 }
 
 impl Display for AnalyzerError {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match self {
-            Self::ColumnValueCountMismatch(row) => write!(f,"number of columns doesn't match values on row {row}"),
-            Self::NotFound(obj) => write!(f, "Object not found in the database {obj}"),
-            Self::MultiplePrimaryKeys => f.write_str("only one primary key per table is allowed"),
+            Self::Parser(e) => write!(f, "{}", e),
+            Self::ColumnValueCountMismatch(row) => {
+                write!(f, "Column count doesn't match values on row {}", row)
+            }
+            Self::NotFound(obj) => write!(f, "Object not found: {}", obj),
+            Self::MultiplePrimaryKeys => write!(f, "Only one primary key per table is allowed"),
             Self::MissingColumns => {
-                f.write_str("default values are not supported, all columns must be specified")
+                write!(
+                    f,
+                    "Default values not supported, all columns must be specified"
+                )
             }
-            Self::DuplicatedColumn(col) => write!(f, "column '{col}' specified more than once"),
-            Self::AlreadyExists(already_exists) => write!(f, "{already_exists}"),
-
-            Self::ArithmeticOverflow(num, data_type) => {
-                write!(f, "integer {num} out of range for data type {data_type}")
+            Self::DuplicatedColumn(col) => write!(f, "Column '{}' specified more than once", col),
+            Self::AlreadyExists(e) => write!(f, "{}", e),
+            Self::ArithmeticOverflow(num, dtype) => {
+                write!(f, "Value {} out of range for type {}", num, dtype)
             }
-            Self::ConstraintViolation(ct, column) => {
-                write!(f, "constraint {ct} violated for column {column}")
+            Self::ConstraintViolation(ct, col) => {
+                write!(f, "Constraint '{}' violated for column '{}'", ct, col)
             }
-            Self::InvalidExpression => {
-                f.write_str( "Invalid expression found!")
+            Self::InvalidExpression => write!(f, "Invalid expression"),
+            Self::AlreadyStarted => write!(f, "Transaction already started on this session"),
+            Self::NotStarted => write!(f, "No active transaction"),
+            Self::InvalidDataType(dtype) => write!(f, "Invalid data type: {}", dtype),
+            Self::InvalidValue(dtype) => write!(f, "Invalid value for type: {}", dtype),
+            Self::InvalidFormat(s, expected) => {
+                write!(f, "Invalid format '{}', expected: {}", s, expected)
             }
-            Self::AlreadyStarted => {
-                f.write_str("There is already an opened transaction on this session. Cannot start another transaction on the same session until the current one finishes")
-            },
-            Self::NotStarted => {
-                f.write_str("Transaction has not started. Must be on a transaction in order to call [ROLLBACK] or [COMMIT].")
-            },
-            Self::InvalidDataType(dtype) => {
-                write!(f, "Invalid datatype for expression: {dtype}")
-            },
-            Self::InvalidValue(dtype) => {
-                write!(f, "Invalid value for datatype: {dtype}")
-            },
-            Self::InvalidFormat(s, o) => {
-                write!(f, "Invalid formatting for string: {s}, expected: {o}")
-            },
-            Self::AliasNotProvided => {
-                write!(f, "An alias is required in order to reference columns when referencing multiple tables in the same statement.")
-            },
-            Self::DuplicatedConstraint(s) => {
-                write!(f, "Duplicated constraint on column {s}")
-            }
+            Self::AliasNotProvided => write!(f, "Alias required for multi-table references"),
+            Self::DuplicatedConstraint(s) => write!(f, "Duplicated constraint on column '{}'", s),
+            Self::Other(s) => write!(f, "{}", s),
         }
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub(crate) enum ParserError {
-    InvalidExpression(String),
-    UnexpectedToken(Token),
-    UnexpectedEof,
-}
+impl Error for AnalyzerError {}
 
-impl Display for ParserError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::InvalidExpression(s) => write!(f, "invalid expression {s}"),
-            Self::UnexpectedToken(s) => write!(f, "unexpected token  {s}"),
-            Self::UnexpectedEof => f.write_str("unexpected EOF reached"),
-        }
+impl From<ParserError> for AnalyzerError {
+    fn from(value: ParserError) -> Self {
+        Self::Parser(value)
     }
 }
 
-/// Errors that can occur during binding
+impl From<TaskError> for AnalyzerError {
+    fn from(value: TaskError) -> Self {
+        Self::Other(value.to_string())
+    }
+}
+
+/// Binder errors (Step 3: Name resolution, type checking)
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BinderError {
-    /// Table not found in catalog
+    Analyzer(AnalyzerError),
     TableNotFound(String),
-    /// Column not found in any table in scope
     ColumnNotFound(String),
-    /// Column reference is ambiguous (exists in multiple tables)
     AmbiguousColumn(String),
-    /// Type mismatch in expression
     TypeMismatch {
         expected: DataTypeKind,
         found: DataTypeKind,
         context: String,
     },
-    /// Invalid expression
     InvalidExpression(String),
-    /// Alias required but not provided
     AliasRequired(String),
-    /// Duplicate alias in scope
     DuplicateAlias(String),
-    /// CTE not found
     CteNotFound(String),
-    /// Internal error
-    Internal(String),
     ColumnCountMismatch {
         expected: usize,
         found: usize,
     },
+    Other(String),
 }
 
 impl Display for BinderError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            BinderError::TableNotFound(name) => write!(f, "Table not found: {}", name),
-            BinderError::ColumnNotFound(name) => write!(f, "Column not found: {}", name),
-            BinderError::AmbiguousColumn(name) => {
-                write!(f, "Ambiguous column reference: {}", name)
+            Self::Analyzer(e) => write!(f, "{}", e),
+            Self::TableNotFound(name) => write!(f, "Table not found: {}", name),
+            Self::ColumnNotFound(name) => write!(f, "Column not found: {}", name),
+            Self::AmbiguousColumn(name) => write!(f, "Ambiguous column reference: {}", name),
+            Self::ColumnCountMismatch { expected, found } => {
+                write!(
+                    f,
+                    "Column count mismatch: expected {}, found {}",
+                    expected, found
+                )
             }
-            BinderError::ColumnCountMismatch { expected, found } => write!(
-                f,
-                "Column count mismatch. Expected: {expected} but found {found}"
-            ),
-            BinderError::TypeMismatch {
+            Self::TypeMismatch {
                 expected,
                 found,
                 context,
@@ -393,244 +355,106 @@ impl Display for BinderError {
                     context, expected, found
                 )
             }
-            BinderError::InvalidExpression(msg) => write!(f, "Invalid expression: {}", msg),
-            BinderError::AliasRequired(msg) => write!(f, "Alias required: {}", msg),
-            BinderError::DuplicateAlias(alias) => write!(f, "Duplicate alias: {}", alias),
-            BinderError::CteNotFound(name) => write!(f, "CTE not found: {}", name),
-            BinderError::Internal(msg) => write!(f, "Internal error: {}", msg),
+            Self::InvalidExpression(msg) => write!(f, "Invalid expression: {}", msg),
+            Self::AliasRequired(msg) => write!(f, "Alias required: {}", msg),
+            Self::DuplicateAlias(alias) => write!(f, "Duplicate alias: {}", alias),
+            Self::CteNotFound(name) => write!(f, "CTE not found: {}", name),
+            Self::Other(msg) => write!(f, "{}", msg),
         }
     }
 }
 
-/// Errors that can occur during planning
+impl Error for BinderError {}
+
+impl From<AnalyzerError> for BinderError {
+    fn from(value: AnalyzerError) -> Self {
+        Self::Analyzer(value)
+    }
+}
+
+impl From<ParserError> for BinderError {
+    fn from(value: ParserError) -> Self {
+        Self::Analyzer(AnalyzerError::Parser(value))
+    }
+}
+
+impl From<TaskError> for BinderError {
+    fn from(value: TaskError) -> Self {
+        Self::Other(value.to_string())
+    }
+}
+
+/// Planner errors (Step 4: Logical plan generation)
 #[derive(Debug)]
 pub(crate) enum PlanError {
-    /// Table not found
+    Binder(BinderError),
     TableNotFound(String),
-    /// Column not found
     ColumnNotFound(String),
-    /// Ambiguous column reference
     AmbiguousColumn(String),
-    /// Type mismatch
     TypeMismatch(DataTypeKind, DataTypeKind),
-    /// Invalid expression
     InvalidExpr(String),
-    /// Unsupported operation
     Unsupported(String),
-    /// Internal error
-    Internal(String),
-    /// Invalid plan
     InvalidPlan(String),
+    Io(IoError),
+    Other(String),
 }
 
 impl Display for PlanError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            PlanError::TableNotFound(t) => write!(f, "Table not found: {}", t),
-            PlanError::ColumnNotFound(c) => write!(f, "Column not found: {}", c),
-            PlanError::AmbiguousColumn(c) => write!(f, "Ambiguous column: {}", c),
-            PlanError::TypeMismatch(a, b) => write!(f, "Type mismatch: {:?} vs {:?}", a, b),
-            PlanError::InvalidExpr(e) => write!(f, "Invalid expression: {}", e),
-            PlanError::Unsupported(s) => write!(f, "Unsupported: {}", s),
-            PlanError::Internal(s) => write!(f, "Internal error: {}", s),
-            PlanError::InvalidPlan(s) => write!(f, "Invalid plan: {}", s),
+            Self::Binder(e) => write!(f, "{}", e),
+            Self::TableNotFound(t) => write!(f, "Table not found: {}", t),
+            Self::ColumnNotFound(c) => write!(f, "Column not found: {}", c),
+            Self::AmbiguousColumn(c) => write!(f, "Ambiguous column: {}", c),
+            Self::TypeMismatch(a, b) => write!(f, "Type mismatch: {:?} vs {:?}", a, b),
+            Self::InvalidExpr(e) => write!(f, "Invalid expression: {}", e),
+            Self::Unsupported(s) => write!(f, "Unsupported: {}", s),
+            Self::InvalidPlan(s) => write!(f, "Invalid plan: {}", s),
+            Self::Io(e) => write!(f, "IO error: {}", e),
+            Self::Other(s) => write!(f, "{}", s),
         }
+    }
+}
+
+impl Error for PlanError {}
+
+impl From<BinderError> for PlanError {
+    fn from(value: BinderError) -> Self {
+        Self::Binder(value)
+    }
+}
+
+impl From<AnalyzerError> for PlanError {
+    fn from(value: AnalyzerError) -> Self {
+        Self::Binder(BinderError::Analyzer(value))
+    }
+}
+
+impl From<ParserError> for PlanError {
+    fn from(value: ParserError) -> Self {
+        Self::Binder(BinderError::Analyzer(AnalyzerError::Parser(value)))
     }
 }
 
 impl From<IoError> for PlanError {
     fn from(e: IoError) -> Self {
-        PlanError::Internal(e.to_string())
+        Self::Io(e)
     }
 }
 
 impl From<String> for PlanError {
     fn from(value: String) -> Self {
-        Self::Internal(value)
+        Self::Other(value)
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum OptimizerError {
-    NoPlanFound(String),
-    Internal(String),
-    Unsupported(String),
-    InvalidState(String),
-    CostOverflow,
-    Ddl(DdlError),
-    Timeout,
-}
-
-impl Display for OptimizerError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::NoPlanFound(msg) => write!(f, "No plan found: {}", msg),
-            Self::Internal(msg) => write!(f, "Internal error: {}", msg),
-            Self::Unsupported(msg) => write!(f, "Unsupported: {}", msg),
-            Self::InvalidState(msg) => write!(f, "Invalid state: {}", msg),
-            Self::CostOverflow => write!(f, "Cost overflow"),
-            Self::Timeout => write!(f, "Optimization timeout"),
-            Self::Ddl(err) => write!(f, "DDL error: {}", err),
-        }
-    }
-}
-
-impl From<DdlError> for OptimizerError {
-    fn from(value: DdlError) -> Self {
-        Self::Ddl(value)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum SQLError {
-    ParserError(ParserError),
-    AnalyzerError(AnalyzerError),
-    BinderError(BinderError),
-    PlannerError(PlanError),
-    // Optimizer error
-    Optimization(OptimizerError),
-}
-
-impl Display for SQLError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::AnalyzerError(e) => write!(f, "analyzer error {e}"),
-            Self::ParserError(e) => write!(f, "parser error {e}"),
-            Self::BinderError(e) => write!(f, "binder error {e}"),
-            Self::PlannerError(e) => write!(f, "planner error {e}"),
-            Self::Optimization(e) => write!(f, "Optimizer error {e}"),
-        }
-    }
-}
-
-impl From<ParserError> for SQLError {
-    fn from(value: ParserError) -> Self {
-        Self::ParserError(value)
-    }
-}
-
-impl From<OptimizerError> for SQLError {
-    fn from(value: OptimizerError) -> Self {
-        Self::Optimization(value)
-    }
-}
-
-impl From<AnalyzerError> for SQLError {
-    fn from(value: AnalyzerError) -> Self {
-        Self::AnalyzerError(value)
-    }
-}
-
-impl From<PlanError> for SQLError {
-    fn from(value: PlanError) -> Self {
-        Self::PlannerError(value)
-    }
-}
-
-impl From<BinderError> for SQLError {
-    fn from(value: BinderError) -> Self {
-        Self::BinderError(value)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum TransactionError {
-    Aborted(TransactionId),
-    NotActive(TransactionId),
-    WriteWriteConflict(TransactionId, LogicalId),
-    NotFound(TransactionId),
-    TupleNotVisible(TransactionId, LogicalId),
-    Sql(SQLError),
-    QueryExecution(QueryExecutionError),
-    Other(String),
-}
-
-impl From<QueryExecutionError> for TransactionError {
-    fn from(value: QueryExecutionError) -> Self {
-        Self::QueryExecution(value)
-    }
-}
-
-impl From<SQLError> for TransactionError {
-    fn from(value: SQLError) -> Self {
-        Self::Sql(value)
-    }
-}
-
-impl From<ParserError> for TransactionError {
-    fn from(value: ParserError) -> Self {
-        Self::Sql(SQLError::from(value))
-    }
-}
-
-impl From<AnalyzerError> for TransactionError {
-    fn from(value: AnalyzerError) -> Self {
-        Self::Sql(SQLError::from(value))
-    }
-}
-
-impl From<BinderError> for TransactionError {
-    fn from(value: BinderError) -> Self {
-        Self::Sql(SQLError::from(value))
-    }
-}
-
-impl From<PlanError> for TransactionError {
-    fn from(value: PlanError) -> Self {
-        Self::Sql(SQLError::from(value))
-    }
-}
-
-impl From<OptimizerError> for TransactionError {
-    fn from(value: OptimizerError) -> Self {
-        Self::Sql(SQLError::from(value))
-    }
-}
-
-impl From<BuilderError> for TransactionError {
-    fn from(value: BuilderError) -> Self {
-        Self::QueryExecution(QueryExecutionError::Build(value))
-    }
-}
-
-impl From<String> for TransactionError {
-    fn from(value: String) -> Self {
+impl From<TaskError> for PlanError {
+    fn from(value: TaskError) -> Self {
         Self::Other(value.to_string())
     }
 }
 
-impl From<IoError> for TransactionError {
-    fn from(value: IoError) -> Self {
-        Self::QueryExecution(QueryExecutionError::Io(value))
-    }
-}
-
-impl Display for TransactionError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            TransactionError::Aborted(id) => write!(f, "Transaction with id {id} was aborted"),
-            TransactionError::NotActive(id) => {
-                write!(f, "Transaction with id {id} is not on active state")
-            }
-            TransactionError::QueryExecution(e) => write!(f, "Query execution error: {e}"),
-            Self::WriteWriteConflict(txid, tuple) => {
-                write!(
-                    f,
-                    "Transaction {} conflict: tuple {} was modified by another committed transaction",
-                    txid, tuple
-                )
-            }
-            TransactionError::Sql(err) => write!(f, "SQL error: {err}"),
-            TransactionError::NotFound(id) => write!(f, "Transaction {id} not found"),
-            TransactionError::TupleNotVisible(id, logical) => write!(
-                f,
-                "Tuple with id {logical} cannot be seen by transaction {id}."
-            ),
-            TransactionError::Other(msg) => write!(f, "Internal error: {msg}"),
-        }
-    }
-}
-
+/// DDL errors (schema modifications)
 #[derive(Debug)]
 pub(crate) enum DdlError {
     AlreadyExists(AlreadyExists),
@@ -645,16 +469,18 @@ pub(crate) enum DdlError {
 impl Display for DdlError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            Self::AlreadyExists(exists) => write!(f, "{}", exists),
+            Self::AlreadyExists(e) => write!(f, "{}", e),
             Self::NotFound(name) => write!(f, "Object not found: {}", name),
-            Self::InvalidObjectType(obj_type) => write!(f, "Invalid object type: {}", obj_type),
+            Self::InvalidObjectType(t) => write!(f, "Invalid object type: {}", t),
             Self::ConstraintViolation(msg) => write!(f, "Constraint violation: {}", msg),
             Self::CatalogError(msg) => write!(f, "Catalog error: {}", msg),
             Self::Io(err) => write!(f, "IO error: {}", err),
-            Self::Other(msg) => write!(f, "DDL error: {}", msg),
+            Self::Other(msg) => write!(f, "{}", msg),
         }
     }
 }
+
+impl Error for DdlError {}
 
 impl From<IoError> for DdlError {
     fn from(value: IoError) -> Self {
@@ -674,25 +500,447 @@ impl From<AlreadyExists> for DdlError {
     }
 }
 
-pub(crate) type DdlResult<T> = Result<T, DdlError>;
+impl From<TaskError> for DdlError {
+    fn from(value: TaskError) -> Self {
+        Self::Other(value.to_string())
+    }
+}
+
+/// Optimizer errors (Step 5: Physical plan optimization)
+#[derive(Debug)]
+pub(crate) enum OptimizerError {
+    Plan(PlanError),
+    Ddl(DdlError),
+    NoPlanFound(String),
+    Unsupported(String),
+    InvalidState(String),
+    CostOverflow,
+    Timeout,
+    Other(String),
+}
+
+impl Display for OptimizerError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Plan(e) => write!(f, "{}", e),
+            Self::Ddl(e) => write!(f, "{}", e),
+            Self::NoPlanFound(msg) => write!(f, "No plan found: {}", msg),
+            Self::Unsupported(msg) => write!(f, "Unsupported: {}", msg),
+            Self::InvalidState(msg) => write!(f, "Invalid state: {}", msg),
+            Self::CostOverflow => write!(f, "Cost overflow"),
+            Self::Timeout => write!(f, "Optimization timeout"),
+            Self::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl Error for OptimizerError {}
+
+impl From<PlanError> for OptimizerError {
+    fn from(value: PlanError) -> Self {
+        Self::Plan(value)
+    }
+}
+
+impl From<BinderError> for OptimizerError {
+    fn from(value: BinderError) -> Self {
+        Self::Plan(PlanError::Binder(value))
+    }
+}
+
+impl From<AnalyzerError> for OptimizerError {
+    fn from(value: AnalyzerError) -> Self {
+        Self::Plan(PlanError::Binder(BinderError::Analyzer(value)))
+    }
+}
+
+impl From<ParserError> for OptimizerError {
+    fn from(value: ParserError) -> Self {
+        Self::Plan(PlanError::Binder(BinderError::Analyzer(
+            AnalyzerError::Parser(value),
+        )))
+    }
+}
+
+impl From<DdlError> for OptimizerError {
+    fn from(value: DdlError) -> Self {
+        Self::Ddl(value)
+    }
+}
+
+impl From<TaskError> for OptimizerError {
+    fn from(value: TaskError) -> Self {
+        Self::Other(value.to_string())
+    }
+}
+
+/// Builder errors (physical operator construction)
+#[derive(Debug)]
+pub(crate) enum BuilderError {
+    InvalidOperator(PhysicalOperator),
+    NumChildrenMismatch(usize, usize),
+    Other(String),
+}
+
+impl Display for BuilderError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::InvalidOperator(o) => write!(f, "Invalid operator: {}", o),
+            Self::NumChildrenMismatch(found, expected) => {
+                write!(
+                    f,
+                    "Children mismatch: found {}, expected {}",
+                    found, expected
+                )
+            }
+            Self::Other(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl Error for BuilderError {}
+
+impl From<TaskError> for BuilderError {
+    fn from(value: TaskError) -> Self {
+        Self::Other(value.to_string())
+    }
+}
+
+/// Evaluation errors (expression evaluation)
+#[derive(Debug)]
+pub(crate) enum EvaluationError {
+    Type(TypeError),
+    InvalidExpression(BoundExpression),
+    InvalidArguments(Function),
+    ColumnOutOfBounds(usize, usize),
+    Other(String),
+}
+
+impl Display for EvaluationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Type(e) => write!(f, "{}", e),
+            Self::InvalidExpression(expr) => write!(f, "Invalid expression: {}", expr),
+            Self::ColumnOutOfBounds(i, total) => {
+                write!(f, "Column {} out of bounds (row has {} columns)", i, total)
+            }
+            Self::InvalidArguments(func) => write!(f, "Invalid arguments for {}", func),
+            Self::Other(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl Error for EvaluationError {}
+
+impl From<TypeError> for EvaluationError {
+    fn from(value: TypeError) -> Self {
+        Self::Type(value)
+    }
+}
+
+impl From<TaskError> for EvaluationError {
+    fn from(value: TaskError) -> Self {
+        Self::Other(value.to_string())
+    }
+}
+
+/// Query execution errors (Step 6: Plan execution)
+#[derive(Debug)]
+pub(crate) enum QueryExecutionError {
+    Optimizer(OptimizerError),
+    Builder(BuilderError),
+    Eval(EvaluationError),
+    Type(TypeError),
+    Io(IoError),
+    AlreadyDeleted(LogicalId),
+    InvalidObjectType(ObjectType),
+    ObjectNotFound(ObjectId),
+    TupleNotFound(LogicalId),
+    AlreadyExists(AlreadyExists),
+    InvalidState(ExecutionState),
+    Other(String),
+}
+
+impl Display for QueryExecutionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Optimizer(e) => write!(f, "{}", e),
+            Self::Builder(e) => write!(f, "{}", e),
+            Self::Eval(e) => write!(f, "{}", e),
+            Self::Type(e) => write!(f, "{}", e),
+            Self::Io(e) => write!(f, "IO error: {}", e),
+            Self::InvalidState(state) => write!(f, "Invalid execution state: {}", state),
+            Self::AlreadyDeleted(id) => write!(f, "Tuple {} already deleted", id),
+            Self::TupleNotFound(id) => write!(f, "Tuple {} not found", id),
+            Self::ObjectNotFound(id) => write!(f, "Object {} not found", id),
+            Self::InvalidObjectType(t) => write!(f, "Invalid object type: {}", t),
+            Self::AlreadyExists(e) => write!(f, "{}", e),
+            Self::Other(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl Error for QueryExecutionError {}
+
+impl From<OptimizerError> for QueryExecutionError {
+    fn from(value: OptimizerError) -> Self {
+        Self::Optimizer(value)
+    }
+}
+
+impl From<PlanError> for QueryExecutionError {
+    fn from(value: PlanError) -> Self {
+        Self::Optimizer(OptimizerError::Plan(value))
+    }
+}
+
+impl From<BinderError> for QueryExecutionError {
+    fn from(value: BinderError) -> Self {
+        Self::Optimizer(OptimizerError::Plan(PlanError::Binder(value)))
+    }
+}
+
+impl From<AnalyzerError> for QueryExecutionError {
+    fn from(value: AnalyzerError) -> Self {
+        Self::Optimizer(OptimizerError::Plan(PlanError::Binder(
+            BinderError::Analyzer(value),
+        )))
+    }
+}
+
+impl From<ParserError> for QueryExecutionError {
+    fn from(value: ParserError) -> Self {
+        Self::Optimizer(OptimizerError::Plan(PlanError::Binder(
+            BinderError::Analyzer(AnalyzerError::Parser(value)),
+        )))
+    }
+}
+
+impl From<BuilderError> for QueryExecutionError {
+    fn from(value: BuilderError) -> Self {
+        Self::Builder(value)
+    }
+}
+
+impl From<EvaluationError> for QueryExecutionError {
+    fn from(value: EvaluationError) -> Self {
+        Self::Eval(value)
+    }
+}
+
+impl From<TypeError> for QueryExecutionError {
+    fn from(value: TypeError) -> Self {
+        Self::Type(value)
+    }
+}
+
+impl From<IoError> for QueryExecutionError {
+    fn from(value: IoError) -> Self {
+        Self::Io(value)
+    }
+}
+
+impl From<TaskError> for QueryExecutionError {
+    fn from(value: TaskError) -> Self {
+        Self::Other(value.to_string())
+    }
+}
+
+/// Unified SQL error (wraps all SQL pipeline errors)
+#[derive(Debug)]
+pub(crate) enum SQLError {
+    Execution(QueryExecutionError),
+}
+
+impl Display for SQLError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Execution(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl Error for SQLError {}
+
+impl From<QueryExecutionError> for SQLError {
+    fn from(value: QueryExecutionError) -> Self {
+        Self::Execution(value)
+    }
+}
+
+impl From<OptimizerError> for SQLError {
+    fn from(value: OptimizerError) -> Self {
+        Self::Execution(QueryExecutionError::Optimizer(value))
+    }
+}
+
+impl From<PlanError> for SQLError {
+    fn from(value: PlanError) -> Self {
+        Self::Execution(QueryExecutionError::Optimizer(OptimizerError::Plan(value)))
+    }
+}
+
+impl From<BinderError> for SQLError {
+    fn from(value: BinderError) -> Self {
+        Self::Execution(QueryExecutionError::Optimizer(OptimizerError::Plan(
+            PlanError::Binder(value),
+        )))
+    }
+}
+
+impl From<AnalyzerError> for SQLError {
+    fn from(value: AnalyzerError) -> Self {
+        Self::Execution(QueryExecutionError::Optimizer(OptimizerError::Plan(
+            PlanError::Binder(BinderError::Analyzer(value)),
+        )))
+    }
+}
+
+impl From<ParserError> for SQLError {
+    fn from(value: ParserError) -> Self {
+        Self::Execution(QueryExecutionError::Optimizer(OptimizerError::Plan(
+            PlanError::Binder(BinderError::Analyzer(AnalyzerError::Parser(value))),
+        )))
+    }
+}
+
+impl From<TaskError> for SQLError {
+    fn from(value: TaskError) -> Self {
+        Self::Execution(QueryExecutionError::Other(value.to_string()))
+    }
+}
+
+/// Transaction errors (top-level)
+#[derive(Debug)]
+pub(crate) enum TransactionError {
+    Sql(SQLError),
+    Aborted(TransactionId),
+    NotActive(TransactionId),
+    WriteWriteConflict(TransactionId, LogicalId),
+    NotFound(TransactionId),
+    TupleNotVisible(TransactionId, LogicalId),
+    Other(String),
+}
+
+impl Display for TransactionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Sql(e) => write!(f, "{}", e),
+            Self::Aborted(id) => write!(f, "Transaction {} aborted", id),
+            Self::NotActive(id) => write!(f, "Transaction {} not active", id),
+            Self::WriteWriteConflict(txid, tuple) => {
+                write!(f, "Transaction {} conflict on tuple {}", txid, tuple)
+            }
+            Self::NotFound(id) => write!(f, "Transaction {} not found", id),
+            Self::TupleNotVisible(id, logical) => {
+                write!(f, "Tuple {} not visible to transaction {}", logical, id)
+            }
+            Self::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl Error for TransactionError {}
+
+impl From<SQLError> for TransactionError {
+    fn from(value: SQLError) -> Self {
+        Self::Sql(value)
+    }
+}
+
+impl From<QueryExecutionError> for TransactionError {
+    fn from(value: QueryExecutionError) -> Self {
+        Self::Sql(SQLError::Execution(value))
+    }
+}
+
+impl From<OptimizerError> for TransactionError {
+    fn from(value: OptimizerError) -> Self {
+        Self::Sql(SQLError::Execution(QueryExecutionError::Optimizer(value)))
+    }
+}
+
+impl From<PlanError> for TransactionError {
+    fn from(value: PlanError) -> Self {
+        Self::Sql(SQLError::Execution(QueryExecutionError::Optimizer(
+            OptimizerError::Plan(value),
+        )))
+    }
+}
+
+impl From<BinderError> for TransactionError {
+    fn from(value: BinderError) -> Self {
+        Self::Sql(SQLError::Execution(QueryExecutionError::Optimizer(
+            OptimizerError::Plan(PlanError::Binder(value)),
+        )))
+    }
+}
+
+impl From<AnalyzerError> for TransactionError {
+    fn from(value: AnalyzerError) -> Self {
+        Self::Sql(SQLError::Execution(QueryExecutionError::Optimizer(
+            OptimizerError::Plan(PlanError::Binder(BinderError::Analyzer(value))),
+        )))
+    }
+}
+
+impl From<ParserError> for TransactionError {
+    fn from(value: ParserError) -> Self {
+        Self::Sql(SQLError::Execution(QueryExecutionError::Optimizer(
+            OptimizerError::Plan(PlanError::Binder(BinderError::Analyzer(
+                AnalyzerError::Parser(value),
+            ))),
+        )))
+    }
+}
+
+impl From<BuilderError> for TransactionError {
+    fn from(value: BuilderError) -> Self {
+        Self::Sql(SQLError::Execution(QueryExecutionError::Builder(value)))
+    }
+}
+
+impl From<IoError> for TransactionError {
+    fn from(value: IoError) -> Self {
+        Self::Sql(SQLError::Execution(QueryExecutionError::Io(value)))
+    }
+}
+
+impl From<String> for TransactionError {
+    fn from(value: String) -> Self {
+        Self::Other(value)
+    }
+}
+
+impl From<TaskError> for TransactionError {
+    fn from(value: TaskError) -> Self {
+        Self::Other(value.to_string())
+    }
+}
+
 pub(crate) type ParseResult<T> = Result<T, ParserError>;
 pub(crate) type AnalyzerResult<T> = Result<T, AnalyzerError>;
 pub(crate) type BinderResult<T> = Result<T, BinderError>;
-pub(crate) type SQLResult<T> = Result<T, SQLError>;
-pub(crate) type TransactionResult<T> = Result<T, TransactionError>;
-pub(crate) type BuilderResult<T> = Result<T, BuilderError>;
+pub(crate) type PlanResult<T> = Result<T, PlanError>;
 pub(crate) type OptimizerResult<T> = Result<T, OptimizerError>;
+pub(crate) type DdlResult<T> = Result<T, DdlError>;
+pub(crate) type BuilderResult<T> = Result<T, BuilderError>;
 pub(crate) type EvalResult<T> = Result<T, EvaluationError>;
 pub(crate) type TypeResult<T> = Result<T, TypeError>;
 pub(crate) type ExecutionResult<T> = Result<T, QueryExecutionError>;
+pub(crate) type SQLResult<T> = Result<T, SQLError>;
+pub(crate) type TransactionResult<T> = Result<T, TransactionError>;
+pub(crate) type ThreadPoolResult<T> = Result<T, ThreadPoolError>;
+pub(crate) type TaskResult<T> = Result<T, TaskError>;
 
-impl Error for DdlError {}
-impl Error for BuilderError {}
-impl Error for TransactionError {}
-impl Error for SQLError {}
-impl Error for PlanError {}
-impl Error for OptimizerError {}
-impl Error for BinderError {}
-impl Error for EvaluationError {}
-impl Error for QueryExecutionError {}
-impl Error for TypeError {}
+pub(crate) type BoxError = Box<dyn Error + Send + 'static>;
+
+pub trait IntoBoxError<T> {
+    fn box_err(self) -> Result<T, BoxError>;
+}
+
+impl<T, E: Error + Send + 'static> IntoBoxError<T> for Result<T, E> {
+    fn box_err(self) -> Result<T, BoxError> {
+        self.map_err(|e| Box::new(e) as BoxError)
+    }
+}

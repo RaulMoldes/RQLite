@@ -39,10 +39,10 @@ impl Insert {
 
     fn insert_row(&mut self, row: &Row) -> ExecutionResult<LogicalId> {
         let catalog = self.ctx.catalog();
-        let worker = self.ctx.worker().clone();
+        let accessor = self.ctx.accessor().clone();
         let tx_id = self.ctx.transaction_id();
 
-        let mut relation = catalog.get_relation_unchecked(self.op.table_id, worker.clone())?;
+        let mut relation = catalog.get_relation_unchecked(self.op.table_id, accessor.clone())?;
 
         let next_row = if let Relation::TableRel(ref mut tab) = relation {
             let next = tab.get_next();
@@ -72,16 +72,16 @@ impl Insert {
         let tuple = Tuple::new(&full_values, schema, tx_id)?;
         let bytes: OwnedTuple = tuple.into();
 
-        let mut btree = catalog.table_btree(relation.root(), worker.clone())?;
+        let mut btree = catalog.table_btree(relation.root(), accessor.clone())?;
         btree.insert(relation.root(), bytes.as_ref())?;
-        btree.clear_worker_stack();
+        btree.clear_accessor_stack();
 
         // Maintain indexes - insert entries for all composite/single indexes
         let indexes = schema.get_indexes();
         let num_keys = schema.num_keys as usize;
 
         for (index_name, columns) in indexes {
-            let index_relation = catalog.get_relation(&index_name, worker.clone())?;
+            let index_relation = catalog.get_relation(&index_name, accessor.clone())?;
             let index_schema = index_relation.schema();
 
             // Build index tuple: [indexed_col_1, indexed_col_2, ..., row_id]
@@ -96,12 +96,12 @@ impl Insert {
             let index_bytes: OwnedTuple = index_tuple.into();
 
             let mut index_btree =
-                catalog.index_btree(index_relation.root(), index_schema, worker.clone())?;
+                catalog.index_btree(index_relation.root(), index_schema, accessor.clone())?;
             index_btree.insert(index_relation.root(), index_bytes.as_ref())?;
-            index_btree.clear_worker_stack();
+            index_btree.clear_accessor_stack();
         }
 
-        catalog.update_relation(relation, worker)?;
+        catalog.update_relation(relation, accessor)?;
 
         Ok(logical_id)
     }

@@ -10,7 +10,9 @@ use std::{
 use crate::{
     ObjectId,
     database::{
-        Catalog, META_INDEX, META_TABLE, SharedCatalog, meta_table_schema,
+        Catalog, META_INDEX, META_TABLE, SharedCatalog,
+        errors::IntoBoxError,
+        meta_table_schema,
         schema::{Column, Index, ObjectType, Relation, Schema, Table},
     },
     sql::planner::{
@@ -19,7 +21,7 @@ use crate::{
     },
     storage::tuple::TupleRef,
     structures::comparator::{Comparator, DynComparator},
-    transactions::worker::Worker,
+    transactions::accessor::RcPageAccessor,
     types::{DataTypeKind, DataTypeRef, PageId, core::murmur_hash},
 };
 
@@ -280,13 +282,13 @@ impl Catalog {
     pub(crate) fn recompute_table_statistics(
         &self,
         table_name: &str,
-        worker: Worker,
+        accessor: RcPageAccessor,
         config: &StatsComputeConfig,
     ) -> StatsComputeResult<TableStatistics> {
-        let relation = self.get_relation(table_name, worker.clone())?;
+        let relation = self.get_relation(table_name, accessor.clone())?;
         if let Relation::TableRel(table) = relation {
             let stats =
-                self.compute_table_stats(table.root(), table.schema(), worker.clone(), config)?;
+                self.compute_table_stats(table.root(), table.schema(), accessor.clone(), config)?;
 
             // Update the table with new statistics
             let updated_table = Table::build(
@@ -298,7 +300,7 @@ impl Catalog {
                 Some(stats.clone()),
             );
 
-            self.update_relation(Relation::TableRel(updated_table), worker)?;
+            self.update_relation(Relation::TableRel(updated_table), accessor)?;
 
             Ok(stats)
         } else {
@@ -310,14 +312,14 @@ impl Catalog {
     pub(crate) fn recompute_index_statistics(
         &self,
         index_name: &str,
-        worker: Worker,
+        accessor: RcPageAccessor,
         config: &StatsComputeConfig,
     ) -> StatsComputeResult<IndexStatistics> {
-        let relation = self.get_relation(index_name, worker.clone())?;
+        let relation = self.get_relation(index_name, accessor.clone())?;
 
         if let Relation::IndexRel(index) = relation {
             let stats =
-                self.compute_index_stats(index.root(), index.schema(), worker.clone(), config)?;
+                self.compute_index_stats(index.root(), index.schema(), accessor.clone(), config)?;
 
             // Update the index with new statistics
             let updated_index = Index::build(
@@ -329,7 +331,7 @@ impl Catalog {
                 index.schema().num_keys,
             );
 
-            self.update_relation(Relation::IndexRel(updated_index), worker)?;
+            self.update_relation(Relation::IndexRel(updated_index), accessor)?;
 
             Ok(stats)
         } else {
@@ -342,10 +344,10 @@ impl Catalog {
         &self,
         root: PageId,
         schema: &Schema,
-        worker: Worker,
+        accessor: RcPageAccessor,
         config: &StatsComputeConfig,
     ) -> StatsComputeResult<TableStatistics> {
-        let btree = self.table_btree(root, worker)?;
+        let btree = self.table_btree(root, accessor)?;
 
         // Initialize collectors for each column
         let mut collectors: Vec<ColumnStatsCollector> = schema
@@ -366,9 +368,9 @@ impl Catalog {
             1
         };
 
-        btree.clear_worker_stack();
+        btree.clear_accessor_stack();
 
-        // Not sure if this approach will work as the iterator needs to acquire the worker mutably.
+        // Not sure if this approach will work as the iterator needs to acquire the RcPageAccessor mutably.
         for (i, position) in btree.clone().iter_positions()?.enumerate() {
             if let Ok(pos) = position {
                 // Track pages
@@ -447,12 +449,12 @@ impl Catalog {
         &self,
         root: PageId,
         schema: &Schema,
-        worker: Worker,
+        accessor: RcPageAccessor,
         config: &StatsComputeConfig,
     ) -> StatsComputeResult<IndexStatistics> {
         // Get the key column's data type for the comparator
 
-        let btree = self.index_btree(root, schema, worker)?;
+        let btree = self.index_btree(root, schema, accessor)?;
 
         let mut entries: u64 = 0;
         let mut distinct_keys: HashSet<u128> = HashSet::new();
@@ -465,7 +467,7 @@ impl Catalog {
         let height = btree.height()?;
 
         // Iterate through all positions
-        btree.clear_worker_stack();
+        btree.clear_accessor_stack();
 
         for (i, iter_result) in btree.clone().iter_positions()?.enumerate() {
             if let Ok(pos) = iter_result {
@@ -538,10 +540,10 @@ impl Catalog {
 
     pub(crate) fn analyze(
         &self,
-        worker: Worker,
+        accessor: RcPageAccessor,
         config: &StatsComputeConfig,
     ) -> StatsComputeResult<StatsComputation> {
-        let meta_table = self.table_btree(self.meta_table_root(), worker.clone())?;
+        let meta_table = self.table_btree(self.meta_table_root(), accessor.clone())?;
         let meta_schema = meta_table_schema();
 
         let mut relations_to_analyze: Vec<(String, ObjectType)> = Vec::new();
@@ -574,7 +576,7 @@ impl Catalog {
             }
         }
 
-        meta_table.clear_worker_stack();
+        meta_table.clear_accessor_stack();
 
         // Now recompute statistics for each relation
         let mut result = StatsComputation::default();
@@ -582,7 +584,7 @@ impl Catalog {
         for (name, obj_type) in relations_to_analyze {
             match obj_type {
                 ObjectType::Table => {
-                    match self.recompute_table_statistics(&name, worker.clone(), config) {
+                    match self.recompute_table_statistics(&name, accessor.clone(), config) {
                         Ok(stats) => {
                             result.tables_updated += 1;
                             result.table_stats.insert(name, stats);
@@ -593,7 +595,7 @@ impl Catalog {
                     }
                 }
                 ObjectType::Index => {
-                    match self.recompute_index_statistics(&name, worker.clone(), config) {
+                    match self.recompute_index_statistics(&name, accessor.clone(), config) {
                         Ok(stats) => {
                             result.indexes_updated += 1;
                             result.index_stats.insert(name, stats);
@@ -632,12 +634,12 @@ impl StatsComputation {
 
 pub(crate) struct CatalogStatsProvider {
     catalog: SharedCatalog,
-    worker: Worker,
+    accessor: RcPageAccessor,
 }
 
 impl CatalogStatsProvider {
-    pub(crate) fn new(catalog: SharedCatalog, worker: Worker) -> Self {
-        Self { catalog, worker }
+    pub(crate) fn new(catalog: SharedCatalog, accessor: RcPageAccessor) -> Self {
+        Self { catalog, accessor }
     }
 }
 
@@ -645,7 +647,7 @@ impl StatisticsProvider for CatalogStatsProvider {
     fn get_column_stats(&self, table_id: ObjectId, column_idx: usize) -> Option<ColumnStatistics> {
         if let Ok(Relation::TableRel(table)) = self
             .catalog
-            .get_relation_unchecked(table_id, self.worker.clone())
+            .get_relation_unchecked(table_id, self.accessor.clone())
         {
             if let Some(statistics) = table.stats() {
                 return statistics.get_column_stats(column_idx).cloned();
@@ -657,7 +659,7 @@ impl StatisticsProvider for CatalogStatsProvider {
     fn get_index_stats(&self, object_id: ObjectId) -> Option<IndexStatistics> {
         if let Ok(Relation::IndexRel(index)) = self
             .catalog
-            .get_relation_unchecked(object_id, self.worker.clone())
+            .get_relation_unchecked(object_id, self.accessor.clone())
         {
             return index.stats().cloned();
         }
@@ -667,21 +669,22 @@ impl StatisticsProvider for CatalogStatsProvider {
     fn get_table_stats(&self, table_id: ObjectId) -> Option<TableStatistics> {
         if let Ok(Relation::TableRel(table)) = self
             .catalog
-            .get_relation_unchecked(table_id, self.worker.clone())
+            .get_relation_unchecked(table_id, self.accessor.clone())
         {
             return table.stats().cloned();
         }
         None
     }
 }
+
 #[cfg(test)]
 mod stats_compute_tests {
     use super::*;
     use crate::{
         TRANSACTION_ZERO,
-        database::{Database, schema::Schema},
+        database::{Database, errors::IntoBoxError, schema::Schema},
         io::pager::{Pager, SharedPager},
-        storage::tuple::Tuple,
+        storage::tuple::{OwnedTuple, Tuple},
         types::{Blob, DataType, DataTypeKind, Int32, Int32Ref, Int64, UInt64},
     };
 
@@ -707,11 +710,11 @@ mod stats_compute_tests {
     fn create_test_database() -> io::Result<(Database, NamedTempFile)> {
         let temp_file = NamedTempFile::new()?;
         let pager = SharedPager::from(create_test_pager(temp_file.path(), 100)?);
-        let db = Database::new(pager, 3, 2)?;
+        let db = Database::new(pager, 3, 2, 4)?;
         Ok((db, temp_file))
     }
 
-    fn create_test_schema() -> Schema {
+    fn users_schema() -> Schema {
         let mut schema = Schema::new();
         schema.add_column("id", DataTypeKind::BigInt, true, true, false);
         schema.add_column("name", DataTypeKind::Text, false, false, false);
@@ -720,29 +723,47 @@ mod stats_compute_tests {
         schema
     }
 
+    fn products_schema() -> Schema {
+        let mut schema2 = Schema::new();
+        schema2.add_column("product_id", DataTypeKind::BigInt, true, true, false);
+        schema2.add_column("name", DataTypeKind::Text, false, false, false);
+        schema2.add_column("price", DataTypeKind::Double, false, false, false);
+        schema2.set_num_keys(1);
+        schema2
+    }
+
+    fn users_idx_schema() -> Schema {
+        let mut index_schema = Schema::new();
+        index_schema.add_column("email", DataTypeKind::Text, true, true, false);
+        index_schema.add_column("user_id", DataTypeKind::BigUInt, false, false, false);
+        index_schema.set_num_keys(1);
+        index_schema
+    }
     #[test]
     fn test_column_stats_collector() {
         let col =
             crate::database::schema::Column::new_unindexed(DataTypeKind::Int, "test_col", None);
         let mut collector = ColumnStatsCollector::new(0, &col);
 
-        // Observe some values
         let type_owned = crate::types::Int32(10);
         let type_ref: Int32Ref<'_> = Int32Ref::try_from(type_owned.as_ref()).unwrap();
         collector.observe(&DataTypeRef::Int(type_ref));
+
         let type_owned = crate::types::Int32(20);
         let type_ref: Int32Ref<'_> = Int32Ref::try_from(type_owned.as_ref()).unwrap();
         collector.observe(&DataTypeRef::Int(type_ref));
+
         let type_owned = crate::types::Int32(30);
         let type_ref: Int32Ref<'_> = Int32Ref::try_from(type_owned.as_ref()).unwrap();
         collector.observe(&DataTypeRef::Int(type_ref));
+
         collector.observe(&DataTypeRef::Null);
 
         let config = StatsComputeConfig::default();
         let stats = collector.finalize(&config);
 
         assert_eq!(stats.null_count, 1);
-        assert!(stats.ndv >= 3); // At least 3 distinct non-null values
+        assert!(stats.ndv >= 3);
         assert!(stats.min_bytes.is_some());
         assert!(stats.max_bytes.is_some());
     }
@@ -754,14 +775,9 @@ mod stats_compute_tests {
 
         assert_eq!(histogram.num_buckets, 10);
         assert_eq!(histogram.buckets.len(), 10);
-
-        // First bucket should start at 1
         assert!((histogram.buckets[0].lower_bound - 1.0).abs() < f64::EPSILON);
-
-        // Last bucket should end at 100
         assert!((histogram.buckets[9].upper_bound - 100.0).abs() < f64::EPSILON);
 
-        // Each bucket should have ~10 values
         for bucket in &histogram.buckets {
             assert!(bucket.count >= 9.0 && bucket.count <= 11.0);
         }
@@ -784,51 +800,72 @@ mod stats_compute_tests {
     #[test]
     fn test_recompute_table_statistics() -> StatsComputeResult<()> {
         let (db, _temp) = create_test_database()?;
-        let catalog = db.catalog();
-        let worker = db.main_worker_cloned();
 
-        // Create a test table
-        let schema = create_test_schema();
-        catalog.create_table("test_users", schema.clone(), worker.clone())?;
+        // Task 1: Create the table
+        db.task_runner()
+            .run(|ctx| {
+                let schema = users_schema();
+                ctx.catalog()
+                    .create_table("test_users", schema, ctx.accessor())
+                    .box_err()?;
+                Ok(())
+            })
+            .unwrap();
 
-        // Insert some test data
-        let relation = catalog.get_relation("test_users", worker.clone())?;
-        let root = relation.root();
-        let mut btree = catalog.table_btree(root, worker.clone())?;
+        // Task 2: Insert test data
+        db.task_runner()
+            .run(|ctx| {
+                let relation = ctx
+                    .catalog()
+                    .get_relation("test_users", ctx.accessor())
+                    .box_err()?;
+                let root = relation.root();
 
-        for i in 0..100i64 {
-            let tuple = Tuple::new(
-                &[
-                    DataType::BigInt(Int64(i)),
-                    DataType::Text(Blob::from(format!("User {}", i).as_str())),
-                    DataType::Int(Int32((i % 50) as i32 + 18)),
-                ],
-                &schema,
-                TRANSACTION_ZERO,
-            )?;
+                let mut btree = ctx.catalog().table_btree(root, ctx.accessor()).box_err()?;
 
-            let owned: crate::storage::tuple::OwnedTuple = tuple.into();
-            btree.insert(root, owned.as_ref())?;
-        }
-        btree.clear_worker_stack();
+                for i in 0..100i64 {
+                    let tuple = Tuple::new(
+                        &[
+                            DataType::BigInt(Int64(i)),
+                            DataType::Text(Blob::from(format!("User {}", i).as_str())),
+                            DataType::Int(Int32((i % 50) as i32 + 18)),
+                        ],
+                        relation.schema(),
+                        TRANSACTION_ZERO,
+                    )
+                    .box_err()?;
 
-        // Recompute statistics
-        let config = StatsComputeConfig::default();
-        let stats = catalog.recompute_table_statistics("test_users", worker.clone(), &config)?;
+                    let owned: OwnedTuple = tuple.into();
+                    btree.insert(root, owned.as_ref()).box_err()?;
+                }
+
+                btree.clear_accessor_stack();
+                Ok(())
+            })
+            .unwrap();
+
+        // Task 3: Recompute statistics
+        let stats = db
+            .task_runner()
+            .run_with_result(|ctx| {
+                let config = StatsComputeConfig::default();
+                ctx.catalog()
+                    .recompute_table_statistics("test_users", ctx.accessor(), &config)
+                    .box_err()
+            })
+            .unwrap();
 
         assert_eq!(stats.row_count, 100);
         assert!(stats.page_count > 0);
         assert!(stats.avg_row_size > 0.0);
         assert_eq!(stats.column_stats.len(), 3);
 
-        // Verify column 0 (id) statistics
         let id_stats = stats.get_column_stats(0).unwrap();
-        assert_eq!(id_stats.ndv, 100); // All unique
+        assert_eq!(id_stats.ndv, 100);
         assert_eq!(id_stats.null_count, 0);
 
-        // Verify column 2 (age) statistics
         let age_stats = stats.get_column_stats(2).unwrap();
-        assert_eq!(age_stats.ndv, 50); // 50 distinct ages (0-49 + 18)
+        assert_eq!(age_stats.ndv, 50);
         assert_eq!(age_stats.null_count, 0);
 
         Ok(())
@@ -837,42 +874,63 @@ mod stats_compute_tests {
     #[test]
     fn test_recompute_index_statistics() -> StatsComputeResult<()> {
         let (db, _temp) = create_test_database()?;
-        let catalog = db.catalog();
-        let worker = db.main_worker_cloned();
 
-        // Create a test index
-        let mut index_schema = Schema::new();
-        index_schema.add_column("email", DataTypeKind::Text, true, true, false);
-        index_schema.add_column("row_id", DataTypeKind::BigUInt, false, false, false);
-        index_schema.set_num_keys(1);
+        // Task 1: Create index
+        db.task_runner()
+            .run(|ctx| {
+                let schema = users_idx_schema();
+                ctx.catalog()
+                    .create_index("idx_email", schema, ctx.accessor())
+                    .box_err()?;
+                Ok(())
+            })
+            .unwrap();
 
-        catalog.create_index("idx_email", index_schema.clone(), worker.clone())?;
+        // Task 2: Insert test data
 
-        // Insert some test data
-        let relation = catalog.get_relation("idx_email", worker.clone())?;
-        let root = relation.root();
-        let schema = relation.schema();
-        let mut btree = catalog.index_btree(root, schema, worker.clone())?;
+        db.task_runner()
+            .run(move |ctx| {
+                let relation = ctx
+                    .catalog()
+                    .get_relation("idx_email", ctx.accessor())
+                    .box_err()?;
+                let root = relation.root();
+                let schema = relation.schema();
+                let mut btree = ctx
+                    .catalog()
+                    .index_btree(root, schema, ctx.accessor())
+                    .box_err()?;
+                let index_schema = users_idx_schema();
+                for i in 0..50u64 {
+                    let tuple = Tuple::new(
+                        &[
+                            DataType::Text(Blob::from(format!("user{}@example.com", i).as_str())),
+                            DataType::BigUInt(UInt64(i)),
+                        ],
+                        &index_schema,
+                        TRANSACTION_ZERO,
+                    )
+                    .box_err()?;
 
-        for i in 0..50u64 {
-            let tuple = Tuple::new(
-                &[
-                    DataType::Text(Blob::from(format!("user{}@example.com", i).as_str())),
-                    DataType::BigUInt(UInt64(i)),
-                ],
-                &index_schema,
-                TRANSACTION_ZERO,
-            )?;
+                    let owned: OwnedTuple = tuple.into();
+                    btree.insert(root, owned.as_ref()).box_err()?;
+                }
 
-            let owned: crate::storage::tuple::OwnedTuple = tuple.into();
-            btree.insert(root, owned.as_ref())?;
-        }
-        btree.clear_worker_stack();
+                btree.clear_accessor_stack();
+                Ok(())
+            })
+            .unwrap();
 
-        // Recompute statistics
-
-        let config = StatsComputeConfig::default();
-        let stats = catalog.recompute_index_statistics("idx_email", worker.clone(), &config)?;
+        // Task 3: Recompute statistics
+        let stats = db
+            .task_runner()
+            .run_with_result(|ctx| {
+                let config = StatsComputeConfig::default();
+                ctx.catalog()
+                    .recompute_index_statistics("idx_email", ctx.accessor(), &config)
+                    .box_err()
+            })
+            .unwrap();
 
         assert_eq!(stats.entries, 50);
         assert_eq!(stats.distinct_keys, 50);
@@ -887,92 +945,134 @@ mod stats_compute_tests {
     #[test]
     fn test_analyze_all_relations() -> StatsComputeResult<()> {
         let (db, _temp) = create_test_database()?;
-        let catalog = db.catalog();
-        let worker = db.main_worker_cloned();
 
-        // Create multiple tables
-        let schema1 = create_test_schema();
-        catalog.create_table("users", schema1.clone(), worker.clone())?;
+        // Task 1: Create all tables and index
+        db.task_runner()
+            .run(|ctx| {
+                let schema1 = users_schema();
+                ctx.catalog()
+                    .create_table("users", schema1.clone(), ctx.accessor())
+                    .box_err()?;
 
-        let mut schema2 = Schema::new();
-        schema2.add_column("product_id", DataTypeKind::BigInt, true, true, false);
-        schema2.add_column("name", DataTypeKind::Text, false, false, false);
-        schema2.add_column("price", DataTypeKind::Double, false, false, false);
-        schema2.set_num_keys(1);
-        catalog.create_table("products", schema2.clone(), worker.clone())?;
+                let schema2 = products_schema();
+                ctx.catalog()
+                    .create_table("products", schema2, ctx.accessor())
+                    .box_err()?;
+                let index_schema = users_idx_schema();
+                ctx.catalog()
+                    .create_index("idx_users_email", index_schema, ctx.accessor())
+                    .box_err()?;
+                Ok(())
+            })
+            .unwrap();
 
-        // Create an index
-        let mut index_schema = Schema::new();
-        index_schema.add_column("email", DataTypeKind::Text, true, true, false);
-        index_schema.add_column("user_id", DataTypeKind::BigUInt, false, false, false);
-        index_schema.set_num_keys(1);
-        catalog.create_index("idx_users_email", index_schema.clone(), worker.clone())?;
+        // Task 2: Insert data into users table
+        db.task_runner()
+            .run(move |ctx| {
+                let schema1 = users_schema();
+                let relation = ctx
+                    .catalog()
+                    .get_relation("users", ctx.accessor())
+                    .box_err()?;
+                let root = relation.root();
+                let mut btree = ctx.catalog().table_btree(root, ctx.accessor()).box_err()?;
 
-        // Insert data into users table
-        let relation = catalog.get_relation("users", worker.clone())?;
-        let root = relation.root();
-        let mut btree = catalog.table_btree(root, worker.clone())?;
+                for i in 0..50i64 {
+                    let tuple = Tuple::new(
+                        &[
+                            DataType::BigInt(Int64(i)),
+                            DataType::Text(Blob::from(format!("User {}", i).as_str())),
+                            DataType::Int(Int32((i % 30) as i32 + 20)),
+                        ],
+                        &schema1,
+                        TRANSACTION_ZERO,
+                    )
+                    .box_err()?;
 
-        for i in 0..50i64 {
-            let tuple = Tuple::new(
-                &[
-                    DataType::BigInt(Int64(i)),
-                    DataType::Text(Blob::from(format!("User {}", i).as_str())),
-                    DataType::Int(Int32((i % 30) as i32 + 20)),
-                ],
-                &schema1,
-                TRANSACTION_ZERO,
-            )?;
-            let owned: crate::storage::tuple::OwnedTuple = tuple.into();
-            btree.insert(root, owned.as_ref())?;
-        }
-        btree.clear_worker_stack();
+                    let owned: OwnedTuple = tuple.into();
+                    btree.insert(root, owned.as_ref()).box_err()?;
+                }
 
-        // Insert data into products table
-        let relation = catalog.get_relation("products", worker.clone())?;
-        let root = relation.root();
-        let mut btree = catalog.table_btree(root, worker.clone())?;
+                btree.clear_accessor_stack();
+                Ok(())
+            })
+            .unwrap();
 
-        for i in 0..30i64 {
-            let tuple = Tuple::new(
-                &[
-                    DataType::BigInt(Int64(i)),
-                    DataType::Text(Blob::from(format!("Product {}", i).as_str())),
-                    DataType::Double(crate::types::Float64((i as f64) * 9.99)),
-                ],
-                &schema2,
-                TRANSACTION_ZERO,
-            )?;
-            let owned: crate::storage::tuple::OwnedTuple = tuple.into();
-            btree.insert(root, owned.as_ref())?;
-        }
-        btree.clear_worker_stack();
+        // Task 3: Insert data into products table
 
-        // Insert data into index
-        let relation = catalog.get_relation("idx_users_email", worker.clone())?;
-        let root = relation.root();
-        let schema = relation.schema();
-        let mut btree = catalog.index_btree(root, schema, worker.clone())?;
+        db.task_runner()
+            .run(move |ctx| {
+                let relation = ctx
+                    .catalog()
+                    .get_relation("products", ctx.accessor())
+                    .box_err()?;
+                let root = relation.root();
+                let mut btree = ctx.catalog().table_btree(root, ctx.accessor()).box_err()?;
 
-        for i in 0..50u64 {
-            let tuple = Tuple::new(
-                &[
-                    DataType::Text(Blob::from(format!("user{}@example.com", i).as_str())),
-                    DataType::BigUInt(UInt64(i)),
-                ],
-                &index_schema,
-                TRANSACTION_ZERO,
-            )?;
-            let owned: crate::storage::tuple::OwnedTuple = tuple.into();
-            btree.insert(root, owned.as_ref())?;
-        }
-        btree.clear_worker_stack();
+                for i in 0..30i64 {
+                    let tuple = Tuple::new(
+                        &[
+                            DataType::BigInt(Int64(i)),
+                            DataType::Text(Blob::from(format!("Product {}", i).as_str())),
+                            DataType::Double(crate::types::Float64((i as f64) * 9.99)),
+                        ],
+                        relation.schema(),
+                        TRANSACTION_ZERO,
+                    )
+                    .box_err()?;
 
-        // Run analyze
-        let config = StatsComputeConfig::default();
-        let result = catalog.analyze(worker, &config)?;
+                    let owned: OwnedTuple = tuple.into();
+                    btree.insert(root, owned.as_ref()).box_err()?;
+                }
 
-        // Verify results
+                btree.clear_accessor_stack();
+                Ok(())
+            })
+            .unwrap();
+
+        // Task 4: Insert data into index
+        db.task_runner()
+            .run(move |ctx| {
+                let relation = ctx
+                    .catalog()
+                    .get_relation("idx_users_email", ctx.accessor())
+                    .box_err()?;
+                let root = relation.root();
+                let schema = relation.schema();
+                let mut btree = ctx
+                    .catalog()
+                    .index_btree(root, schema, ctx.accessor())
+                    .box_err()?;
+
+                for i in 0..50u64 {
+                    let tuple = Tuple::new(
+                        &[
+                            DataType::Text(Blob::from(format!("user{}@example.com", i).as_str())),
+                            DataType::BigUInt(UInt64(i)),
+                        ],
+                        schema,
+                        TRANSACTION_ZERO,
+                    )
+                    .box_err()?;
+
+                    let owned: OwnedTuple = tuple.into();
+                    btree.insert(root, owned.as_ref()).box_err()?;
+                }
+
+                btree.clear_accessor_stack();
+                Ok(())
+            })
+            .unwrap();
+
+        // Task 5: Run analyze
+        let result = db
+            .task_runner()
+            .run_with_result(|ctx| {
+                let config = StatsComputeConfig::default();
+                ctx.catalog().analyze(ctx.accessor(), &config).box_err()
+            })
+            .unwrap();
+
         assert!(
             result.is_success(),
             "Analyze should complete without errors: {:?}",
@@ -986,28 +1086,23 @@ mod stats_compute_tests {
             "Should have updated 3 relations total"
         );
 
-        // Verify users table stats
         assert!(result.table_stats.contains_key("users"));
         let users_stats = result.table_stats.get("users").unwrap();
         assert_eq!(users_stats.row_count, 50);
         assert!(users_stats.page_count > 0);
         assert_eq!(users_stats.column_stats.len(), 3);
 
-        // Verify id column has 50 distinct values
         let id_stats = users_stats.get_column_stats(0).unwrap();
         assert_eq!(id_stats.ndv, 50);
 
-        // Verify age column has 30 distinct values (i % 30 + 20)
         let age_stats = users_stats.get_column_stats(2).unwrap();
         assert_eq!(age_stats.ndv, 30);
 
-        // Verify products table stats
         assert!(result.table_stats.contains_key("products"));
         let products_stats = result.table_stats.get("products").unwrap();
         assert_eq!(products_stats.row_count, 30);
         assert_eq!(products_stats.column_stats.len(), 3);
 
-        // Verify index stats
         assert!(result.index_stats.contains_key("idx_users_email"));
         let index_stats = result.index_stats.get("idx_users_email").unwrap();
         assert_eq!(index_stats.entries, 50);
@@ -1022,14 +1117,15 @@ mod stats_compute_tests {
     #[test]
     fn test_analyze_empty_database() -> StatsComputeResult<()> {
         let (db, _temp) = create_test_database()?;
-        let catalog = db.catalog();
-        let worker = db.main_worker_cloned();
 
-        // Run analyze on empty database (only meta tables exist)
-        let config = StatsComputeConfig::default();
-        let result = catalog.analyze(worker, &config)?;
+        let result = db
+            .task_runner()
+            .run_with_result(|ctx| {
+                let config = StatsComputeConfig::default();
+                ctx.catalog().analyze(ctx.accessor(), &config).box_err()
+            })
+            .unwrap();
 
-        // Should succeed with no user tables/indexes
         assert!(result.is_success());
         assert_eq!(result.tables_updated, 0);
         assert_eq!(result.indexes_updated, 0);
@@ -1040,22 +1136,33 @@ mod stats_compute_tests {
     #[test]
     fn test_analyze_with_empty_tables() -> StatsComputeResult<()> {
         let (db, _temp) = create_test_database()?;
-        let catalog = db.catalog();
-        let worker = db.main_worker_cloned();
 
-        // Create empty tables
-        let schema = create_test_schema();
-        catalog.create_table("empty_table1", schema.clone(), worker.clone())?;
-        catalog.create_table("empty_table2", schema.clone(), worker.clone())?;
+        // Task 1: Create empty tables
+        db.task_runner()
+            .run(|ctx| {
+                let schema = users_schema();
+                ctx.catalog()
+                    .create_table("empty_table1", schema.clone(), ctx.accessor())
+                    .box_err()?;
+                ctx.catalog()
+                    .create_table("empty_table2", schema.clone(), ctx.accessor())
+                    .box_err()?;
+                Ok(())
+            })
+            .unwrap();
 
-        // Run analyze
-        let config = StatsComputeConfig::default();
-        let result = catalog.analyze(worker, &config)?;
+        // Task 2: Run analyze
+        let result = db
+            .task_runner()
+            .run_with_result(|ctx| {
+                let config = StatsComputeConfig::default();
+                ctx.catalog().analyze(ctx.accessor(), &config).box_err()
+            })
+            .unwrap();
 
         assert!(result.is_success());
         assert_eq!(result.tables_updated, 2);
 
-        // Verify empty table stats
         let stats1 = result.table_stats.get("empty_table1").unwrap();
         assert_eq!(stats1.row_count, 0);
         assert_eq!(stats1.page_count, 0);
@@ -1069,44 +1176,65 @@ mod stats_compute_tests {
     #[test]
     fn test_analyze_with_fast_config() -> StatsComputeResult<()> {
         let (db, _temp) = create_test_database()?;
-        let catalog = db.catalog();
-        let worker = db.main_worker_cloned();
 
-        // Create a table with data
-        let schema = create_test_schema();
-        catalog.create_table("large_table", schema.clone(), worker.clone())?;
+        // Task 1: Create table
+        db.task_runner()
+            .run(|ctx| {
+                let schema = users_schema();
+                ctx.catalog()
+                    .create_table("large_table", schema, ctx.accessor())
+                    .box_err()?;
+                Ok(())
+            })
+            .unwrap();
 
-        let relation = catalog.get_relation("large_table", worker.clone())?;
-        let root = relation.root();
-        let mut btree = catalog.table_btree(root, worker.clone())?;
+        // Task 2: Insert data
+        db.task_runner()
+            .run(move |ctx| {
+                let schema = users_schema();
+                let relation = ctx
+                    .catalog()
+                    .get_relation("large_table", ctx.accessor())
+                    .box_err()?;
+                let root = relation.root();
+                let mut btree = ctx.catalog().table_btree(root, ctx.accessor()).box_err()?;
 
-        for i in 0..100i64 {
-            let tuple = Tuple::new(
-                &[
-                    DataType::BigInt(Int64(i)),
-                    DataType::Text(Blob::from(format!("Name {}", i).as_str())),
-                    DataType::Int(Int32(i as i32)),
-                ],
-                &schema,
-                TRANSACTION_ZERO,
-            )?;
-            let owned: crate::storage::tuple::OwnedTuple = tuple.into();
-            btree.insert(root, owned.as_ref())?;
-        }
-        btree.clear_worker_stack();
+                for i in 0..100i64 {
+                    let tuple = Tuple::new(
+                        &[
+                            DataType::BigInt(Int64(i)),
+                            DataType::Text(Blob::from(format!("Name {}", i).as_str())),
+                            DataType::Int(Int32(i as i32)),
+                        ],
+                        &schema,
+                        TRANSACTION_ZERO,
+                    )
+                    .box_err()?;
 
-        // Run analyze with fast config (sampling enabled)
-        let config = StatsComputeConfig::fast();
-        let result = catalog.analyze(worker, &config)?;
+                    let owned: OwnedTuple = tuple.into();
+                    btree.insert(root, owned.as_ref()).box_err()?;
+                }
+
+                btree.clear_accessor_stack();
+                Ok(())
+            })
+            .unwrap();
+
+        // Task 3: Run analyze with fast config
+        let result = db
+            .task_runner()
+            .run_with_result(|ctx| {
+                let config = StatsComputeConfig::fast();
+                ctx.catalog().analyze(ctx.accessor(), &config).box_err()
+            })
+            .unwrap();
 
         assert!(result.is_success());
         assert_eq!(result.tables_updated, 1);
 
         let stats = result.table_stats.get("large_table").unwrap();
-        // Row count should still reflect full table even with sampling
         assert_eq!(stats.row_count, 100);
 
-        // With fast config, histograms should not be computed
         let col_stats = stats.get_column_stats(0).unwrap();
         assert!(col_stats.histogram.is_none());
 

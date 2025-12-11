@@ -98,7 +98,7 @@ mod query_execution_tests {
                 CascadesOptimizer, OptimizerConfig, ProcessedStatement, model::AxmosCostModel,
             },
         },
-        transactions::worker::WorkerPool,
+        transactions::accessor::RcPageAccessorPool,
         types::{Blob, DataType, DataTypeKind, UInt64},
     };
 
@@ -128,11 +128,11 @@ mod query_execution_tests {
             1,
         );
         db.catalog()
-            .create_table("users", schema, db.main_worker_cloned())?;
+            .create_table("users", schema, db.main_accessor.clone()d())?;
 
         // Insert test data
         let handle = db.coordinator().begin().unwrap();
-        let pool = WorkerPool::from(handle);
+        let pool = RcPageAccessorPool::from(handle);
         pool.begin().unwrap();
 
         for (name, age) in [
@@ -164,18 +164,18 @@ mod query_execution_tests {
         let stmt = parser.parse()?;
 
         // 2. Bind
-        let mut binder = Binder::new(db.catalog(), db.main_worker_cloned());
+        let mut binder = Binder::new(db.catalog(), db.main_accessor.clone()d());
         let bound_stmt = binder.bind(&stmt)?;
 
         // 3. Process (handles both DDL and queries)
         let catalog = db.catalog();
-        let worker = db.main_worker_cloned();
+        let accessor = db.main_accessor.clone()d();
         let cost_model = AxmosCostModel::new(4096);
-        let stats_provider = CatalogStatsProvider::new(catalog.clone(), worker.clone());
+        let stats_provider = CatalogStatsProvider::new(catalog.clone(), accessor.clone());
 
         let mut optimizer = CascadesOptimizer::new(
             catalog.clone(),
-            worker.clone(),
+            accessor.clone(),
             OptimizerConfig::default(),
             cost_model,
             stats_provider,
@@ -186,7 +186,7 @@ mod query_execution_tests {
             ProcessedStatement::Plan(physical_plan) => {
                 // 4. Build and execute the plan
                 let handle = db.coordinator().begin()?;
-                let pool = WorkerPool::from(handle);
+                let pool = RcPageAccessorPool::from(handle);
                 pool.begin()?;
 
                 let ctx = pool.execution_context();

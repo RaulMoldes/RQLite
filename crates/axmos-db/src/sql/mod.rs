@@ -29,15 +29,3 @@ pub(crate) fn parse_sql(sql: &str) -> SQLResult<Statement> {
     Ok(stmt)
 }
 
-/// Parse a SQL query string into an AST
-pub(crate) fn parsing_pipeline(sql: &str, db: &Database) -> SQLResult<Statement> {
-    let lexer = Lexer::new(sql);
-    let mut parser = Parser::new(lexer);
-    let mut stmt = parser.parse()?;
-    stmt.simplify();
-    let mut analyzer = Analyzer::new(db.catalog(), db.main_worker_cloned());
-    let mut preparator = Binder::new(db.catalog(), db.main_worker_cloned());
-    analyzer.analyze(&stmt)?;
-    preparator.bind(&mut stmt)?;
-    Ok(stmt)
-}

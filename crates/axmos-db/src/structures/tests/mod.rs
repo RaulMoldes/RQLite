@@ -154,7 +154,7 @@ fn test_insert_remove_single_key() -> io::Result<()> {
     let cell = btree.get_payload(retrieved)?;
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), bytes);
-    btree.clear_worker_stack();
+    btree.clear_accessor_stack();
     btree.remove(root, bytes)?;
 
     let retrieved = btree.search(&start_pos, bytes, FrameAccessMode::Read)?;
@@ -202,7 +202,7 @@ fn test_update_single_key() -> io::Result<()> {
     let cell = btree.get_payload(retrieved)?;
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), kv.as_ref());
-    btree.clear_worker_stack();
+    btree.clear_accessor_stack();
 
     btree.update(root, kv2.as_ref())?;
 
@@ -212,7 +212,7 @@ fn test_update_single_key() -> io::Result<()> {
     let cell = btree.get_payload(retrieved)?;
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), kv2.as_ref());
-    btree.clear_worker_stack();
+    btree.clear_accessor_stack();
 
     Ok(())
 }
@@ -244,7 +244,7 @@ fn test_upsert_single_key() -> io::Result<()> {
     let cell = btree.get_payload(retrieved)?;
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), kv.as_ref());
-    btree.clear_worker_stack();
+    btree.clear_accessor_stack();
 
     btree.upsert(root, kv2.as_ref())?;
 
@@ -254,7 +254,7 @@ fn test_upsert_single_key() -> io::Result<()> {
     let cell = btree.get_payload(retrieved)?;
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), kv2.as_ref());
-    btree.clear_worker_stack();
+    btree.clear_accessor_stack();
 
     btree.upsert(root, kv3.as_ref())?;
 
@@ -264,7 +264,7 @@ fn test_upsert_single_key() -> io::Result<()> {
     let cell = btree.get_payload(retrieved)?;
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), kv3.as_ref());
-    btree.clear_worker_stack();
+    btree.clear_accessor_stack();
 
     Ok(())
 }
@@ -290,7 +290,7 @@ fn test_variable_length_keys() -> io::Result<()> {
         let retrieved = tree.search(&start_pos, &key.as_bytes(), FrameAccessMode::Read)?;
         // Search does not release the latch on the node so we have to do it ourselves.
         let cell = tree.get_payload(retrieved)?;
-        tree.clear_worker_stack();
+        tree.clear_accessor_stack();
         assert!(cell.is_some());
         assert_eq!(cell.unwrap().as_ref(), key.as_bytes());
     }
@@ -321,7 +321,7 @@ fn test_overflow_chain() -> io::Result<()> {
     let cell = cell.unwrap();
     assert_eq!(cell.as_ref().len(), kv.as_ref().len());
     assert_eq!(cell.as_ref(), kv.as_ref());
-    tree.clear_worker_stack();
+    tree.clear_accessor_stack();
     Ok(())
 }
 
@@ -353,7 +353,7 @@ fn test_multiple_overflow_chain() -> io::Result<()> {
     let cell = cell.unwrap();
     assert_eq!(cell.as_ref().len(), kv.as_ref().len());
     assert_eq!(cell.as_ref(), kv.as_ref());
-    tree.clear_worker_stack();
+    tree.clear_accessor_stack();
     Ok(())
 }
 
@@ -378,7 +378,7 @@ fn test_split_root() -> io::Result<()> {
         let retrieved = tree.search(&start_pos, key.as_ref(), FrameAccessMode::Read)?;
         // Search does not release the latch on the node so we have to do it ourselves.
         let cell = tree.get_payload(retrieved)?;
-        tree.clear_worker_stack();
+        tree.clear_accessor_stack();
         assert!(cell.is_some());
         assert_eq!(cell.unwrap().as_ref(), key.as_ref());
     }
@@ -448,7 +448,7 @@ fn test_overflow_keys() -> io::Result<()> {
 
         let retrieved = tree.search(&start_pos, &key.as_bytes(), FrameAccessMode::Read)?;
         let cell = tree.get_payload(retrieved)?;
-        tree.clear_worker_stack();
+        tree.clear_accessor_stack();
 
         assert!(cell.is_some());
         assert_eq!(cell.unwrap().as_ref(), key.as_bytes());
@@ -464,7 +464,7 @@ fn test_overflow_keys() -> io::Result<()> {
 
     let retrieved = tree.search(&start_pos, &huge_key.as_bytes(), FrameAccessMode::Read)?;
     let cell = tree.get_payload(retrieved)?;
-    tree.clear_worker_stack();
+    tree.clear_accessor_stack();
 
     assert!(cell.is_some());
     assert_eq!(cell.unwrap().as_ref(), &combined_data);
@@ -611,26 +611,27 @@ fn test_overflow_chain_integrity() -> io::Result<()> {
     tree.insert(root, kv.as_ref())?;
 
     // Now manually inspect the overflow chain
-    tree.worker_mut()
+    tree.accessor_mut()
         .acquire::<BtreePage>(root, FrameAccessMode::Read)?;
 
     let (is_overflow, overflow_start) =
-        tree.worker().read_page::<BtreePage, _, _>(root, |btree| {
-            let cell = btree.cell(Slot(0));
-            println!("Cell metadata: {:?}", cell.metadata());
-            println!("Cell len: {}", cell.len());
-            println!("Cell is_overflow: {}", cell.metadata().is_overflow());
+        tree.accessor()
+            .read_page::<BtreePage, _, _>(root, |btree| {
+                let cell = btree.cell(Slot(0));
+                println!("Cell metadata: {:?}", cell.metadata());
+                println!("Cell len: {}", cell.len());
+                println!("Cell is_overflow: {}", cell.metadata().is_overflow());
 
-            if cell.metadata().is_overflow() {
-                let ovf_page = cell.overflow_page();
-                println!("Overflow page from cell: {}", ovf_page);
-                (true, ovf_page)
-            } else {
-                (false, PAGE_ZERO)
-            }
-        })?;
+                if cell.metadata().is_overflow() {
+                    let ovf_page = cell.overflow_page();
+                    println!("Overflow page from cell: {}", ovf_page);
+                    (true, ovf_page)
+                } else {
+                    (false, PAGE_ZERO)
+                }
+            })?;
 
-    tree.worker_mut().release_latch(root);
+    tree.accessor_mut().release_latch(root);
 
     assert!(is_overflow, "Cell should be overflow");
     assert!(overflow_start.is_valid(), "Overflow page should be valid");
@@ -650,18 +651,18 @@ fn test_overflow_chain_integrity() -> io::Result<()> {
 
         println!("  Overflow page {}: {}", chain_length, current);
 
-        tree.worker_mut()
+        tree.accessor_mut()
             .acquire::<OverflowPage>(current, FrameAccessMode::Read)?;
 
-        let (next, num_bytes) = tree
-            .worker()
-            .read_page::<OverflowPage, _, _>(current, |ovf| {
-                println!("    num_bytes: {}", ovf.metadata().num_bytes);
-                println!("    next: {}", ovf.metadata().next);
-                (ovf.metadata().next, ovf.metadata().num_bytes)
-            })?;
+        let (next, num_bytes) =
+            tree.accessor()
+                .read_page::<OverflowPage, _, _>(current, |ovf| {
+                    println!("    num_bytes: {}", ovf.metadata().num_bytes);
+                    println!("    next: {}", ovf.metadata().next);
+                    (ovf.metadata().next, ovf.metadata().num_bytes)
+                })?;
 
-        tree.worker_mut().release_latch(current);
+        tree.accessor_mut().release_latch(current);
 
         // Sanity check: num_bytes should be reasonable
         assert!(
@@ -863,14 +864,14 @@ fn test_dealloc_with_overflow() -> io::Result<()> {
         }
         btree_pages.insert(page_id);
 
-        tree.worker_mut()
+        tree.accessor_mut()
             .acquire::<BtreePage>(page_id, FrameAccessMode::Read)?;
 
         let children: Vec<PageId> = tree
-            .worker()
+            .accessor()
             .read_page::<BtreePage, _, _>(page_id, |btree| btree.iter_children().collect())?;
 
-        tree.worker_mut().release_latch(page_id);
+        tree.accessor_mut().release_latch(page_id);
 
         for child in children {
             if child.is_valid() {
@@ -905,11 +906,11 @@ fn test_dealloc_with_overflow() -> io::Result<()> {
         }
         all_btree_pages.insert(page_id);
 
-        tree.worker_mut()
+        tree.accessor_mut()
             .acquire::<BtreePage>(page_id, FrameAccessMode::Read)?;
 
         let (children, overflows) =
-            tree.worker()
+            tree.accessor()
                 .read_page::<BtreePage, _, _>(page_id, |btree| {
                     let children: Vec<PageId> = btree.iter_children().collect();
 
@@ -927,7 +928,7 @@ fn test_dealloc_with_overflow() -> io::Result<()> {
                     (children, overflows)
                 })?;
 
-        tree.worker_mut().release_latch(page_id);
+        tree.accessor_mut().release_latch(page_id);
 
         for (slot, ovf) in overflows {
             println!(
@@ -959,10 +960,10 @@ fn test_dealloc_with_overflow() -> io::Result<()> {
             println!("  ERROR: Overflow start {} is a BTree page!", start);
 
             // Let's see what the cell actually contains
-            tree.worker_mut()
+            tree.accessor_mut()
                 .acquire::<BtreePage>(*btree_page, FrameAccessMode::Read)?;
 
-            tree.worker()
+            tree.accessor()
                 .read_page::<BtreePage, _, _>(*btree_page, |btree| {
                     let cell = btree.cell(*slot);
                     println!("  Cell metadata: {:?}", cell.metadata());
@@ -973,7 +974,7 @@ fn test_dealloc_with_overflow() -> io::Result<()> {
                     println!("  Cell len: {}", cell.len());
                 })?;
 
-            tree.worker_mut().release_latch(*btree_page);
+            tree.accessor_mut().release_latch(*btree_page);
 
             panic!("Overflow page {} is actually a BTree page!", start);
         }
@@ -995,14 +996,14 @@ fn test_dealloc_with_overflow() -> io::Result<()> {
             visited.insert(current);
             chain_len += 1;
 
-            tree.worker_mut()
+            tree.accessor_mut()
                 .acquire::<OverflowPage>(current, FrameAccessMode::Read)?;
 
             let next = tree
-                .worker()
+                .accessor()
                 .read_page::<OverflowPage, _, _>(current, |ovf| ovf.metadata().next)?;
 
-            tree.worker_mut().release_latch(current);
+            tree.accessor_mut().release_latch(current);
             current = next;
 
             if chain_len > 50 {

@@ -243,7 +243,7 @@ impl<'a> ExpressionEvaluator<'a> {
         match &result {
             DataType::Boolean(b) => Ok(b.0 != 0),
             DataType::Null => Ok(false), // NULL is treated as false in boolean context
-            other => Err(EvaluationError::TypeError(TypeError::UnexpectedDataType(
+            other => Err(EvaluationError::Type(TypeError::UnexpectedDataType(
                 result.kind(),
             ))),
         }
@@ -442,7 +442,7 @@ impl<'a> ExpressionEvaluator<'a> {
         match unary_op {
             UnaryOperator::Not => match operand {
                 DataType::Boolean(b) => Ok(DataType::Boolean((b.0 == 0).into())),
-                _ => Err(EvaluationError::TypeError(TypeError::UnexpectedDataType(
+                _ => Err(EvaluationError::Type(TypeError::UnexpectedDataType(
                     operand.kind(),
                 ))),
             },
@@ -453,7 +453,7 @@ impl<'a> ExpressionEvaluator<'a> {
                 DataType::SmallInt(i) => Ok(DataType::SmallInt((-i.0).into())),
                 DataType::Double(f) => Ok(DataType::Double((-f.0).into())),
                 DataType::Float(f) => Ok(DataType::Float((-f.0).into())),
-                _ => Err(EvaluationError::TypeError(TypeError::UnexpectedDataType(
+                _ => Err(EvaluationError::Type(TypeError::UnexpectedDataType(
                     operand.kind(),
                 ))),
             },
@@ -567,7 +567,7 @@ impl Callable for Concat {
                     result.push_str(&s);
                 }
                 other => {
-                    return Err(EvaluationError::TypeError(TypeError::TypeMismatch {
+                    return Err(EvaluationError::Type(TypeError::TypeMismatch {
                         left: other.kind(),
                         right: DataTypeKind::Text,
                     }));
@@ -618,7 +618,7 @@ impl Callable for LTrim {
                 let trimmed = s.trim_start(); // left trim
                 Ok(DataType::Text(Blob::from(trimmed)))
             }
-            other => Err(EvaluationError::TypeError(TypeError::TypeMismatch {
+            other => Err(EvaluationError::Type(TypeError::TypeMismatch {
                 left: other.kind(),
                 right: DataTypeKind::Text,
             })),
@@ -638,7 +638,7 @@ impl Callable for RTrim {
                 let trimmed = s.trim_end(); // right trim
                 Ok(DataType::Text(Blob::from(trimmed)))
             }
-            other => Err(EvaluationError::TypeError(TypeError::TypeMismatch {
+            other => Err(EvaluationError::Type(TypeError::TypeMismatch {
                 left: other.kind(),
                 right: DataTypeKind::Text,
             })),
@@ -657,7 +657,7 @@ impl Callable for Lower {
                 let s = blob.to_string(crate::TextEncoding::Utf8);
                 Ok(DataType::Text(Blob::from(s.to_lowercase().as_str())))
             }
-            other => Err(EvaluationError::TypeError(TypeError::TypeMismatch {
+            other => Err(EvaluationError::Type(TypeError::TypeMismatch {
                 left: other.kind(),
                 right: DataTypeKind::Text,
             })),
@@ -676,7 +676,7 @@ impl Callable for Upper {
                 let s = blob.to_string(crate::TextEncoding::Utf8);
                 Ok(DataType::Text(Blob::from(s.to_uppercase().as_str())))
             }
-            other => Err(EvaluationError::TypeError(TypeError::TypeMismatch {
+            other => Err(EvaluationError::Type(TypeError::TypeMismatch {
                 left: other.kind(),
                 right: DataTypeKind::Text,
             })),
@@ -697,7 +697,7 @@ impl Callable for Length {
                     s.chars().count() as u64
                 )))
             }
-            other => Err(EvaluationError::TypeError(TypeError::TypeMismatch {
+            other => Err(EvaluationError::Type(TypeError::TypeMismatch {
                 left: other.kind(),
                 right: DataTypeKind::Text,
             })),

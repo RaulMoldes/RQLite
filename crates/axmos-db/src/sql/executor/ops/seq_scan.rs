@@ -99,7 +99,7 @@ impl Executor for SeqScan {
         let relation = self
             .ctx
             .catalog()
-            .get_relation_unchecked(self.op.table_id, self.ctx.worker().clone())?;
+            .get_relation_unchecked(self.op.table_id, self.ctx.accessor().clone())?;
 
         let root_page = relation.root();
         let mut table = self.ctx.table(root_page)?;
@@ -152,7 +152,7 @@ impl Executor for SeqScan {
     fn close(&mut self) -> ExecutionResult<()> {
         self.state = ExecutionState::Closed;
         if let Some(iterator) = self.cursor.as_mut() {
-            iterator.get_tree().clear_worker_stack();
+            iterator.get_tree().clear_accessor_stack();
         };
 
         self.cursor = None;

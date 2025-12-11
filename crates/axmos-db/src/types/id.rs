@@ -4,11 +4,14 @@ id_type!(PageId, __GLOBAL_PAGE_COUNT, "PageId");
 id_type!(TransactionId, __GLOBAL_TX_COUNT, "TransactionId");
 id_type!(ObjectId, __GLOBAL_OBJ_COUNT, "ObjectId");
 
+id_type!(WorkerId, __GLOBAL_WORKER_COUNT, "WorkerId");
+
 pub fn initialize_atomics() {
     __GLOBAL_LOG_COUNT.store(1, std::sync::atomic::Ordering::Relaxed);
     __GLOBAL_PAGE_COUNT.store(1, std::sync::atomic::Ordering::Relaxed);
     __GLOBAL_TX_COUNT.store(1, std::sync::atomic::Ordering::Relaxed);
     __GLOBAL_OBJ_COUNT.store(1, std::sync::atomic::Ordering::Relaxed);
+    __GLOBAL_WORKER_COUNT.store(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn get_next_object() -> u64 {

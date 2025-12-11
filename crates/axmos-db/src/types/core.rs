@@ -4,7 +4,7 @@
 //! to participate in the DataType system. The derive macro uses trait
 //! dispatch exclusively
 
-use crate::{DataType, impl_number_op};
+use crate::impl_number_op;
 use murmur3::murmur3_x64_128;
 use std::io::{Cursor, Result};
 /// Core trait for all Axmos value types.

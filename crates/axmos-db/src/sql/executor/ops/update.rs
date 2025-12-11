@@ -83,14 +83,14 @@ impl Update {
         };
 
         let catalog = self.ctx.catalog();
-        let worker = self.ctx.worker().clone();
+        let accessor = self.ctx.accessor().clone();
         let tx_id = self.ctx.transaction_id();
 
-        let relation = catalog.get_relation_unchecked(self.op.table_id, worker.clone())?;
+        let relation = catalog.get_relation_unchecked(self.op.table_id, accessor.clone())?;
         let schema = relation.schema();
         let root = relation.root();
 
-        let mut btree = catalog.table_btree(root, worker.clone())?;
+        let mut btree = catalog.table_btree(root, accessor.clone())?;
         let logical_id = LogicalId::new(self.op.table_id, row_id);
 
         let search_result = btree.search_from_root(row_id.as_ref(), FrameAccessMode::Write)?;
@@ -98,7 +98,7 @@ impl Update {
         let position = match search_result {
             SearchResult::Found(pos) => pos,
             SearchResult::NotFound(_) => {
-                btree.clear_worker_stack();
+                btree.clear_accessor_stack();
                 return Err(QueryExecutionError::TupleNotFound(logical_id));
             }
         };
@@ -116,7 +116,7 @@ impl Update {
                 Ok((new_bytes, old_vals, new_vals))
             })?;
         let (payload, old_values, new_values) = result?;
-        btree.clear_worker_stack();
+        btree.clear_accessor_stack();
         btree.update(root, payload.as_ref())?;
 
         // Maintain indexes
@@ -132,11 +132,12 @@ impl Update {
                 continue;
             }
 
-            let index_relation = catalog.get_relation(&index_name, worker.clone())?;
+            let index_relation = catalog.get_relation(&index_name, accessor.clone())?;
             let index_schema = index_relation.schema();
             let index_root = index_relation.root();
 
-            let mut index_btree = catalog.index_btree(index_root, index_schema, worker.clone())?;
+            let mut index_btree =
+                catalog.index_btree(index_root, index_schema, accessor.clone())?;
 
             // Build old index key for search
             let mut old_index_key: Vec<u8> = Vec::new();
@@ -160,10 +161,10 @@ impl Update {
 
                 let deleted_bytes = deleted_result?;
 
-                index_btree.clear_worker_stack();
+                index_btree.clear_accessor_stack();
                 index_btree.update(index_root, deleted_bytes.as_ref())?;
             } else {
-                index_btree.clear_worker_stack();
+                index_btree.clear_accessor_stack();
             }
 
             // Insert new index entry
@@ -177,7 +178,7 @@ impl Update {
             let new_index_bytes: OwnedTuple = new_index_tuple.into();
 
             index_btree.insert(index_root, new_index_bytes.as_ref())?;
-            index_btree.clear_worker_stack();
+            index_btree.clear_accessor_stack();
         }
 
         Ok(())

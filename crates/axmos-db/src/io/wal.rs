@@ -384,7 +384,7 @@ impl LogRecord {
         buffer
     }
 
-    fn lsn(&self) -> LogId {
+    pub(crate) fn lsn(&self) -> LogId {
         self.metadata().lsn
     }
 

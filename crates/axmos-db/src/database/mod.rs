@@ -1,9 +1,9 @@
 pub(crate) mod errors;
+pub(crate) mod runner;
 pub(crate) mod schema;
 pub(crate) mod stats;
 
 use std::{
-    cell::{Ref, RefMut},
     collections::HashMap,
     io::{self, Error as IoError, ErrorKind},
     ops::Deref,
@@ -12,7 +12,10 @@ use std::{
 
 use crate::{
     TRANSACTION_ZERO,
-    database::schema::{Column, Constraint, Index, Relation, Schema, Table},
+    database::{
+        runner::TaskRunner,
+        schema::{Column, Constraint, Index, Relation, Schema, Table},
+    },
     io::{frames::FrameAccessMode, pager::SharedPager},
     storage::{
         page::BtreePage,
@@ -20,15 +23,9 @@ use crate::{
     },
     structures::{
         bplustree::{BPlusTree, SearchResult},
-        comparator::{
-            DynComparator, FixedSizeBytesComparator, NumericComparator, SignedNumericComparator,
-            VarlenComparator,
-        },
+        comparator::{DynComparator, NumericComparator},
     },
-    transactions::{
-        TransactionCoordinator,
-        worker::{ThreadWorker, Worker},
-    },
+    transactions::{TransactionCoordinator, accessor::RcPageAccessor},
     types::{
         Blob, DataType, DataTypeKind, ObjectId, PAGE_ZERO, PageId, UInt64, get_next_object,
         initialize_atomics,
@@ -75,7 +72,7 @@ pub(crate) fn meta_table_schema() -> Schema {
 pub(crate) struct Database {
     pager: SharedPager,
     controller: TransactionCoordinator,
-    main_worker: Worker,
+    task_runner: TaskRunner,
     catalog: SharedCatalog,
 }
 
@@ -123,13 +120,13 @@ impl Catalog {
     pub(crate) fn new_init(
         min_keys: usize,
         siblings_per_side: usize,
-        worker: Worker,
+        accessor: RcPageAccessor,
     ) -> io::Result<Self> {
         let (meta_table_root, meta_index_root) = {
-            let mut worker = worker.borrow_mut();
+            let mut accessor = accessor.borrow_mut();
             (
-                worker.alloc_page::<BtreePage>()?,
-                worker.alloc_page::<BtreePage>()?,
+                accessor.alloc_page::<BtreePage>()?,
+                accessor.alloc_page::<BtreePage>()?,
             )
         };
 
@@ -143,8 +140,8 @@ impl Catalog {
             btree_num_siblings_per_side: siblings_per_side,
         };
 
-        catalog.create_relation(Relation::TableRel(meta_table), worker.clone())?;
-        catalog.create_relation(Relation::IndexRel(meta_idx), worker)?;
+        catalog.create_relation(Relation::TableRel(meta_table), accessor.clone())?;
+        catalog.create_relation(Relation::IndexRel(meta_idx), accessor)?;
 
         Ok(catalog)
     }
@@ -167,7 +164,7 @@ impl Catalog {
         &self,
         root: PageId,
         schema: &Schema,
-        tx: Worker,
+        tx: RcPageAccessor,
     ) -> io::Result<BPlusTree<DynComparator>> {
         let comparator = schema.comparator();
 
@@ -183,7 +180,7 @@ impl Catalog {
     pub(crate) fn table_btree(
         &self,
         root: PageId,
-        tx: Worker,
+        tx: RcPageAccessor,
     ) -> io::Result<BPlusTree<NumericComparator>> {
         let comparator = NumericComparator::with_type::<u64>();
 
@@ -200,16 +197,16 @@ impl Catalog {
         &self,
         table_name: &str,
         schema: Schema,
-        worker: Worker,
+        accessor: RcPageAccessor,
     ) -> io::Result<ObjectId> {
-        let root = worker.borrow_mut().alloc_page::<BtreePage>()?;
+        let root = accessor.borrow_mut().alloc_page::<BtreePage>()?;
         debug_assert!(
             root.is_valid(),
             "Cannot allocate a table pointing to page zero"
         );
         self.create_relation(
             Relation::TableRel(Table::new(table_name, root, schema)),
-            worker,
+            accessor,
         )
     }
 
@@ -217,30 +214,34 @@ impl Catalog {
         &self,
         index_name: &str,
         schema: Schema,
-        worker: Worker,
+        accessor: RcPageAccessor,
     ) -> io::Result<ObjectId> {
-        let root = worker.borrow_mut().alloc_page::<BtreePage>()?;
+        let root = accessor.borrow_mut().alloc_page::<BtreePage>()?;
         debug_assert!(
             root.is_valid(),
             "Cannot allocate a table pointing to page zero"
         );
         self.create_relation(
             Relation::IndexRel(Index::new(index_name, root, schema)),
-            worker,
+            accessor,
         )
     }
 
-    /// Stores a new relation in the meta table using the provided worker.
-    pub(crate) fn store_relation(&self, mut obj: Relation, worker: Worker) -> io::Result<ObjectId> {
+    /// Stores a new relation in the meta table using the provided RcPageAccessor.
+    pub(crate) fn store_relation(
+        &self,
+        mut obj: Relation,
+        accessor: RcPageAccessor,
+    ) -> io::Result<ObjectId> {
         if !obj.is_allocated() {
-            let id = worker.borrow_mut().alloc_page::<BtreePage>()?;
+            let id = accessor.borrow_mut().alloc_page::<BtreePage>()?;
             obj.set_root(id);
         };
 
-        let mut btree = self.table_btree(self.meta_table, worker.clone())?; // Increments the worker's ref count
+        let mut btree = self.table_btree(self.meta_table, accessor.clone())?; // Increments the RcPageAccessor's ref count
         let obj_id = obj.id();
         let tuple = obj.into_boxed_tuple()?;
-        btree.clear_worker_stack();
+        btree.clear_accessor_stack();
 
         // Will replace existing relation if it exists.
         btree.upsert(self.meta_table, tuple.as_ref())?;
@@ -248,22 +249,26 @@ impl Catalog {
         Ok(obj_id)
     }
 
-    /// Updates the metadata of a given relation using the provided worker.
-    pub(crate) fn update_relation(&self, obj: Relation, worker: Worker) -> io::Result<()> {
-        let mut btree = self.table_btree(self.meta_table, worker.clone())?;
+    /// Updates the metadata of a given relation using the provided RcPageAccessor.
+    pub(crate) fn update_relation(
+        &self,
+        obj: Relation,
+        accessor: RcPageAccessor,
+    ) -> io::Result<()> {
+        let mut btree = self.table_btree(self.meta_table, accessor.clone())?;
         let tuple = obj.into_boxed_tuple()?;
-        btree.clear_worker_stack();
+        btree.clear_accessor_stack();
         btree.update(self.meta_table, tuple.as_ref())?;
         Ok(())
     }
 
-    /// Removes a given relation using the provided worker.
+    /// Removes a given relation using the provided RcPageAccessor.
     /// Cascades the removal if required.
     pub(crate) fn remove_relation(
         &self,
         rel: Relation,
         cascade: bool,
-        worker: Worker,
+        accessor: RcPageAccessor,
     ) -> io::Result<()> {
         if cascade {
             let schema = rel.schema();
@@ -271,26 +276,30 @@ impl Catalog {
 
             // Recursively remove object dependants
             for dep in dependants {
-                let relation = self.get_relation(&dep, worker.clone())?;
-                self.remove_relation(relation, true, worker.clone())?;
+                let relation = self.get_relation(&dep, accessor.clone())?;
+                self.remove_relation(relation, true, accessor.clone())?;
             }
         };
 
-        let mut meta_table = self.table_btree(self.meta_table, worker.clone())?;
-        let mut meta_index = self.index_btree(self.meta_index, &meta_idx_schema(), worker)?;
+        let mut meta_table = self.table_btree(self.meta_table, accessor.clone())?;
+        let mut meta_index = self.index_btree(self.meta_index, &meta_idx_schema(), accessor)?;
 
         let blob = Blob::from(rel.name());
-        meta_index.clear_worker_stack();
+        meta_index.clear_accessor_stack();
         meta_index.remove(self.meta_index, blob.as_ref())?;
-        meta_table.clear_worker_stack();
+        meta_table.clear_accessor_stack();
         meta_table.remove(self.meta_table, rel.id().as_ref())?;
 
         Ok(())
     }
 
-    /// Stores a relation in the meta - index using the provided Worker
-    pub(crate) fn index_relation(&self, obj: &Relation, worker: Worker) -> io::Result<()> {
-        let mut btree = self.index_btree(self.meta_index, &meta_idx_schema(), worker.clone())?;
+    /// Stores a relation in the meta - index using the provided RcPageAccessor
+    pub(crate) fn index_relation(
+        &self,
+        obj: &Relation,
+        accessor: RcPageAccessor,
+    ) -> io::Result<()> {
+        let mut btree = self.index_btree(self.meta_index, &meta_idx_schema(), accessor.clone())?;
 
         let schema = meta_idx_schema();
         let tuple = Tuple::new(
@@ -302,40 +311,46 @@ impl Catalog {
             TRANSACTION_ZERO, // PLaceholder. MUST DO THIS INSIDE A TRANSACTION
         )?;
 
-        btree.clear_worker_stack();
+        btree.clear_accessor_stack();
         let boxed: OwnedTuple = tuple.into();
         btree.insert(self.meta_index, boxed.as_ref())?;
 
         Ok(())
     }
 
-    /// Stores a relation in the meta index and the meta table using the provided worker.
+    /// Stores a relation in the meta index and the meta table using the provided RcPageAccessor.
     pub(crate) fn create_relation(
         &self,
         relation: Relation,
-        worker: Worker,
+        accessor: RcPageAccessor,
     ) -> io::Result<ObjectId> {
         let id = relation.id();
-        self.index_relation(&relation, worker.clone())?;
-        self.store_relation(relation, worker)?;
+        self.index_relation(&relation, accessor.clone())?;
+        self.store_relation(relation, accessor)?;
         Ok(id)
     }
 
     /// Checks if a given relation exists in the meta-index
-    pub(crate) fn lookup_relation(&self, name: &str, worker: Worker) -> io::Result<SearchResult> {
-        let meta_idx = self.index_btree(self.meta_index, &meta_idx_schema(), worker)?;
+    pub(crate) fn lookup_relation(
+        &self,
+        name: &str,
+        accessor: RcPageAccessor,
+    ) -> io::Result<SearchResult> {
+        let meta_idx = self.index_btree(self.meta_index, &meta_idx_schema(), accessor)?;
         let blob = Blob::from(name);
         meta_idx.search_from_root(blob.as_ref(), FrameAccessMode::Read)
     }
 
-    /// Obtains a relation from the meta table if it exists, using the provided worker.
-    pub(crate) fn get_relation(&self, name: &str, worker: Worker) -> io::Result<Relation> {
-        let meta_idx = self.index_btree(self.meta_index, &meta_idx_schema(), worker.clone())?;
+    /// Obtains a relation from the meta table if it exists, using the provided RcPageAccessor.
+    pub(crate) fn get_relation(
+        &self,
+        name: &str,
+        accessor: RcPageAccessor,
+    ) -> io::Result<Relation> {
+        let meta_idx = self.index_btree(self.meta_index, &meta_idx_schema(), accessor.clone())?;
 
         let blob = Blob::from(name);
-        // println!("Searching for table {name}");
         let bytes: &[u8] = blob.as_ref();
-        //println!("{:?}", bytes);
 
         let result = meta_idx.search_from_root(bytes, FrameAccessMode::Read)?;
 
@@ -351,7 +366,7 @@ impl Catalog {
             }
         };
 
-        meta_idx.clear_worker_stack();
+        meta_idx.clear_accessor_stack();
         let schema = meta_idx_schema();
         let tuple = TupleRef::read(payload.as_ref(), &schema)?;
 
@@ -367,16 +382,16 @@ impl Catalog {
             }
         };
         // Go to the meta table to obtain therelation
-        self.get_relation_unchecked(id, worker)
+        self.get_relation_unchecked(id, accessor)
     }
 
     /// Directly gets a relation from the meta table
     pub(crate) fn get_relation_unchecked(
         &self,
         id: ObjectId,
-        worker: Worker,
+        accessor: RcPageAccessor,
     ) -> io::Result<Relation> {
-        let meta_table = self.table_btree(self.meta_table, worker.clone())?;
+        let meta_table = self.table_btree(self.meta_table, accessor.clone())?;
         let bytes: &[u8] = id.as_ref();
         let result = meta_table.search_from_root(id.as_ref(), FrameAccessMode::Read)?;
         let payload = match result {
@@ -391,7 +406,7 @@ impl Catalog {
             }
         };
 
-        meta_table.clear_worker_stack();
+        meta_table.clear_accessor_stack();
         let schema = meta_table_schema();
         let tuple = TupleRef::read(payload.as_ref(), &schema)?;
 
@@ -412,28 +427,26 @@ impl Database {
         pager: SharedPager,
         min_keys: usize,
         siblings_per_side: usize,
+        pool_size: usize,
     ) -> io::Result<Self> {
         initialize_atomics();
 
-        let main_worker = Worker::new(pager.clone());
+        let init_accessor = RcPageAccessor::new(pager.clone());
         let catalog = SharedCatalog::from(Catalog::new_init(
             min_keys,
             siblings_per_side,
-            main_worker.clone(),
+            init_accessor,
         )?);
 
         let controller = TransactionCoordinator::new(pager.clone(), catalog.clone());
+        let task_runner = TaskRunner::new(pool_size, pager.clone(), catalog.clone());
 
         Ok(Self {
             pager,
             controller,
-            main_worker,
+            task_runner,
             catalog,
         })
-    }
-
-    pub(crate) fn main_worker_ref(&self) -> Ref<'_, ThreadWorker> {
-        self.main_worker.borrow()
     }
 
     pub(crate) fn catalog(&self) -> SharedCatalog {
@@ -444,12 +457,8 @@ impl Database {
         self.controller.clone()
     }
 
-    pub(crate) fn main_worker_ref_mut(&self) -> RefMut<'_, ThreadWorker> {
-        self.main_worker.borrow_mut()
-    }
-
-    pub(crate) fn main_worker_cloned(&self) -> Worker {
-        self.main_worker.clone()
+    pub(crate) fn task_runner(&self) -> &TaskRunner {
+        &self.task_runner
     }
 
     pub(crate) fn pager(&self) -> SharedPager {

@@ -45,7 +45,7 @@ macro_rules! insert_tests {
                     let retrieved = tree.search(&start, key.as_ref(), FrameAccessMode::Read)?;
                     assert!(matches!(retrieved, SearchResult::Found(_)));
                     let cell = tree.get_payload(retrieved)?;
-                    tree.clear_worker_stack();
+                    tree.clear_accessor_stack();
                     assert!(cell.is_some());
                     assert_eq!(cell.unwrap().as_ref(), key.as_ref());
                 }
@@ -80,7 +80,7 @@ macro_rules! delete_test {
                 let cell = tree.get_payload(retrieved)?;
                 assert!(cell.is_some());
                 assert_eq!(cell.unwrap().as_ref(), key.as_ref());
-                tree.clear_worker_stack();
+                tree.clear_accessor_stack();
             }
 
             // Track deleted keys
@@ -110,7 +110,7 @@ macro_rules! delete_test {
                     assert!(cell.is_some());
                     assert_eq!(cell.unwrap().as_ref(), key.as_ref());
                 }
-                tree.clear_worker_stack();
+                tree.clear_accessor_stack();
             }
 
             Ok(())

@@ -2,17 +2,17 @@
 use crate::{
     database::SharedCatalog,
     structures::{bplustree::BPlusTree, comparator::NumericComparator},
-    transactions::{Snapshot, worker::Worker},
+    transactions::{Snapshot, accessor::RcPageAccessor},
     types::{PageId, TransactionId},
 };
 
 use std::io::Result as IoResult;
 
 /// Lightweight execution context for query operators.
-/// Created by WorkerPool::execution_context()
+/// Created by RcPageAccessorPool::execution_context()
 #[derive(Clone)]
 pub(crate) struct ExecutionContext {
-    worker: Worker,
+    accessor: RcPageAccessor,
     catalog: SharedCatalog,
     snapshot: Snapshot,
     transaction_id: TransactionId,
@@ -20,13 +20,13 @@ pub(crate) struct ExecutionContext {
 
 impl ExecutionContext {
     pub(crate) fn new(
-        worker: Worker,
+        accessor: RcPageAccessor,
         catalog: SharedCatalog,
         snapshot: Snapshot,
         transaction_id: TransactionId,
     ) -> Self {
         Self {
-            worker,
+            accessor,
             catalog,
             snapshot,
             transaction_id,
@@ -34,8 +34,8 @@ impl ExecutionContext {
     }
 
     #[inline]
-    pub(crate) fn worker(&self) -> &Worker {
-        &self.worker
+    pub(crate) fn accessor(&self) -> &RcPageAccessor {
+        &self.accessor
     }
 
     #[inline]
@@ -55,6 +55,6 @@ impl ExecutionContext {
 
     #[inline]
     pub(crate) fn table(&self, root: PageId) -> IoResult<BPlusTree<NumericComparator>> {
-        self.catalog.table_btree(root, self.worker.clone())
+        self.catalog.table_btree(root, self.accessor.clone())
     }
 }

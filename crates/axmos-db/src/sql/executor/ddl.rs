@@ -6,7 +6,7 @@ use crate::{
     },
     sql::binder::ast::*,
     structures::bplustree::SearchResult,
-    transactions::worker::Worker,
+    transactions::accessor::RcPageAccessor,
     types::{Blob, DataType, DataTypeKind, ObjectId},
 };
 
@@ -16,12 +16,12 @@ use super::Row;
 /// These operations modify schema/catalog and don't go through the optimizer.
 pub(crate) struct DdlExecutor {
     catalog: SharedCatalog,
-    worker: Worker,
+    accessor: RcPageAccessor,
 }
 
 impl DdlExecutor {
-    pub(crate) fn new(catalog: SharedCatalog, worker: Worker) -> Self {
-        Self { catalog, worker }
+    pub(crate) fn new(catalog: SharedCatalog, accessor: RcPageAccessor) -> Self {
+        Self { catalog, accessor }
     }
 
     /// Check if a statement is DDL
@@ -52,7 +52,7 @@ impl DdlExecutor {
         // Check if table already exists
         if let Ok(SearchResult::Found(_)) = self
             .catalog
-            .lookup_relation(&stmt.table_name, self.worker.clone())
+            .lookup_relation(&stmt.table_name, self.accessor.clone())
         {
             if stmt.if_not_exists {
                 return Ok(DdlOutcome::NoOp);
@@ -63,9 +63,9 @@ impl DdlExecutor {
         }
 
         let schema = self.build_schema_from_bound(&stmt.columns, &stmt.constraints);
-        let object_id = self
-            .catalog
-            .create_table(&stmt.table_name, schema, self.worker.clone())?;
+        let object_id =
+            self.catalog
+                .create_table(&stmt.table_name, schema, self.accessor.clone())?;
 
         Ok(DdlOutcome::TableCreated {
             name: stmt.table_name.clone(),
@@ -76,7 +76,7 @@ impl DdlExecutor {
         // Check if index already exists
         if let Ok(SearchResult::Found(_)) = self
             .catalog
-            .lookup_relation(&stmt.index_name, self.worker.clone())
+            .lookup_relation(&stmt.index_name, self.accessor.clone())
         {
             if stmt.if_not_exists {
                 return Ok(DdlOutcome::NoOp);
@@ -89,7 +89,7 @@ impl DdlExecutor {
         // Get the table to find column types
         let mut table_relation = self
             .catalog
-            .get_relation_unchecked(stmt.table_id, self.worker.clone())?;
+            .get_relation_unchecked(stmt.table_id, self.accessor.clone())?;
 
         if !matches!(table_relation, Relation::TableRel(_)) {
             return Err(DdlError::InvalidObjectType(ObjectType::Table));
@@ -125,7 +125,7 @@ impl DdlExecutor {
         // Create the index
         let object_id =
             self.catalog
-                .create_index(&stmt.index_name, index_schema, self.worker.clone())?;
+                .create_index(&stmt.index_name, index_schema, self.accessor.clone())?;
 
         // Update table's schema (all participating columns reference this index)
         for col_name in &column_names {
@@ -137,7 +137,7 @@ impl DdlExecutor {
         }
 
         self.catalog
-            .update_relation(table_relation, self.worker.clone())?;
+            .update_relation(table_relation, self.accessor.clone())?;
 
         Ok(DdlOutcome::IndexCreated {
             name: stmt.index_name.clone(),
@@ -148,7 +148,7 @@ impl DdlExecutor {
     fn execute_alter_table(&self, stmt: &BoundAlterTable) -> DdlResult<DdlOutcome> {
         let mut relation = self
             .catalog
-            .get_relation_unchecked(stmt.table_id, self.worker.clone())?;
+            .get_relation_unchecked(stmt.table_id, self.accessor.clone())?;
 
         let table_name = relation.name().to_string();
 
@@ -181,9 +181,9 @@ impl DdlExecutor {
                     // Drop the index first
                     let index_relation = self
                         .catalog
-                        .get_relation(&index_name, self.worker.clone())?;
+                        .get_relation(&index_name, self.accessor.clone())?;
                     self.catalog
-                        .remove_relation(index_relation, false, self.worker.clone())?;
+                        .remove_relation(index_relation, false, self.accessor.clone())?;
                 }
 
                 // Remove the column
@@ -281,7 +281,7 @@ impl DdlExecutor {
 
         // Update the relation in catalog
         self.catalog
-            .update_relation(relation, self.worker.clone())?;
+            .update_relation(relation, self.accessor.clone())?;
 
         Ok(DdlOutcome::TableAltered {
             name: table_name,
@@ -293,7 +293,7 @@ impl DdlExecutor {
         // Try to get the relation
         let relation = match self
             .catalog
-            .get_relation_unchecked(stmt.table_id, self.worker.clone())
+            .get_relation_unchecked(stmt.table_id, self.accessor.clone())
         {
             Ok(rel) => rel,
             Err(_) => {
@@ -308,13 +308,13 @@ impl DdlExecutor {
 
         // Remove the relation (cascade handled by catalog.remove_relation)
         self.catalog
-            .remove_relation(relation, stmt.cascade, self.worker.clone())?;
+            .remove_relation(relation, stmt.cascade, self.accessor.clone())?;
 
         Ok(DdlOutcome::TableDropped { name: table_name })
     }
 
     fn execute_transaction(&self, stmt: &BoundTransaction) -> DdlResult<DdlOutcome> {
-        // TODO. Implement complete transaction management and integrate with workerpools
+        // TODO. Implement complete transaction management and integrate with RcPageAccessorpools
         match stmt {
             BoundTransaction::Begin => Ok(DdlOutcome::TransactionStarted),
             BoundTransaction::Commit => Ok(DdlOutcome::TransactionCommitted),
@@ -389,7 +389,7 @@ impl DdlExecutor {
                     // We need to resolve table name from ID
                     if let Ok(ref_relation) = self
                         .catalog
-                        .get_relation_unchecked(*ref_table_id, self.worker.clone())
+                        .get_relation_unchecked(*ref_table_id, self.accessor.clone())
                     {
                         let ref_table_name = ref_relation.name().to_string();
 
@@ -452,7 +452,7 @@ impl DdlExecutor {
                     // Resolve table and column names
                     if let Ok(ref_relation) = self
                         .catalog
-                        .get_relation_unchecked(*ref_table_id, self.worker.clone())
+                        .get_relation_unchecked(*ref_table_id, self.accessor.clone())
                     {
                         let ref_table_name = ref_relation.name().to_string();
                         let ref_col_name = ref_relation
@@ -532,7 +532,7 @@ impl DdlExecutor {
             } => {
                 if let Ok(ref_relation) = self
                     .catalog
-                    .get_relation_unchecked(*ref_table_id, self.worker.clone())
+                    .get_relation_unchecked(*ref_table_id, self.accessor.clone())
                 {
                     let ref_table_name = ref_relation.name().to_string();
 

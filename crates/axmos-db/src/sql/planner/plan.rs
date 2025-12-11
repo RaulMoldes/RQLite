@@ -7,7 +7,7 @@ use crate::database::SharedCatalog;
 use crate::database::schema::Schema;
 use crate::sql::ast::JoinType;
 use crate::sql::binder::ast::*;
-use crate::transactions::worker::Worker;
+use crate::transactions::accessor::RcPageAccessor;
 use crate::types::ObjectId;
 
 use super::logical::*;
@@ -21,7 +21,7 @@ use super::{OptimizerError, OptimizerResult};
 pub struct PlanBuilder<'a, P: StatisticsProvider> {
     memo: &'a mut Memo,
     catalog: SharedCatalog,
-    worker: Worker,
+    accessor: RcPageAccessor,
 
     deriver: PropertyDeriver<'a, P>,
     /// CTE storage for WITH queries - maps CTE index to its built group
@@ -32,13 +32,13 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
     pub fn new(
         memo: &'a mut Memo,
         catalog: SharedCatalog,
-        worker: Worker,
+        accessor: RcPageAccessor,
         stats_provider: &'a P,
     ) -> Self {
         Self {
             memo,
             catalog,
-            worker,
+            accessor,
             deriver: PropertyDeriver::new(stats_provider),
             cte_groups: Vec::new(),
         }
@@ -150,7 +150,7 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
                 if let Some(Some(group_id)) = self.cte_groups.get(*cte_idx) {
                     Ok(*group_id)
                 } else {
-                    Err(OptimizerError::Internal(format!(
+                    Err(OptimizerError::Other(format!(
                         "CTE index {} not found",
                         cte_idx
                     )))
@@ -427,10 +427,10 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
     fn get_table_name(&self, table_id: ObjectId) -> OptimizerResult<String> {
         match self
             .catalog
-            .get_relation_unchecked(table_id, self.worker.clone())
+            .get_relation_unchecked(table_id, self.accessor.clone())
         {
             Ok(relation) => Ok(relation.name().to_string()),
-            Err(_) => Err(OptimizerError::Internal(format!(
+            Err(_) => Err(OptimizerError::Other(format!(
                 "Table {:?} not found in catalog",
                 table_id
             ))),
@@ -601,20 +601,63 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
     }
 }
 
+
+
+/// TODO: Improve this tests.
 #[cfg(test)]
 mod planner_tests {
     use super::*;
-    use crate::database::{Database, stats::CatalogStatsProvider};
-    use crate::io::pager::{Pager, SharedPager};
-    use crate::sql::binder::Binder;
-    use crate::sql::lexer::Lexer;
-    use crate::sql::parser::Parser;
-    use crate::types::DataTypeKind;
-    use crate::{AxmosDBConfig, IncrementalVaccum, TextEncoding};
-    use serial_test::serial;
+    use crate::{
+        AxmosDBConfig, IncrementalVaccum, TextEncoding,
+        database::{
+            Database,
+            errors::{ BinderResult, IntoBoxError},
+            stats::CatalogStatsProvider,
+        },
+        io::pager::{Pager, SharedPager},
+        sql::{binder::Binder, lexer::Lexer, parser::Parser},
+        types::DataTypeKind,
+    };
+
     use std::path::Path;
 
-    fn create_test_db(path: impl AsRef<Path>) -> std::io::Result<Database> {
+    fn users_schema() -> Schema {
+        let mut users_schema = Schema::new();
+        users_schema.add_column("id", DataTypeKind::Int, true, true, false);
+        users_schema.add_column("name", DataTypeKind::Text, false, false, false);
+        users_schema.add_column("email", DataTypeKind::Text, false, true, false);
+        users_schema.add_column("age", DataTypeKind::Int, false, false, false);
+        users_schema
+    }
+
+    fn orders_schema() -> Schema {
+        let mut orders_schema = Schema::new();
+        orders_schema.add_column("id", DataTypeKind::Int, true, true, false);
+        orders_schema.add_column("user_id", DataTypeKind::Int, false, false, false);
+        orders_schema.add_column("amount", DataTypeKind::Double, false, false, false);
+        orders_schema.add_column("status", DataTypeKind::Text, false, false, false);
+        orders_schema
+    }
+
+    fn products_schema() -> Schema {
+        let mut products_schema = Schema::new();
+        products_schema.add_column("id", DataTypeKind::Int, true, true, false);
+        products_schema.add_column("name", DataTypeKind::Text, false, false, false);
+        products_schema.add_column("price", DataTypeKind::Double, false, false, false);
+        products_schema.add_column("category", DataTypeKind::Text, false, false, false);
+        products_schema
+    }
+
+    fn order_items_schema() -> Schema {
+        let mut order_items_schema = Schema::new();
+        order_items_schema.add_column("id", DataTypeKind::Int, true, true, false);
+        order_items_schema.add_column("order_id", DataTypeKind::Int, false, false, false);
+        order_items_schema.add_column("product_id", DataTypeKind::Int, false, false, false);
+        order_items_schema.add_column("quantity", DataTypeKind::Int, false, false, false);
+        order_items_schema
+    }
+
+    fn create_db(path: impl AsRef<Path>) -> std::io::Result<Database> {
         let config = AxmosDBConfig {
             page_size: 4096,
             cache_size: Some(100),
@@ -624,1118 +667,68 @@ mod planner_tests {
         };
 
         let pager = Pager::from_config(config, &path)?;
-        let db = Database::new(SharedPager::from(pager), 3, 2)?;
+        let db = Database::new(SharedPager::from(pager), 3, 2, 5)?;
 
-        // Create users table
-        let mut users_schema = Schema::new();
-        users_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        users_schema.add_column("name", DataTypeKind::Text, false, false, false);
-        users_schema.add_column("email", DataTypeKind::Text, false, true, false);
-        users_schema.add_column("age", DataTypeKind::Int, false, false, false);
-        let worker = db.main_worker_cloned();
-        db.catalog()
-            .create_table("users", users_schema, worker.clone())?;
-
-        // Create orders table
-        let mut orders_schema = Schema::new();
-        orders_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        orders_schema.add_column("user_id", DataTypeKind::Int, false, false, false);
-        orders_schema.add_column("amount", DataTypeKind::Double, false, false, false);
-        orders_schema.add_column("status", DataTypeKind::Text, false, false, false);
-        db.catalog()
-            .create_table("orders", orders_schema, worker.clone())?;
-
-        // Create products table
-        let mut products_schema = Schema::new();
-        products_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        products_schema.add_column("name", DataTypeKind::Text, false, false, false);
-        products_schema.add_column("price", DataTypeKind::Double, false, false, false);
-        products_schema.add_column("category", DataTypeKind::Text, false, false, false);
-        db.catalog()
-            .create_table("products", products_schema, worker.clone())?;
-
-        // Create order_items table
-        let mut order_items_schema = Schema::new();
-        order_items_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        order_items_schema.add_column("order_id", DataTypeKind::Int, false, false, false);
-        order_items_schema.add_column("product_id", DataTypeKind::Int, false, false, false);
-        order_items_schema.add_column("quantity", DataTypeKind::Int, false, false, false);
-        db.catalog()
-            .create_table("order_items", order_items_schema, worker)?;
+        db.task_runner()
+            .run(|ctx| {
+                let schema = users_schema();
+                ctx.catalog()
+                    .create_table("users", schema, ctx.accessor())
+                    .box_err()?;
+                let schema = orders_schema();
+                ctx.catalog()
+                    .create_table("orders", schema, ctx.accessor())
+                    .box_err()?;
+                let schema = order_items_schema();
+                ctx.catalog()
+                    .create_table("order_items", schema, ctx.accessor())
+                    .box_err()?;
+                let schema = products_schema();
+                ctx.catalog()
+                    .create_table("products", schema, ctx.accessor())
+                    .box_err()?;
+                Ok(())
+            })
+            .unwrap();
 
         Ok(db)
     }
 
-    fn build_plan(sql: &str, db: &Database) -> OptimizerResult<GroupId> {
-        let lexer = Lexer::new(sql);
-        let mut parser = Parser::new(lexer);
-        let stmt = parser
-            .parse()
-            .map_err(|e| OptimizerError::Internal(e.to_string()))?;
-
-        let mut binder = Binder::new(db.catalog(), db.main_worker_cloned());
-        let bound_stmt = binder
-            .bind(&stmt)
-            .map_err(|e| OptimizerError::Internal(e.to_string()))?;
-        let provider = CatalogStatsProvider::new(db.catalog(), db.main_worker_cloned());
-
-        let mut memo = Memo::new();
-        let builder = PlanBuilder::new(&mut memo, db.catalog(), db.main_worker_cloned(), &provider);
-        let id = builder.build(&bound_stmt)?;
-        let displayer =
-            PlanBuilder::new(&mut memo, db.catalog(), db.main_worker_cloned(), &provider);
-        let plan = displayer.build_logical_plan(id)?;
-
-        Ok(id)
-    }
-
-    fn build_plan_with_memo(sql: &str, db: &Database) -> OptimizerResult<(GroupId, Memo)> {
-        let lexer = Lexer::new(sql);
-        let mut parser = Parser::new(lexer);
-        let stmt = parser
-            .parse()
-            .map_err(|e| OptimizerError::Internal(e.to_string()))?;
-
-        let mut binder = Binder::new(db.catalog(), db.main_worker_cloned());
-        let bound_stmt = binder
-            .bind(&stmt)
-            .map_err(|e| OptimizerError::Internal(e.to_string()))?;
-
-        let mut memo = Memo::new();
-        let provider = CatalogStatsProvider::new(db.catalog(), db.main_worker_cloned());
-        let builder = PlanBuilder::new(&mut memo, db.catalog(), db.main_worker_cloned(), &provider);
-        let group_id = builder.build(&bound_stmt)?;
-
-        let displayer =
-            PlanBuilder::new(&mut memo, db.catalog(), db.main_worker_cloned(), &provider);
-        let plan = displayer.build_logical_plan(group_id)?;
-        println!("{}", plan.explain());
-        std::fs::write("output.dot", plan.to_graphviz("MY QUERY PLAN")).unwrap();
-        Ok((group_id, memo))
-    }
-
-    fn get_root_operator(memo: &Memo, group_id: GroupId) -> Option<LogicalOperator> {
-        memo.get_group(group_id)
-            .and_then(|g| g.logical_exprs.first())
-            .map(|e| e.op.clone())
-    }
-
-    #[test]
-    #[serial]
-    fn test_simple_select_all() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) = build_plan_with_memo("SELECT * FROM order_items", &db).unwrap();
-
-        // Should have created groups
-        assert!(memo.num_groups() > 0);
-
-        // Root should be a Project
-        let root_op = get_root_operator(&memo, group_id);
-
-        assert!(matches!(root_op, Some(LogicalOperator::Project(_))));
-    }
-
-    #[test]
-    #[serial]
-    fn test_select_specific_columns() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) = build_plan_with_memo("SELECT name, email FROM users", &db).unwrap();
-
-        let root_op = get_root_operator(&memo, group_id);
-
-        assert!(matches!(root_op, Some(LogicalOperator::Project(_))));
-
-        // Verify projection has correct number of expressions
-        if let Some(LogicalOperator::Project(proj)) = root_op {
-            assert_eq!(proj.expressions.len(), 2);
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_select_without_from() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) = build_plan_with_memo("SELECT 1 + 1", &db).unwrap();
-
-        // Should have an Empty operator as the source
-        let group = memo.get_group(group_id).unwrap();
-        let children = &group.logical_exprs[0].children;
-
-        if !children.is_empty() {
-            let child_op = get_root_operator(&memo, children[0]);
-            assert!(matches!(child_op, Some(LogicalOperator::Empty(_))));
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_select_with_where_equality() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) =
-            build_plan_with_memo("SELECT * FROM users WHERE id = 1", &db).unwrap();
-
-        // Should have a Filter in the plan
-        let group = memo.get_group(group_id).unwrap();
-        let project_children = &group.logical_exprs[0].children;
-        assert!(!project_children.is_empty());
-
-        let filter_op = get_root_operator(&memo, project_children[0]);
-        assert!(matches!(filter_op, Some(LogicalOperator::Filter(_))));
-    }
-
-    #[test]
-    #[serial]
-    fn test_select_with_where_comparison() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT * FROM users WHERE age > 18", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_select_with_where_and() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT * FROM users WHERE age > 18 AND name = 'John'", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_select_with_where_or() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT * FROM users WHERE age < 18 OR age > 65", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_select_with_where_in_list() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT * FROM users WHERE id IN (1, 2, 3)", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_select_with_where_between() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT * FROM users WHERE age BETWEEN 18 AND 65", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_select_with_where_is_null() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT * FROM users WHERE email IS NULL", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_select_with_where_is_not_null() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT * FROM users WHERE email IS NOT NULL", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_select_with_where_like() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT * FROM users WHERE name LIKE 'John%'", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_inner_join() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) = build_plan_with_memo(
-            "SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id",
-            &db,
-        )
-        .unwrap();
-
-        // Find the Join operator
-        let mut found_join = false;
-        for group in memo.groups() {
-            for expr in &group.logical_exprs {
-                if matches!(expr.op, LogicalOperator::Join(_)) {
-                    found_join = true;
-                    if let LogicalOperator::Join(join) = &expr.op {
-                        assert_eq!(join.join_type, JoinType::Inner);
-                    }
-                }
-            }
-        }
-        assert!(found_join);
-    }
-
-    #[test]
-    #[serial]
-    fn test_left_join() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT u.name, o.amount FROM users u LEFT JOIN orders o ON u.id = o.user_id",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_right_join() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT u.name, o.amount FROM users u RIGHT JOIN orders o ON u.id = o.user_id",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_cross_join() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT * FROM users, orders", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_multiple_joins() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan_with_memo(
-            "SELECT u.name, o.id, p.name
-             FROM users u
-             JOIN orders o ON u.id = o.user_id
-             JOIN order_items oi ON o.id = oi.order_id
-             JOIN products p ON oi.product_id = p.id",
-            &db,
-        );
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_self_join() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan_with_memo(
-            "SELECT u1.name, u2.name FROM users u1 JOIN users u2 ON u1.id = u2.id",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_subquery_in_from() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT * FROM (SELECT id, name FROM users WHERE age > 18) AS adults",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_subquery_in_where_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_subquery_in_where_in() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_nested_subqueries() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT * FROM (SELECT * FROM (SELECT id, name FROM users) AS inner_q) AS outer_q",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_simple_count() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) = build_plan_with_memo("SELECT COUNT(*) FROM users", &db).unwrap();
-
-        // Should have an Aggregate operator
-        let mut found_agg = false;
-        for group in memo.groups() {
-            for expr in &group.logical_exprs {
-                if matches!(expr.op, LogicalOperator::Aggregate(_)) {
-                    found_agg = true;
-                }
-            }
-        }
-        assert!(found_agg);
-    }
-
-    #[test]
-    #[serial]
-    fn test_sum_aggregate() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT SUM(amount) FROM orders", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_avg_aggregate() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT AVG(age) FROM users", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_min_max_aggregate() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT MIN(age), MAX(age) FROM users", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_group_by_single_column() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) =
-            build_plan_with_memo("SELECT status, COUNT(*) FROM orders GROUP BY status", &db)
-                .unwrap();
-
-        // Verify Aggregate has group by
-        let mut found = false;
-        for group in memo.groups() {
-            for expr in &group.logical_exprs {
-                if let LogicalOperator::Aggregate(agg) = &expr.op {
-                    if !agg.group_by.is_empty() {
-                        found = true;
-                    }
-                }
-            }
-        }
-        assert!(found);
-    }
-
-    #[test]
-    #[serial]
-    fn test_group_by_multiple_columns() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT user_id, status, SUM(amount) FROM orders GROUP BY user_id, status",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_having_clause() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT user_id, SUM(amount) FROM orders GROUP BY user_id HAVING SUM(amount) > 100",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_count_distinct() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT COUNT(DISTINCT user_id) FROM orders", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_order_by_single_column_asc() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) =
-            build_plan_with_memo("SELECT * FROM users ORDER BY name", &db).unwrap();
-
-        // Should have a Sort operator
-        let mut found_sort = false;
-        for group in memo.groups() {
-            for expr in &group.logical_exprs {
-                if matches!(expr.op, LogicalOperator::Sort(_)) {
-                    found_sort = true;
-                }
-            }
-        }
-        assert!(found_sort);
-    }
-
-    #[test]
-    #[serial]
-    fn test_order_by_single_column_desc() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) =
-            build_plan_with_memo("SELECT * FROM users ORDER BY age DESC", &db).unwrap();
-
-        // Verify Sort has descending order
-        for group in memo.groups() {
-            for expr in &group.logical_exprs {
-                if let LogicalOperator::Sort(sort) = &expr.op {
-                    assert!(!sort.order_by[0].asc);
-                }
-            }
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_order_by_multiple_columns() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT * FROM users ORDER BY age DESC, name ASC", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_limit_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) = build_plan_with_memo("SELECT * FROM users LIMIT 10", &db).unwrap();
-
-        // Should have a Limit operator
-        let root_op = get_root_operator(&memo, group_id);
-        // The root might be Project, Limit should be in the tree
-        let mut found_limit = false;
-        for group in memo.groups() {
-            for expr in &group.logical_exprs {
-                if let LogicalOperator::Limit(limit) = &expr.op {
-                    assert_eq!(limit.limit, 10);
-                    found_limit = true;
-                }
-            }
-        }
-        assert!(found_limit);
-    }
-
-    #[test]
-    #[serial]
-    // Currently fails
-    fn test_limit_with_offset() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) =
-            build_plan_with_memo("SELECT * FROM users LIMIT 10 OFFSET 5", &db).unwrap();
-
-        let mut found = false;
-        for group in memo.groups() {
-            for expr in &group.logical_exprs {
-                if let LogicalOperator::Limit(limit) = &expr.op {
-                    assert_eq!(limit.limit, 10);
-                    assert_eq!(limit.offset, Some(5));
-                    found = true;
-                }
-            }
-        }
-        assert!(found);
-    }
-
-    #[test]
-    #[serial]
-    fn test_order_by_with_limit() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT * FROM users ORDER BY age DESC LIMIT 5", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_select_distinct() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) =
-            build_plan_with_memo("SELECT DISTINCT name FROM users", &db).unwrap();
-
-        // Should have a Distinct operator
-        let mut found = false;
-        for group in memo.groups() {
-            for expr in &group.logical_exprs {
-                if matches!(expr.op, LogicalOperator::Distinct(_)) {
-                    found = true;
-                }
-            }
-        }
-        assert!(found);
-    }
-
-    #[test]
-    #[serial]
-    fn test_select_distinct_multiple_columns() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT DISTINCT name, age FROM users", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_insert_values_single_row() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) = build_plan_with_memo(
-            "INSERT INTO users (id, name, email, age) VALUES (1, 'John', 'john@test.com', 25)",
-            &db,
-        )
-        .unwrap();
-
-        // Root should be Insert
-        let root_op = get_root_operator(&memo, group_id);
-        assert!(matches!(root_op, Some(LogicalOperator::Insert(_))));
-    }
-
-    #[test]
-    #[serial]
-    fn test_insert_values_multiple_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) = build_plan_with_memo(
-            "INSERT INTO users (id, name, email, age) VALUES
-             (1, 'John', 'john@test.com', 25),
-             (2, 'Jane', 'jane@test.com', 30)",
-            &db,
-        )
-        .unwrap();
-
-        // Should have Values operator with 2 rows
-        let mut found = false;
-        for group in memo.groups() {
-            for expr in &group.logical_exprs {
-                if let LogicalOperator::Values(vals) = &expr.op {
-                    assert_eq!(vals.rows.len(), 2);
-                    found = true;
-                }
-            }
-        }
-        assert!(found);
-    }
-
-    #[test]
-    #[serial]
-    fn test_insert_from_select() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "INSERT INTO users (id, name, email, age) SELECT id, name, email, age FROM users WHERE age > 18",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_insert_partial_columns() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "INSERT INTO users (id, name, email, age) VALUES (1, 'John', 'j@t.com', 25)",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_update_single_column() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) =
-            build_plan_with_memo("UPDATE users SET age = 30 WHERE id = 1", &db).unwrap();
-
-        // Root should be Update
-        let root_op = get_root_operator(&memo, group_id);
-        assert!(matches!(root_op, Some(LogicalOperator::Update(_))));
-    }
-
-    #[test]
-    #[serial]
-    fn test_update_multiple_columns() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) =
-            build_plan_with_memo("UPDATE users SET name = 'Jane', age = 35 WHERE id = 1", &db)
-                .unwrap();
-
-        // Verify multiple assignments
-        let root_op = get_root_operator(&memo, group_id);
-        if let Some(LogicalOperator::Update(upd)) = root_op {
-            assert_eq!(upd.assignments.len(), 2);
-        } else {
-            panic!("Expected Update operator");
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_update_with_expression() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("UPDATE users SET age = age + 1 WHERE id = 1", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_update_without_where() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("UPDATE users SET age = 0", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_delete_with_where() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) = build_plan_with_memo("DELETE FROM users WHERE id = 1", &db).unwrap();
-
-        // Root should be Delete
-        let root_op = get_root_operator(&memo, group_id);
-        assert!(matches!(root_op, Some(LogicalOperator::Delete(_))));
-    }
-
-    #[test]
-    #[serial]
-    fn test_delete_without_where() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("DELETE FROM users", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_delete_with_complex_where() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("DELETE FROM users WHERE age < 18 OR age > 65", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_simple_cte() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "WITH adults AS (SELECT * FROM users WHERE age >= 18) SELECT * FROM adults",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_multiple_ctes() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "WITH
-             adults AS (SELECT * FROM users WHERE age >= 18),
-             seniors AS (SELECT * FROM users WHERE age >= 65)
-             SELECT * FROM adults",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_create_table_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("CREATE TABLE test (id INT PRIMARY KEY, name TEXT)", &db);
-        assert!(matches!(result, Err(OptimizerError::Unsupported(_))));
+    fn resolve_sql(sql: String, db: &Database) -> BinderResult<BoundStatement> {
+        let stmt = db
+            .task_runner()
+            .run_with_result(move |ctx| {
+                let lexer = Lexer::new(&sql);
+                let mut parser = Parser::new(lexer);
+                let stmt = parser
+                    .parse()
+                    .box_err()?;
+                let mut binder = Binder::new(ctx.catalog(), ctx.accessor());
+                binder.bind(&stmt).box_err()
+            })
+            .unwrap();
+        Ok(stmt)
+    }
+
+    fn create_plan(bound_stmt: BoundStatement, db: &Database) -> OptimizerResult<(GroupId, LogicalPlan)> {
+        let result = db.task_runner().run_with_result(move |ctx| {
+            let provider = CatalogStatsProvider::new(ctx.catalog(), ctx.accessor());
+
+            let mut memo = Memo::new();
+            let builder = PlanBuilder::new(&mut memo, ctx.catalog(), ctx.accessor(), &provider);
+            let id = builder.build(&bound_stmt).box_err()?;
+            let displayer = PlanBuilder::new(&mut memo, ctx.catalog(), ctx.accessor(), &provider);
+            let plan = displayer.build_logical_plan(id).box_err()?;
+            Ok((id, plan))
+        })?;
+        Ok(result)
+    }
+
+    fn build_plan(sql: String, db: &Database) -> OptimizerResult<GroupId> {
+       let stmt = resolve_sql(sql, db)?;
+       let (id, plan) = create_plan(stmt, db)?;
+       println!("{plan}");
+       Ok(id)
     }
 
-    #[test]
-    #[serial]
-    fn test_drop_table_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("DROP TABLE users", &db);
-        assert!(matches!(result, Err(OptimizerError::Unsupported(_))));
-    }
-
-    #[test]
-    #[serial]
-    fn test_alter_table_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("ALTER TABLE users ADD COLUMN phone TEXT", &db);
-        assert!(matches!(result, Err(OptimizerError::Unsupported(_))));
-    }
-
-    #[test]
-    #[serial]
-    // currently fails.
-    fn test_complex_select_with_all_clauses() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT DISTINCT u.name, SUM(o.amount) as total
-             FROM users u
-             JOIN orders o ON u.id = o.user_id
-             WHERE u.age >= 18
-             GROUP BY u.name
-             HAVING SUM(o.amount) > 100
-             ORDER BY total DESC
-             LIMIT 10",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_deeply_nested_query() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT * FROM (
-                SELECT * FROM (
-                    SELECT * FROM (
-                        SELECT id, name FROM users WHERE age > 18
-                    ) AS level1 WHERE id > 0
-                ) AS level2
-             ) AS level3",
-            &db,
-        );
-        dbg!(&result);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_multiple_subqueries_in_where() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT * FROM users u
-             WHERE u.id IN (SELECT user_id FROM orders WHERE amount > 100)
-             AND EXISTS (SELECT 1 FROM orders WHERE user_id = u.id)",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_arithmetic_expressions() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT age + 10, age * 2, age / 2 FROM users", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_string_functions() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT UPPER(name), LENGTH(email) FROM users", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_case_expression() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT name, CASE WHEN age < 18 THEN 'minor' ELSE 'adult' END FROM users",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_coalesce_function() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT COALESCE(email, 'no email') FROM users", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_empty_table_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        // This should fail at binder level
-        let result = build_plan("SELECT * FROM nonexistent_table", &db);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    #[serial]
-    fn test_alias_handling() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT u.name AS user_name, o.amount AS order_amount
-             FROM users u JOIN orders o ON u.id = o.user_id",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_null_literal() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT NULL FROM users", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_boolean_literals() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan("SELECT * FROM users WHERE TRUE", &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_plan_structure_select_filter() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) =
-            build_plan_with_memo("SELECT name FROM users WHERE age > 18", &db).unwrap();
-
-        // Verify structure: Project -> Filter -> TableScan
-        let group = memo.get_group(group_id).unwrap();
-        assert_eq!(group.logical_exprs.len(), 1);
-
-        let root_expr = &group.logical_exprs[0];
-        assert!(matches!(root_expr.op, LogicalOperator::Project(_)));
-        assert_eq!(root_expr.children.len(), 1);
-
-        let filter_group = memo.get_group(root_expr.children[0]).unwrap();
-        let filter_expr = &filter_group.logical_exprs[0];
-        assert!(matches!(filter_expr.op, LogicalOperator::Filter(_)));
-        assert_eq!(filter_expr.children.len(), 1);
-
-        let scan_group = memo.get_group(filter_expr.children[0]).unwrap();
-        let scan_expr = &scan_group.logical_exprs[0];
-        assert!(matches!(scan_expr.op, LogicalOperator::TableScan(_)));
-        assert!(scan_expr.children.is_empty());
-    }
-
-    #[test]
-    #[serial]
-    fn test_plan_structure_join() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) = build_plan_with_memo(
-            "SELECT * FROM users u JOIN orders o ON u.id = o.user_id",
-            &db,
-        )
-        .unwrap();
-
-        // Find the Join and verify it has 2 children
-        let mut found_join = false;
-        for group in memo.groups() {
-            for expr in &group.logical_exprs {
-                if let LogicalOperator::Join(join) = &expr.op {
-                    assert_eq!(expr.children.len(), 2);
-                    found_join = true;
-
-                    // Both children should be scans
-                    for child_id in &expr.children {
-                        let child = memo.get_group(*child_id).unwrap();
-                        assert!(matches!(
-                            child.logical_exprs[0].op,
-                            LogicalOperator::TableScan(_)
-                        ));
-                    }
-                }
-            }
-        }
-        assert!(found_join);
-    }
-
-    #[test]
-    #[serial]
-    fn test_schema_propagation() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let (group_id, memo) = build_plan_with_memo("SELECT name, age FROM users", &db).unwrap();
-
-        // Root group schema should have 2 columns
-        let root_group = memo.get_group(group_id).unwrap();
-        assert_eq!(root_group.logical_props.schema.columns().len(), 2);
-    }
-
-    #[test]
-    #[serial]
-    fn test_large_in_list() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        // Generate a large IN list
-        let ids: Vec<String> = (1..100).map(|i| i.to_string()).collect();
-        let in_list = ids.join(", ");
-        let sql = format!("SELECT * FROM users WHERE id IN ({})", in_list);
-
-        let result = build_plan(&sql, &db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_many_columns_projection() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT id, name, email, age, id, name, email, age FROM users",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_chained_filters() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_test_db(dir.path().join("test.db")).unwrap();
-
-        let result = build_plan(
-            "SELECT * FROM users WHERE age > 18 AND age < 65 AND name IS NOT NULL AND email IS NOT NULL",
-            &db,
-        );
-        assert!(result.is_ok());
-    }
 }

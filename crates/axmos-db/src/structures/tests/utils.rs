@@ -2,7 +2,7 @@ use crate::{
     AxmosDBConfig, IncrementalVaccum, TextEncoding,
     io::pager::{Pager, SharedPager},
     structures::{bplustree::BPlusTree, comparator::Comparator},
-    transactions::worker::Worker,
+    transactions::accessor::RcPageAccessor,
     types::VarInt,
 };
 
@@ -102,8 +102,8 @@ pub fn create_test_btree<Cmp: Comparator + Clone>(
 
     let shared_pager = SharedPager::from(Pager::from_config(config, &path)?);
 
-    let worker = Worker::new(shared_pager);
-    BPlusTree::new(worker, min_keys, 2, comparator)
+    let accessor = RcPageAccessor::new(shared_pager);
+    BPlusTree::new(accessor, min_keys, 2, comparator)
 }
 
 pub fn gen_random_bytes(size: usize, seed: u64) -> Vec<u8> {
