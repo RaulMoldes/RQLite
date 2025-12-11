@@ -86,6 +86,8 @@ impl Update {
         let accessor = self.ctx.accessor().clone();
         let tx_id = self.ctx.transaction_id();
 
+        let logger = self.ctx.logger();
+
         let relation = catalog.get_relation_unchecked(self.op.table_id, accessor.clone())?;
         let schema = relation.schema();
         let root = relation.root();
@@ -106,17 +108,22 @@ impl Update {
         let updates = self.compute_updates(row, schema)?;
 
         // Read current tuple, capture old values, apply updates
-        let result: ExecutionResult<(OwnedTuple, Vec<DataType>, Vec<DataType>)> = btree
+        let result: ExecutionResult<(OwnedTuple, OwnedTuple, Vec<DataType>, Vec<DataType>)> = btree
             .with_cell_at(position, |bytes| {
                 let mut tuple = Tuple::try_from((bytes, schema))?;
+
                 let old_vals: Vec<DataType> = tuple.values().to_vec();
                 tuple.add_version(&updates, tx_id)?;
                 let new_vals: Vec<DataType> = tuple.values().to_vec();
                 let new_bytes: OwnedTuple = tuple.into();
-                Ok((new_bytes, old_vals, new_vals))
+                let old_bytes: OwnedTuple = OwnedTuple::from_bytes(bytes.to_vec());
+                Ok((new_bytes, old_bytes, old_vals, new_vals))
             })?;
-        let (payload, old_values, new_values) = result?;
+        let (payload, old_payload, old_values, new_values) = result?;
         btree.clear_accessor_stack();
+
+        logger.log_update(self.op.table_id, old_payload, payload.clone())?;
+
         btree.update(root, payload.as_ref())?;
 
         // Maintain indexes

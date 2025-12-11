@@ -2,7 +2,7 @@
 macro_rules! vector {
     ($name:ident, $inner:ty) => {
         #[derive(Debug, Clone)]
-        pub(crate) struct $name(Vec<$inner>);
+        pub struct $name(Vec<$inner>);
 
         impl $name {
             pub fn new() -> Self {
@@ -31,18 +31,6 @@ macro_rules! vector {
 
             pub fn clear(&mut self) {
                 self.0.clear();
-            }
-
-            pub fn inner(&self) -> &Vec<$inner> {
-                &self.0
-            }
-
-            pub fn inner_mut(&mut self) -> &mut Vec<$inner> {
-                &mut self.0
-            }
-
-            pub fn into_inner(self) -> Vec<$inner> {
-                self.0
             }
 
             pub fn reserve(&mut self, additional: usize) {

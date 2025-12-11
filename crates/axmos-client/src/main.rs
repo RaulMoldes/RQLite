@@ -1,3 +1,5 @@
+// src/bin/client.rs
+
 mod protocol;
 
 use protocol::{SqlRequest, SqlResponse};
@@ -6,16 +8,30 @@ use std::{
     net::TcpStream,
 };
 
-fn main() {
-    println!("Connecting to DB server at 127.0.0.1:7878...");
+const DEFAULT_HOST: &str = "127.0.0.1";
+const DEFAULT_PORT: u16 = 5433;
 
-    let stream = match TcpStream::connect("127.0.0.1:7878") {
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    let host = args.get(1).map(String::as_str).unwrap_or(DEFAULT_HOST);
+    let port: u16 = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_PORT);
+
+    let addr = format!("{}:{}", host, port);
+
+    println!("Connecting to AxmosDB at {}...", addr);
+
+    let stream = match TcpStream::connect(&addr) {
         Ok(s) => {
-            println!("Connected.\nType SQL queries or :quit");
+            println!("Connected successfully!");
+            println!("Type SQL queries ending with ';' or :quit to exit\n");
             s
         }
         Err(e) => {
-            eprintln!("Failed to connect: {e}");
+            eprintln!("Failed to connect: {}", e);
             return;
         }
     };
@@ -23,15 +39,23 @@ fn main() {
     let mut writer = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to clone stream: {e}");
+            eprintln!("Failed to clone stream: {}", e);
             return;
         }
     };
+
     let mut reader = BufReader::new(stream);
     let stdin = io::stdin();
+    let mut query_buffer = String::new();
 
     loop {
-        print!("db> ");
+        // Show appropriate prompt
+        if query_buffer.is_empty() {
+            print!("axmosdb> ");
+        } else {
+            print!("      -> ");
+        }
+
         if io::stdout().flush().is_err() {
             break;
         }
@@ -42,37 +66,70 @@ fn main() {
             break;
         }
 
-        let input = input.trim();
-        if input == ":quit" {
-            println!("Bye.");
-            break;
+        let trimmed = input.trim();
+
+        // Handle special commands
+        match trimmed.to_lowercase().as_str() {
+            ":quit" | ":exit" | "\\q" => {
+                println!("Goodbye!");
+                break;
+            }
+            ":help" | "\\h" | "\\?" => {
+                print_help();
+                continue;
+            }
+            ":clear" | "\\c" => {
+                query_buffer.clear();
+                println!("Query buffer cleared.");
+                continue;
+            }
+            "" => {
+                continue;
+            }
+            _ => {}
         }
 
-        if input.is_empty() {
+        // Accumulate query
+        if !query_buffer.is_empty() {
+            query_buffer.push(' ');
+        }
+        query_buffer.push_str(trimmed);
+
+        // Check if query is complete (ends with semicolon)
+        if !query_buffer.ends_with(';') {
             continue;
         }
 
-        let request = SqlRequest {
-            sql: input.to_string(),
-        };
+        // Remove trailing semicolon
+        let query = query_buffer.trim_end_matches(';').trim().to_string();
+        query_buffer.clear();
+
+        if query.is_empty() {
+            continue;
+        }
+
+        // Send request
+        let request = SqlRequest { sql: query };
 
         let json = match serde_json::to_string(&request) {
             Ok(j) => j,
             Err(e) => {
-                eprintln!("Failed to serialize request: {e}");
+                eprintln!("Failed to serialize request: {}", e);
                 continue;
             }
         };
 
-        let framed = format!("{json}\n");
-
-        // Send to server, handle broken pipe
-        if let Err(e) = writer.write_all(framed.as_bytes()) {
-            eprintln!("Connection lost: {e}");
+        if let Err(e) = writer.write_all(format!("{}\n", json).as_bytes()) {
+            eprintln!("Connection lost: {}", e);
             break;
         }
 
-        // Read server response
+        if let Err(e) = writer.flush() {
+            eprintln!("Failed to flush: {}", e);
+            break;
+        }
+
+        // Read response
         let mut line = String::new();
         match reader.read_line(&mut line) {
             Ok(0) => {
@@ -81,26 +138,57 @@ fn main() {
             }
             Ok(_) => {}
             Err(e) => {
-                eprintln!("Connection error: {e}");
+                eprintln!("Connection error: {}", e);
                 break;
             }
         }
 
         if line.trim().is_empty() {
-            println!("-> <empty response>");
+            println!("(empty response)");
             continue;
         }
 
         match serde_json::from_str::<SqlResponse>(&line) {
             Ok(resp) => {
-                // Check if server is shutting down
-                if resp.result.contains("server shutting down") {
-                    println!("Server is shutting down. Disconnecting.");
-                    break;
+                if resp.success {
+                    println!("{}", resp.result);
+                    if let Some(rows) = resp.row_count {
+                        println!("({} rows)", rows);
+                    }
+                    if let Some(elapsed) = resp.elapsed_ms {
+                        println!("Time: {:.2}ms", elapsed);
+                    }
+                } else {
+                    println!("ERROR: {}", resp.result);
                 }
-                println!("{}", resp.result)
             }
-            Err(err) => println!("Invalid JSON: {err}. Raw: {}", line.trim()),
+            Err(e) => {
+                eprintln!("Invalid response: {}. Raw: {}", e, line.trim());
+            }
         }
+
+        println!();
     }
+}
+
+fn print_help() {
+    println!(r#"
+AxmosDB Client Commands:
+========================
+  :quit, :exit, \q    Exit the client
+  :help, \h, \?       Show this help
+  :clear, \c          Clear the query buffer
+
+SQL Examples:
+  CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);
+  INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30);
+  SELECT * FROM users;
+  SELECT * FROM users WHERE age > 25;
+  UPDATE users SET age = 31 WHERE name = 'Alice';
+  DELETE FROM users WHERE id = 1;
+
+Tips:
+  - End queries with semicolon (;)
+  - Multi-line queries are supported
+"#);
 }

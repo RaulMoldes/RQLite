@@ -601,8 +601,6 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
     }
 }
 
-
-
 /// TODO: Improve this tests.
 #[cfg(test)]
 mod planner_tests {
@@ -611,7 +609,7 @@ mod planner_tests {
         AxmosDBConfig, IncrementalVaccum, TextEncoding,
         database::{
             Database,
-            errors::{ BinderResult, IntoBoxError},
+            errors::{BinderResult, IntoBoxError},
             stats::CatalogStatsProvider,
         },
         io::pager::{Pager, SharedPager},
@@ -700,9 +698,7 @@ mod planner_tests {
             .run_with_result(move |ctx| {
                 let lexer = Lexer::new(&sql);
                 let mut parser = Parser::new(lexer);
-                let stmt = parser
-                    .parse()
-                    .box_err()?;
+                let stmt = parser.parse().box_err()?;
                 let mut binder = Binder::new(ctx.catalog(), ctx.accessor());
                 binder.bind(&stmt).box_err()
             })
@@ -710,7 +706,10 @@ mod planner_tests {
         Ok(stmt)
     }
 
-    fn create_plan(bound_stmt: BoundStatement, db: &Database) -> OptimizerResult<(GroupId, LogicalPlan)> {
+    fn create_plan(
+        bound_stmt: BoundStatement,
+        db: &Database,
+    ) -> OptimizerResult<(GroupId, LogicalPlan)> {
         let result = db.task_runner().run_with_result(move |ctx| {
             let provider = CatalogStatsProvider::new(ctx.catalog(), ctx.accessor());
 
@@ -725,10 +724,9 @@ mod planner_tests {
     }
 
     fn build_plan(sql: String, db: &Database) -> OptimizerResult<GroupId> {
-       let stmt = resolve_sql(sql, db)?;
-       let (id, plan) = create_plan(stmt, db)?;
-       println!("{plan}");
-       Ok(id)
+        let stmt = resolve_sql(sql, db)?;
+        let (id, plan) = create_plan(stmt, db)?;
+        println!("{plan}");
+        Ok(id)
     }
-
 }

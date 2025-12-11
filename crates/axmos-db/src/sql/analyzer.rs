@@ -660,7 +660,6 @@ mod analyzer_tests {
     use serial_test::serial;
     use std::path::Path;
 
-
     fn users_schema() -> Schema {
         let mut users_schema = Schema::new();
         users_schema.add_column("id", DataTypeKind::Int, true, true, false);
@@ -669,9 +668,7 @@ mod analyzer_tests {
         users_schema.add_column("age", DataTypeKind::Int, false, false, false);
         users_schema.add_column("created_at", DataTypeKind::DateTime, false, false, false);
         users_schema
-
     }
-
 
     fn orders_schema() -> Schema {
         let mut orders_schema = Schema::new();
@@ -681,7 +678,7 @@ mod analyzer_tests {
         orders_schema
     }
 
-     fn create_db(path: impl AsRef<Path>) -> std::io::Result<Database> {
+    fn create_db(path: impl AsRef<Path>) -> std::io::Result<Database> {
         let config = AxmosDBConfig {
             page_size: 4096,
             cache_size: Some(100),
@@ -710,7 +707,7 @@ mod analyzer_tests {
         Ok(db)
     }
 
-    fn analyze_sql(sql: String, db: &Database) ->  AnalyzerResult<()> {
+    fn analyze_sql(sql: String, db: &Database) -> AnalyzerResult<()> {
         db.task_runner().run(move |ctx| {
             let lexer = Lexer::new(&sql);
             let mut parser = Parser::new(lexer);
@@ -722,15 +719,16 @@ mod analyzer_tests {
         Ok(())
     }
 
-
-
     #[test]
     #[serial]
     fn test_insert_unknown_column() {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
 
-        let result = analyze_sql("INSERT INTO users (id, unknown) VALUES (1, 'x')".to_string(), &db);
+        let result = analyze_sql(
+            "INSERT INTO users (id, unknown) VALUES (1, 'x')".to_string(),
+            &db,
+        );
         assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
     }
 
@@ -766,7 +764,10 @@ mod analyzer_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
 
-        let result = analyze_sql("UPDATE users SET email = NULL WHERE id = 1".to_string(), &db);
+        let result = analyze_sql(
+            "UPDATE users SET email = NULL WHERE id = 1".to_string(),
+            &db,
+        );
         assert!(matches!(
             result,
             Err(AnalyzerError::ConstraintViolation(_, col)) if col == "email"
@@ -796,7 +797,8 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "INSERT INTO users (id, name, email, age) VALUES (1, 'John', 'j@t.com', 'not_int')".to_string(),
+            "INSERT INTO users (id, name, email, age) VALUES (1, 'John', 'j@t.com', 'not_int')"
+                .to_string(),
             &db,
         );
         assert!(matches!(result, Err(AnalyzerError::InvalidValue(_))));
@@ -937,7 +939,8 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)".to_string(),
+            "SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)"
+                .to_string(),
             &db,
         );
         assert!(result.is_ok());
@@ -951,7 +954,8 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
 
         let result = analyze_sql(
-            "SELECT name,(SELECT COUNT(*) FROM orders WHERE user_id = users.id) FROM users".to_string(),
+            "SELECT name,(SELECT COUNT(*) FROM orders WHERE user_id = users.id) FROM users"
+                .to_string(),
             &db,
         );
         assert!(result.is_ok());
@@ -972,7 +976,8 @@ mod analyzer_tests {
         let db = create_db(dir.path().join("test.db")).unwrap();
         assert!(
             analyze_sql(
-                "INSERT INTO users (id, name, email, age) VALUES (1, 'John', 'j@t.com', 25)".to_string(),
+                "INSERT INTO users (id, name, email, age) VALUES (1, 'John', 'j@t.com', 25)"
+                    .to_string(),
                 &db
             )
             .is_ok()
@@ -1022,7 +1027,13 @@ mod analyzer_tests {
     fn test_valid_alter() {
         let dir = tempfile::tempdir().unwrap();
         let db = create_db(dir.path().join("test.db")).unwrap();
-        assert!(analyze_sql("ALTER TABLE users ALTER COLUMN name SET NOT NULL".to_string(), &db).is_ok());
+        assert!(
+            analyze_sql(
+                "ALTER TABLE users ALTER COLUMN name SET NOT NULL".to_string(),
+                &db
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1033,7 +1044,8 @@ mod analyzer_tests {
         // FAILS IF YOU ADD THE COMMA. WE ARE USING CURRENTLY THE COMMA AS A CONTINUATION MARKER FOR SUBQUERIES.
         assert!(
             analyze_sql(
-                "WITH adults as (SELECT * FROM users WHERE age > 10) SELECT * FROM adults;".to_string(),
+                "WITH adults as (SELECT * FROM users WHERE age > 10) SELECT * FROM adults;"
+                    .to_string(),
                 &db
             )
             .is_ok()

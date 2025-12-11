@@ -33,7 +33,7 @@ pub use varint::VarInt;
 mod tests;
 
 #[derive(AxmosDataType, Debug, Clone, Default)]
-pub(crate) enum DataType {
+pub enum DataType {
     #[default]
     #[null]
     Null,

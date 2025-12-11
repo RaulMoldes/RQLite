@@ -7,7 +7,9 @@ pub(crate) const MAX_PAGE_SIZE: u32 = 65536;
 pub(crate) const DEFAULT_CACHE_SIZE: u16 = 10000;
 /// Default page size of the database
 pub(crate) const DEFAULT_PAGE_SIZE: u32 = MIN_PAGE_SIZE; // 4KB
-
+pub(crate) const DEFAULT_POOL_SIZE: u16 = 10; // Ten workers by default.
+pub(crate) const DEFAULT_BTREE_MIN_KEYS: u8 = 3;
+pub(crate) const DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE: u8 = 3;
 /// Cells are aligned to 64 bits for memory efficiency.
 pub(crate) const CELL_ALIGNMENT: u8 = 64;
 
@@ -25,13 +27,13 @@ crate::repr_enum!(pub enum TextEncoding: u32 {
     Utf16le = 2,
     Utf16be = 3,
 });
-crate::repr_enum!(pub(crate) enum IncrementalVaccum: u32 {
+crate::repr_enum!(pub enum IncrementalVaccum: u32 {
     Enabled = 1,
     Disabled = 0,
 });
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct AxmosDBConfig {
+pub struct AxmosDBConfig {
     pub(crate) incremental_vacuum_mode: IncrementalVaccum,
     pub(crate) min_keys: u8,
     pub(crate) text_encoding: TextEncoding,

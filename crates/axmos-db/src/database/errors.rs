@@ -72,7 +72,7 @@ impl From<ThreadPoolError> for TaskError {
 
 /// Numeric parsing errors
 #[derive(Debug)]
-pub(crate) enum ParsingError {
+pub enum ParsingError {
     Int(ParseIntError),
     Float(ParseFloatError),
 }
@@ -109,7 +109,7 @@ impl From<ParseFloatError> for ParsingError {
 
 /// Type system errors
 #[derive(Debug)]
-pub(crate) enum TypeError {
+pub enum TypeError {
     UnexpectedDataType(DataTypeKind),
     ParseError(ParsingError),
     NullOperation,
@@ -208,7 +208,7 @@ impl Display for AlreadyExists {
 
 /// Parser errors (Step 1: SQL text -> AST)
 #[derive(Debug, PartialEq, Clone)]
-pub(crate) enum ParserError {
+pub enum ParserError {
     InvalidExpression(String),
     UnexpectedToken(Token),
     UnexpectedEof,
@@ -234,7 +234,7 @@ impl From<TaskError> for ParserError {
 
 /// Analyzer errors (Step 2: AST validation)
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum AnalyzerError {
+pub enum AnalyzerError {
     Parser(ParserError),
     ConstraintViolation(String, String),
     ColumnValueCountMismatch(usize),
@@ -309,7 +309,7 @@ impl From<TaskError> for AnalyzerError {
 
 /// Binder errors (Step 3: Name resolution, type checking)
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum BinderError {
+pub enum BinderError {
     Analyzer(AnalyzerError),
     TableNotFound(String),
     ColumnNotFound(String),
@@ -386,7 +386,7 @@ impl From<TaskError> for BinderError {
 
 /// Planner errors (Step 4: Logical plan generation)
 #[derive(Debug)]
-pub(crate) enum PlanError {
+pub enum PlanError {
     Binder(BinderError),
     TableNotFound(String),
     ColumnNotFound(String),
@@ -508,7 +508,7 @@ impl From<TaskError> for DdlError {
 
 /// Optimizer errors (Step 5: Physical plan optimization)
 #[derive(Debug)]
-pub(crate) enum OptimizerError {
+pub enum OptimizerError {
     Plan(PlanError),
     Ddl(DdlError),
     NoPlanFound(String),
@@ -608,7 +608,7 @@ impl From<TaskError> for BuilderError {
 
 /// Evaluation errors (expression evaluation)
 #[derive(Debug)]
-pub(crate) enum EvaluationError {
+pub enum EvaluationError {
     Type(TypeError),
     InvalidExpression(BoundExpression),
     InvalidArguments(Function),
@@ -646,7 +646,7 @@ impl From<TaskError> for EvaluationError {
 
 /// Query execution errors (Step 6: Plan execution)
 #[derive(Debug)]
-pub(crate) enum QueryExecutionError {
+pub enum QueryExecutionError {
     Optimizer(OptimizerError),
     Builder(BuilderError),
     Eval(EvaluationError),
@@ -746,74 +746,10 @@ impl From<TaskError> for QueryExecutionError {
     }
 }
 
-/// Unified SQL error (wraps all SQL pipeline errors)
-#[derive(Debug)]
-pub(crate) enum SQLError {
-    Execution(QueryExecutionError),
-}
-
-impl Display for SQLError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::Execution(e) => write!(f, "{}", e),
-        }
-    }
-}
-
-impl Error for SQLError {}
-
-impl From<QueryExecutionError> for SQLError {
-    fn from(value: QueryExecutionError) -> Self {
-        Self::Execution(value)
-    }
-}
-
-impl From<OptimizerError> for SQLError {
-    fn from(value: OptimizerError) -> Self {
-        Self::Execution(QueryExecutionError::Optimizer(value))
-    }
-}
-
-impl From<PlanError> for SQLError {
-    fn from(value: PlanError) -> Self {
-        Self::Execution(QueryExecutionError::Optimizer(OptimizerError::Plan(value)))
-    }
-}
-
-impl From<BinderError> for SQLError {
-    fn from(value: BinderError) -> Self {
-        Self::Execution(QueryExecutionError::Optimizer(OptimizerError::Plan(
-            PlanError::Binder(value),
-        )))
-    }
-}
-
-impl From<AnalyzerError> for SQLError {
-    fn from(value: AnalyzerError) -> Self {
-        Self::Execution(QueryExecutionError::Optimizer(OptimizerError::Plan(
-            PlanError::Binder(BinderError::Analyzer(value)),
-        )))
-    }
-}
-
-impl From<ParserError> for SQLError {
-    fn from(value: ParserError) -> Self {
-        Self::Execution(QueryExecutionError::Optimizer(OptimizerError::Plan(
-            PlanError::Binder(BinderError::Analyzer(AnalyzerError::Parser(value))),
-        )))
-    }
-}
-
-impl From<TaskError> for SQLError {
-    fn from(value: TaskError) -> Self {
-        Self::Execution(QueryExecutionError::Other(value.to_string()))
-    }
-}
-
 /// Transaction errors (top-level)
 #[derive(Debug)]
-pub(crate) enum TransactionError {
-    Sql(SQLError),
+pub enum TransactionError {
+    Sql(QueryExecutionError),
     Aborted(TransactionId),
     NotActive(TransactionId),
     WriteWriteConflict(TransactionId, LogicalId),
@@ -842,67 +778,57 @@ impl Display for TransactionError {
 
 impl Error for TransactionError {}
 
-impl From<SQLError> for TransactionError {
-    fn from(value: SQLError) -> Self {
-        Self::Sql(value)
-    }
-}
-
 impl From<QueryExecutionError> for TransactionError {
     fn from(value: QueryExecutionError) -> Self {
-        Self::Sql(SQLError::Execution(value))
+        Self::Sql(value)
     }
 }
 
 impl From<OptimizerError> for TransactionError {
     fn from(value: OptimizerError) -> Self {
-        Self::Sql(SQLError::Execution(QueryExecutionError::Optimizer(value)))
+        Self::Sql(QueryExecutionError::Optimizer(value))
     }
 }
 
 impl From<PlanError> for TransactionError {
     fn from(value: PlanError) -> Self {
-        Self::Sql(SQLError::Execution(QueryExecutionError::Optimizer(
-            OptimizerError::Plan(value),
-        )))
+        Self::Sql(QueryExecutionError::Optimizer(OptimizerError::Plan(value)))
     }
 }
 
 impl From<BinderError> for TransactionError {
     fn from(value: BinderError) -> Self {
-        Self::Sql(SQLError::Execution(QueryExecutionError::Optimizer(
-            OptimizerError::Plan(PlanError::Binder(value)),
+        Self::Sql(QueryExecutionError::Optimizer(OptimizerError::Plan(
+            PlanError::Binder(value),
         )))
     }
 }
 
 impl From<AnalyzerError> for TransactionError {
     fn from(value: AnalyzerError) -> Self {
-        Self::Sql(SQLError::Execution(QueryExecutionError::Optimizer(
-            OptimizerError::Plan(PlanError::Binder(BinderError::Analyzer(value))),
+        Self::Sql(QueryExecutionError::Optimizer(OptimizerError::Plan(
+            PlanError::Binder(BinderError::Analyzer(value)),
         )))
     }
 }
 
 impl From<ParserError> for TransactionError {
     fn from(value: ParserError) -> Self {
-        Self::Sql(SQLError::Execution(QueryExecutionError::Optimizer(
-            OptimizerError::Plan(PlanError::Binder(BinderError::Analyzer(
-                AnalyzerError::Parser(value),
-            ))),
+        Self::Sql(QueryExecutionError::Optimizer(OptimizerError::Plan(
+            PlanError::Binder(BinderError::Analyzer(AnalyzerError::Parser(value))),
         )))
     }
 }
 
 impl From<BuilderError> for TransactionError {
     fn from(value: BuilderError) -> Self {
-        Self::Sql(SQLError::Execution(QueryExecutionError::Builder(value)))
+        Self::Sql(QueryExecutionError::Builder(value))
     }
 }
 
 impl From<IoError> for TransactionError {
     fn from(value: IoError) -> Self {
-        Self::Sql(SQLError::Execution(QueryExecutionError::Io(value)))
+        Self::Sql(QueryExecutionError::Io(value))
     }
 }
 
@@ -928,7 +854,6 @@ pub(crate) type BuilderResult<T> = Result<T, BuilderError>;
 pub(crate) type EvalResult<T> = Result<T, EvaluationError>;
 pub(crate) type TypeResult<T> = Result<T, TypeError>;
 pub(crate) type ExecutionResult<T> = Result<T, QueryExecutionError>;
-pub(crate) type SQLResult<T> = Result<T, SQLError>;
 pub(crate) type TransactionResult<T> = Result<T, TransactionError>;
 pub(crate) type ThreadPoolResult<T> = Result<T, ThreadPoolError>;
 pub(crate) type TaskResult<T> = Result<T, TaskError>;

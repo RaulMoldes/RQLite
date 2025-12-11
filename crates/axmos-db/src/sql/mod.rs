@@ -7,11 +7,9 @@ pub mod parser;
 pub mod planner;
 
 use crate::{
-    database::{Database, errors::SQLResult},
+    database::errors::ExecutionResult,
     sql::{
-        analyzer::Analyzer,
         ast::{Simplify, Statement},
-        binder::Binder,
         lexer::Lexer,
         parser::Parser,
     },
@@ -21,11 +19,10 @@ use crate::{
 mod tests;
 
 /// Parse a SQL query string into an AST
-pub(crate) fn parse_sql(sql: &str) -> SQLResult<Statement> {
+pub(crate) fn parse_sql(sql: &str) -> ExecutionResult<Statement> {
     let lexer = Lexer::new(sql);
     let mut parser = Parser::new(lexer);
     let mut stmt = parser.parse()?;
     stmt.simplify();
     Ok(stmt)
 }
-

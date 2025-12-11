@@ -6,6 +6,7 @@ use crate::{
         errors::{TransactionError, TransactionResult},
     },
     io::pager::SharedPager,
+    transactions::logger::Logger,
     types::TransactionId,
 };
 use parking_lot::RwLock;
@@ -194,10 +195,22 @@ impl TransactionMetadata {
 /// Shared transaction table protected by RwLock
 type SharedTransactionTable = Arc<RwLock<HashMap<TransactionId, TransactionMetadata>>>;
 
+impl Clone for TransactionCoordinator {
+    fn clone(&self) -> Self {
+        Self {
+            transactions: Arc::clone(&self.transactions),
+            pager: self.pager.clone(),
+            catalog: self.catalog.clone(),
+            last_committed: self.last_committed,
+            commit_counter: Arc::clone(&self.commit_counter),
+            tuple_commits: Arc::clone(&self.tuple_commits),
+        }
+    }
+}
 /// Central coordinator for all transactions in the system.
 ///
 ///  Creates transactions, snapshots, tracks active transactions, validates commits and maintains commit order.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TransactionCoordinator {
     /// All active and recently committed transactions
     transactions: SharedTransactionTable,
@@ -267,9 +280,13 @@ impl TransactionCoordinator {
             txs.insert(txid, entry);
         }
 
+        let logger = Logger::new(txid, self.pager());
+        logger.begin()?;
+
         Ok(TransactionHandle {
             id: txid,
             snapshot,
+            logger,
             coordinator: self.clone(),
         })
     }
@@ -448,6 +465,7 @@ impl TransactionCoordinator {
 pub struct TransactionHandle {
     id: TransactionId,
     snapshot: Snapshot,
+    logger: Logger,
     coordinator: TransactionCoordinator,
 }
 
@@ -456,8 +474,12 @@ impl TransactionHandle {
         self.id
     }
 
-    pub fn snapshot(&self) -> &Snapshot {
-        &self.snapshot
+    pub fn snapshot(&self) -> Snapshot {
+        self.snapshot.clone()
+    }
+
+    pub fn logger(&self) -> Logger {
+        self.logger.clone()
     }
 
     /// Commit this transaction
@@ -470,9 +492,6 @@ impl TransactionHandle {
         self.coordinator.abort(self.id)
     }
 }
-
-
-
 
 #[cfg(test)]
 mod coordinator_tests {

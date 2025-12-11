@@ -11,12 +11,25 @@ use std::{
 };
 
 use crate::{
-    TRANSACTION_ZERO,
+    AxmosDBConfig, DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, DEFAULT_CACHE_SIZE,
+    DEFAULT_PAGE_SIZE, DEFAULT_POOL_SIZE, IncrementalVaccum, TRANSACTION_ZERO, TextEncoding,
     database::{
-        runner::TaskRunner,
+        errors::{BoxError, IntoBoxError, TaskResult, TransactionResult},
+        runner::{TaskContext, TaskRunner},
         schema::{Column, Constraint, Index, Relation, Schema, Table},
+        stats::CatalogStatsProvider,
     },
-    io::{frames::FrameAccessMode, pager::SharedPager},
+    io::{
+        frames::FrameAccessMode,
+        pager::{Pager, SharedPager},
+    },
+    sql::{
+        binder::Binder,
+        executor::{Row, build::ExecutorBuilder, context::ExecutionContext},
+        lexer::Lexer,
+        parser::Parser,
+        planner::{CascadesOptimizer, OptimizerConfig, ProcessedStatement, model::AxmosCostModel},
+    },
     storage::{
         page::BtreePage,
         tuple::{OwnedTuple, Tuple, TupleRef},
@@ -31,6 +44,8 @@ use crate::{
         initialize_atomics,
     },
 };
+
+use std::path::Path;
 
 pub(crate) const META_TABLE: &str = "rqcatalog";
 pub(crate) const META_INDEX: &str = "rqindex";
@@ -69,11 +84,31 @@ pub(crate) fn meta_table_schema() -> Schema {
     )
 }
 
-pub(crate) struct Database {
+pub struct Database {
     pager: SharedPager,
     controller: TransactionCoordinator,
     task_runner: TaskRunner,
     catalog: SharedCatalog,
+}
+
+impl Database {
+    pub fn with_defaults(path: impl AsRef<Path>) -> io::Result<Self> {
+        let config = AxmosDBConfig {
+            page_size: DEFAULT_PAGE_SIZE,
+            cache_size: Some(DEFAULT_CACHE_SIZE),
+            incremental_vacuum_mode: IncrementalVaccum::Disabled,
+            min_keys: 3,
+            text_encoding: TextEncoding::Utf8,
+        };
+
+        let pager = Pager::from_config(config, path)?;
+        Database::new(
+            SharedPager::from(pager),
+            DEFAULT_BTREE_MIN_KEYS as usize,
+            DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE as usize,
+            DEFAULT_POOL_SIZE as usize,
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -439,7 +474,12 @@ impl Database {
         )?);
 
         let controller = TransactionCoordinator::new(pager.clone(), catalog.clone());
-        let task_runner = TaskRunner::new(pool_size, pager.clone(), catalog.clone());
+        let task_runner = TaskRunner::new(
+            pool_size,
+            pager.clone(),
+            catalog.clone(),
+            controller.clone(),
+        );
 
         Ok(Self {
             pager,
@@ -471,5 +511,133 @@ impl Database {
 
     fn meta_index(&self) -> PageId {
         self.catalog.meta_index
+    }
+
+    pub(crate) fn run_transaction<F, T>(&self, f: F) -> TransactionResult<T>
+    where
+        F: FnOnce(&ExecutionContext) -> TransactionResult<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        use crate::sql::executor::context::ExecutionContext;
+
+        let result = self.task_runner.run_with_result(move |ctx| {
+            // Begin transaction
+            let handle = ctx.coordinator().begin().box_err()?;
+
+            // Create execution context
+            let exec_ctx = ExecutionContext::new(
+                ctx.accessor(),
+                ctx.pager(),
+                ctx.catalog().clone(),
+                handle.snapshot(),
+                handle.id(),
+                handle.logger(),
+            );
+
+            // Execute the user's function
+            match f(&exec_ctx) {
+                Ok(value) => {
+                    // Commit on success
+                    handle.commit().box_err()?;
+                    Ok(value)
+                }
+                Err(e) => {
+                    // Abort on error
+                    let _ = handle.abort();
+                    Err(Box::new(e) as BoxError)
+                }
+            }
+        })?;
+
+        Ok(result)
+    }
+
+    /// Runs a read-only operation without transaction overhead.
+    ///
+    /// Use this for simple reads that don't need ACID guarantees.
+    pub(crate) fn run_read<F, T>(&self, f: F) -> TaskResult<T>
+    where
+        F: FnOnce(&TaskContext) -> Result<T, BoxError> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.task_runner.run_with_result(f)
+    }
+
+    pub fn run_query(&self, sql: String) -> TransactionResult<Vec<Row>> {
+        let results = self.task_runner.run_with_result(move |ctx| {
+            // 1. Parse
+            let lexer = Lexer::new(&sql);
+            let mut parser = Parser::new(lexer);
+            let stmt = parser.parse().box_err()?;
+
+            // 2. Bind
+            let mut binder = Binder::new(ctx.catalog(), ctx.accessor());
+            let bound_stmt = binder.bind(&stmt).box_err()?;
+
+            // 3. Optimize
+            let catalog = ctx.catalog().clone();
+            let accessor = ctx.accessor();
+            let cost_model = AxmosCostModel::new(4096);
+            let stats_provider = CatalogStatsProvider::new(catalog.clone(), accessor.clone());
+
+            let mut optimizer = CascadesOptimizer::new(
+                catalog.clone(),
+                accessor.clone(),
+                OptimizerConfig::default(),
+                cost_model,
+                stats_provider,
+            );
+
+            match optimizer.process(&bound_stmt).box_err()? {
+                ProcessedStatement::DdlExecuted(result) => Ok(vec![result.to_row()]),
+                ProcessedStatement::Plan(physical_plan) => {
+                    // 4. Begin transaction and execute
+                    let handle = ctx.coordinator().begin().box_err()?;
+
+                    let exec_ctx = ExecutionContext::new(
+                        ctx.accessor(),
+                        ctx.pager(),
+                        ctx.catalog().clone(),
+                        handle.snapshot(),
+                        handle.id(),
+                        handle.logger(),
+                    );
+
+                    let builder = ExecutorBuilder::new(exec_ctx);
+                    let mut executor = builder.build(&physical_plan).box_err()?;
+
+                    executor.open().box_err()?;
+                    let mut results = Vec::new();
+                    while let Some(row) = executor.next().box_err()? {
+                        results.push(row);
+                    }
+                    executor.close().box_err()?;
+
+                    // Commit transaction
+                    handle.commit().box_err()?;
+
+                    Ok(results)
+                }
+            }
+        })?;
+
+        Ok(results)
+    }
+
+    /// Runs a SQL query and returns results as formatted strings.
+    pub fn run_query_formatted(&self, sql: String) -> TransactionResult<String> {
+        let rows = self.run_query(sql)?;
+
+        if rows.is_empty() {
+            return Ok("(0 rows)".to_string());
+        }
+
+        let mut output = String::new();
+        for row in &rows {
+            output.push_str(&format!("{}\n", row));
+        }
+        output.push_str(&format!("({} rows)", rows.len()));
+
+        Ok(output)
     }
 }

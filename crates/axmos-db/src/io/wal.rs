@@ -114,7 +114,7 @@ pub struct Update {
 }
 
 impl Update {
-    pub fn new(oid: ObjectId, old: OwnedTuple, new: OwnedTuple) -> Self {
+    pub(crate) fn new(oid: ObjectId, old: OwnedTuple, new: OwnedTuple) -> Self {
         Self { oid, old, new }
     }
 }
@@ -144,7 +144,7 @@ pub struct Insert {
 }
 
 impl Insert {
-    pub fn new(oid: ObjectId, new: OwnedTuple) -> Self {
+    pub(crate) fn new(oid: ObjectId, new: OwnedTuple) -> Self {
         Self { oid, new }
     }
 }
@@ -173,7 +173,7 @@ pub struct Delete {
 }
 
 impl Delete {
-    pub fn new(oid: ObjectId, old: OwnedTuple) -> Self {
+    pub(crate) fn new(oid: ObjectId, old: OwnedTuple) -> Self {
         Self { oid, old }
     }
 }
@@ -203,14 +203,14 @@ pub struct LogRecordBuilder {
 }
 
 impl LogRecordBuilder {
-    pub fn for_transaction(tx_id: TransactionId) -> Self {
+    pub(crate) fn for_transaction(tx_id: TransactionId) -> Self {
         Self {
             tx_id,
             last_lsn: None,
         }
     }
 
-    pub fn build_rec<O>(&mut self, log_record_type: LogRecordType, operation: O) -> LogRecord
+    pub(crate) fn build_rec<O>(&mut self, log_record_type: LogRecordType, operation: O) -> LogRecord
     where
         O: Operation,
     {
@@ -341,7 +341,7 @@ pub type LogRecord = BufferWithMetadata<LogHeader>;
 
 impl LogRecord {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         tid: TransactionId,
         prev_lsn: Option<LogId>,
         object_id: ObjectId,
@@ -505,7 +505,7 @@ impl WriteAheadLog {
         self.header.padding as usize
     }
 
-    pub fn push(&mut self, record: LogRecord) -> std::io::Result<()> {
+    pub(crate) fn push(&mut self, record: LogRecord) -> std::io::Result<()> {
         let size = record.size();
         let lsn = record.metadata().lsn;
         let journal_length = self.journal.len();
@@ -667,25 +667,25 @@ pub struct LogRecordRef<'a> {
 
 impl<'a> LogRecordRef<'a> {
     /// Get the header
-    pub fn metadata(&self) -> &LogHeader {
+    pub(crate) fn metadata(&self) -> &LogHeader {
         self.header
     }
 
     /// Get the redo payload as a slice
-    pub fn redo_data(&self) -> &[u8] {
+    pub(crate) fn redo_data(&self) -> &[u8] {
         let start = self.header.undo_offset as usize;
         let end = self.header.redo_offset as usize;
         &self.data[std::mem::size_of::<LogHeader>() + start..std::mem::size_of::<LogHeader>() + end]
     }
 
     /// Get the undo payload as a slice
-    pub fn undo_data(&self) -> &[u8] {
+    pub(crate) fn undo_data(&self) -> &[u8] {
         let end = self.header.undo_offset as usize;
         &self.data[std::mem::size_of::<LogHeader>()..std::mem::size_of::<LogHeader>() + end]
     }
 
     /// Get total size of the record
-    pub fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         self.header.total_size as usize
     }
 }
@@ -778,7 +778,7 @@ impl<'a> WalIterator<'a> {
     }
 
     /// Get the next record as a reference
-    pub fn next_ref(&mut self) -> std::io::Result<Option<LogRecordRef<'_>>> {
+    pub(crate) fn next_ref(&mut self) -> std::io::Result<Option<LogRecordRef<'_>>> {
         // Check if we've already read all entries
         if self.last_lsn != LogId::from(0) && self.current_lsn > self.last_lsn {
             return Ok(None);
@@ -891,7 +891,7 @@ impl<'a> WalIterator<'a> {
 
 impl<'a> WalIterator<'a> {
     /// Process each record with a closure (zero-copy)
-    pub fn for_each<F>(&mut self, mut f: F) -> std::io::Result<()>
+    pub(crate) fn for_each<F>(&mut self, mut f: F) -> std::io::Result<()>
     where
         F: FnMut(LogRecordRef) -> std::io::Result<()>,
     {
@@ -911,7 +911,7 @@ mod wal_tests {
     use rand::{Rng, SeedableRng};
     use tempfile::tempdir;
 
-    pub fn push_items(wal: &mut WriteAheadLog, start: u64, end: u64) {
+    pub(crate) fn push_items(wal: &mut WriteAheadLog, start: u64, end: u64) {
         let start_entries = wal.header.num_entries;
         let num_rec = ((end - start) + 1) as u32;
         for i in start..=end {
@@ -923,7 +923,7 @@ mod wal_tests {
         assert_eq!(wal.header.num_entries, start_entries + num_rec);
     }
 
-    pub fn validate_replay(wal: &mut WriteAheadLog, expected_count: usize) {
+    pub(crate) fn validate_replay(wal: &mut WriteAheadLog, expected_count: usize) {
         let mut iterator = wal.replay().unwrap();
         let mut count = 0;
 
@@ -938,7 +938,7 @@ mod wal_tests {
         assert_eq!(count, expected_count);
     }
 
-    pub fn make_record(
+    pub(crate) fn make_record(
         lsn: u64,
         tid: u64,
         oid: u64,

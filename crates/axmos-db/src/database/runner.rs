@@ -10,19 +10,27 @@ use crate::{
         errors::{BoxError, TaskError, TaskResult},
     },
     io::pager::SharedPager,
-    transactions::{accessor::RcPageAccessor, threadpool::ThreadPool},
+    transactions::{TransactionCoordinator, accessor::RcPageAccessor, threadpool::ThreadPool},
 };
 
 /// Context provided to each task, containing thread-local resources.
 pub(crate) struct TaskContext {
     accessor: RcPageAccessor,
+    pager: SharedPager,
+    coordinator: TransactionCoordinator,
     catalog: SharedCatalog,
 }
 
 impl TaskContext {
-    fn new(pager: SharedPager, catalog: SharedCatalog) -> Self {
+    fn new(
+        pager: SharedPager,
+        coordinator: TransactionCoordinator,
+        catalog: SharedCatalog,
+    ) -> Self {
         Self {
-            accessor: RcPageAccessor::new(pager),
+            accessor: RcPageAccessor::new(pager.clone()),
+            coordinator,
+            pager,
             catalog,
         }
     }
@@ -31,8 +39,16 @@ impl TaskContext {
         self.accessor.clone()
     }
 
+    pub fn coordinator(&self) -> TransactionCoordinator {
+        self.coordinator.clone()
+    }
+
     pub fn catalog(&self) -> SharedCatalog {
         self.catalog.clone()
+    }
+
+    pub fn pager(&self) -> SharedPager {
+        self.pager.clone()
     }
 }
 
@@ -41,14 +57,21 @@ pub struct TaskRunner {
     pool: ThreadPool,
     pager: SharedPager,
     catalog: SharedCatalog,
+    coordinator: TransactionCoordinator,
 }
 
 impl TaskRunner {
-    pub fn new(pool_size: usize, pager: SharedPager, catalog: SharedCatalog) -> Self {
+    pub fn new(
+        pool_size: usize,
+        pager: SharedPager,
+        catalog: SharedCatalog,
+        coordinator: TransactionCoordinator,
+    ) -> Self {
         Self {
             pool: ThreadPool::new(pool_size),
             pager,
             catalog,
+            coordinator,
         }
     }
 
@@ -59,9 +82,10 @@ impl TaskRunner {
     {
         let pager = self.pager.clone();
         let catalog = self.catalog.clone();
+        let coordinator = self.coordinator.clone();
 
         self.pool.execute(move || {
-            let ctx = TaskContext::new(pager, catalog);
+            let ctx = TaskContext::new(pager, coordinator, catalog);
             task(&ctx)
         })?;
 
@@ -76,9 +100,10 @@ impl TaskRunner {
         let (tx, rx) = mpsc::channel();
         let pager = self.pager.clone();
         let catalog = self.catalog.clone();
+        let coordinator = self.coordinator.clone();
 
         self.pool.execute(move || {
-            let ctx = TaskContext::new(pager, catalog);
+            let ctx = TaskContext::new(pager, coordinator, catalog);
             let result = task(&ctx);
             let _ = tx.send(result);
             Ok(())
@@ -104,9 +129,10 @@ impl TaskRunner {
         let (tx, rx) = mpsc::channel::<Result<T, BoxError>>();
         let pager = self.pager.clone();
         let catalog = self.catalog.clone();
+        let coordinator = self.coordinator.clone();
 
         self.pool.execute(move || {
-            let ctx = TaskContext::new(pager, catalog);
+            let ctx = TaskContext::new(pager, coordinator, catalog);
             let result = task(&ctx);
             let _ = tx.send(result);
             Ok(())
@@ -134,9 +160,10 @@ impl TaskRunner {
             let tx = tx.clone();
             let pager = self.pager.clone();
             let catalog = self.catalog.clone();
+            let coordinator = self.coordinator.clone();
 
             self.pool.execute(move || {
-                let ctx = TaskContext::new(pager, catalog);
+                let ctx = TaskContext::new(pager, coordinator, catalog);
                 let result = task(&ctx);
                 let _ = tx.send(result);
                 Ok(())
@@ -172,9 +199,10 @@ impl TaskRunner {
             let tx = tx.clone();
             let pager = self.pager.clone();
             let catalog = self.catalog.clone();
+            let coordinator = self.coordinator.clone();
 
             self.pool.execute(move || {
-                let ctx = TaskContext::new(pager, catalog);
+                let ctx = TaskContext::new(pager, coordinator, catalog);
                 let result = task(&ctx);
                 let _ = tx.send((idx, result));
                 Ok(())

@@ -94,7 +94,7 @@ pub trait FixedSizeType: AxmosValueType {
 pub trait DynamicSizeType: AxmosValueType {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NumClass {
+pub enum NumClass {
     Signed,
     Unsigned,
     Float,

@@ -73,7 +73,6 @@ pub struct ExecutionStats {
     pub pages_read: u64,
 }
 
-/*
 #[cfg(test)]
 mod query_execution_tests {
     use super::*;
@@ -81,26 +80,37 @@ mod query_execution_tests {
     use std::path::Path;
 
     use crate::{
-        AxmosDBConfig, IncrementalVaccum, TextEncoding,
+        AxmosDBConfig, IncrementalVaccum, TRANSACTION_ZERO, TextEncoding,
         database::{
             Database,
-            errors::TransactionResult,
+            errors::{IntoBoxError, TransactionResult},
             schema::{Column, Schema},
             stats::CatalogStatsProvider,
         },
         io::pager::{Pager, SharedPager},
         sql::{
             binder::Binder,
-            executor::build::ExecutorBuilder,
+            executor::{build::ExecutorBuilder, context::ExecutionContext},
             lexer::Lexer,
             parser::Parser,
             planner::{
                 CascadesOptimizer, OptimizerConfig, ProcessedStatement, model::AxmosCostModel,
             },
         },
-        transactions::accessor::RcPageAccessorPool,
-        types::{Blob, DataType, DataTypeKind, UInt64},
+        storage::tuple::{OwnedTuple, Tuple},
+        types::{Blob, DataType, DataTypeKind, Int64, UInt64},
     };
+
+    fn create_test_schema() -> Schema {
+        Schema::from_columns(
+            &[
+                Column::new_unindexed(DataTypeKind::BigUInt, "row_id", None),
+                Column::new_unindexed(DataTypeKind::Text, "name", None),
+                Column::new_unindexed(DataTypeKind::BigUInt, "age", None),
+            ],
+            1,
+        )
+    }
 
     fn create_db(
         page_size: usize,
@@ -116,94 +126,120 @@ mod query_execution_tests {
         };
 
         let pager = Pager::from_config(config, &path)?;
-        let db = Database::new(SharedPager::from(pager), 3, 2)?;
+        let db = Database::new(SharedPager::from(pager), 3, 2, 4)?;
 
         // Create users table
-        let schema = Schema::from_columns(
-            &[
-                Column::new_unindexed(DataTypeKind::BigUInt, "row_id", None),
-                Column::new_unindexed(DataTypeKind::Text, "name", None),
-                Column::new_unindexed(DataTypeKind::BigUInt, "age", None),
-            ],
-            1,
-        );
-        db.catalog()
-            .create_table("users", schema, db.main_accessor.clone()d())?;
-
-        // Insert test data
-        let handle = db.coordinator().begin().unwrap();
-        let pool = RcPageAccessorPool::from(handle);
-        pool.begin().unwrap();
-
-        for (name, age) in [
-            ("Alice", 25u64),
-            ("Bob", 30),
-            ("Charlie", 35),
-            ("Diana", 28),
-            ("Diana", 22),
-        ] {
-            pool.insert_one(
-                "users",
-                &[
-                    DataType::Text(Blob::from(name)),
-                    DataType::BigUInt(UInt64::from(age)),
-                ],
-            )
+        db.task_runner()
+            .run(|ctx| {
+                let schema = create_test_schema();
+                ctx.catalog()
+                    .create_table("users", schema, ctx.accessor())
+                    .box_err()?;
+                Ok(())
+            })
             .unwrap();
-        }
 
-        pool.try_commit().unwrap();
+        // Insert test data using btree directly
+        db.task_runner()
+            .run(|ctx| {
+                let relation = ctx
+                    .catalog()
+                    .get_relation("users", ctx.accessor())
+                    .box_err()?;
+                let root = relation.root();
+                let schema = relation.schema().clone();
+                let mut btree = ctx.catalog().table_btree(root, ctx.accessor()).box_err()?;
+
+                let test_data = [
+                    (1u64, "Alice", 25u64),
+                    (2u64, "Bob", 30u64),
+                    (3u64, "Charlie", 35u64),
+                    (4u64, "Diana", 28u64),
+                    (5u64, "Eve", 22u64),
+                ];
+
+                for (id, name, age) in test_data {
+                    let tuple = Tuple::new(
+                        &[
+                            DataType::BigUInt(UInt64(id)),
+                            DataType::Text(Blob::from(name)),
+                            DataType::BigUInt(UInt64(age)),
+                        ],
+                        &schema,
+                        TRANSACTION_ZERO,
+                    )
+                    .box_err()?;
+
+                    let owned: OwnedTuple = tuple.into();
+                    btree.insert(root, owned.as_ref()).box_err()?;
+                }
+
+                btree.clear_accessor_stack();
+                Ok(())
+            })
+            .unwrap();
 
         Ok(db)
     }
 
     fn execute_query(db: &Database, sql: &str) -> TransactionResult<Vec<Row>> {
-        // 1. Parse
-        let lexer = Lexer::new(sql);
-        let mut parser = Parser::new(lexer);
-        let stmt = parser.parse()?;
+        let sql_owned = sql.to_string();
 
-        // 2. Bind
-        let mut binder = Binder::new(db.catalog(), db.main_accessor.clone()d());
-        let bound_stmt = binder.bind(&stmt)?;
+        let results = db.task_runner().run_with_result(move |ctx| {
+            // 1. Parse
+            let lexer = Lexer::new(&sql_owned);
+            let mut parser = Parser::new(lexer);
+            let stmt = parser.parse().box_err()?;
 
-        // 3. Process (handles both DDL and queries)
-        let catalog = db.catalog();
-        let accessor = db.main_accessor.clone()d();
-        let cost_model = AxmosCostModel::new(4096);
-        let stats_provider = CatalogStatsProvider::new(catalog.clone(), accessor.clone());
+            // 2. Bind
+            let mut binder = Binder::new(ctx.catalog(), ctx.accessor());
+            let bound_stmt = binder.bind(&stmt).box_err()?;
 
-        let mut optimizer = CascadesOptimizer::new(
-            catalog.clone(),
-            accessor.clone(),
-            OptimizerConfig::default(),
-            cost_model,
-            stats_provider,
-        );
+            // 3. Optimize
+            let catalog = ctx.catalog().clone();
+            let accessor = ctx.accessor();
+            let cost_model = AxmosCostModel::new(4096);
+            let stats_provider = CatalogStatsProvider::new(catalog.clone(), accessor.clone());
 
-        match optimizer.process(&bound_stmt)? {
-            ProcessedStatement::DdlExecuted(result) => Ok(vec![result.to_row()]),
-            ProcessedStatement::Plan(physical_plan) => {
-                // 4. Build and execute the plan
-                let handle = db.coordinator().begin()?;
-                let pool = RcPageAccessorPool::from(handle);
-                pool.begin()?;
+            let mut optimizer = CascadesOptimizer::new(
+                catalog.clone(),
+                accessor.clone(),
+                OptimizerConfig::default(),
+                cost_model,
+                stats_provider,
+            );
 
-                let ctx = pool.execution_context();
-                let builder = ExecutorBuilder::new(ctx);
-                let mut executor = builder.build(&physical_plan)?;
+            match optimizer.process(&bound_stmt).box_err()? {
+                ProcessedStatement::DdlExecuted(result) => Ok(vec![result.to_row()]),
+                ProcessedStatement::Plan(physical_plan) => {
+                    let handle = ctx.coordinator().begin().box_err()?;
 
-                executor.open()?;
-                let mut results = Vec::new();
-                while let Some(row) = executor.next()? {
-                    results.push(row);
+                    // 4. Build and execute
+                    let exec_ctx = ExecutionContext::new(
+                        ctx.accessor(),
+                        ctx.pager(),
+                        ctx.catalog(),
+                        handle.snapshot().clone(),
+                        handle.id(),
+                        handle.logger(),
+                    );
+
+                    let builder = ExecutorBuilder::new(exec_ctx);
+                    let mut executor = builder.build(&physical_plan).box_err()?;
+
+                    executor.open().box_err()?;
+                    let mut results = Vec::new();
+                    while let Some(row) = executor.next().box_err()? {
+                        results.push(row);
+                    }
+                    executor.close().box_err()?;
+
+                    Ok(results)
                 }
-                executor.close()?;
-
-                pool.try_commit()?;
-                Ok(results)
             }
-        }
+        })?;
+
+        Ok(results)
     }
 
     #[test]
@@ -229,7 +265,7 @@ mod query_execution_tests {
         for row in &results {
             println!("{row}");
         }
-        assert_eq!(results.len(), 1, "Should return all 5 users");
+        assert_eq!(results.len(), 1, "Should return 1 user");
     }
 
     #[test]
@@ -242,7 +278,8 @@ mod query_execution_tests {
         for row in &results {
             println!("{row}");
         }
-        assert_eq!(results.len(), 4, "Should return all 5 users");
+        // All names are unique now, so 5 groups
+        assert_eq!(results.len(), 5, "Should return 5 groups");
     }
 
     #[test]
@@ -256,7 +293,7 @@ mod query_execution_tests {
             println!("{row}");
         }
 
-        //Bob(30), Charlie(35) pass the filter
+        // Bob(30), Charlie(35) pass the filter
         assert_eq!(results.len(), 2, "Should return 2 users with age > 28");
 
         for row in &results {
@@ -555,4 +592,3 @@ mod query_execution_tests {
         assert_eq!(old_results.len(), 0, "No one should have age 25");
     }
 }
-*/

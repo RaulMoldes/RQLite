@@ -99,14 +99,17 @@ impl Delete {
         })??;
 
         // Mark tuple as deleted and update
-        let deleted_result: ExecutionResult<OwnedTuple> =
+        let deleted_result: ExecutionResult<(OwnedTuple, OwnedTuple)> =
             btree.with_cell_at(position, |bytes| {
                 let mut tuple = Tuple::try_from((bytes, schema))?;
                 tuple.delete(tx_id)?;
-                Ok(tuple.into())
+                let old_data = OwnedTuple::from_bytes(bytes.to_vec());
+                Ok((old_data, tuple.into()))
             })?;
 
-        let deleted_bytes = deleted_result?;
+        let (old_bytes, deleted_bytes) = deleted_result?;
+        let logger = self.ctx.logger();
+        logger.log_delete(self.op.table_id, old_bytes)?;
 
         btree.clear_accessor_stack();
         btree.update(root, deleted_bytes.as_ref())?;

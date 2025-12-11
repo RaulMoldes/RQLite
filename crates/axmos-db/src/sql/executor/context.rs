@@ -1,18 +1,19 @@
 // src/sql/executor/context.rs
 use crate::{
     database::SharedCatalog,
+    io::pager::SharedPager,
     structures::{bplustree::BPlusTree, comparator::NumericComparator},
-    transactions::{Snapshot, accessor::RcPageAccessor},
+    transactions::{Snapshot, accessor::RcPageAccessor, logger::Logger},
     types::{PageId, TransactionId},
 };
 
 use std::io::Result as IoResult;
 
 /// Lightweight execution context for query operators.
-/// Created by RcPageAccessorPool::execution_context()
 #[derive(Clone)]
 pub(crate) struct ExecutionContext {
     accessor: RcPageAccessor,
+    logger: Logger,
     catalog: SharedCatalog,
     snapshot: Snapshot,
     transaction_id: TransactionId,
@@ -21,12 +22,15 @@ pub(crate) struct ExecutionContext {
 impl ExecutionContext {
     pub(crate) fn new(
         accessor: RcPageAccessor,
+        pager: SharedPager,
         catalog: SharedCatalog,
         snapshot: Snapshot,
         transaction_id: TransactionId,
+        logger: Logger,
     ) -> Self {
         Self {
             accessor,
+            logger,
             catalog,
             snapshot,
             transaction_id,
@@ -36,6 +40,16 @@ impl ExecutionContext {
     #[inline]
     pub(crate) fn accessor(&self) -> &RcPageAccessor {
         &self.accessor
+    }
+
+    #[inline]
+    pub(crate) fn logger(&self) -> &Logger {
+        &self.logger
+    }
+
+    #[inline]
+    pub(crate) fn logger_mut(&mut self) -> &mut Logger {
+        &mut self.logger
     }
 
     #[inline]

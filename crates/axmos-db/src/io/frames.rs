@@ -133,7 +133,7 @@ where
     /// and everything that is [FnMut] is also [FnOnce], the compiler can coerce the Function types in that order. However, [FnOnce] cannot be coerced into [FnMut] neither into [Fn].
     ///
     /// So [try_with_variant] will accept a [FnOnce], that is a functor that takes a shared reference over a Frame. While [try_with_variant_mut] will take a [FnMut] (a functor that takes an exclusive reference over a Frame).
-    pub fn try_with_variant<V, F, R, E>(&self, f: F) -> Result<R, E>
+    pub(crate) fn try_with_variant<V, F, R, E>(&self, f: F) -> Result<R, E>
     where
         F: FnOnce(&V) -> R,
         for<'a> &'a Latch<P>: TryInto<&'a V, Error = E>,
@@ -143,7 +143,7 @@ where
         Ok(f(variant))
     }
 
-    pub fn try_with_variant_mut<V, F, R, E>(&mut self, f: F) -> Result<R, E>
+    pub(crate) fn try_with_variant_mut<V, F, R, E>(&mut self, f: F) -> Result<R, E>
     where
         F: FnOnce(&mut V) -> R,
         for<'a> &'a mut Latch<P>: TryInto<&'a mut V, Error = E>,
@@ -161,14 +161,14 @@ pub struct FrameStack {
 }
 
 impl FrameStack {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         FrameStack {
             latches: HashMap::new(),
             traversal: Vec::new(),
         }
     }
 
-    pub fn acquire(&mut self, key: PageId, value: MemFrame<MemPage>, access_mode: FrameAccessMode) {
+    pub(crate) fn acquire(&mut self, key: PageId, value: MemFrame<MemPage>, access_mode: FrameAccessMode) {
         if let Some(existing_latch) = self.latches.get(&key) {
             match (existing_latch, access_mode) {
                 (Latch::Upgradable(p), FrameAccessMode::Write) => {
@@ -191,7 +191,7 @@ impl FrameStack {
         }
     }
 
-    pub fn acquire_unchecked(
+    pub(crate) fn acquire_unchecked(
         &mut self,
         key: PageId,
         mut value: MemFrame<MemPage>,
@@ -204,31 +204,31 @@ impl FrameStack {
         };
     }
 
-    pub fn release(&mut self, key: PageId) {
+    pub(crate) fn release(&mut self, key: PageId) {
         self.latches.remove(&key);
     }
 
-    pub fn visit(&mut self, key: Position) {
+    pub(crate) fn visit(&mut self, key: Position) {
         self.traversal.push(key);
     }
 
-    pub fn get(&self, key: PageId) -> Option<&Latch<MemPage>> {
+    pub(crate) fn get(&self, key: PageId) -> Option<&Latch<MemPage>> {
         self.latches.get(&key)
     }
 
-    pub fn get_mut(&mut self, key: PageId) -> Option<&mut Latch<MemPage>> {
+    pub(crate) fn get_mut(&mut self, key: PageId) -> Option<&mut Latch<MemPage>> {
         self.latches.get_mut(&key)
     }
 
-    pub fn pop(&mut self) -> Option<Position> {
+    pub(crate) fn pop(&mut self) -> Option<Position> {
         self.traversal.pop()
     }
 
-    pub fn last(&self) -> Option<&Position> {
+    pub(crate) fn last(&self) -> Option<&Position> {
         self.traversal.last()
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.latches.clear();
         self.traversal.clear();
     }

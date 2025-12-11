@@ -148,7 +148,7 @@ impl Pager {
         Ok(())
     }
 
-    pub fn push_to_log(&mut self, record: LogRecord) -> io::Result<()> {
+    pub(crate) fn push_to_log(&mut self, record: LogRecord) -> io::Result<()> {
         self.wal.push(record)
     }
 
@@ -250,11 +250,11 @@ impl Pager {
         Ok(())
     }
 
-    pub fn page_size(&self) -> u32 {
+    pub(crate) fn page_size(&self) -> u32 {
         self.header.page_size
     }
 
-    pub fn alloc_frame<P: Page>(&mut self) -> io::Result<MemFrame<MemPage>>
+    pub(crate) fn alloc_frame<P: Page>(&mut self) -> io::Result<MemFrame<MemPage>>
     where
         MemPage: From<P>,
         BufferWithMetadata<P::Header>: Into<MemPage>,
@@ -301,7 +301,7 @@ impl Pager {
         Ok(mem_page)
     }
 
-    pub fn cache_frame(&mut self, frame: MemFrame<MemPage>) -> io::Result<PageId> {
+    pub(crate) fn cache_frame(&mut self, frame: MemFrame<MemPage>) -> io::Result<PageId> {
         let id = frame.read().page_number();
         if let Some(mut evicted) = self.cache.insert(id, frame) {
             let evicted_id = evicted.read().page_number();
@@ -313,7 +313,7 @@ impl Pager {
         Ok(id)
     }
 
-    pub fn read_page<P: Page>(&mut self, id: PageId) -> io::Result<MemFrame<MemPage>>
+    pub(crate) fn read_page<P: Page>(&mut self, id: PageId) -> io::Result<MemFrame<MemPage>>
     where
         MemPage: From<P>,
     {
@@ -360,7 +360,7 @@ impl Pager {
         Ok(self.cache.get(&id).unwrap())
     }
 
-    pub fn dealloc_page<P: Page>(&mut self, id: PageId) -> io::Result<()>
+    pub(crate) fn dealloc_page<P: Page>(&mut self, id: PageId) -> io::Result<()>
     where
         MemPage: From<P>,
     {

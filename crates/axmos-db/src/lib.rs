@@ -10,12 +10,11 @@
 #![feature(concat_bytes)]
 #![feature(str_from_raw_parts)]
 #![feature(current_thread_id)]
-mod configs;
-mod database;
-mod io;
+pub mod configs;
+pub mod database;
+pub mod io;
 mod macros;
-//mod planner;
-pub mod sql;
+mod sql;
 mod storage;
 mod structures;
 mod transactions;
@@ -31,9 +30,10 @@ pub mod types;
 /// We also provide an API with a custom [Direct-IO] allocator (see [io::disk::linux] for details), but Jemalloc has performed better in benchmarks.
 #[cfg(not(miri))]
 use jemallocator::Jemalloc;
-pub use types::*;
+pub(crate) use types::*;
 
 #[cfg(not(miri))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
-pub(crate) use configs::*;
+pub use configs::*;
+pub use database::Database;

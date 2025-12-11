@@ -72,6 +72,9 @@ impl Insert {
         let tuple = Tuple::new(&full_values, schema, tx_id)?;
         let bytes: OwnedTuple = tuple.into();
 
+        let logger = self.ctx.logger();
+        logger.log_insert(self.op.table_id, bytes.clone())?;
+
         let mut btree = catalog.table_btree(relation.root(), accessor.clone())?;
         btree.insert(relation.root(), bytes.as_ref())?;
         btree.clear_accessor_stack();
