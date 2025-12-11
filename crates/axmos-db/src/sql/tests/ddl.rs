@@ -49,31 +49,6 @@ sql_test!(
 );
 
 sql_test!(
-    test_parser_create_table_with_check_constraint,
-    "CREATE TABLE products (id INTEGER, price FLOAT CHECK (price > 0));",
-    Statement::CreateTable(CreateTableStatement {
-        table: "products".to_string(),
-        columns: vec![
-            ColumnDefExpr {
-                name: "id".to_string(),
-                data_type: DataTypeKind::Int,
-                constraints: vec![]
-            },
-            ColumnDefExpr {
-                name: "price".to_string(),
-                data_type: DataTypeKind::Float,
-                constraints: vec![ColumnConstraintExpr::Check(Expr::BinaryOp {
-                    left: Box::new(Expr::Identifier("price".to_string())),
-                    op: BinaryOperator::Gt,
-                    right: Box::new(Expr::Number(0.0))
-                })]
-            }
-        ],
-        constraints: vec![]
-    })
-);
-
-sql_test!(
     test_parser_create_table_with_default,
     "CREATE TABLE posts (id INTEGER, status TEXT DEFAULT 'draft');",
     Statement::CreateTable(CreateTableStatement {

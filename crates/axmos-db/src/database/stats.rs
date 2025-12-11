@@ -451,13 +451,8 @@ impl Catalog {
         config: &StatsComputeConfig,
     ) -> StatsComputeResult<IndexStatistics> {
         // Get the key column's data type for the comparator
-        let key_dtype = schema
-            .keys()
-            .first()
-            .map(|k| k.dtype)
-            .unwrap_or(DataTypeKind::BigUInt);
 
-        let btree = self.index_btree(root, key_dtype, worker)?;
+        let btree = self.index_btree(root, schema, worker)?;
 
         let mut entries: u64 = 0;
         let mut distinct_keys: HashSet<u128> = HashSet::new();
@@ -856,7 +851,8 @@ mod stats_compute_tests {
         // Insert some test data
         let relation = catalog.get_relation("idx_email", worker.clone())?;
         let root = relation.root();
-        let mut btree = catalog.index_btree(root, DataTypeKind::Text, worker.clone())?;
+        let schema = relation.schema();
+        let mut btree = catalog.index_btree(root, schema, worker.clone())?;
 
         for i in 0..50u64 {
             let tuple = Tuple::new(
@@ -955,7 +951,8 @@ mod stats_compute_tests {
         // Insert data into index
         let relation = catalog.get_relation("idx_users_email", worker.clone())?;
         let root = relation.root();
-        let mut btree = catalog.index_btree(root, DataTypeKind::Text, worker.clone())?;
+        let schema = relation.schema();
+        let mut btree = catalog.index_btree(root, schema, worker.clone())?;
 
         for i in 0..50u64 {
             let tuple = Tuple::new(

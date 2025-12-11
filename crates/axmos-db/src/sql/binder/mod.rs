@@ -703,9 +703,6 @@ impl Binder {
             ColumnConstraintExpr::Default(expr) => {
                 Ok(BoundColumnConstraint::Default(self.bind_expr(expr)?))
             }
-            ColumnConstraintExpr::Check(expr) => {
-                Ok(BoundColumnConstraint::Check(self.bind_expr(expr)?))
-            }
         }
     }
 
@@ -737,16 +734,6 @@ impl Binder {
                     ref_table_id: relation.id(),
                     ref_columns: ref_indices,
                 })
-            }
-            TableConstraintExpr::Check(expr) => {
-                self.ctx.add_to_scope(ScopeEntry {
-                    table_id: None,
-                    ref_name: String::new(),
-                    scope_index: 0,
-                    schema: schema.clone(),
-                    cte_idx: None,
-                })?;
-                Ok(BoundTableConstraint::Check(self.bind_expr(expr)?))
             }
         }
     }

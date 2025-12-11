@@ -6,13 +6,13 @@ MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test
 
 # TODO LIST:
 
-4. Implement the executor (order of priority):
+0. Refactor UPDATE, INSERT and DELETE operators.
+0.1. Refactor workerpools to decouple from transaction and make them be proper thread pools.
+0.2 Add a complete integration of the Write Ahead Log in the DML/DDL executors.
 
-    - DDL operators (almost).
-        - Integrate with executor and add transaction statements.
-        - Implement multi column indexes.
-        - Implement check constraints (can wait)
 
+
+1. Implement the executor (order of priority):
 
     - JOIN
 
@@ -21,5 +21,3 @@ MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test
     - SORT (PARTIALLY DONE):
         - Currently, an in memory quicksort + limit is implemented and tested.
         - We should add external merge sort or some other way of performing sort on disk.
-
-7. Make workerpools run on actual threads.

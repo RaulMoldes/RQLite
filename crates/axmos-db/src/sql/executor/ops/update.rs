@@ -71,7 +71,6 @@ impl Update {
         Ok(updates)
     }
 
-    /// Update a single row by searching for it by row_id (primary key)
     fn update_row(&mut self, row: &Row) -> ExecutionResult<()> {
         let row_id = match &row[0] {
             DataType::BigUInt(id) => *id,
@@ -86,7 +85,6 @@ impl Update {
         let catalog = self.ctx.catalog();
         let worker = self.ctx.worker().clone();
         let tx_id = self.ctx.transaction_id();
-        let snapshot = self.ctx.snapshot();
 
         let relation = catalog.get_relation_unchecked(self.op.table_id, worker.clone())?;
         let schema = relation.schema();
@@ -95,7 +93,6 @@ impl Update {
         let mut btree = catalog.table_btree(root, worker.clone())?;
         let logical_id = LogicalId::new(self.op.table_id, row_id);
 
-        // Search by row_id key - tree structure may have changed since materialization
         let search_result = btree.search_from_root(row_id.as_ref(), FrameAccessMode::Write)?;
 
         let position = match search_result {
@@ -108,42 +105,79 @@ impl Update {
 
         let updates = self.compute_updates(row, schema)?;
 
-        // Read current tuple at found position
-        let payload_result: ExecutionResult<OwnedTuple> =
-            btree.with_cell_at(position, |bytes| {
+        // Read current tuple, capture old values, apply updates
+        let result: ExecutionResult<(OwnedTuple, Vec<DataType>, Vec<DataType>)> = btree
+            .with_cell_at(position, |bytes| {
                 let mut tuple = Tuple::try_from((bytes, schema))?;
+                let old_vals: Vec<DataType> = tuple.values().to_vec();
                 tuple.add_version(&updates, tx_id)?;
+                let new_vals: Vec<DataType> = tuple.values().to_vec();
                 let new_bytes: OwnedTuple = tuple.into();
-                Ok(new_bytes)
+                Ok((new_bytes, old_vals, new_vals))
             })?;
-
-        let payload = payload_result?;
+        let (payload, old_values, new_values) = result?;
         btree.clear_worker_stack();
-
-        // Update in B-tree
         btree.update(root, payload.as_ref())?;
 
-        // Handle index updates
-        let indexed_cols = schema.get_indexed_columns();
-        for (col_idx, idx_info) in &indexed_cols {
-            if let Some((_, new_value)) = updates.iter().find(|(idx, _)| idx == col_idx) {
-                let index_relation = catalog.get_relation(idx_info.name(), worker.clone())?;
-                let mut index_btree = catalog.index_btree(
-                    index_relation.root(),
-                    idx_info.datatype(),
-                    worker.clone(),
-                )?;
+        // Maintain indexes
+        let indexes = schema.get_indexes();
 
-                let index_schema = index_relation.schema();
-                let new_index_tuple = Tuple::new(
-                    &[new_value.clone(), DataType::BigUInt(row_id)],
-                    index_schema,
-                    tx_id,
-                )?;
-                let new_index_bytes: OwnedTuple = new_index_tuple.into();
-                index_btree.insert(index_relation.root(), new_index_bytes.as_ref())?;
+        for (index_name, columns) in indexes {
+            // Check if any column in this index was updated
+            let index_affected = columns
+                .iter()
+                .any(|(col_idx, _)| updates.iter().any(|(upd_idx, _)| upd_idx == col_idx));
+
+            if !index_affected {
+                continue;
+            }
+
+            let index_relation = catalog.get_relation(&index_name, worker.clone())?;
+            let index_schema = index_relation.schema();
+            let index_root = index_relation.root();
+
+            let mut index_btree = catalog.index_btree(index_root, index_schema, worker.clone())?;
+
+            // Build old index key for search
+            let mut old_index_key: Vec<u8> = Vec::new();
+            for (col_idx, _dtype) in &columns {
+                old_index_key.extend_from_slice(old_values[*col_idx].as_ref());
+            }
+            old_index_key.extend_from_slice(row_id.as_ref());
+
+            // Search for old index entry, mark as deleted, update
+            let search_result =
+                index_btree.search_from_root(&old_index_key, FrameAccessMode::Write)?;
+
+            if let SearchResult::Found(pos) = search_result {
+                let deleted_result: ExecutionResult<OwnedTuple> =
+                    index_btree.with_cell_at(pos, |bytes| {
+                        let mut index_tuple = Tuple::try_from((bytes, index_schema))?;
+                        index_tuple.delete(tx_id)?;
+                        let owned: OwnedTuple = index_tuple.into();
+                        Ok(owned)
+                    })?;
+
+                let deleted_bytes = deleted_result?;
+
+                index_btree.clear_worker_stack();
+                index_btree.update(index_root, deleted_bytes.as_ref())?;
+            } else {
                 index_btree.clear_worker_stack();
             }
+
+            // Insert new index entry
+            let mut new_index_values: Vec<DataType> = Vec::with_capacity(columns.len() + 1);
+            for (col_idx, _dtype) in &columns {
+                new_index_values.push(new_values[*col_idx].clone());
+            }
+            new_index_values.push(DataType::BigUInt(row_id));
+
+            let new_index_tuple = Tuple::new(&new_index_values, index_schema, tx_id)?;
+            let new_index_bytes: OwnedTuple = new_index_tuple.into();
+
+            index_btree.insert(index_root, new_index_bytes.as_ref())?;
+            index_btree.clear_worker_stack();
         }
 
         Ok(())

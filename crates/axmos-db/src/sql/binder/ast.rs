@@ -438,7 +438,6 @@ pub enum BoundColumnConstraint {
         ref_column_idx: usize,
     },
     Default(BoundExpression),
-    Check(BoundExpression),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -450,7 +449,6 @@ pub enum BoundTableConstraint {
         ref_table_id: ObjectId,
         ref_columns: Vec<usize>,
     },
-    Check(BoundExpression),
 }
 
 #[derive(Debug, Clone, PartialEq)]

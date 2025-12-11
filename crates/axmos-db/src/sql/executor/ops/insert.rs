@@ -76,28 +76,29 @@ impl Insert {
         btree.insert(relation.root(), bytes.as_ref())?;
         btree.clear_worker_stack();
 
-        let indexed_cols = schema.get_indexed_columns();
-        for (col_idx, idx_info) in indexed_cols {
-            if col_idx < full_values.len() {
-                let index_relation = catalog.get_relation(idx_info.name(), worker.clone())?;
-                let mut index_btree = catalog.index_btree(
-                    index_relation.root(),
-                    idx_info.datatype(),
-                    worker.clone(),
-                )?;
+        // Maintain indexes - insert entries for all composite/single indexes
+        let indexes = schema.get_indexes();
+        let num_keys = schema.num_keys as usize;
 
-                let indexed_value = full_values[col_idx].clone();
-                let index_schema = index_relation.schema();
-                let index_tuple = Tuple::new(
-                    &[indexed_value, DataType::BigUInt(next_row)],
-                    index_schema,
-                    tx_id,
-                )?;
-                let index_bytes: OwnedTuple = index_tuple.into();
+        for (index_name, columns) in indexes {
+            let index_relation = catalog.get_relation(&index_name, worker.clone())?;
+            let index_schema = index_relation.schema();
 
-                index_btree.insert(index_relation.root(), index_bytes.as_ref())?;
-                index_btree.clear_worker_stack();
+            // Build index tuple: [indexed_col_1, indexed_col_2, ..., row_id]
+            let mut index_values: Vec<DataType> = Vec::with_capacity(columns.len() + 1);
+            for (col_idx, _dtype) in &columns {
+                let full_idx = num_keys + col_idx;
+                index_values.push(full_values[full_idx].clone());
             }
+            index_values.push(DataType::BigUInt(next_row));
+
+            let index_tuple = Tuple::new(&index_values, index_schema, tx_id)?;
+            let index_bytes: OwnedTuple = index_tuple.into();
+
+            let mut index_btree =
+                catalog.index_btree(index_relation.root(), index_schema, worker.clone())?;
+            index_btree.insert(index_relation.root(), index_bytes.as_ref())?;
+            index_btree.clear_worker_stack();
         }
 
         catalog.update_relation(relation, worker)?;

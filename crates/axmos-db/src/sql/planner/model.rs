@@ -874,7 +874,8 @@ mod tests {
 
         let relation = catalog.get_relation(index_name, worker.clone())?;
         let root = relation.root();
-        let mut btree = catalog.index_btree(root, DataTypeKind::Text, worker)?;
+        let schema = relation.schema();
+        let mut btree = catalog.index_btree(root, schema, worker)?;
 
         for i in 0..count {
             let tuple = Tuple::new(

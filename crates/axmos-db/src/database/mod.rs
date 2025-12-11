@@ -166,24 +166,10 @@ impl Catalog {
     pub(crate) fn index_btree(
         &self,
         root: PageId,
-        dtype: DataTypeKind,
+        schema: &Schema,
         tx: Worker,
     ) -> io::Result<BPlusTree<DynComparator>> {
-        let comparator = if dtype.is_signed()
-            && let Some(size) = dtype.size_of_val()
-        {
-            DynComparator::SignedNumeric(SignedNumericComparator::for_size(size))
-        } else if dtype.is_numeric()
-            && let Some(size) = dtype.size_of_val()
-        {
-            DynComparator::StrictNumeric(NumericComparator::for_size(size))
-        } else if dtype.is_fixed_size()
-            && let Some(size) = dtype.size_of_val()
-        {
-            DynComparator::FixedSizeBytes(FixedSizeBytesComparator::for_size(size))
-        } else {
-            DynComparator::Variable(VarlenComparator)
-        };
+        let comparator = schema.comparator();
 
         Ok(BPlusTree::from_existent(
             root,
@@ -291,7 +277,7 @@ impl Catalog {
         };
 
         let mut meta_table = self.table_btree(self.meta_table, worker.clone())?;
-        let mut meta_index = self.index_btree(self.meta_index, DataTypeKind::Text, worker)?;
+        let mut meta_index = self.index_btree(self.meta_index, &meta_idx_schema(), worker)?;
 
         let blob = Blob::from(rel.name());
         meta_index.clear_worker_stack();
@@ -304,7 +290,7 @@ impl Catalog {
 
     /// Stores a relation in the meta - index using the provided Worker
     pub(crate) fn index_relation(&self, obj: &Relation, worker: Worker) -> io::Result<()> {
-        let mut btree = self.index_btree(self.meta_index, DataTypeKind::Text, worker.clone())?;
+        let mut btree = self.index_btree(self.meta_index, &meta_idx_schema(), worker.clone())?;
 
         let schema = meta_idx_schema();
         let tuple = Tuple::new(
@@ -337,14 +323,14 @@ impl Catalog {
 
     /// Checks if a given relation exists in the meta-index
     pub(crate) fn lookup_relation(&self, name: &str, worker: Worker) -> io::Result<SearchResult> {
-        let meta_idx = self.index_btree(self.meta_index, DataTypeKind::Text, worker)?;
+        let meta_idx = self.index_btree(self.meta_index, &meta_idx_schema(), worker)?;
         let blob = Blob::from(name);
         meta_idx.search_from_root(blob.as_ref(), FrameAccessMode::Read)
     }
 
     /// Obtains a relation from the meta table if it exists, using the provided worker.
     pub(crate) fn get_relation(&self, name: &str, worker: Worker) -> io::Result<Relation> {
-        let meta_idx = self.index_btree(self.meta_index, DataTypeKind::Text, worker.clone())?;
+        let meta_idx = self.index_btree(self.meta_index, &meta_idx_schema(), worker.clone())?;
 
         let blob = Blob::from(name);
         // println!("Searching for table {name}");

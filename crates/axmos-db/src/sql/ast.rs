@@ -578,9 +578,6 @@ impl Simplify for CreateTableStatement {
         for ct in self.columns.iter_mut() {
             ct.simplify();
         }
-        for ct in self.constraints.iter_mut() {
-            ct.simplify();
-        }
     }
 }
 
@@ -605,14 +602,13 @@ pub(crate) enum ColumnConstraintExpr {
     Unique,
     PrimaryKey,
     ForeignKey { table: String, column: String },
-    Check(Expr),
     Default(Expr),
 }
 
 impl Simplify for ColumnConstraintExpr {
     fn simplify(&mut self) {
         match self {
-            Self::Check(expr) | Self::Default(expr) => expr.simplify(),
+            Self::Default(expr) => expr.simplify(),
             _ => {}
         }
     }
@@ -627,15 +623,6 @@ pub(crate) enum TableConstraintExpr {
         ref_table: String,
         ref_columns: Vec<String>,
     },
-    Check(Expr),
-}
-
-impl Simplify for TableConstraintExpr {
-    fn simplify(&mut self) {
-        if let Self::Check(expr) = self {
-            expr.simplify();
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -676,7 +663,6 @@ impl Simplify for AlterAction {
         match self {
             Self::AddColumn(col) => col.simplify(),
             Self::AlterColumn(col) => col.simplify(),
-            Self::AddConstraint(ct) => ct.simplify(),
             _ => {}
         }
     }
@@ -1047,7 +1033,6 @@ impl Display for ColumnConstraintExpr {
             ColumnConstraintExpr::ForeignKey { table, column } => {
                 write!(f, "REFERENCES {table}({column})")
             }
-            ColumnConstraintExpr::Check(expr) => write!(f, "CHECK ({expr})"),
             ColumnConstraintExpr::Default(expr) => write!(f, "DEFAULT {expr}"),
         }
     }
@@ -1075,7 +1060,6 @@ impl Display for TableConstraintExpr {
                     ref_columns.join(", ")
                 )
             }
-            TableConstraintExpr::Check(expr) => write!(f, "CHECK ({expr})"),
         }
     }
 }

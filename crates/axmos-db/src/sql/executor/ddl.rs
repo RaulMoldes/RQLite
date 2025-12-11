@@ -2,7 +2,7 @@ use crate::{
     database::{
         SharedCatalog,
         errors::{AlreadyExists, DdlError, DdlResult},
-        schema::{Column, Constraint, ForeignKey, Relation, Schema, TableConstraint, ObjectType},
+        schema::{Column, Constraint, ForeignKey, ObjectType, Relation, Schema, TableConstraint},
     },
     sql::binder::ast::*,
     structures::bplustree::SearchResult,
@@ -18,8 +18,6 @@ pub(crate) struct DdlExecutor {
     catalog: SharedCatalog,
     worker: Worker,
 }
-
-
 
 impl DdlExecutor {
     pub(crate) fn new(catalog: SharedCatalog, worker: Worker) -> Self {
@@ -59,8 +57,9 @@ impl DdlExecutor {
             if stmt.if_not_exists {
                 return Ok(DdlOutcome::NoOp);
             }
-            return Err(DdlError::AlreadyExists(AlreadyExists::Table(stmt.table_name.clone()),
-            ));
+            return Err(DdlError::AlreadyExists(AlreadyExists::Table(
+                stmt.table_name.clone(),
+            )));
         }
 
         let schema = self.build_schema_from_bound(&stmt.columns, &stmt.constraints);
@@ -73,7 +72,6 @@ impl DdlExecutor {
             object_id,
         })
     }
-
     fn execute_create_index(&self, stmt: &BoundCreateIndex) -> DdlResult<DdlOutcome> {
         // Check if index already exists
         if let Ok(SearchResult::Found(_)) = self
@@ -83,8 +81,9 @@ impl DdlExecutor {
             if stmt.if_not_exists {
                 return Ok(DdlOutcome::NoOp);
             }
-            return Err(DdlError::AlreadyExists(AlreadyExists::Index(stmt.index_name.clone())),
-            );
+            return Err(DdlError::AlreadyExists(AlreadyExists::Index(
+                stmt.index_name.clone(),
+            )));
         }
 
         // Get the table to find column types
@@ -92,44 +91,51 @@ impl DdlExecutor {
             .catalog
             .get_relation_unchecked(stmt.table_id, self.worker.clone())?;
 
-        let table_name = table_relation.name().to_string();
-
         if !matches!(table_relation, Relation::TableRel(_)) {
-            return Err(DdlError::InvalidObjectType(ObjectType::Table),
-            );
+            return Err(DdlError::InvalidObjectType(ObjectType::Table));
         }
 
+        if stmt.columns.is_empty() {
+            return Err(DdlError::Other(
+                "Index must have at least one column".to_string(),
+            ));
+        }
 
-        // TODO. This can actually be done. Add full support for multi column indexes.
-        // For now, support single-column indexes
-        let first_col = stmt.columns.first().ok_or_else(|| {
-            DdlError::Other("Index must have at least one column".to_string())
-        })?;
+        // Build index schema: all indexed columns as keys + row_id as value
+        let num_index_keys = stmt.columns.len();
+        let mut index_columns: Vec<Column> = Vec::with_capacity(num_index_keys + 1);
+        let mut column_names: Vec<String> = Vec::with_capacity(num_index_keys);
 
-        let column = &table_relation.schema().columns()[first_col.column_idx];
-        let column_name = column.name().to_string();
-        let column_dtype = column.dtype;
+        for col_ref in &stmt.columns {
+            let table_col = &table_relation.schema().columns()[col_ref.column_idx];
+            column_names.push(table_col.name().to_string());
 
-        // Build index schema: (indexed_value, row_id)
-        let index_schema = Schema::from_columns(
-            &[
-                Column::new_unindexed(column_dtype, &column_name, None),
-                Column::new_unindexed(DataTypeKind::BigUInt, "row_id", None),
-            ],
-            1,
-        );
+            index_columns.push(Column::new_unindexed(
+                table_col.dtype,
+                table_col.name(),
+                None,
+            ));
+        }
+
+        // row_id is the value column
+        index_columns.push(Column::new_unindexed(DataTypeKind::BigUInt, "row_id", None));
+
+        let index_schema = Schema::from_columns(&index_columns, num_index_keys as u8);
 
         // Create the index
         let object_id =
             self.catalog
                 .create_index(&stmt.index_name, index_schema, self.worker.clone())?;
 
-        // Update table's schema to reference this index
-        if let Some(col) = table_relation.schema_mut().column_mut(&column_name) {
-            col.set_index(stmt.index_name.clone());
+        // Update table's schema (all participating columns reference this index)
+        for col_name in &column_names {
+            if let Some(col) = table_relation.schema_mut().column_mut(col_name) {
+                if col.index().is_none() {
+                    col.set_index(stmt.index_name.clone());
+                }
+            }
         }
 
-        // Update table relation in catalog
         self.catalog
             .update_relation(table_relation, self.worker.clone())?;
 
@@ -147,8 +153,9 @@ impl DdlExecutor {
         let table_name = relation.name().to_string();
 
         if !matches!(relation, Relation::TableRel(_)) {
-            return Err(DdlError::InvalidObjectType(crate::database::schema::ObjectType::Table),
-            );
+            return Err(DdlError::InvalidObjectType(
+                crate::database::schema::ObjectType::Table,
+            ));
         }
 
         let action_desc = match &stmt.action {
@@ -156,10 +163,9 @@ impl DdlExecutor {
                 // Check column doesn't already exist
                 if relation.schema().has_column(&col_def.name) {
                     return Err(DdlError::AlreadyExists(AlreadyExists::Column(
-                            table_name.clone(),
-                            col_def.name.clone(),
-                        )),
-                    );
+                        table_name.clone(),
+                        col_def.name.clone(),
+                    )));
                 }
 
                 let column = self.bound_column_to_column(col_def);
@@ -412,11 +418,6 @@ impl DdlExecutor {
                         });
                     }
                 }
-
-                BoundTableConstraint::Check(_expr) => {
-                    // CHECK constraints need expression storage - skip for now
-                    // TODO: Implement CHECK constraint storage
-                }
             }
         }
 
@@ -475,10 +476,6 @@ impl DdlExecutor {
                             Constraint::Default(default_value),
                         );
                     }
-                }
-                BoundColumnConstraint::Check(_expr) => {
-                    // CHECK constraints need expression evaluation - skip for now
-                    // TODO: Implement CHECK constraint
                 }
             }
         }
@@ -566,17 +563,8 @@ impl DdlExecutor {
 
                     Ok(constraint_name)
                 } else {
-                    Err(DdlError::Other(
-                        "Referenced table not found".to_string(),
-                    ))
+                    Err(DdlError::Other("Referenced table not found".to_string()))
                 }
-            }
-
-            BoundTableConstraint::Check(_expr) => {
-                // TODO: Implement CHECK constraint
-                Err(DdlError::Other(
-                    "CHECK constraints not yet supported".to_string(),
-                ))
             }
         }
     }
@@ -586,7 +574,7 @@ impl DdlExecutor {
     fn eval_literal_expr(&self, expr: &BoundExpression) -> Option<DataType> {
         match expr {
             BoundExpression::Literal { value } => Some(value.clone()),
-            _ => None, // Non-literal defaults not supported yet
+            _ => None, // Non-literal defaults are not supported yet
         }
     }
 }

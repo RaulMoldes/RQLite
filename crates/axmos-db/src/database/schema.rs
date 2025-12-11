@@ -6,8 +6,8 @@ use crate::{
     sql::planner::stats::{IndexStatistics, TableStatistics},
     storage::tuple::{OwnedTuple, Tuple, TupleRef},
     structures::comparator::{
-        DynComparator, FixedSizeBytesComparator, NumericComparator, SignedNumericComparator,
-        VarlenComparator,
+        CompositeComparator, DynComparator, FixedSizeBytesComparator, NumericComparator,
+        SignedNumericComparator, VarlenComparator,
     },
     types::{
         Blob, DataType, DataTypeKind, DataTypeRef, ObjectId, PAGE_ZERO, PageId, UInt8, UInt64,
@@ -290,63 +290,32 @@ impl Schema {
             || self.columns.iter().any(|p| p.has_constraint(ct_name))
     }
 
-    pub(crate) fn get_indexed_columns(&self) -> Vec<(usize, IndexInfo)> {
-        self.iter_values()
-            .enumerate()
-            .filter_map(|(i, col)| col.index().is_some().then(|| (i, IndexInfo::from(col))))
-            .collect()
+    /// Returns a map of index name to list of (value_column_idx, dtype) for all indexed columns.
+    /// For composite indexes, multiple columns will map to the same index name.
+    pub(crate) fn get_indexes(&self) -> HashMap<String, Vec<(usize, DataTypeKind)>> {
+        let mut indexes: HashMap<String, Vec<(usize, DataTypeKind)>> = HashMap::new();
+
+        for (i, col) in self.iter_values().enumerate() {
+            if let Some(index_name) = col.index() {
+                indexes
+                    .entry(index_name.clone())
+                    .or_default()
+                    .push((i, col.dtype));
+            }
+        }
+
+        indexes
     }
 
     pub(crate) fn comparator(&self) -> DynComparator {
         if self.num_keys > 1 {
-            DynComparator::Variable(VarlenComparator)
+            DynComparator::Composite(CompositeComparator::from_schema(self))
         } else {
             self.columns()
                 .first()
                 .map(|c| c.comparator())
                 .unwrap_or(DynComparator::Variable(VarlenComparator))
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct IndexInfo {
-    dtype: DataTypeKind,
-    name: String,
-}
-
-impl IndexInfo {
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub(crate) fn datatype(&self) -> DataTypeKind {
-        self.dtype
-    }
-}
-impl From<Column> for IndexInfo {
-    fn from(value: Column) -> IndexInfo {
-        if let Some(indx) = value.index() {
-            return IndexInfo {
-                dtype: value.dtype,
-                name: indx.to_string(),
-            };
-        } else {
-            panic!("Column does not have an index");
-        };
-    }
-}
-
-impl From<&Column> for IndexInfo {
-    fn from(value: &Column) -> IndexInfo {
-        if let Some(indx) = value.index() {
-            return IndexInfo {
-                dtype: value.dtype,
-                name: indx.to_string(),
-            };
-        } else {
-            panic!("Column does not have an index");
-        };
     }
 }
 

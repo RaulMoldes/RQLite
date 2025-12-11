@@ -119,12 +119,13 @@ pub(crate) trait Comparator {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum DynComparator {
     Variable(VarlenComparator),
     StrictNumeric(NumericComparator),
     FixedSizeBytes(FixedSizeBytesComparator),
     SignedNumeric(SignedNumericComparator),
+    Composite(CompositeComparator),
 }
 
 impl Comparator for DynComparator {
@@ -134,6 +135,7 @@ impl Comparator for DynComparator {
             Self::Variable(c) => c.compare(lhs, rhs),
             Self::StrictNumeric(c) => c.compare(lhs, rhs),
             Self::SignedNumeric(c) => c.compare(lhs, rhs),
+            Self::Composite(c) => c.compare(lhs, rhs),
         }
     }
 
@@ -143,6 +145,7 @@ impl Comparator for DynComparator {
             Self::Variable(c) => c.is_fixed_size(),
             Self::StrictNumeric(c) => c.is_fixed_size(),
             Self::SignedNumeric(c) => c.is_fixed_size(),
+            Self::Composite(c) => c.is_fixed_size(),
         }
     }
 
@@ -152,6 +155,7 @@ impl Comparator for DynComparator {
             Self::Variable(c) => c.key_size(data),
             Self::StrictNumeric(c) => c.key_size(data),
             Self::SignedNumeric(c) => c.key_size(data),
+            Self::Composite(c) => c.key_size(data),
         }
     }
 }
@@ -163,6 +167,7 @@ impl Ranger for DynComparator {
             Self::Variable(c) => c.range_bytes(lhs, rhs),
             Self::StrictNumeric(c) => c.range_bytes(lhs, rhs),
             Self::SignedNumeric(c) => c.range_bytes(lhs, rhs),
+            Self::Composite(c) => c.range_bytes(lhs, rhs),
         }
     }
 }
@@ -508,6 +513,101 @@ impl Ranger for VarlenComparator {
     }
 }
 
+/// Comparator for composite keys with multiple typed columns.
+/// Chains individual comparators and compares column by column.
+#[derive(Debug, Clone)]
+pub(crate) struct CompositeComparator {
+    /// Comparators for each key column, in order
+    comparators: Vec<DynComparator>,
+}
+
+impl CompositeComparator {
+    pub(crate) fn new(comparators: Vec<DynComparator>) -> Self {
+        Self { comparators }
+    }
+
+    /// Creates a composite comparator from a schema's key columns.
+    pub(crate) fn from_schema(schema: &crate::database::schema::Schema) -> Self {
+        let comparators: Vec<DynComparator> =
+            schema.iter_keys().map(|col| col.comparator()).collect();
+        Self { comparators }
+    }
+
+    /// Returns the number of key columns.
+    pub(crate) fn num_keys(&self) -> usize {
+        self.comparators.len()
+    }
+}
+
+impl Comparator for CompositeComparator {
+    fn compare(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Ordering> {
+        let mut lhs_offset = 0usize;
+        let mut rhs_offset = 0usize;
+
+        for comparator in &self.comparators {
+            let lhs_key = &lhs[lhs_offset..];
+            let rhs_key = &rhs[rhs_offset..];
+
+            match comparator.compare(lhs_key, rhs_key)? {
+                Ordering::Equal => {
+                    // Move to next column
+                    lhs_offset += comparator.key_size(lhs_key)?;
+                    rhs_offset += comparator.key_size(rhs_key)?;
+                }
+                other => return Ok(other),
+            }
+        }
+
+        Ok(Ordering::Equal)
+    }
+
+    fn key_size(&self, data: &[u8]) -> io::Result<usize> {
+        let mut offset = 0usize;
+
+        for comparator in &self.comparators {
+            let key_data = &data[offset..];
+            offset += comparator.key_size(key_data)?;
+        }
+
+        Ok(offset)
+    }
+
+    fn is_fixed_size(&self) -> bool {
+        self.comparators.iter().all(|c| c.is_fixed_size())
+    }
+}
+
+impl Ranger for CompositeComparator {
+    fn range_bytes(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Box<[u8]>> {
+        // For composite keys, we compute the range based on the first differing column
+        // This is useful for range scans where we want to estimate distance
+        let mut lhs_offset = 0usize;
+        let mut rhs_offset = 0usize;
+
+        for comparator in &self.comparators {
+            let lhs_key = &lhs[lhs_offset..];
+            let rhs_key = &rhs[rhs_offset..];
+
+            let lhs_size = comparator.key_size(lhs_key)?;
+            let rhs_size = comparator.key_size(rhs_key)?;
+
+            match comparator.compare(lhs_key, rhs_key)? {
+                Ordering::Equal => {
+                    lhs_offset += lhs_size;
+                    rhs_offset += rhs_size;
+                }
+                _ => {
+                    // Return range for the first differing column
+                    return comparator.range_bytes(lhs_key, rhs_key);
+                }
+            }
+        }
+
+        // All columns equal
+        Ok(Box::from([]))
+    }
+}
+
 #[cfg(test)]
 mod comparators_tests {
     use super::*;
@@ -689,6 +789,150 @@ mod comparators_tests {
             assert_eq!(lex_result, Ordering::Less);
         }
         // Big-endian would have different result based on actual bytes
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_composite_two_integers() -> io::Result<()> {
+        // Composite key: (i32, i32)
+        let comparator = CompositeComparator::new(vec![
+            DynComparator::SignedNumeric(SignedNumericComparator::for_size(4)),
+            DynComparator::SignedNumeric(SignedNumericComparator::for_size(4)),
+        ]);
+
+        // Key (1, 2) vs (1, 3)
+        let mut key_a = Vec::new();
+        key_a.extend_from_slice(&1i32.to_ne_bytes());
+        key_a.extend_from_slice(&2i32.to_ne_bytes());
+
+        let mut key_b = Vec::new();
+        key_b.extend_from_slice(&1i32.to_ne_bytes());
+        key_b.extend_from_slice(&3i32.to_ne_bytes());
+
+        // (1, 2) < (1, 3) because first columns equal, second column 2 < 3
+        assert_eq!(comparator.compare(&key_a, &key_b)?, Ordering::Less);
+
+        // Key (2, 1) vs (1, 100)
+        let mut key_c = Vec::new();
+        key_c.extend_from_slice(&2i32.to_ne_bytes());
+        key_c.extend_from_slice(&1i32.to_ne_bytes());
+
+        let mut key_d = Vec::new();
+        key_d.extend_from_slice(&1i32.to_ne_bytes());
+        key_d.extend_from_slice(&100i32.to_ne_bytes());
+
+        // (2, 1) > (1, 100) because first column 2 > 1
+        assert_eq!(comparator.compare(&key_c, &key_d)?, Ordering::Greater);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_composite_int_and_text() -> io::Result<()> {
+        use crate::types::Blob;
+
+        // Composite key: (i64, Text)
+        let comparator = CompositeComparator::new(vec![
+            DynComparator::SignedNumeric(SignedNumericComparator::for_size(8)),
+            DynComparator::Variable(VarlenComparator),
+        ]);
+
+        // Key (1, "apple") vs (1, "banana")
+        let blob_a = Blob::from("apple");
+        let blob_b = Blob::from("banana");
+
+        let mut key_a = Vec::new();
+        key_a.extend_from_slice(&1i64.to_ne_bytes());
+        key_a.extend_from_slice(blob_a.as_ref());
+
+        let mut key_b = Vec::new();
+        key_b.extend_from_slice(&1i64.to_ne_bytes());
+        key_b.extend_from_slice(blob_b.as_ref());
+
+        // (1, "apple") < (1, "banana")
+        assert_eq!(comparator.compare(&key_a, &key_b)?, Ordering::Less);
+
+        // Key (2, "apple") vs (1, "zebra")
+        let blob_z = Blob::from("zebra");
+
+        let mut key_c = Vec::new();
+        key_c.extend_from_slice(&2i64.to_ne_bytes());
+        key_c.extend_from_slice(blob_a.as_ref());
+
+        let mut key_d = Vec::new();
+        key_d.extend_from_slice(&1i64.to_ne_bytes());
+        key_d.extend_from_slice(blob_z.as_ref());
+
+        // (2, "apple") > (1, "zebra") because 2 > 1
+        assert_eq!(comparator.compare(&key_c, &key_d)?, Ordering::Greater);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_composite_key_size() -> io::Result<()> {
+        use crate::types::Blob;
+
+        // Composite key: (i32, Text)
+        let comparator = CompositeComparator::new(vec![
+            DynComparator::SignedNumeric(SignedNumericComparator::for_size(4)),
+            DynComparator::Variable(VarlenComparator),
+        ]);
+
+        let blob = Blob::from("hello");
+        let mut key = Vec::new();
+        key.extend_from_slice(&42i32.to_ne_bytes());
+        key.extend_from_slice(blob.as_ref());
+
+        let size = comparator.key_size(&key)?;
+        // 4 bytes for i32 + varint(5) + 5 bytes for "hello" = 4 + 1 + 5 = 10
+        assert_eq!(size, 10);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_composite_equal_keys() -> io::Result<()> {
+        let comparator = CompositeComparator::new(vec![
+            DynComparator::StrictNumeric(NumericComparator::for_size(8)),
+            DynComparator::StrictNumeric(NumericComparator::for_size(8)),
+        ]);
+
+        let mut key = Vec::new();
+        key.extend_from_slice(&100u64.to_ne_bytes());
+        key.extend_from_slice(&200u64.to_ne_bytes());
+
+        assert_eq!(comparator.compare(&key, &key)?, Ordering::Equal);
+
+        let range = comparator.range_bytes(&key, &key)?;
+        assert!(range.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_composite_range_bytes() -> io::Result<()> {
+        let comparator = CompositeComparator::new(vec![
+            DynComparator::StrictNumeric(NumericComparator::for_size(4)),
+            DynComparator::StrictNumeric(NumericComparator::for_size(4)),
+        ]);
+
+        // (10, 5) vs (10, 3) - differ on second column
+        let mut key_a = Vec::new();
+        key_a.extend_from_slice(&10u32.to_ne_bytes());
+        key_a.extend_from_slice(&5u32.to_ne_bytes());
+
+        let mut key_b = Vec::new();
+        key_b.extend_from_slice(&10u32.to_ne_bytes());
+        key_b.extend_from_slice(&3u32.to_ne_bytes());
+
+        let range = comparator.range_bytes(&key_a, &key_b)?;
+
+        // Should be range of second column: |5 - 3| = 2
+        let num_comp = NumericComparator::for_size(4);
+        let diff = num_comp.read_native_u64(&range);
+        assert_eq!(diff, 2);
 
         Ok(())
     }

@@ -69,7 +69,6 @@ impl Delete {
         let mut btree = catalog.table_btree(root, worker.clone())?;
         let logical_id = LogicalId::new(self.op.table_id, row_id);
 
-        // Search the tuple by row id.
         let search_result = btree.search_from_root(row_id.as_ref(), FrameAccessMode::Write)?;
 
         let position = match search_result {
@@ -80,29 +79,73 @@ impl Delete {
             }
         };
 
-        // Read current tuple
-        if let Ok(mut tuple) = btree.with_cell_at(position, |bytes| {
+        // Read current tuple, get values for index maintenance, mark as deleted
+        let values: Vec<DataType> = btree.with_cell_at(position, |bytes| {
             let Some(tuple_ref) = TupleRef::read_for_snapshot(bytes, schema, snapshot)? else {
                 return Err(QueryExecutionError::TupleNotFound(logical_id));
             };
 
-            // Check if already deleted
-            // If the xmax is not valid, it means it points to [TRANSACTION ZERO] which is the transaction id null ptr.
             if tuple_ref.xmax().is_valid() {
                 return Err(QueryExecutionError::AlreadyDeleted(logical_id));
             }
 
-            Ok(Tuple::try_from((bytes, schema))?)
-        })? {
-            // Mark the tuple as deleted
-            tuple.delete(tx_id)?;
-            let new_bytes: OwnedTuple = tuple.into();
-            btree.clear_worker_stack();
-            // Update in B-tree
-            btree.update(root, new_bytes.as_ref())?;
-        } else {
-            btree.clear_worker_stack();
-            return Err(QueryExecutionError::TupleNotFound(logical_id));
+            // Collect values for index deletion
+            let mut vals = Vec::with_capacity(schema.values().len());
+            for i in 0..schema.values().len() {
+                vals.push(tuple_ref.value(i)?.to_owned());
+            }
+
+            Ok(vals)
+        })??;
+
+        // Mark tuple as deleted and update
+        let deleted_result: ExecutionResult<OwnedTuple> =
+            btree.with_cell_at(position, |bytes| {
+                let mut tuple = Tuple::try_from((bytes, schema))?;
+                tuple.delete(tx_id)?;
+                Ok(tuple.into())
+            })?;
+
+        let deleted_bytes = deleted_result?;
+
+        btree.clear_worker_stack();
+        btree.update(root, deleted_bytes.as_ref())?;
+
+        // Maintain indexes - search, mark as deleted, update
+        let indexes = schema.get_indexes();
+
+        for (index_name, columns) in indexes {
+            let index_relation = catalog.get_relation(&index_name, worker.clone())?;
+            let index_schema = index_relation.schema();
+            let index_root = index_relation.root();
+
+            let mut index_btree = catalog.index_btree(index_root, index_schema, worker.clone())?;
+
+            // Build index key for search
+            let mut index_key: Vec<u8> = Vec::new();
+            for (col_idx, _dtype) in &columns {
+                index_key.extend_from_slice(values[*col_idx].as_ref());
+            }
+            index_key.extend_from_slice(row_id.as_ref());
+
+            // Search for index entry
+            let search_result = index_btree.search_from_root(&index_key, FrameAccessMode::Write)?;
+
+            if let SearchResult::Found(pos) = search_result {
+                // Mark as deleted and update
+                let deleted_index_bytes_result: ExecutionResult<OwnedTuple> = index_btree
+                    .with_cell_at(pos, |bytes| {
+                        let mut index_tuple = Tuple::try_from((bytes, index_schema))?;
+                        index_tuple.delete(tx_id)?;
+                        Ok(index_tuple.into())
+                    })?;
+                let deleted_index_bytes = deleted_index_bytes_result?;
+
+                index_btree.clear_worker_stack();
+                index_btree.update(index_root, deleted_index_bytes.as_ref())?;
+            } else {
+                index_btree.clear_worker_stack();
+            }
         }
 
         Ok(())

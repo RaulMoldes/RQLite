@@ -631,8 +631,6 @@ impl Display for TransactionError {
     }
 }
 
-
-
 #[derive(Debug)]
 pub(crate) enum DdlError {
     AlreadyExists(AlreadyExists),
@@ -657,8 +655,6 @@ impl Display for DdlError {
         }
     }
 }
-
-
 
 impl From<IoError> for DdlError {
     fn from(value: IoError) -> Self {
@@ -689,8 +685,6 @@ pub(crate) type OptimizerResult<T> = Result<T, OptimizerError>;
 pub(crate) type EvalResult<T> = Result<T, EvaluationError>;
 pub(crate) type TypeResult<T> = Result<T, TypeError>;
 pub(crate) type ExecutionResult<T> = Result<T, QueryExecutionError>;
-
-
 
 impl Error for DdlError {}
 impl Error for BuilderError {}

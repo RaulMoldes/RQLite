@@ -1575,13 +1575,6 @@ impl Parser {
                         column: ref_column,
                     });
                 }
-                Token::Check => {
-                    self.next_token();
-                    self.expect(Token::LParen)?;
-                    let expr = self.parse_expression()?;
-                    self.expect(Token::RParen)?;
-                    constraints.push(ColumnConstraintExpr::Check(expr));
-                }
                 Token::Default => {
                     self.next_token();
                     let expr = self.parse_expression()?;
@@ -1651,13 +1644,6 @@ impl Parser {
                     ref_table,
                     ref_columns,
                 })
-            }
-            Token::Check => {
-                self.next_token();
-                self.expect(Token::LParen)?;
-                let expr = self.parse_expression()?;
-                self.expect(Token::RParen)?;
-                Ok(TableConstraintExpr::Check(expr))
             }
             _ => Err(ParserError::UnexpectedToken(self.current_token.clone())),
         }

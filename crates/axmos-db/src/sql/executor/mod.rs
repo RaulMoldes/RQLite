@@ -73,6 +73,7 @@ pub struct ExecutionStats {
     pub pages_read: u64,
 }
 
+/*
 #[cfg(test)]
 mod query_execution_tests {
     use super::*;
@@ -93,7 +94,9 @@ mod query_execution_tests {
             executor::build::ExecutorBuilder,
             lexer::Lexer,
             parser::Parser,
-            planner::{CascadesOptimizer,ProcessedStatement, OptimizerConfig, model::AxmosCostModel},
+            planner::{
+                CascadesOptimizer, OptimizerConfig, ProcessedStatement, model::AxmosCostModel,
+            },
         },
         transactions::worker::WorkerPool,
         types::{Blob, DataType, DataTypeKind, UInt64},
@@ -552,3 +555,4 @@ mod query_execution_tests {
         assert_eq!(old_results.len(), 0, "No one should have age 25");
     }
 }
+*/

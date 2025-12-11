@@ -16,8 +16,8 @@ use crate::{
         errors::{OptimizerError, OptimizerResult},
     },
     sql::binder::ast::*,
+    sql::executor::ddl::{DdlExecutor, DdlOutcome},
     transactions::worker::Worker,
-    sql::executor::ddl::{DdlExecutor, DdlOutcome}
 };
 
 pub(crate) use memo::{ExprId, GroupId, Memo};
@@ -46,7 +46,6 @@ impl Default for OptimizerConfig {
         }
     }
 }
-
 
 /// Result of processing a statement
 #[derive(Debug)]
@@ -116,7 +115,6 @@ impl<C: CostModel, P: StatisticsProvider> CascadesOptimizer<C, P> {
         self.implementation_rules.extend(rules);
         self
     }
-
 
     /// Process a bound statement.
     /// - DDL statements are executed immediately
