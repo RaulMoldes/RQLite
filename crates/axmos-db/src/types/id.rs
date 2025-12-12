@@ -6,6 +6,12 @@ id_type!(ObjectId, __GLOBAL_OBJ_COUNT, "ObjectId");
 
 id_type!(WorkerId, __GLOBAL_WORKER_COUNT, "WorkerId");
 
+id_type!(BlockId, __GLOBAL_BLOCK_COUNT, "BlockId");
+
+pub fn initialize_block_count(val: u64) {
+     __GLOBAL_BLOCK_COUNT.store(val, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn initialize_atomics() {
     __GLOBAL_LOG_COUNT.store(1, std::sync::atomic::Ordering::Relaxed);
     __GLOBAL_PAGE_COUNT.store(1, std::sync::atomic::Ordering::Relaxed);
@@ -35,3 +41,4 @@ pub const OBJECT_ZERO: ObjectId = ObjectId(0);
 pub const TRANSACTION_ZERO: TransactionId = TransactionId(0);
 pub const META_TABLE_ROOT: PageId = PageId(1);
 pub const META_INDEX_ROOT: PageId = PageId(2);
+pub const BLOCK_ZERO: BlockId = BlockId(0);

@@ -1,3 +1,4 @@
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{
     collections::HashMap,
     io::{self, Error as IoError, ErrorKind},
@@ -10,10 +11,11 @@ use crate::{
     io::{
         disk::FileOperations,
         pager::{Pager, SharedPager},
+        wal::{OwnedRecord, RecordRef, RecordType},
     },
     structures::{bplustree::BPlusTree, comparator::Comparator},
     transactions::accessor::RcPageAccessor,
-    types::DataTypeKind,
+    types::{DataTypeKind, LogId, ObjectId, TransactionId},
 };
 
 mod btree;
@@ -139,4 +141,53 @@ pub(crate) fn test_btree<Cmp: Comparator + Clone>(
         comparator,
     )?;
     Ok((tree, f))
+}
+
+pub(crate) fn make_test_record(
+    lsn_seed: u64,
+    tid: u64,
+    oid: u64,
+    undo_len: usize,
+    redo_len: usize,
+) -> OwnedRecord {
+    let mut rng = StdRng::seed_from_u64(lsn_seed);
+    let undo: Vec<u8> = (0..undo_len).map(|_| rng.random()).collect();
+    let redo: Vec<u8> = (0..redo_len).map(|_| rng.random()).collect();
+
+    OwnedRecord::new(
+        TransactionId::from(tid),
+        if lsn_seed > 1 {
+            Some(LogId::from(lsn_seed - 1))
+        } else {
+            None
+        },
+        ObjectId::from(oid),
+        RecordType::Update,
+        &undo,
+        &redo,
+    )
+}
+
+pub(crate) fn verify_record(
+    record: &RecordRef<'_>,
+    expected_seed: u64,
+    tid: u64,
+    undo_len: usize,
+    redo_len: usize,
+) {
+    assert_eq!(record.tid(), TransactionId::from(tid));
+
+    let mut rng = StdRng::seed_from_u64(expected_seed);
+
+    let undo = record.undo_data();
+    assert_eq!(undo.len(), undo_len);
+    for &byte in undo {
+        assert_eq!(byte, rng.random::<u8>());
+    }
+
+    let redo = record.redo_data();
+    assert_eq!(redo.len(), redo_len);
+    for &byte in redo {
+        assert_eq!(byte, rng.random::<u8>());
+    }
 }

@@ -2,7 +2,7 @@ use crate::{
     io::{
         frames::{FrameAccessMode, FrameStack, Position},
         pager::SharedPager,
-        wal::OwnedLogRecord,
+        wal::OwnedRecord,
     },
     storage::{
         buffer::MemBlock,
@@ -222,7 +222,7 @@ impl PageAccessor {
         ))
     }
 
-    pub(crate) fn push_to_log(&self, record: OwnedLogRecord) -> io::Result<()> {
+    pub(crate) fn push_to_log(&self, record: OwnedRecord) -> io::Result<()> {
         self.pager.write().push_to_log(record)
     }
 }

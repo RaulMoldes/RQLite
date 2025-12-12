@@ -1,8 +1,9 @@
 use crate::{io::frames::MemFrame, storage::page::MemPage, types::PageId};
 
+use indexmap::IndexMap;
 use std::{
     clone::Clone,
-    collections::{HashMap, VecDeque},
+    io::{self, Error as IoError, ErrorKind},
 };
 
 #[derive(Debug, Default)]
@@ -26,17 +27,17 @@ impl std::fmt::Display for MemoryStats {
 #[derive(Debug)]
 pub(crate) struct PageCache {
     capacity: usize,
-    frames: HashMap<PageId, MemFrame<MemPage>>,
-    free_list: VecDeque<PageId>, // Queue of frames in eviction order
-    stats: MemoryStats,          // Tracking stats
+    frames: IndexMap<PageId, MemFrame<MemPage>>,
+    cursor: usize,
+    stats: MemoryStats, // Tracking stats
 }
 
 impl PageCache {
     pub fn new() -> Self {
         PageCache {
             capacity: 0,
-            frames: HashMap::new(),
-            free_list: VecDeque::new(),
+            frames: IndexMap::new(),
+            cursor: 0,
             stats: MemoryStats::default(),
         }
     }
@@ -54,8 +55,8 @@ impl PageCache {
     pub fn with_capacity(capacity: usize) -> Self {
         PageCache {
             capacity,
-            frames: HashMap::with_capacity(capacity),
-            free_list: VecDeque::with_capacity(capacity),
+            frames: IndexMap::with_capacity(capacity),
+            cursor: 0,
             stats: MemoryStats::default(),
         }
     }
@@ -68,16 +69,14 @@ impl PageCache {
         } else {
             self.frames.shrink_to(capacity);
         }
-
-        if self.free_list.capacity() < capacity {
-            self.free_list.reserve(capacity - self.free_list.capacity());
-        } else {
-            self.free_list.shrink_to(capacity);
-        }
     }
 
     /// Add a list of frames to the buffer pool.
-    pub fn insert(&mut self, id: PageId, frame: MemFrame<MemPage>) -> Option<MemFrame<MemPage>> {
+    pub fn insert(
+        &mut self,
+        id: PageId,
+        frame: MemFrame<MemPage>,
+    ) -> io::Result<Option<MemFrame<MemPage>>> {
         // If the frame already exists, update it
         if self.frames.contains_key(&id) {
             if let Some(old_frame) = self.frames.get_mut(&id) {
@@ -85,46 +84,49 @@ impl PageCache {
                 self.stats.cache_hits += 1;
                 *old_frame = frame
             }
-            return None;
+            return Ok(None);
         }
 
         let evicted = if self.capacity <= self.frames.len() {
-            self.evict()
+            self.evict()?
         } else {
             None
         };
 
-        self.free_list.push_back(id);
         self.frames.insert(id, frame);
-        evicted
+        Ok(evicted)
     }
 
-    pub fn evict(&mut self) -> Option<MemFrame<MemPage>> {
-        // TODO: I NEED I WAY TO CHECK FOR OOM ERRORS HERE.
-        //if self.frames.len() >= self.capacity {
-        // Pop from the queue until there is one page that we can evict.
-        let mut visited: std::collections::HashSet<PageId> = std::collections::HashSet::new();
-        while let Some(id) = self.free_list.pop_front() {
-            if let Some(frame) = self.frames.remove(&id) {
+    pub fn evict(&mut self) -> io::Result<Option<MemFrame<MemPage>>> {
+        if self.frames.is_empty() {
+            return Ok(None);
+        };
+
+        let mut found_victim = None;
+        // Attempt to iterate over all the frames.
+        while self.cursor <= self.frames.len() && found_victim.is_none() {
+            if let Some((pid, frame)) = self.frames.get_index(self.cursor) {
                 if frame.is_free() {
                     self.stats.frames_evicted += 1;
 
-                    return Some(frame);
-                };
+                    let (_, victim) = self.frames.swap_remove_index(self.cursor).unwrap();
 
-                if visited.contains(&id) {
-                    self.free_list.push_back(id);
-                    self.frames.insert(id, frame);
-                    panic!("OUT OF MEMORY");
-                };
+                    found_victim = Some(victim);
+                }
+            };
 
-                visited.insert(id);
-                self.free_list.push_back(id);
-                self.frames.insert(id, frame);
-            }
+            // Not evictable.
+            self.cursor += 1;
         }
-        // }
-        None
+
+        if found_victim.is_some() {
+            return Ok(found_victim);
+        };
+
+        Err(IoError::new(
+            ErrorKind::OutOfMemory,
+            "Buffer pool got out of memory for new frames.",
+        ))
     }
 
     pub fn get(&mut self, id: &PageId) -> Option<MemFrame<MemPage>> {
@@ -140,13 +142,13 @@ impl PageCache {
 
     pub fn clear(&mut self) -> Vec<MemFrame<MemPage>> {
         let mut remaining_frames = Vec::with_capacity(self.frames.len());
-        for (_, frame) in self.frames.drain() {
+        for (_, frame) in self.frames.drain(..) {
             // We do not do any checks here because this is like a force-eviction of all pages, useful when a crash happens and we need to write everything to the disk as is.
             // For safe eviction use [evict].
             remaining_frames.push(frame);
         }
 
-        self.free_list.clear();
+        self.cursor = 0;
         self.capacity = 0;
         remaining_frames
     }

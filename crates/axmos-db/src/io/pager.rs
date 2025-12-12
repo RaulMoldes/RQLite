@@ -4,7 +4,7 @@ use crate::{
         cache::PageCache,
         disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
         frames::MemFrame,
-        wal::{OwnedLogRecord, WriteAheadLog},
+        wal::{OwnedRecord, WriteAheadLog},
     },
     make_shared,
     storage::{
@@ -15,7 +15,7 @@ use crate::{
 };
 
 use std::{
-    io::{self, Error as IoError, ErrorKind, Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     mem,
     path::Path,
     ptr,
@@ -147,7 +147,7 @@ impl Pager {
         Ok(())
     }
 
-    pub(crate) fn push_to_log(&mut self, record: OwnedLogRecord) -> io::Result<()> {
+    pub(crate) fn push_to_log(&mut self, record: OwnedRecord) -> io::Result<()> {
         self.wal.push(record)
     }
 
@@ -290,7 +290,7 @@ impl Pager {
 
     pub(crate) fn cache_frame(&mut self, frame: MemFrame<MemPage>) -> io::Result<PageId> {
         let id = frame.read().page_number();
-        if let Some(mut evicted) = self.cache.insert(id, frame) {
+        if let Some(mut evicted) = self.cache.insert(id, frame)? {
             let evicted_id = evicted.read().page_number();
 
             if evicted.is_dirty() {
@@ -322,7 +322,7 @@ impl Pager {
         );
 
         let mem_page = MemFrame::new(MemPage::from(page));
-        if let Some(mut evicted) = self.cache.insert(id, mem_page)
+        if let Some(mut evicted) = self.cache.insert(id, mem_page)?
             && evicted.is_dirty()
         {
             let evicted_id = evicted.read().page_number();

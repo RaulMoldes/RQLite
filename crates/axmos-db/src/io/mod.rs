@@ -11,8 +11,7 @@ pub mod pager;
 pub mod wal;
 
 use crate::types::{DataType, DataTypeKind, VarInt, reinterpret_cast, varint::MAX_VARINT_LEN};
-use std::alloc::{Layout, alloc_zeroed};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, Write};
 
 #[cfg(test)]
 mod tests;
