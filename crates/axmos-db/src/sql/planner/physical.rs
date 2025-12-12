@@ -11,7 +11,7 @@ use std::{
 
 use crate::{
     database::schema::Schema,
-    sql::{ast::JoinType, binder::ast::*},
+    sql::{binder::ast::*, parser::ast::JoinType},
     types::ObjectId,
 };
 

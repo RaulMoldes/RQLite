@@ -4,7 +4,7 @@
 //! It implements AxmosValueType as a dynamic-size type.
 
 use crate::{
-    TextEncoding, from_blob, impl_axmos_hashable,
+    from_blob, impl_axmos_hashable,
     structures::comparator::{Comparator, VarlenComparator},
     types::{
         Date, DateTime, Float32, Float64, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
@@ -20,22 +20,6 @@ use std::{
     cmp::{Ordering, PartialEq},
     ops::{Deref, DerefMut},
 };
-
-pub(crate) fn decode_utf16le(bytes: &[u8]) -> String {
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect();
-    String::from_utf16(&units).unwrap()
-}
-
-pub(crate) fn decode_utf16be(bytes: &[u8]) -> String {
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
-        .collect();
-    String::from_utf16(&units).unwrap()
-}
 
 #[derive(Debug, Clone)]
 pub struct Blob(Box<[u8]>);
@@ -81,35 +65,16 @@ impl Blob {
         self.data().is_empty()
     }
 
-    pub fn to_string(&self, encoding: TextEncoding) -> String {
-        match encoding {
-            TextEncoding::Utf8 => String::from_utf8(self.content().to_vec()).unwrap(),
-            TextEncoding::Utf16be => {
-                assert!(
-                    self.len().is_power_of_two(),
-                    "UTF-16BE blob length must be multiple of 2"
-                );
-                decode_utf16be(self.content())
-            }
-            TextEncoding::Utf16le => {
-                assert!(
-                    self.len().is_power_of_two(),
-                    "UTF-16LE blob length must be multiple of 2"
-                );
-                decode_utf16le(self.content())
-            }
-        }
+    pub fn to_string(&self) -> String {
+        String::from_utf8(self.content().to_vec()).unwrap()
     }
 
     pub fn as_utf8(&self) -> &[u8] {
         self.content()
     }
 
-    pub fn as_str(&self, encoding: TextEncoding) -> &str {
-        match encoding {
-            TextEncoding::Utf8 => std::str::from_utf8(self.as_utf8()).unwrap(),
-            _ => panic!("Can only convert to string directly using utf8 encoding"),
-        }
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(self.as_utf8()).unwrap()
     }
 
     pub fn content(&self) -> &[u8] {
@@ -162,35 +127,16 @@ impl<'a> BlobRef<'a> {
         self.content().len()
     }
 
-    pub fn to_string(&self, encoding: TextEncoding) -> String {
-        match encoding {
-            TextEncoding::Utf8 => String::from_utf8(self.content().to_vec()).unwrap(),
-            TextEncoding::Utf16be => {
-                assert!(
-                    self.len().is_power_of_two(),
-                    "UTF-16BE blob length must be multiple of 2"
-                );
-                decode_utf16be(self.content())
-            }
-            TextEncoding::Utf16le => {
-                assert!(
-                    self.len().is_power_of_two(),
-                    "UTF-16LE blob length must be multiple of 2"
-                );
-                decode_utf16le(self.content())
-            }
-        }
+    pub fn to_string(&self) -> String {
+        String::from_utf8(self.content().to_vec()).unwrap()
     }
 
     pub fn as_utf8(&self) -> &[u8] {
         self.content()
     }
 
-    pub fn as_str(&self, encoding: TextEncoding) -> &str {
-        match encoding {
-            TextEncoding::Utf8 => std::str::from_utf8(self.as_utf8()).unwrap(),
-            _ => panic!("Can only convert to string directly using utf8 encoding"),
-        }
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(self.as_utf8()).unwrap()
     }
 
     pub fn to_blob(&self) -> Blob {
@@ -270,35 +216,16 @@ impl<'a> BlobRefMut<'a> {
         self.content().len()
     }
 
-    pub fn to_string(&self, encoding: TextEncoding) -> String {
-        match encoding {
-            TextEncoding::Utf8 => String::from_utf8(self.content().to_vec()).unwrap(),
-            TextEncoding::Utf16be => {
-                assert!(
-                    self.len().is_power_of_two(),
-                    "UTF-16BE blob length must be multiple of 2"
-                );
-                decode_utf16be(self.content())
-            }
-            TextEncoding::Utf16le => {
-                assert!(
-                    self.len().is_power_of_two(),
-                    "UTF-16LE blob length must be multiple of 2"
-                );
-                decode_utf16le(self.content())
-            }
-        }
+    pub fn to_string(&self) -> String {
+        String::from_utf8(self.content().to_vec()).unwrap()
     }
 
     pub fn as_utf8(&self) -> &[u8] {
         self.content()
     }
 
-    pub fn as_str(&self, encoding: TextEncoding) -> &str {
-        match encoding {
-            TextEncoding::Utf8 => std::str::from_utf8(self.as_utf8()).unwrap(),
-            _ => panic!("Can only convert to string directly using utf8 encoding"),
-        }
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(self.as_utf8()).unwrap()
     }
 
     pub fn to_blob(&self) -> Blob {
@@ -568,21 +495,21 @@ impl<'a> DerefMut for BlobRefMut<'a> {
 
 impl AxmosCastable<Date> for Blob {
     fn can_cast(&self) -> bool {
-        Date::parse_iso(&self.to_string(TextEncoding::Utf8)).is_ok()
+        Date::parse_iso(&self.to_string()).is_ok()
     }
 
     fn try_cast(&self) -> Option<Date> {
-        Date::parse_iso(&self.to_string(TextEncoding::Utf8)).ok()
+        Date::parse_iso(&self.to_string()).ok()
     }
 }
 
 impl AxmosCastable<DateTime> for Blob {
     fn can_cast(&self) -> bool {
-        DateTime::parse_iso(&self.to_string(TextEncoding::Utf8)).is_ok()
+        DateTime::parse_iso(&self.to_string()).is_ok()
     }
 
     fn try_cast(&self) -> Option<DateTime> {
-        DateTime::parse_iso(&self.to_string(TextEncoding::Utf8)).ok()
+        DateTime::parse_iso(&self.to_string()).ok()
     }
 }
 

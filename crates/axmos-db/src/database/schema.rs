@@ -1,5 +1,5 @@
 use crate::{
-    TRANSACTION_ZERO, TextEncoding,
+    TRANSACTION_ZERO,
     database::meta_table_schema,
     io::{AsBytes, read_string_unchecked, read_type_from_buf, write_string_unchecked},
     repr_enum,
@@ -857,7 +857,7 @@ impl<'a, 'b> TryFrom<TupleRef<'a, 'b>> for Relation {
         };
 
         let name = match tuple.value(3)? {
-            DataTypeRef::Text(blob) => blob.as_str(TextEncoding::Utf8).to_string(),
+            DataTypeRef::Text(blob) => blob.as_str().to_string(),
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,

@@ -11,8 +11,7 @@ use std::{
 };
 
 use crate::{
-    AxmosDBConfig, DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, DEFAULT_CACHE_SIZE,
-    DEFAULT_PAGE_SIZE, DEFAULT_POOL_SIZE, IncrementalVaccum, TRANSACTION_ZERO, TextEncoding,
+    AxmosDBConfig, TRANSACTION_ZERO,
     database::{
         errors::{BoxError, IntoBoxError, TaskResult, TransactionResult},
         runner::{TaskContext, TaskRunner},
@@ -26,7 +25,6 @@ use crate::{
     sql::{
         binder::Binder,
         executor::{Row, build::ExecutorBuilder, context::ExecutionContext},
-        lexer::Lexer,
         parser::Parser,
         planner::{CascadesOptimizer, OptimizerConfig, ProcessedStatement, model::AxmosCostModel},
     },
@@ -93,21 +91,9 @@ pub struct Database {
 
 impl Database {
     pub fn with_defaults(path: impl AsRef<Path>) -> io::Result<Self> {
-        let config = AxmosDBConfig {
-            page_size: DEFAULT_PAGE_SIZE,
-            cache_size: Some(DEFAULT_CACHE_SIZE),
-            incremental_vacuum_mode: IncrementalVaccum::Disabled,
-            min_keys: 3,
-            text_encoding: TextEncoding::Utf8,
-        };
+        let config = AxmosDBConfig::default();
 
-        let pager = Pager::from_config(config, path)?;
-        Database::new(
-            SharedPager::from(pager),
-            DEFAULT_BTREE_MIN_KEYS as usize,
-            DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE as usize,
-            DEFAULT_POOL_SIZE as usize,
-        )
+        Database::new(config, path)
     }
 }
 
@@ -458,24 +444,20 @@ impl Catalog {
 }
 
 impl Database {
-    pub(crate) fn new(
-        pager: SharedPager,
-        min_keys: usize,
-        siblings_per_side: usize,
-        pool_size: usize,
-    ) -> io::Result<Self> {
+    pub(crate) fn new(config: AxmosDBConfig, path: impl AsRef<Path>) -> io::Result<Self> {
         initialize_atomics();
+        let pager: SharedPager = SharedPager::from(Pager::from_config(config, path)?);
 
         let init_accessor = RcPageAccessor::new(pager.clone());
         let catalog = SharedCatalog::from(Catalog::new_init(
-            min_keys,
-            siblings_per_side,
+            config.min_keys_per_page as usize,
+            config.num_siblings_per_side as usize,
             init_accessor,
         )?);
 
         let controller = TransactionCoordinator::new(pager.clone(), catalog.clone());
         let task_runner = TaskRunner::new(
-            pool_size,
+            config.pool_size as usize,
             pager.clone(),
             catalog.clone(),
             controller.clone(),
@@ -566,8 +548,7 @@ impl Database {
     pub fn run_query(&self, sql: String) -> TransactionResult<Vec<Row>> {
         let results = self.task_runner.run_with_result(move |ctx| {
             // 1. Parse
-            let lexer = Lexer::new(&sql);
-            let mut parser = Parser::new(lexer);
+            let mut parser = Parser::new(&sql);
             let stmt = parser.parse().box_err()?;
 
             // 2. Bind

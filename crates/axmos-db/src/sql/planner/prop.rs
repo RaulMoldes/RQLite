@@ -9,8 +9,8 @@ use std::collections::HashSet;
 use crate::{
     database::schema::Schema,
     sql::{
-        ast::{BinaryOperator, JoinType},
         binder::ast::BoundExpression,
+        parser::ast::{BinaryOperator, JoinType},
         planner::physical::OrderingSpec,
     },
     types::ObjectId,

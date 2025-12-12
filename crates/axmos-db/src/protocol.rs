@@ -1,5 +1,3 @@
-// src/bin/protocol.rs
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -36,7 +34,7 @@ impl SqlResponse {
         }
     }
 
-    pub fn ok(message: String) -> Self {
+    pub fn _ok(message: String) -> Self {
         Self {
             success: true,
             result: message,

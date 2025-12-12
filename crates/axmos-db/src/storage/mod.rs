@@ -1,15 +1,13 @@
-mod tests;
-
 pub mod buffer;
 pub mod cell;
 pub mod latches;
 pub mod page;
 pub mod tuple;
 
-use crate::TextEncoding;
 use crate::types::DataTypeRef;
 use tuple::{TupleRef, TupleRefMut};
 
+#[macro_export]
 macro_rules! impl_display_tuple {
     ($tuple_type:ty, $name:expr) => {
         impl<'a, 'b> std::fmt::Display for $tuple_type {
@@ -44,9 +42,7 @@ macro_rules! impl_display_tuple {
                             DataTypeRef::Date(v) => write!(f, "{}", v.to_owned())?,
                             DataTypeRef::DateTime(v) => write!(f, "{}", v.to_owned())?,
                             DataTypeRef::Blob(b) => write!(f, "Blob({} bytes)", b.len())?,
-                            DataTypeRef::Text(b) => {
-                                write!(f, "Text: \"{}\"", b.as_str(TextEncoding::Utf8))?
-                            }
+                            DataTypeRef::Text(b) => write!(f, "Text: \"{}\"", b.as_str())?,
                         },
                         Err(e) => {
                             write!(f, "<error: {e}>")?;
@@ -83,9 +79,7 @@ macro_rules! impl_display_tuple {
                             DataTypeRef::Date(v) => write!(f, "{}", v.to_owned())?,
                             DataTypeRef::DateTime(v) => write!(f, "{}", v.to_owned())?,
                             DataTypeRef::Blob(b) => write!(f, "Blob({} bytes)", b.len())?,
-                            DataTypeRef::Text(b) => {
-                                write!(f, "Text: \"{}\"", b.as_str(TextEncoding::Utf8))?
-                            }
+                            DataTypeRef::Text(b) => write!(f, "Text: \"{}\"", b.as_str())?,
                         },
                         Err(e) => {
                             write!(f, "<error: {e}>")?;

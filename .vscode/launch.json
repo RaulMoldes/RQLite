@@ -5,8 +5,8 @@
       "type": "lldb",
       "request": "launch",
       "name": "Debug Rust test (AxmosDB)",
-      "program": "${workspaceFolder}/target/debug/deps/axmosdb-bc5182bbda8020c7",
-      "args": ["--nocapture", "test_select_group_by"],
+      "program": "${workspaceFolder}/target/debug/deps/axmosdb-df256a20cb74a2b7",
+      "args": ["--nocapture", "test_wal_multiple_flushes"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {

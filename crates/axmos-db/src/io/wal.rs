@@ -1,48 +1,41 @@
 use crate::{
-    io::{
-        MemBuffer,
-        disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
-    },
-    storage::{buffer::BufferWithMetadata, tuple::OwnedTuple},
+    io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
+    repr_enum,as_slice,
+    storage::{buffer::MemBlock, tuple::OwnedTuple},
     types::{LogId, OBJECT_ZERO, ObjectId, TransactionId},
 };
 
 use std::{
-    fs::{self},
-    io::{Read, Seek, SeekFrom, Write},
+    collections::VecDeque,
+    fs,
+    io::{self, Error as IoError, ErrorKind, Read, Seek, SeekFrom, Write},
+    mem,
     path::Path,
-    ptr::NonNull,
 };
-pub const WAL_RECORD_ALIGNMENT: usize = 64;
 
-/// My logging structure is physiological.
-///
-/// As I am using the index-organized storage approach, pages can move around all over the place during transactions.
-///
-/// To use a fully physical logging approach, I would have to append entries to the log every time a page is modified, which can happen pretty often due to the Bplustree balancing algorithms. This could easily become a bottleneck in that sense.
-///
-/// Therefore, the solution has been to use a physiological logging (not fully logical) architecture, where I log actual changes to tuples and tables instead of the physical changes to the pages.
+pub const WAL_RECORD_ALIGNMENT: usize = 64;
+pub const WAL_BLOCK_SIZE: usize = 4 * 1024 * 10; // 40KB blocks
+pub const WAL_READ_AHEAD_BLOCKS: usize = 4;
+
 pub trait Operation {
     fn op_type(&self) -> LogRecordType;
     fn object_id(&self) -> ObjectId;
     fn undo(&self) -> &[u8];
     fn redo(&self) -> &[u8];
 }
+
 pub struct Begin;
 
 impl Operation for Begin {
     fn op_type(&self) -> LogRecordType {
         LogRecordType::Begin
     }
-
     fn object_id(&self) -> ObjectId {
         OBJECT_ZERO
     }
-
     fn redo(&self) -> &[u8] {
         &[]
     }
-
     fn undo(&self) -> &[u8] {
         &[]
     }
@@ -54,53 +47,46 @@ impl Operation for End {
     fn op_type(&self) -> LogRecordType {
         LogRecordType::End
     }
-
     fn object_id(&self) -> ObjectId {
         OBJECT_ZERO
     }
-
     fn redo(&self) -> &[u8] {
         &[]
     }
-
     fn undo(&self) -> &[u8] {
         &[]
     }
 }
+
 pub struct Commit;
 
 impl Operation for Commit {
     fn op_type(&self) -> LogRecordType {
         LogRecordType::Commit
     }
-
     fn object_id(&self) -> ObjectId {
         OBJECT_ZERO
     }
-
     fn redo(&self) -> &[u8] {
         &[]
     }
-
     fn undo(&self) -> &[u8] {
         &[]
     }
 }
+
 pub struct Abort;
 
 impl Operation for Abort {
     fn op_type(&self) -> LogRecordType {
         LogRecordType::Abort
     }
-
     fn object_id(&self) -> ObjectId {
         OBJECT_ZERO
     }
-
     fn redo(&self) -> &[u8] {
         &[]
     }
-
     fn undo(&self) -> &[u8] {
         &[]
     }
@@ -123,15 +109,12 @@ impl Operation for Update {
     fn op_type(&self) -> LogRecordType {
         LogRecordType::Update
     }
-
     fn object_id(&self) -> ObjectId {
         self.oid
     }
-
     fn redo(&self) -> &[u8] {
         self.new.as_ref()
     }
-
     fn undo(&self) -> &[u8] {
         self.old.as_ref()
     }
@@ -148,19 +131,17 @@ impl Insert {
         Self { oid, new }
     }
 }
+
 impl Operation for Insert {
     fn op_type(&self) -> LogRecordType {
         LogRecordType::Insert
     }
-
     fn object_id(&self) -> ObjectId {
         self.oid
     }
-
     fn redo(&self) -> &[u8] {
         self.new.as_ref()
     }
-
     fn undo(&self) -> &[u8] {
         &[]
     }
@@ -182,15 +163,12 @@ impl Operation for Delete {
     fn op_type(&self) -> LogRecordType {
         LogRecordType::Delete
     }
-
     fn object_id(&self) -> ObjectId {
         self.oid
     }
-
     fn redo(&self) -> &[u8] {
         &[]
     }
-
     fn undo(&self) -> &[u8] {
         self.old.as_ref()
     }
@@ -210,112 +188,102 @@ impl LogRecordBuilder {
         }
     }
 
-    pub(crate) fn build_rec<O>(&mut self, log_record_type: LogRecordType, operation: O) -> LogRecord
+    pub(crate) fn build_rec<O>(&mut self, operation: O) -> OwnedLogRecord
     where
         O: Operation,
     {
-        let log = LogRecord::new(
+        let log = OwnedLogRecord::new(
             self.tx_id,
             self.last_lsn,
             operation.object_id(),
             operation.op_type(),
-            operation.redo(),
             operation.undo(),
+            operation.redo(),
         );
-
         self.last_lsn = Some(log.lsn());
         log
     }
 }
 
-// Log type representation.
-// Redo logs store the database state after the transaction.
-// Used for recovery after failures and eventual flushing to disk.
-// Undo logs store the previous database state before the transaction started.
-// Used for rollback of changes.
-crate::repr_enum!(pub enum LogRecordType: u8 {
+repr_enum!(pub enum LogRecordType: u8 {
     Begin = 0x00,
     Commit = 0x01,
     Abort = 0x02,
-    End = 0x03, // Signifies end of commit or abort
+    End = 0x03,
     Alloc = 0x04,
     Dealloc = 0x05,
     Update = 0x06,
     Delete = 0x07,
     Insert = 0x08,
     CreateTable = 0x09,
-
 });
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[repr(C, align(64))]
 pub(crate) struct WalHeader {
-    start_lsn: LogId,
-    last_lsn: LogId,
-    last_flushed_offset: u64,
-    padding: u32,        // Padding at the end of the journal.
-    journal_cursor: u32, // Pointer to where the journal starts in the file.
-    num_entries: u32,
-    blk_size: u32,
+    pub(crate) start_lsn: LogId,
+    pub(crate) last_lsn: LogId,
+    pub(crate) last_flushed_offset: u64,
+    pub(crate) num_entries: u32,
+    pub(crate) block_size: u32,
+    pub(crate) current_block_offset: u32, // Offset within current block (for recovery)
+    padding: [u8; 28],                    // Pad to 64 bytes
 }
 
+pub const WAL_HEADER_SIZE: usize = mem::size_of::<WalHeader>();
+
 impl WalHeader {
-    fn new(blk_size: u32) -> Self {
+    fn new(block_size: u32) -> Self {
         Self {
             start_lsn: LogId::from(0),
             last_lsn: LogId::from(0),
-            last_flushed_offset: 0,
-            journal_cursor: 0,
-            padding: 0,
+            last_flushed_offset: block_size as u64, // First block is header
             num_entries: 0,
-            blk_size,
+            block_size,
+            current_block_offset: 0,
+            padding: [0; 28],
         }
     }
 
-    // SAFETY:
-    // As long as the bytes are a valid representation of th header this is safe.
-    fn from_buf(bytes: &[u8]) -> Self {
-        unsafe { std::ptr::read(bytes[..std::mem::size_of::<Self>()].as_ptr() as *const WalHeader) }
+    fn from_bytes(bytes: &[u8]) -> Self {
+        assert!(bytes.len() >= WAL_HEADER_SIZE);
+        unsafe { std::ptr::read(bytes.as_ptr() as *const WalHeader) }
     }
-}
 
-impl AsRef<[u8]> for WalHeader {
-    fn as_ref(&self) -> &[u8] {
+    fn as_bytes(&self) -> &[u8] {
         unsafe {
-            std::slice::from_raw_parts(
-                (self as *const WalHeader) as *const u8,
-                std::mem::size_of::<WalHeader>(),
-            )
+            std::slice::from_raw_parts(self as *const WalHeader as *const u8, WAL_HEADER_SIZE)
         }
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 #[repr(C, align(64))]
 pub struct LogHeader {
-    /// Auto-incrementing log sequence number
-    lsn: LogId,
-    tid: TransactionId, // Id of the current transaction
-    /// Log id of the previous LSN of the current transaction.
-    prev_lsn: LogId,
-    object_id: ObjectId,
-    total_size: u32,
-    undo_offset: u16,
-    redo_offset: u16,
-    log_type: LogRecordType,
-    padding: u8,
+    pub(crate) lsn: LogId,
+    pub(crate) tid: TransactionId,
+    pub(crate) prev_lsn: LogId,
+    pub(crate) object_id: ObjectId,
+    pub(crate) total_size: u32,
+    pub(crate) undo_len: u16,
+    pub(crate) redo_len: u16,
+    pub(crate) log_type: LogRecordType,
+    pub(crate) padding: [u8; 7],
 }
 
+as_slice!(LogHeader);
+
+pub const LOG_HEADER_SIZE: usize = mem::size_of::<LogHeader>();
+
 impl LogHeader {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         tid: TransactionId,
         object_id: ObjectId,
         prev_lsn: Option<LogId>,
         total_size: u32,
-        redo_offset: u16,
-        undo_offset: u16,
+        undo_len: u16,
+        redo_len: u16,
         log_type: LogRecordType,
-        padding: u8,
     ) -> Self {
         Self {
             lsn: LogId::new(),
@@ -323,371 +291,403 @@ impl LogHeader {
             prev_lsn: prev_lsn.unwrap_or(LogId::from(0)),
             object_id,
             total_size,
-            undo_offset,
-            redo_offset,
+            undo_len,
+            redo_len,
             log_type,
-            padding,
-        }
-    }
-
-    fn from_buf(bytes: &[u8]) -> Self {
-        unsafe {
-            std::ptr::read(bytes[..std::mem::size_of::<LogHeader>()].as_ptr() as *const LogHeader)
+            padding: [0; 7],
         }
     }
 }
 
-pub type LogRecord = BufferWithMetadata<LogHeader>;
+#[derive(Debug)]
+pub struct OwnedLogRecord {
+    header: LogHeader,
+    payload: Box<[u8]>, // undo bytes followed by redo bytes
+}
 
-impl LogRecord {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+impl OwnedLogRecord {
+    pub fn new(
         tid: TransactionId,
         prev_lsn: Option<LogId>,
         object_id: ObjectId,
         log_type: LogRecordType,
-        redo_payload: &[u8],
         undo_payload: &[u8],
+        redo_payload: &[u8],
     ) -> Self {
-        let size = (redo_payload.len() + undo_payload.len() + std::mem::size_of::<LogHeader>())
-            .next_multiple_of(WAL_RECORD_ALIGNMENT);
+        let payload_size = (undo_payload.len() + redo_payload.len() + LOG_HEADER_SIZE)
+            .next_multiple_of(WAL_RECORD_ALIGNMENT)
+            - LOG_HEADER_SIZE;
 
-        // Align payload size to WAL_RECORD_ALIGNMENT
-        let payload_size = size - std::mem::size_of::<LogHeader>();
-        let padding = payload_size - redo_payload.len() - undo_payload.len();
-        let undo_offset = undo_payload.len() as u16;
-        let redo_offset = undo_offset + redo_payload.len() as u16;
+        let mut payload = vec![0u8; payload_size].into_boxed_slice();
+        payload[..undo_payload.len()].copy_from_slice(undo_payload);
+        payload[undo_payload.len()..undo_payload.len() + redo_payload.len()]
+            .copy_from_slice(redo_payload);
 
-        // Create buffer with total size = header + aligned payload
-        let mut buffer = BufferWithMetadata::<LogHeader>::with_capacity(
-            size, // usable space for data
-            WAL_RECORD_ALIGNMENT,
-        );
-
-        // Initialize header
         let header = LogHeader::new(
             tid,
             object_id,
             prev_lsn,
-            size as u32,
-            redo_offset,
-            undo_offset,
+            (LOG_HEADER_SIZE + payload_size) as u32,
+            undo_payload.len() as u16,
+            redo_payload.len() as u16,
             log_type,
-            padding as u8,
         );
 
-        *buffer.metadata_mut() = header;
-        // Copy payload and update length
-        buffer.push_bytes(undo_payload);
-        buffer.push_bytes(redo_payload);
-
-        buffer
+        Self { header, payload }
     }
 
-    pub(crate) fn lsn(&self) -> LogId {
-        self.metadata().lsn
+    pub fn lsn(&self) -> LogId {
+        self.header.lsn
     }
 
-    fn content_at(&self, offset: u16) -> NonNull<[u8]> {
-        unsafe { self.data.byte_add(offset as usize) }
+    pub fn total_size(&self) -> usize {
+        LOG_HEADER_SIZE + self.payload.len()
     }
 
-    fn redo_content(&self) -> NonNull<[u8]> {
-        self.content_at(self.metadata().redo_offset)
+    pub fn header(&self) -> &LogHeader {
+        &self.header
     }
 
-    fn undo_content(&self) -> NonNull<[u8]> {
-        self.content_at(self.metadata().undo_offset)
+    pub fn payload(&self) -> &[u8]{
+        &self.payload
     }
 
-    /// Get the redo payload as a slice
-    pub(crate) fn redo_data(&self) -> &[u8] {
-        let start = self.metadata().undo_offset as usize;
-        let end = self.metadata().redo_offset as usize;
-        unsafe {
-            std::slice::from_raw_parts(self.data.byte_add(start).as_ptr() as *const u8, end - start)
-        }
+    pub fn undo_data(&self) -> &[u8] {
+        &self.payload[..self.header.undo_len as usize]
     }
 
-    /// Get the undo payload as a slice
-    pub(crate) fn undo_data(&self) -> &[u8] {
-        let len = self.metadata().undo_offset as usize;
-        unsafe { std::slice::from_raw_parts(self.data.as_ptr() as *const u8, len) }
+    pub fn redo_data(&self) -> &[u8] {
+        let start = self.header.undo_len as usize;
+        let end = start + self.header.redo_len as usize;
+        &self.payload[start..end]
+    }
+
+    /// Write header + payload into a buffer. Returns bytes written.
+    pub fn write_to(&self, buffer: &mut [u8]) -> usize {
+        let header_bytes= self.header.as_ref();
+        buffer[..LOG_HEADER_SIZE].copy_from_slice(header_bytes);
+        buffer[LOG_HEADER_SIZE..self.total_size()].copy_from_slice(&self.payload);
+        self.total_size()
+    }
+
+
+}
+
+#[derive(Debug)]
+pub struct LogRecordRef<'a> {
+    header: &'a LogHeader,
+    data: &'a [u8],
+}
+
+impl<'a> LogRecordRef<'a> {
+    pub fn header(&self) -> &LogHeader {
+        self.header
+    }
+
+    pub fn lsn(&self) -> LogId {
+        self.header.lsn
+    }
+
+    pub fn tid(&self) -> TransactionId {
+        self.header.tid
+    }
+
+    pub fn log_type(&self) -> LogRecordType {
+        self.header.log_type
+    }
+
+    pub fn undo_data(&self) -> &[u8] {
+        let start = LOG_HEADER_SIZE;
+        let end = start + self.header.undo_len as usize;
+        &self.data[start..end]
+    }
+
+    pub fn redo_data(&self) -> &[u8] {
+        let start = LOG_HEADER_SIZE + self.header.undo_len as usize;
+        let end = start + self.header.redo_len as usize;
+        &self.data[start..end]
+    }
+
+    pub fn total_size(&self) -> usize {
+        self.header.total_size as usize
     }
 }
 
 #[derive(Debug)]
 pub struct WriteAheadLog {
     header: WalHeader,
-    journal: MemBuffer, // in memory write buffer
+    current_block: MemBlock<()>,
+    current_offset: usize,
+    flush_queue: VecDeque<MemBlock<()>>,
     file: DBFile,
-}
-
-impl FileOperations for WriteAheadLog {
-    // Create the file. Allocate an initial buffer of the size of one block, write the header to the buffer and flush to the file.
-    fn create(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let mut file = DBFile::create(&path)?;
-        let block_size = FileSystem::block_size(&path)? as u32;
-        let mut header = WalHeader::new(block_size);
-        let mut journal = MemBuffer::alloc(block_size as usize, block_size as usize)?;
-        header.padding = 0;
-        header.journal_cursor = 0; // The journal starts at zero.
-        header.last_flushed_offset = 0;
-        journal.write_all(header.as_ref())?;
-        file.write_all(journal.as_ref())?;
-        file.seek(SeekFrom::Start(0))?;
-        Ok(Self {
-            header,
-            journal,
-            file,
-        })
-    }
-
-    // Open the file.
-    // Read the header.
-    // Read the membuffer from the file.
-    fn open(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let block_size = FileSystem::block_size(&path)? as u32;
-
-        let mut file = DBFile::open(&path)?;
-        let header = Self::load_header(&mut file, block_size as usize)?;
-        let old_padding = header.padding;
-
-        let mut log = Self {
-            header,
-            journal: MemBuffer::empty(),
-            file,
-        };
-        log.reload_journal_from(old_padding as usize)?;
-        Ok(log)
-    }
-
-    fn remove(path: impl AsRef<Path>) -> std::io::Result<()> {
-        fs::remove_file(&path)
-    }
-
-    fn sync_all(&self) -> std::io::Result<()> {
-        self.file.sync_all()
-    }
-
-    fn truncate(&mut self) -> std::io::Result<()> {
-        self.file.truncate()
-    }
+    block_size: usize,
 }
 
 impl Write for WriteAheadLog {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.file.write(buf)
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.do_flush()
+    fn flush(&mut self) -> io::Result<()> {
+        self.perform_flush()
+        //self.file.flush()
     }
 }
 
 impl Read for WriteAheadLog {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.file.read(buf)
     }
 }
 
 impl Seek for WriteAheadLog {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         self.file.seek(pos)
+    }
+}
+impl FileOperations for WriteAheadLog {
+    fn create(path: impl AsRef<Path>) -> io::Result<Self> {
+        let mut file = DBFile::create(&path)?;
+        let fs_block_size = FileSystem::block_size(&path)?;
+
+        // WAL block size must be multiple of filesystem block size
+        let block_size = WAL_BLOCK_SIZE.next_multiple_of(fs_block_size);
+
+        let header = WalHeader::new(block_size as u32);
+        let current_block = MemBlock::new(block_size);
+
+        // Write initial header block
+        let mut header_block = MemBlock::<()>::new(block_size);
+        header_block.data_mut()[..WAL_HEADER_SIZE].copy_from_slice(header.as_bytes());
+        file.write_all(header_block.as_ref())?;
+        file.sync_all()?;
+
+        Ok(Self {
+            header,
+            current_block,
+            current_offset: 0,
+            flush_queue: VecDeque::new(),
+            file,
+            block_size,
+        })
+    }
+
+    fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let mut file = DBFile::open(&path)?;
+        let fs_block_size = FileSystem::block_size(&path)?;
+        let block_size = WAL_BLOCK_SIZE.next_multiple_of(fs_block_size);
+
+        // Read header from first block
+        let mut header_block = MemBlock::<()>::new(block_size);
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(header_block.data_mut())?;
+        let header = WalHeader::from_bytes(header_block.data());
+
+        // Use block size from header if available, otherwise use computed
+        let block_size = if header.block_size > 0 {
+            header.block_size as usize
+        } else {
+            block_size
+        };
+
+        let current_block = MemBlock::new(block_size);
+
+        Ok(Self {
+            header,
+            current_block,
+            current_offset: 0,
+            flush_queue: VecDeque::new(),
+            file,
+            block_size,
+        })
+    }
+
+    fn remove(path: impl AsRef<Path>) -> io::Result<()> {
+        fs::remove_file(&path)
+    }
+
+    fn sync_all(&self) -> io::Result<()> {
+        self.file.sync_all()
+    }
+
+    fn truncate(&mut self) -> io::Result<()> {
+        self.file.truncate()?;
+        self.header = WalHeader::new(self.block_size as u32);
+        self.current_block = MemBlock::new(self.block_size);
+        self.current_offset = 0;
+        self.flush_queue.clear();
+
+        // Rewrite header
+        let mut header_block = MemBlock::<()>::new(self.block_size);
+        header_block.data_mut()[..WAL_HEADER_SIZE].copy_from_slice(self.header.as_bytes());
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.write_all(header_block.as_ref())?;
+        self.file.sync_all()
     }
 }
 
 impl WriteAheadLog {
-    fn recompute_padding(&mut self) -> usize {
-        let total_size = self.journal.len();
-        let current_pos = self.journal.position();
-        self.header.padding = (total_size - current_pos) as u32;
-        self.header.padding as usize
+
+    fn available_space(&self) -> usize {
+        self.block_size.saturating_sub(self.current_offset)
     }
 
-    pub(crate) fn push(&mut self, record: LogRecord) -> std::io::Result<()> {
-        let size = record.size();
-        let lsn = record.metadata().lsn;
-        let journal_length = self.journal.len();
-        let journal_pos = self.journal.position();
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        let dest = &mut self.current_block.data_mut()[self.current_offset..];
+        dest.copy_from_slice(bytes);
+        self.current_offset += bytes.len();
+    }
 
-        if journal_length < (size + journal_pos) {
-            //  let alignment = self.header.blk_size;
-            self.journal.extend_from_slice(record.as_ref())?;
-        } else {
-            self.journal.write_all(record.as_ref())?;
+    /// Push a log record to the WAL
+    pub fn push(&mut self, record: OwnedLogRecord) -> io::Result<()> {
+        let record_size = record.total_size();
+        let available_space = self.available_space();
+
+        // Not enough available space. Needs rotation, but first we need to copy as much as we can.
+        if record_size >= available_space && available_space > 0 {
+            let bytes_to_write = std::cmp::min(mem::size_of::<LogHeader>(), available_space);
+
+            // Write the header.
+            self.push_bytes(&record.header().as_ref()[..bytes_to_write]);
+            // If there is more space, we copy also as much as we can from the data.
+            let available_space = self.available_space();
+            if available_space > 0 {
+                let bytes_to_write = std::cmp::min(record.payload().len(), available_space);
+                self.push_bytes(&record.payload()[..bytes_to_write]);
+            };
+
+            // Rotate the block once we have written all the data we could in the previous one.
+            self.rotate_block()?;
+
+            // Now we copy the remaining in the rotated block.
+            self.push_bytes(&record.payload()[bytes_to_write..]);
+            self.update_tracking(record.lsn());
+            return  Ok(());
+
+        } else if available_space == 0 {
+            self.rotate_block()?;
         };
 
-        self.recompute_padding();
+        // Write record to current block
+        let dest = &mut self.current_block.data_mut()[self.current_offset..];
+        record.write_to(dest);
+        self.current_offset += record_size;
 
+        self.update_tracking(record.lsn());
+        Ok(())
+    }
+
+
+    fn update_tracking(&mut self, lsn: LogId) {
+        // Update header stats
         if self.header.start_lsn == LogId::from(0) {
-            self.header.start_lsn = lsn;
-        };
-
+            self.header.start_lsn = lsn
+        }
         self.header.last_lsn = lsn;
         self.header.num_entries += 1;
+        self.header.current_block_offset = self.current_offset as u32;
 
-        Ok(())
     }
 
-    fn load_header(file: &mut DBFile, block_size: usize) -> std::io::Result<WalHeader> {
-        let mut block = MemBuffer::alloc(block_size, block_size)?;
-        file.seek(SeekFrom::Start(0))?;
-        file.read_exact(&mut block)?;
-        Ok(WalHeader::from_buf(&block))
-    }
 
-    fn load_blks_at(&mut self, offset: usize) -> std::io::Result<()> {
-        debug_assert!(
-            (self.header.last_flushed_offset as usize - offset) == self.journal.len(),
-            "Invalid input . Failed to fill whole buffer"
-        );
 
-        self.file.seek(SeekFrom::Start(offset as u64))?;
-        self.file.read_exact(self.journal.as_mut())?;
-        self.header.journal_cursor = offset as u32;
-        Ok(())
-    }
-
-    fn flush_journal(&mut self) -> std::io::Result<()> {
-        if self.journal.is_empty() {
-            return Ok(());
-        };
-
-        self.journal.seek(SeekFrom::Start(0))?;
-        let blk_offset = self.header.journal_cursor as u64;
-        self.file.seek(SeekFrom::Start(blk_offset))?;
-        let total_size: usize = self.journal.len();
-
-        let alignment: usize = self.journal.mem_alignment();
-        debug_assert!(
-            total_size.is_multiple_of(self.header.blk_size as usize),
-            "Invalid journal lengh, must be aligned to filesystem blk size"
-        );
-        debug_assert!(
-            alignment.is_multiple_of(self.header.blk_size as usize),
-            "Invalid journal alignement, must be aligned to filesystem blk size"
-        );
-        self.file.write_all(self.journal.as_ref())?;
-
-        // Recompute statistics after flush
-        self.header.last_flushed_offset = self.header.journal_cursor as u64 + total_size as u64;
-
-        Ok(())
-    }
-
-    fn reload_journal_from(&mut self, old_padding: usize) -> std::io::Result<()> {
-        self.journal =
-            MemBuffer::alloc(self.header.blk_size as usize, self.header.blk_size as usize)?;
-
-        // Si hay padding, el último bloque está a block_size bytes antes de last_flushed_offset
-        let read_offset = if old_padding > 0 {
-            self.header
-                .last_flushed_offset
-                .saturating_sub(self.header.blk_size as u64)
-        } else {
-            // Si no hay padding, empezamos desde last_flushed_offset
-            self.header.last_flushed_offset
-        };
-
-        if old_padding > 0 {
-            self.load_blks_at(read_offset as usize)?;
-            let write_offset = (self.header.blk_size - old_padding as u32) as u64;
-            self.journal.seek(SeekFrom::Start(write_offset))?;
-            self.header.padding = (self.journal.len() - self.journal.position()) as u32;
-        } else {
-            // Journal vacío, empezar desde 0
-            self.header.journal_cursor = read_offset as u32;
-            self.journal.seek(SeekFrom::Start(0))?;
+    /// Rotate current block to flush queue and allocate new block
+    fn rotate_block(&mut self) -> io::Result<()> {
+        if self.current_offset == 0 {
+            return Ok(()); // Nothing to rotate
         }
+
+        let full_block = std::mem::replace(&mut self.current_block, MemBlock::new(self.block_size));
+        self.flush_queue.push_back(full_block);
+        self.current_offset = 0;
+        self.header.current_block_offset = 0;
+
         Ok(())
     }
 
-    // When flushing the journal to disk we generally want to increment the pointer to the last flushed offset. There are two exceptions, though:
-    // Exception 1 is the header or block zero, which does not modify the last flushed offset but needs to be synced to disk to ensure statistics are persisted.
-    // Exception 2 is self.current_block, which might have some free space, so for space optimization we prefer not to increase the offset to be able to reuse it.
-    fn do_flush(&mut self) -> std::io::Result<()> {
-        let current_padding = self.recompute_padding();
-        self.flush_journal()?;
+    /// Flush all pending blocks to disk
+    pub fn perform_flush(&mut self) -> io::Result<()> {
+
+        // Flush all queued blocks
+        self.file
+            .seek(SeekFrom::Start(self.header.last_flushed_offset))?;
+        while let Some(block) = self.flush_queue.pop_front() {
+            self.file.write_all(block.as_ref())?;
+            self.header.last_flushed_offset += self.block_size as u64;
+        }
+
+        // Write current block in case it has data:
+        if self.current_offset > 0 {
+            self.file.write_all(self.current_block.as_ref())?;
+        }
+
+        // Sync header AFTER updating last_flushed_offset
         self.sync_header()?;
-        self.sync_all()?;
-
-        // RELOAD THE JOURNAL TO BE ABLE TO KEEP DOING STUFF
-        // NEED TO REVIEW THIS.
-        self.reload_journal_from(current_padding)?;
-
-        Ok(())
+        self.file.sync_all()
     }
 
-    fn sync_header(&mut self) -> std::io::Result<()> {
+    /// Write header to first block
+    fn sync_header(&mut self) -> io::Result<()> {
+        // Read current header block
+        let mut header_block = MemBlock::<()>::new(self.block_size);
         self.file.seek(SeekFrom::Start(0))?;
-        let mut tmp =
-            MemBuffer::alloc(self.header.blk_size as usize, self.header.blk_size as usize)?;
-        self.file.read_exact(&mut tmp)?;
-        tmp.as_mut()[..std::mem::size_of::<WalHeader>()].copy_from_slice(self.header.as_ref());
+
+        // Try to read existing, but it's okay if file is smaller
+        let _ = self.file.read(header_block.data_mut());
+
+        // Overwrite header portion
+        header_block.data_mut()[..WAL_HEADER_SIZE].copy_from_slice(self.header.as_bytes());
+
+        // Write back
         self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&tmp)?;
-        Ok(())
+        self.file.write_all(header_block.as_ref())
     }
 
-    /// Recover and load all blocks from disk after opening
-    fn replay(&mut self) -> std::io::Result<WalIterator<'_>> {
+    /// Create an iterator over all log records
+    pub fn iter(&mut self) -> io::Result<WalIterator<'_>> {
         WalIterator::new(
             &mut self.file,
-            self.header.blk_size as usize,
+            self.block_size,
             self.header.start_lsn,
             self.header.last_lsn,
-            self.header.last_flushed_offset as usize,
+            self.header.last_flushed_offset,
             self.header.num_entries,
         )
     }
+
+    /// Get WAL statistics
+    pub fn stats(&self) -> WalStats {
+        WalStats {
+            start_lsn: self.header.start_lsn,
+            last_lsn: self.header.last_lsn,
+            num_entries: self.header.num_entries,
+            flushed_bytes: self.header.last_flushed_offset,
+            pending_blocks: self.flush_queue.len(),
+            current_block_usage: self.current_offset,
+        }
+    }
+}
+#[derive(Debug, Clone)]
+pub struct WalStats {
+    pub start_lsn: LogId,
+    pub last_lsn: LogId,
+    pub num_entries: u32,
+    pub flushed_bytes: u64,
+    pub pending_blocks: usize,
+    pub current_block_usage: usize,
 }
 
-/// Iterator over log records in a WAL.
-pub(crate) struct WalIterator<'a> {
+pub struct WalIterator<'a> {
     file: &'a mut DBFile,
-    block_size: u32,
+    block_size: usize,
+    read_buffer: MemBlock<()>,
+    buffer_offset: usize,
+    file_offset: u64,
+    end_offset: u64,
     start_lsn: LogId,
     last_lsn: LogId,
-    last_flushed_offset: u64,
-    read_ahead_size: usize,
-    read_ahead_buffer: MemBuffer, // We cannot use the mem buffer here because it would require to take mutable references in order to seek it, which would fuck up our zero copy iteration approach.
-    file_cursor: u64,
-    mem_cursor: u64,
-    current_lsn: LogId,
-    num_entries: u32,
     entries_read: u32,
-}
-
-/// A reference to a log record in the buffer without copying
-pub struct LogRecordRef<'a> {
-    header: &'a LogHeader,
-    data: &'a [u8], // The full record data including header
-}
-
-impl<'a> LogRecordRef<'a> {
-    /// Get the header
-    pub(crate) fn metadata(&self) -> &LogHeader {
-        self.header
-    }
-
-    /// Get the redo payload as a slice
-    pub(crate) fn redo_data(&self) -> &[u8] {
-        let start = self.header.undo_offset as usize;
-        let end = self.header.redo_offset as usize;
-        &self.data[std::mem::size_of::<LogHeader>() + start..std::mem::size_of::<LogHeader>() + end]
-    }
-
-    /// Get the undo payload as a slice
-    pub(crate) fn undo_data(&self) -> &[u8] {
-        let end = self.header.undo_offset as usize;
-        &self.data[std::mem::size_of::<LogHeader>()..std::mem::size_of::<LogHeader>() + end]
-    }
-
-    /// Get total size of the record
-    pub(crate) fn size(&self) -> usize {
-        self.header.total_size as usize
-    }
+    num_entries: u32,
 }
 
 impl<'a> WalIterator<'a> {
@@ -696,401 +696,536 @@ impl<'a> WalIterator<'a> {
         block_size: usize,
         start_lsn: LogId,
         last_lsn: LogId,
-        last_flushed_offset: usize,
+        end_offset: u64,
         num_entries: u32,
-    ) -> std::io::Result<Self> {
-        let read_ahead_size = std::cmp::min(block_size * 4, last_flushed_offset); // Read 4 blocks at a time
+    ) -> io::Result<Self> {
+        let read_ahead_size = block_size * WAL_READ_AHEAD_BLOCKS;
+        let mut read_buffer = MemBlock::<()>::new(read_ahead_size);
 
-        // Create aligned MemBuffer for read-ahead
-        let mut read_ahead_buffer = MemBuffer::alloc(read_ahead_size, block_size)?;
-        let cursor_start = read_ahead_buffer.len() as usize;
-        file.seek(SeekFrom::Start(0))?;
-        file.read_exact(&mut read_ahead_buffer)?;
+        // Start reading after header block
+        let file_offset = block_size as u64;
+
+        // Calculate how much data is available
+        let available = end_offset.saturating_sub(file_offset);
+
+        if available == 0 {
+            // No data to read
+            return Ok(Self {
+                file,
+                block_size,
+                read_buffer,
+                buffer_offset: 0,
+                file_offset,
+                end_offset,
+                start_lsn,
+                last_lsn,
+                entries_read: 0,
+                num_entries,
+            });
+        }
+
+        // Read up to read_ahead_size or available, whichever is smaller
+        let read_size = std::cmp::min(read_ahead_size, available as usize);
+
+        // Align read_size to block boundary for direct I/O
+        let aligned_read_size = read_size.next_multiple_of(block_size);
+        let actual_read = std::cmp::min(aligned_read_size, available as usize);
+
+        if actual_read > 0 {
+            file.seek(SeekFrom::Start(file_offset))?;
+            // Only read what's actually available (aligned)
+            let to_read = actual_read.min(read_buffer.size());
+            file.read_exact(&mut read_buffer.data_mut()[..to_read])?;
+        }
 
         Ok(Self {
             file,
-            block_size: block_size as u32,
+            block_size,
+            read_buffer,
+            buffer_offset: 0,
+            file_offset,
+            end_offset,
             start_lsn,
             last_lsn,
-            last_flushed_offset: last_flushed_offset as u64,
-            read_ahead_size,
-            read_ahead_buffer,
-            file_cursor: cursor_start as u64, // Start after header
-            current_lsn: start_lsn,
-            num_entries,
             entries_read: 0,
-            mem_cursor: std::mem::size_of::<WalHeader>() as u64,
+            num_entries,
         })
     }
 
-    /// Reload the read-ahead buffer from disk
-    fn reload_buffer(&mut self) -> std::io::Result<bool> {
-        // Check if we've read everything
-        if self.file_cursor >= self.last_flushed_offset {
-            return Ok(false);
-        }
-
-        // Early exit if we've read all entries based on metadata
-        if self.entries_read >= self.num_entries && self.num_entries > 0 {
-            return Ok(false);
-        }
-
-        // Calculate how much to read
-        let remaining = (self.last_flushed_offset - self.file_cursor) as usize;
-        let aligned_remaining = remaining & !(4096 - 1);
-        let read_size = self.read_ahead_size.min(aligned_remaining);
-
-        // Clear and resize buffer
-        self.mem_cursor = 0;
-
-        // This fails when aligned buffer is larger that the total file size.
-        self.read_ahead_buffer = MemBuffer::alloc(read_size, self.block_size as usize)?;
-        let metadata = self.file.metadata()?;
-
-        if !self.file_cursor.is_multiple_of(self.block_size as u64) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Unaligned pointer to file content",
-            ));
-        }
-        if self.file_cursor as usize + self.read_ahead_buffer.len() > metadata.len() as usize {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Failed to fill whole buffer",
-            ));
-        };
-
-        if self.read_ahead_buffer.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Attempted o read an empty amount",
-            ));
-        }
-
-        // Read from file
-        self.file.seek(SeekFrom::Start(self.file_cursor))?;
-        self.file.read_exact(self.read_ahead_buffer.as_mut())?;
-
-        // Update file cursor
-        self.file_cursor += self.read_ahead_buffer.len() as u64;
-
-        Ok(true)
-    }
-
-    /// Get the next record as a reference
-    pub(crate) fn next_ref(&mut self) -> std::io::Result<Option<LogRecordRef<'_>>> {
-        // Check if we've already read all entries
-        if self.last_lsn != LogId::from(0) && self.current_lsn > self.last_lsn {
+    pub fn next_ref(&mut self) -> io::Result<Option<LogRecordRef<'_>>> {
+        // Check termination conditions
+        if self.num_entries > 0 && self.entries_read >= self.num_entries {
             return Ok(None);
         }
 
-        // Check if buffer needs reloading
-        if self.mem_cursor >= self.read_ahead_buffer.len() as u64 && !self.reload_buffer()? {
-            return Ok(None);
-        }
-
-        let buffer_len = self.read_ahead_buffer.len();
-
-        // Check if we have enough bytes for a header
-        if self.mem_cursor as usize + std::mem::size_of::<LogHeader>() > buffer_len {
-            // Check if we're at the end of valid data
-            if self.file_cursor >= self.last_flushed_offset {
-                return Ok(None);
-            }
-            // Otherwise, reload buffer
+        // Need to reload buffer?
+        let buffer_remaining = self.read_buffer.size() - self.buffer_offset;
+        if buffer_remaining < LOG_HEADER_SIZE {
             if !self.reload_buffer()? {
                 return Ok(None);
             }
-            // Retry after reload
-            return self.next_ref();
         }
 
-        // Get header reference.
-        // SAFETY: This should be safe as long as the header is valid
-        let header = {
-            let buf_ref: &[u8] = self.read_ahead_buffer.as_ref();
-            let header_ptr = &buf_ref[self.mem_cursor as usize] as *const u8 as *const LogHeader;
-            unsafe { &*header_ptr }
-        };
+        // First pass: check if we have a complete record, reload if needed
+        // We do this without holding any borrows
+        loop {
+            let data = self.read_buffer.data();
 
-        // Check if this is padding at the end (lsn == 0)
-        if header.lsn == LogId::from(0) {
-            return Ok(None);
+            // Check we have enough data for header
+            if self.buffer_offset + LOG_HEADER_SIZE > data.len() {
+                return Ok(None);
+            }
+
+            let header_ptr = data[self.buffer_offset..].as_ptr() as *const LogHeader;
+            let total_size = unsafe { (*header_ptr).total_size as usize };
+            let lsn = unsafe { (*header_ptr).lsn };
+
+            // Zero LSN indicates end of valid records
+            if lsn == LogId::from(0) {
+                return Ok(None);
+            }
+
+            // Check if full record is in buffer
+            if self.buffer_offset + total_size > self.read_buffer.size() {
+                // Record spans buffer boundary - need to reload with record at start
+                if !self.reload_buffer_at_record()? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "Incomplete log record at end of file",
+                    ));
+                }
+                // Loop again to re-check with new buffer
+                continue;
+            }
+
+            // Record is complete in buffer, break to return it
+            break;
         }
 
-        // Validate LSN is within expected range
+        // Now we know the record is complete, safe to borrow and return
+        let data = self.read_buffer.data();
+        let header_ptr = data[self.buffer_offset..].as_ptr() as *const LogHeader;
+        let header = unsafe { &*header_ptr };
+
+        // Validate LSN is in expected range
         if self.start_lsn != LogId::from(0) && header.lsn < self.start_lsn {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("LSN {} is before start_lsn {}", header.lsn, self.start_lsn),
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                format!("LSN {} before start_lsn {}", header.lsn, self.start_lsn),
             ));
         }
 
         let total_size = header.total_size as usize;
+        let record_data = &data[self.buffer_offset..self.buffer_offset + total_size];
 
-        // Check if we have the full record in buffer
-        // This can happen if a record happens to be at a mid point in the buffer.
-        if self.mem_cursor as usize + total_size > buffer_len {
-            // Calculate where this record starts
-            let record_start = self.file_cursor - (buffer_len - self.mem_cursor as usize) as u64;
-
-            // Align down to block boundary
-            let aligned_start = record_start & !(self.block_size as u64 - 1);
-            self.file_cursor = aligned_start;
-
-            if !self.reload_buffer()? {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Incomplete log record at end of file",
-                ));
-            }
-            self.mem_cursor = record_start - aligned_start;
-            // Retry after reload
-            return self.next_ref();
-        }
-
-        let buf_ref: &[u8] = self.read_ahead_buffer.as_ref();
-        // Get a reference to the full record data
-        let record_data = &buf_ref[self.mem_cursor as usize..self.mem_cursor as usize + total_size];
-
-        let header_ref = unsafe { &*(record_data.as_ptr() as *const LogHeader) };
-
-        // Create LogRecordRef
-        let record_ref = LogRecordRef {
-            header: header_ref,
-            data: record_data,
-        };
-
-        // Advance buffer position
-        self.mem_cursor += total_size as u64;
-
-        // Update tracking
-        self.current_lsn = header.lsn;
+        // Advance position
+        self.buffer_offset += total_size;
         self.entries_read += 1;
 
-        Ok(Some(record_ref))
+        Ok(Some(LogRecordRef {
+            header,
+            data: record_data,
+        }))
     }
 
-    /// Check if there's more data to read
-    fn has_more_data(&self) -> bool {
-        // Check if we've read all expected entries
-        if self.num_entries > 0 && self.entries_read >= self.num_entries {
-            return false;
+    /// Reload buffer with next chunk of data
+    fn reload_buffer(&mut self) -> io::Result<bool> {
+        let new_file_offset = self.file_offset + self.read_buffer.size() as u64;
+
+        if new_file_offset >= self.end_offset {
+            return Ok(false);
         }
 
-        // Check if we've reached the last LSN
-        if self.last_lsn != LogId::from(0) && self.current_lsn >= self.last_lsn {
-            return false;
+        let available = self.end_offset.saturating_sub(new_file_offset);
+        if available == 0 {
+            return Ok(false);
         }
 
-        let max_mem = self.read_ahead_buffer.len() as u64;
-        // Check physical boundaries
-        self.mem_cursor < max_mem || self.file_cursor < self.last_flushed_offset
+        let read_size = std::cmp::min(self.read_buffer.size(), available as usize);
+
+        // Align to block size
+        let aligned_read = read_size.next_multiple_of(self.block_size);
+        let actual_read = std::cmp::min(aligned_read, available as usize);
+
+        if actual_read == 0 {
+            return Ok(false);
+        }
+
+        // Clear buffer
+        self.read_buffer.data_mut().fill(0);
+
+        self.file.seek(SeekFrom::Start(new_file_offset))?;
+        self.file
+            .read_exact(&mut self.read_buffer.data_mut()[..actual_read])?;
+
+        self.file_offset = new_file_offset;
+        self.buffer_offset = 0;
+
+        Ok(true)
     }
-}
 
-impl<'a> WalIterator<'a> {
-    /// Process each record with a closure (zero-copy)
-    pub(crate) fn for_each<F>(&mut self, mut f: F) -> std::io::Result<()>
+    /// Reload buffer so current record starts at buffer beginning
+    fn reload_buffer_at_record(&mut self) -> io::Result<bool> {
+        // Calculate where current record starts in file
+        let record_file_offset = self.file_offset + self.buffer_offset as u64;
+
+        if record_file_offset >= self.end_offset {
+            return Ok(false);
+        }
+
+        // Align down to block boundary for direct I/O
+        let aligned_offset = (record_file_offset / self.block_size as u64) * self.block_size as u64;
+        let offset_within_block = (record_file_offset - aligned_offset) as usize;
+
+        let available = self.end_offset.saturating_sub(aligned_offset);
+        if available == 0 {
+            return Ok(false);
+        }
+
+        let read_size = std::cmp::min(self.read_buffer.size(), available as usize);
+
+        if read_size == 0 {
+            return Ok(false);
+        }
+
+        // Clear and reload
+        self.read_buffer.data_mut().fill(0);
+
+        self.file.seek(SeekFrom::Start(aligned_offset))?;
+        self.file
+            .read_exact(&mut self.read_buffer.data_mut()[..read_size])?;
+
+        self.file_offset = aligned_offset;
+        self.buffer_offset = offset_within_block;
+
+        Ok(true)
+    }
+
+    /// Process all records with a closure
+    pub fn for_each<F>(&mut self, mut f: F) -> io::Result<()>
     where
-        F: FnMut(LogRecordRef) -> std::io::Result<()>,
+        F: FnMut(LogRecordRef<'_>) -> io::Result<()>,
     {
-        while self.has_more_data() {
-            if let Some(record) = self.next_ref()? {
-                f(record)?;
-            }
+        while let Some(record) = self.next_ref()? {
+            f(record)?;
         }
         Ok(())
+    }
+
+    /// Collect all records (makes copies)
+    pub fn collect_all(&mut self) -> io::Result<Vec<OwnedLogRecord>> {
+        let mut records = Vec::new();
+        while let Some(record) = self.next_ref()? {
+            let owned = OwnedLogRecord::new(
+                record.tid(),
+                Some(record.header().prev_lsn),
+                record.header().object_id,
+                record.log_type(),
+                record.undo_data(),
+                record.redo_data(),
+            );
+            records.push(owned);
+        }
+        Ok(records)
     }
 }
 
 #[cfg(test)]
-mod wal_tests {
+mod write_ahead_logging_tests {
     use super::*;
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
     use tempfile::tempdir;
 
-    pub(crate) fn push_items(wal: &mut WriteAheadLog, start: u64, end: u64) {
-        let start_entries = wal.header.num_entries;
-        let num_rec = ((end - start) + 1) as u32;
-        for i in start..=end {
-            let rec = make_record(i, 1, 1, i as u16, 100, 100);
-            wal.push(rec).unwrap();
-        }
-
-        assert_eq!(wal.header.last_lsn, LogId::from(end));
-        assert_eq!(wal.header.num_entries, start_entries + num_rec);
-    }
-
-    pub(crate) fn validate_replay(wal: &mut WriteAheadLog, expected_count: usize) {
-        let mut iterator = wal.replay().unwrap();
-        let mut count = 0;
-
-        iterator
-            .for_each(|record| {
-                count += 1;
-                verify_record(&record, count as u64, 1);
-                Ok(())
-            })
-            .unwrap();
-
-        assert_eq!(count, expected_count);
-    }
-
-    pub(crate) fn make_record(
-        lsn: u64,
+    fn make_test_record(
+        lsn_seed: u64,
         tid: u64,
         oid: u64,
-        row: u16,
-        redo_len: usize,
         undo_len: usize,
-    ) -> LogRecord {
-        let mut rng = StdRng::seed_from_u64(lsn);
-        let redo: Vec<u8> = (0..redo_len).map(|_| rng.random_range(0..=255)).collect();
-        let undo: Vec<u8> = (0..undo_len).map(|_| rng.random_range(0..=255)).collect();
-        LogRecord::new(
+        redo_len: usize,
+    ) -> OwnedLogRecord {
+        let mut rng = StdRng::seed_from_u64(lsn_seed);
+        let undo: Vec<u8> = (0..undo_len).map(|_| rng.random()).collect();
+        let redo: Vec<u8> = (0..redo_len).map(|_| rng.random()).collect();
+
+        OwnedLogRecord::new(
             TransactionId::from(tid),
-            Some(LogId::from(lsn.saturating_sub(1))),
+            if lsn_seed > 1 {
+                Some(LogId::from(lsn_seed - 1))
+            } else {
+                None
+            },
             ObjectId::from(oid),
             LogRecordType::Update,
-            &redo,
             &undo,
+            &redo,
         )
     }
 
-    fn verify_record(record_ref: &LogRecordRef, expected_lsn: u64, expected_tid: u64) {
-        assert_eq!(record_ref.metadata().lsn, LogId::from(expected_lsn));
-        assert_eq!(record_ref.metadata().tid, TransactionId::from(expected_tid));
+    fn verify_record(
+        record: &LogRecordRef<'_>,
+        expected_seed: u64,
+        tid: u64,
+        undo_len: usize,
+        redo_len: usize,
+    ) {
+        assert_eq!(record.tid(), TransactionId::from(tid));
 
-        // Verify data integrity
-        let mut rng = StdRng::seed_from_u64(expected_lsn);
-        let redo_data = record_ref.redo_data();
-        let undo_data = record_ref.undo_data();
+        let mut rng = StdRng::seed_from_u64(expected_seed);
 
-        for byte in redo_data {
-            assert_eq!(*byte, rng.random_range(0..=255));
+        let undo = record.undo_data();
+        assert_eq!(undo.len(), undo_len);
+        for &byte in undo {
+            assert_eq!(byte, rng.random::<u8>());
         }
 
-        for byte in undo_data {
-            assert_eq!(*byte, rng.random_range(0..=255));
+        let redo = record.redo_data();
+        assert_eq!(redo.len(), redo_len);
+        for &byte in redo {
+            assert_eq!(byte, rng.random::<u8>());
         }
     }
 
     #[test]
-    fn test_wal_1() {
+    fn test_wal_basic_write_read() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("wal.db");
-        let mut wal = WriteAheadLog::create(&path).unwrap();
-        let rec = make_record(1, 2, 3, 3, 11, 11);
-        wal.push(rec).unwrap();
+        let path = dir.path().join("test.wal");
 
-        // After pushing one record, journal should have the record + padding
-        assert!(!wal.journal.is_empty());
-        assert_eq!(wal.header.last_lsn, LogId::from(1));
-        assert_eq!(wal.header.start_lsn, LogId::from(1));
-    }
+        let num_records = 100;
+        let undo_len = 50;
+        let redo_len = 75;
 
-    #[test]
-    fn test_wal_2() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("wal.db");
-
-        let mut wal = WriteAheadLog::create(&path).unwrap();
-        let block_size = wal.header.blk_size as usize;
-
-        // Create records that are large enough to trigger extension
-        let big_rec1 = make_record(1, 2, 3, 3, block_size / 2, block_size / 2);
-        let big_rec2 = make_record(2, 2, 3, 4, block_size / 2, block_size / 2);
-
-        wal.push(big_rec1).unwrap();
-        wal.push(big_rec2).unwrap();
-
-        // Both records should be in journal now
-        assert!(!wal.journal.is_empty());
-        assert_eq!(wal.header.last_lsn, LogId::from(2));
-        assert_eq!(wal.header.start_lsn, LogId::from(1));
-    }
-
-    #[test]
-    fn test_wal_3() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("wal_basic.db");
-        let num_rec = 4555;
         // Write phase
         {
             let mut wal = WriteAheadLog::create(&path).unwrap();
-            push_items(&mut wal, 1, num_rec);
-            // Flush to disk
+
+            for i in 1..=num_records {
+                let record = make_test_record(i, 1, 1, undo_len, redo_len);
+                wal.push(record).unwrap();
+            }
+
+            assert_eq!(wal.header.num_entries as u64, num_records);
             wal.flush().unwrap();
         }
 
         // Read phase
         {
             let mut wal = WriteAheadLog::open(&path).unwrap();
+            assert_eq!(wal.header.num_entries as u64, num_records);
 
-            // Replay and verify records
-            validate_replay(&mut wal, num_rec as usize);
+            let mut count = 0u64;
+            wal.iter()
+                .unwrap()
+                .for_each(|record| {
+                    count += 1;
+                    verify_record(&record, count, 1, undo_len, redo_len);
+                    Ok(())
+                })
+                .unwrap();
+
+            assert_eq!(count, num_records as u64);
         }
     }
 
     #[test]
-    fn test_wal_4() {
+    fn test_wal_multiple_flushes() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("wal_basic.db");
-        let num_rec = 100;
-        // Write phase
+        let path = dir.path().join("test_multi.wal");
+
+        let records_per_batch = 10;
+        let num_batches = 5;
+        let total_records = records_per_batch * num_batches;
+
+        // Write multiple batches with flushes
         {
             let mut wal = WriteAheadLog::create(&path).unwrap();
 
-            push_items(&mut wal, 1, num_rec);
-            // Flush to disk
-            wal.flush().unwrap();
+            for batch in 0..num_batches {
+                for i in 0..records_per_batch {
+                    let record_num = (batch * records_per_batch + i + 1) as u64;
+                    let record = make_test_record(record_num, 1, 1, 100, 100);
+                    wal.push(record).unwrap();
+                }
+                wal.flush().unwrap();
+            }
 
-            push_items(&mut wal, num_rec + 1, 2 * num_rec);
-
-            wal.flush().unwrap();
-
-            push_items(&mut wal, 2 * num_rec + 1, 3 * num_rec);
-
-            wal.flush().unwrap();
+            assert_eq!(wal.header.num_entries, total_records as u32);
         }
 
-        // Read phase
+        // Verify all records
         {
             let mut wal = WriteAheadLog::open(&path).unwrap();
+            assert_eq!(wal.header.num_entries, total_records as u32);
 
-            // Verify header was persisted correctly
-            push_items(&mut wal, 3 * num_rec + 1, 4 * num_rec);
+            let mut count = 0u64;
+            wal.iter()
+                .unwrap()
+                .for_each(|record| {
+                    count += 1;
+                    verify_record(&record, count, 1, 100, 100);
+                    Ok(())
+                })
+                .unwrap();
 
-            wal.flush().unwrap();
-
-            validate_replay(&mut wal, 4 * num_rec as usize);
+            assert_eq!(count, total_records as u64);
         }
     }
 
     #[test]
-    fn test_wal_5() {
+    fn test_wal_large_records() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("wal_basic.db");
-        let num_rec = 100;
-        // Write phase
+        let path = dir.path().join("test_large.wal");
+
+        // Records that are ~1/4 of block size each
+        let record_size = WAL_BLOCK_SIZE / 4 - LOG_HEADER_SIZE - 100;
+        let num_records = 20;
+
         {
             let mut wal = WriteAheadLog::create(&path).unwrap();
 
-            push_items(&mut wal, 1, num_rec);
-            // Flush to disk
-            wal.flush().unwrap();
+            for i in 1..=num_records {
+                let record = make_test_record(i as u64, 1, 1, record_size / 2, record_size / 2);
+                wal.push(record).unwrap();
+            }
 
-            // These extra items should not be read.
-            push_items(&mut wal, num_rec + 1, 2 * num_rec);
+            wal.flush().unwrap();
         }
 
-        // Read phase
         {
             let mut wal = WriteAheadLog::open(&path).unwrap();
 
-            validate_replay(&mut wal, num_rec as usize);
+            let mut count = 0u64;
+            wal.iter()
+                .unwrap()
+                .for_each(|record| {
+                    count += 1;
+                    verify_record(&record, count, 1, record_size / 2, record_size / 2);
+                    Ok(())
+                })
+                .unwrap();
+
+            assert_eq!(count, num_records as u64);
+        }
+    }
+
+    #[test]
+    fn test_wal_truncate() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_truncate.wal");
+
+        {
+            let mut wal = WriteAheadLog::create(&path).unwrap();
+
+            for i in 1..=100 {
+                let record = make_test_record(i, 1, 1, 50, 50);
+                wal.push(record).unwrap();
+            }
+            wal.flush().unwrap();
+
+            assert_eq!(wal.header.num_entries, 100);
+
+            // Truncate
+            wal.truncate().unwrap();
+
+            assert_eq!(wal.header.num_entries, 0);
+            assert_eq!(wal.header.start_lsn, LogId::from(0));
+        }
+
+        // Verify empty after reopen
+        {
+            let mut wal = WriteAheadLog::open(&path).unwrap();
+            assert_eq!(wal.header.num_entries, 0);
+
+            let mut count = 0;
+            wal.iter()
+                .unwrap()
+                .for_each(|_| {
+                    count += 1;
+                    Ok(())
+                })
+                .unwrap();
+
+            assert_eq!(count, 0);
+        }
+    }
+
+    #[test]
+    fn test_wal_record_builder() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_builder.wal");
+
+        {
+            let mut wal = WriteAheadLog::create(&path).unwrap();
+            let mut builder = LogRecordBuilder::for_transaction(TransactionId::from(42));
+
+            // Build records using operations
+            let begin = builder.build_rec(Begin);
+            wal.push(begin).unwrap();
+
+            // Note: For real usage you'd have OwnedTuple, using empty for test
+            let commit = builder.build_rec(Commit);
+            wal.push(commit).unwrap();
+
+            let end = builder.build_rec(End);
+            wal.push(end).unwrap();
+
+            wal.flush().unwrap();
+        }
+
+        {
+            let mut wal = WriteAheadLog::open(&path).unwrap();
+
+            let records = wal.iter().unwrap().collect_all().unwrap();
+
+            assert_eq!(records.len(), 3);
+            assert_eq!(records[0].header().log_type, LogRecordType::Begin);
+            assert_eq!(records[1].header().log_type, LogRecordType::Commit);
+            assert_eq!(records[2].header().log_type, LogRecordType::End);
+
+            // Verify transaction ID
+            assert_eq!(records[0].header().tid, TransactionId::from(42));
+        }
+    }
+
+    #[test]
+    fn test_wal_cross_block_records() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_cross.wal");
+
+        // Create records of varying sizes to force cross-block scenarios
+        let sizes = [100, 500, 1000, 2000, 5000, 100, 3000];
+
+        {
+            let mut wal = WriteAheadLog::create(&path).unwrap();
+
+            for (i, &size) in sizes.iter().enumerate() {
+                let record = make_test_record((i + 1) as u64, 1, 1, size / 2, size / 2);
+                wal.push(record).unwrap();
+            }
+
+            wal.flush().unwrap();
+        }
+
+        {
+            let mut wal = WriteAheadLog::open(&path).unwrap();
+
+            let mut count = 0;
+            wal.iter()
+                .unwrap()
+                .for_each(|record| {
+                    let expected_size = sizes[count];
+                    verify_record(
+                        &record,
+                        (count + 1) as u64,
+                        1,
+                        expected_size / 2,
+                        expected_size / 2,
+                    );
+                    count += 1;
+                    Ok(())
+                })
+                .unwrap();
+
+            assert_eq!(count, sizes.len());
         }
     }
 }

@@ -6,8 +6,8 @@
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 
 use crate::database::schema::Schema;
-use crate::sql::ast::{BinaryOperator, JoinType};
 use crate::sql::binder::ast::*;
+use crate::sql::parser::ast::{BinaryOperator, JoinType};
 use crate::types::ObjectId;
 
 use super::memo::GroupId;

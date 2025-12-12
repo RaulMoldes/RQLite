@@ -20,6 +20,9 @@ mod structures;
 mod transactions;
 pub mod types;
 
+#[cfg(test)]
+pub mod test_utils;
+
 /// Jemalloc apparently has better alignment guarantees than rust's standard allocator.
 /// Rust's global system allocator does not seem to guarantee that allocations are aligned.
 /// Therefore we prefer to use [Jemalloc], to ensure allocations are aligned.

@@ -5,8 +5,8 @@
 
 use crate::database::SharedCatalog;
 use crate::database::schema::Schema;
-use crate::sql::ast::JoinType;
 use crate::sql::binder::ast::*;
+use crate::sql::parser::ast::JoinType;
 use crate::transactions::accessor::RcPageAccessor;
 use crate::types::ObjectId;
 
@@ -598,135 +598,5 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
             children,
             properties: expr.properties,
         })
-    }
-}
-
-/// TODO: Improve this tests.
-#[cfg(test)]
-mod planner_tests {
-    use super::*;
-    use crate::{
-        AxmosDBConfig, IncrementalVaccum, TextEncoding,
-        database::{
-            Database,
-            errors::{BinderResult, IntoBoxError},
-            stats::CatalogStatsProvider,
-        },
-        io::pager::{Pager, SharedPager},
-        sql::{binder::Binder, lexer::Lexer, parser::Parser},
-        types::DataTypeKind,
-    };
-
-    use std::path::Path;
-
-    fn users_schema() -> Schema {
-        let mut users_schema = Schema::new();
-        users_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        users_schema.add_column("name", DataTypeKind::Text, false, false, false);
-        users_schema.add_column("email", DataTypeKind::Text, false, true, false);
-        users_schema.add_column("age", DataTypeKind::Int, false, false, false);
-        users_schema
-    }
-
-    fn orders_schema() -> Schema {
-        let mut orders_schema = Schema::new();
-        orders_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        orders_schema.add_column("user_id", DataTypeKind::Int, false, false, false);
-        orders_schema.add_column("amount", DataTypeKind::Double, false, false, false);
-        orders_schema.add_column("status", DataTypeKind::Text, false, false, false);
-        orders_schema
-    }
-
-    fn products_schema() -> Schema {
-        let mut products_schema = Schema::new();
-        products_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        products_schema.add_column("name", DataTypeKind::Text, false, false, false);
-        products_schema.add_column("price", DataTypeKind::Double, false, false, false);
-        products_schema.add_column("category", DataTypeKind::Text, false, false, false);
-        products_schema
-    }
-
-    fn order_items_schema() -> Schema {
-        let mut order_items_schema = Schema::new();
-        order_items_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        order_items_schema.add_column("order_id", DataTypeKind::Int, false, false, false);
-        order_items_schema.add_column("product_id", DataTypeKind::Int, false, false, false);
-        order_items_schema.add_column("quantity", DataTypeKind::Int, false, false, false);
-        order_items_schema
-    }
-
-    fn create_db(path: impl AsRef<Path>) -> std::io::Result<Database> {
-        let config = AxmosDBConfig {
-            page_size: 4096,
-            cache_size: Some(100),
-            incremental_vacuum_mode: IncrementalVaccum::Disabled,
-            min_keys: 3,
-            text_encoding: TextEncoding::Utf8,
-        };
-
-        let pager = Pager::from_config(config, &path)?;
-        let db = Database::new(SharedPager::from(pager), 3, 2, 5)?;
-
-        db.task_runner()
-            .run(|ctx| {
-                let schema = users_schema();
-                ctx.catalog()
-                    .create_table("users", schema, ctx.accessor())
-                    .box_err()?;
-                let schema = orders_schema();
-                ctx.catalog()
-                    .create_table("orders", schema, ctx.accessor())
-                    .box_err()?;
-                let schema = order_items_schema();
-                ctx.catalog()
-                    .create_table("order_items", schema, ctx.accessor())
-                    .box_err()?;
-                let schema = products_schema();
-                ctx.catalog()
-                    .create_table("products", schema, ctx.accessor())
-                    .box_err()?;
-                Ok(())
-            })
-            .unwrap();
-
-        Ok(db)
-    }
-
-    fn resolve_sql(sql: String, db: &Database) -> BinderResult<BoundStatement> {
-        let stmt = db
-            .task_runner()
-            .run_with_result(move |ctx| {
-                let lexer = Lexer::new(&sql);
-                let mut parser = Parser::new(lexer);
-                let stmt = parser.parse().box_err()?;
-                let mut binder = Binder::new(ctx.catalog(), ctx.accessor());
-                binder.bind(&stmt).box_err()
-            })
-            .unwrap();
-        Ok(stmt)
-    }
-
-    fn create_plan(
-        bound_stmt: BoundStatement,
-        db: &Database,
-    ) -> OptimizerResult<(GroupId, LogicalPlan)> {
-        let result = db.task_runner().run_with_result(move |ctx| {
-            let provider = CatalogStatsProvider::new(ctx.catalog(), ctx.accessor());
-
-            let mut memo = Memo::new();
-            let builder = PlanBuilder::new(&mut memo, ctx.catalog(), ctx.accessor(), &provider);
-            let id = builder.build(&bound_stmt).box_err()?;
-            let displayer = PlanBuilder::new(&mut memo, ctx.catalog(), ctx.accessor(), &provider);
-            let plan = displayer.build_logical_plan(id).box_err()?;
-            Ok((id, plan))
-        })?;
-        Ok(result)
-    }
-
-    fn build_plan(sql: String, db: &Database) -> OptimizerResult<GroupId> {
-        let stmt = resolve_sql(sql, db)?;
-        let (id, plan) = create_plan(stmt, db)?;
-        println!("{plan}");
-        Ok(id)
     }
 }

@@ -84,8 +84,6 @@ fn main() {
     }
 }
 
-
-
 fn handle_client(stream: TcpStream, db: &Database) -> std::io::Result<()> {
     let peer_addr = stream.peer_addr()?;
     println!("[+] Client connected: {}", peer_addr);

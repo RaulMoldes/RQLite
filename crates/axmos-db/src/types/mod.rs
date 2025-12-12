@@ -15,8 +15,6 @@ pub mod id;
 pub mod sized_types;
 pub mod varint;
 
-use crate::TextEncoding;
-
 pub use blob::{Blob, BlobRef, BlobRefMut};
 pub use date::{Date, DateRef, DateRefMut};
 pub use datetime::{DateTime, DateTimeRef, DateTimeRefMut};
@@ -109,7 +107,7 @@ impl Display for DataType {
             }
 
             DataType::Text(b) => {
-                let txt = b.to_string(TextEncoding::Utf8);
+                let txt = b.to_string();
                 write!(f, "Text(\"{}\")", txt)
             }
 

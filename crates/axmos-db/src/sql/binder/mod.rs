@@ -9,13 +9,15 @@ use crate::{
         schema::{Column, Schema},
     },
     sql::{
-        ast::{
-            AlterAction as AstAlterAction, AlterColumnAction, BinaryOperator, ColumnConstraintExpr,
-            ColumnDefExpr, Expr, OrderByExpr, SelectItem, SelectStatement, Statement,
-            TableConstraintExpr, TableReference, TransactionStatement, UnaryOperator, Values,
+        binder::ast::*,
+        parser::ast::{
+            AlterAction as AstAlterAction, AlterColumnAction, AlterTableStatement, BinaryOperator,
+            ColumnConstraintExpr, ColumnDefExpr, CreateIndexStatement, CreateTableStatement,
+            DeleteStatement, DropTableStatement, Expr, InsertStatement, OrderByExpr,
+            OrderDirection, SelectItem, SelectStatement, Statement, TableConstraintExpr,
+            TableReference, TransactionStatement, UnaryOperator, UpdateStatement, Values,
             WithStatement,
         },
-        binder::ast::*,
     },
     transactions::accessor::RcPageAccessor,
     types::{Blob, DataType, DataTypeKind, ObjectId},
@@ -458,10 +460,7 @@ impl Binder {
         })
     }
 
-    fn bind_insert(
-        &mut self,
-        stmt: &crate::sql::ast::InsertStatement,
-    ) -> BinderResult<BoundInsert> {
+    fn bind_insert(&mut self, stmt: &InsertStatement) -> BinderResult<BoundInsert> {
         let relation = self
             .catalog
             .get_relation(&stmt.table, self.accessor.clone())
@@ -555,10 +554,7 @@ impl Binder {
         })
     }
 
-    fn bind_update(
-        &mut self,
-        stmt: &crate::sql::ast::UpdateStatement,
-    ) -> BinderResult<BoundUpdate> {
+    fn bind_update(&mut self, stmt: &UpdateStatement) -> BinderResult<BoundUpdate> {
         let relation = self
             .catalog
             .get_relation(&stmt.table, self.accessor.clone())
@@ -603,10 +599,7 @@ impl Binder {
         })
     }
 
-    fn bind_delete(
-        &mut self,
-        stmt: &crate::sql::ast::DeleteStatement,
-    ) -> BinderResult<BoundDelete> {
+    fn bind_delete(&mut self, stmt: &DeleteStatement) -> BinderResult<BoundDelete> {
         let relation = self
             .catalog
             .get_relation(&stmt.table, self.accessor.clone())
@@ -634,10 +627,7 @@ impl Binder {
         })
     }
 
-    fn bind_create_table(
-        &mut self,
-        stmt: &crate::sql::ast::CreateTableStatement,
-    ) -> BinderResult<BoundCreateTable> {
+    fn bind_create_table(&mut self, stmt: &CreateTableStatement) -> BinderResult<BoundCreateTable> {
         let temp_cols: Vec<Column> = stmt
             .columns
             .iter()
@@ -751,10 +741,7 @@ impl Binder {
             .collect()
     }
 
-    fn bind_create_index(
-        &mut self,
-        stmt: &crate::sql::ast::CreateIndexStatement,
-    ) -> BinderResult<BoundCreateIndex> {
+    fn bind_create_index(&mut self, stmt: &CreateIndexStatement) -> BinderResult<BoundCreateIndex> {
         let relation = self
             .catalog
             .get_relation(&stmt.table, self.accessor.clone())
@@ -776,7 +763,7 @@ impl Binder {
                     ascending: col
                         .order
                         .as_ref()
-                        .map(|o| matches!(o, crate::sql::ast::OrderDirection::Asc))
+                        .map(|o| matches!(o, OrderDirection::Asc))
                         .unwrap_or(true),
                 })
             })
@@ -791,10 +778,7 @@ impl Binder {
         })
     }
 
-    fn bind_alter_table(
-        &mut self,
-        stmt: &crate::sql::ast::AlterTableStatement,
-    ) -> BinderResult<BoundAlterTable> {
+    fn bind_alter_table(&mut self, stmt: &AlterTableStatement) -> BinderResult<BoundAlterTable> {
         let relation = self
             .catalog
             .get_relation(&stmt.table, self.accessor.clone())
@@ -849,10 +833,7 @@ impl Binder {
         Ok(BoundAlterTable { table_id, action })
     }
 
-    fn bind_drop_table(
-        &mut self,
-        stmt: &crate::sql::ast::DropTableStatement,
-    ) -> BinderResult<BoundDropTable> {
+    fn bind_drop_table(&mut self, stmt: &DropTableStatement) -> BinderResult<BoundDropTable> {
         let table_id = self
             .catalog
             .get_relation(&stmt.table, self.accessor.clone())
@@ -1279,78 +1260,13 @@ impl Binder {
 #[cfg(test)]
 mod binder_tests {
     use super::*;
-    use crate::{
-        AxmosDBConfig, IncrementalVaccum, TextEncoding,
-        database::{Database, errors::IntoBoxError},
-        io::pager::{Pager, SharedPager},
-        sql::{lexer::Lexer, parser::Parser},
-    };
+    use crate::test_utils::{resolve_sql, test_db_with_tables};
     use serial_test::serial;
-    use std::path::Path;
-
-    fn users_schema() -> Schema {
-        let mut users_schema = Schema::new();
-        users_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        users_schema.add_column("name", DataTypeKind::Text, false, false, false);
-        users_schema.add_column("email", DataTypeKind::Text, false, true, false);
-        users_schema.add_column("age", DataTypeKind::Int, false, false, false);
-        users_schema
-    }
-
-    fn orders_schema() -> Schema {
-        let mut orders_schema = Schema::new();
-        orders_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        orders_schema.add_column("user_id", DataTypeKind::Int, false, false, false);
-        orders_schema.add_column("amount", DataTypeKind::Double, false, false, false);
-        orders_schema.add_column("status", DataTypeKind::Text, false, false, false);
-        orders_schema
-    }
-
-    fn create_db(path: impl AsRef<Path>) -> std::io::Result<Database> {
-        let config = AxmosDBConfig {
-            page_size: 4096,
-            cache_size: Some(100),
-            incremental_vacuum_mode: IncrementalVaccum::Disabled,
-            min_keys: 3,
-            text_encoding: TextEncoding::Utf8,
-        };
-
-        let pager = Pager::from_config(config, &path)?;
-        let db = Database::new(SharedPager::from(pager), 3, 2, 5)?;
-
-        db.task_runner()
-            .run(|ctx| {
-                let schema = users_schema();
-                ctx.catalog()
-                    .create_table("users", schema, ctx.accessor())
-                    .box_err()?;
-                let schema = orders_schema();
-                ctx.catalog()
-                    .create_table("orders", schema, ctx.accessor())
-                    .box_err()?;
-                Ok(())
-            })
-            .unwrap();
-
-        Ok(db)
-    }
-
-    fn resolve_sql(sql: String, db: &Database) -> BinderResult<BoundStatement> {
-        let stmt = db.task_runner().run_with_result(move |ctx| {
-            let lexer = Lexer::new(&sql);
-            let mut parser = Parser::new(lexer);
-            let stmt = parser.parse().box_err()?;
-            let mut binder = Binder::new(ctx.catalog(), ctx.accessor());
-            binder.bind(&stmt).box_err()
-        })?;
-        Ok(stmt)
-    }
 
     #[test]
     #[serial]
     fn test_resolve_column_indices() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql("SELECT name, age FROM users".to_string(), &db).unwrap();
 
@@ -1376,8 +1292,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_star_expansion() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql("SELECT * FROM users".to_string(), &db).unwrap();
 
@@ -1398,8 +1313,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_qualified_column_resolution() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         // Both tables have 'id' - qualified names resolve correctly
         let result = resolve_sql(
@@ -1427,8 +1341,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_ambiguous_column_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql("SELECT id FROM users, orders".to_string(), &db);
         assert!(matches!(result, Err(BinderError::AmbiguousColumn(_))));
@@ -1437,8 +1350,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_column_not_found_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql("SELECT nonexistent FROM users".to_string(), &db);
         assert!(matches!(result, Err(BinderError::ColumnNotFound(_))));
@@ -1447,8 +1359,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_table_alias_resolution() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql("SELECT u.name FROM users u".to_string(), &db).unwrap();
 
@@ -1465,8 +1376,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_duplicate_alias_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql("SELECT * FROM users t, orders t".to_string(), &db);
         dbg!(&result);
@@ -1476,8 +1386,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_table_not_found_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql("SELECT * FROM nonexistent".to_string(), &db);
         assert!(matches!(result, Err(BinderError::TableNotFound(_))));
@@ -1486,8 +1395,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_insert_reorders_to_physical_order() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         // Columns specified in non-schema order: age, name, id, email
         let result = resolve_sql(
@@ -1521,8 +1429,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_insert_column_count_mismatch() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql(
             "INSERT INTO users (id, name) VALUES (1, 'John', 'extra')".to_string(),
@@ -1537,8 +1444,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_join_condition_resolution() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql(
             "SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id".to_string(),
@@ -1575,8 +1481,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_join_merges_schemas() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql(
             "SELECT * FROM users u JOIN orders o ON u.id = o.user_id".to_string(),
@@ -1595,8 +1500,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_subquery_scope_isolation() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql(
             "SELECT * FROM (SELECT name FROM users) AS sub".to_string(),
@@ -1615,8 +1519,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_correlated_subquery() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql(
             "SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)"
@@ -1640,8 +1543,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_in_subquery() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql(
             "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)".to_string(),
@@ -1663,8 +1565,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_cte_reference() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql(
             "WITH adults AS (SELECT id, name FROM users WHERE age >= 18) SELECT * FROM adults"
@@ -1693,8 +1594,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_expression_type_inference() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql(
             "SELECT age + 1, age > 18, COUNT(*), UPPER(name) FROM users".to_string(),
@@ -1722,8 +1622,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_aggregate_vs_scalar_function() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql(
             "SELECT COUNT(*), SUM(age), LENGTH(name) FROM users".to_string(),
@@ -1754,8 +1653,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_update_assignment_resolution() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql(
             "UPDATE users SET age = age + 1 WHERE id = 1".to_string(),
@@ -1779,8 +1677,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_delete_filter_resolution() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql("DELETE FROM users WHERE age < 18".to_string(), &db).unwrap();
 
@@ -1798,8 +1695,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_create_index_column_resolution() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result =
             resolve_sql("CREATE INDEX idx ON users(name, email)".to_string(), &db).unwrap();
@@ -1816,8 +1712,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_alter_table_drop_column() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql("ALTER TABLE users DROP COLUMN age".to_string(), &db).unwrap();
 
@@ -1835,8 +1730,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_create_table_foreign_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql(
             "CREATE TABLE order_items (id INT PRIMARY KEY, order_id INT REFERENCES orders(id))"
@@ -1863,8 +1757,7 @@ mod binder_tests {
     #[test]
     #[serial]
     fn test_select_generates_schema() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = resolve_sql("SELECT name, age * 2 FROM users".to_string(), &db).unwrap();
 

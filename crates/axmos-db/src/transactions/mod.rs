@@ -496,30 +496,8 @@ impl TransactionHandle {
 #[cfg(test)]
 mod coordinator_tests {
     use super::*;
-    use crate::{
-        IncrementalVaccum, TextEncoding, configs::AxmosDBConfig, database::Database,
-        io::pager::Pager,
-    };
-    use std::{collections::HashSet, io, path::Path};
-
-    /// Creates mock fixtures for testing.
-    fn create_db(
-        page_size: usize,
-        capacity: usize,
-        path: impl AsRef<Path>,
-    ) -> io::Result<Database> {
-        let config = AxmosDBConfig {
-            page_size: page_size as u32,
-            cache_size: Some(capacity as u16),
-            incremental_vacuum_mode: IncrementalVaccum::Disabled,
-            min_keys: 3,
-            text_encoding: TextEncoding::Utf8,
-        };
-
-        let pager = Pager::from_config(config, &path).unwrap();
-
-        Database::new(SharedPager::from(pager), 3, 2, 5)
-    }
+    use crate::test_utils::test_database;
+    use std::{collections::HashSet, io};
 
     /// Test: A transaction can see tuples it created itself.
     ///
@@ -661,9 +639,7 @@ mod coordinator_tests {
     /// 5. Transaction B tries to commit -> fails because tuple X was modified after B started
     #[test]
     fn test_coordinator_6() -> io::Result<()> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let db = create_db(4096, 100, &path)?;
+        let (db, f) = test_database()?;
         let pager = db.pager();
         let catalog = db.catalog();
         let coordinator = TransactionCoordinator::new(pager, catalog);
@@ -711,9 +687,7 @@ mod coordinator_tests {
     /// 3. Both commit successfully (no conflict)
     #[test]
     fn test_coordinator_7() -> io::Result<()> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let db = create_db(4096, 100, &path)?;
+        let (db, f) = test_database()?;
         let pager = db.pager();
         let catalog = db.catalog();
 
@@ -758,9 +732,7 @@ mod coordinator_tests {
     /// This works because B's start_ts is after A's commit_ts.
     #[test]
     fn test_coordinator_8() -> io::Result<()> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let db = create_db(4096, 100, &path)?;
+        let (db, f) = test_database()?;
         let pager = db.pager();
         let catalog = db.catalog();
         let coordinator = TransactionCoordinator::new(pager, catalog);
@@ -800,9 +772,7 @@ mod coordinator_tests {
     /// Aborted transactions should not cause conflicts.
     #[test]
     fn test_coordinator_9() -> io::Result<()> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let db = create_db(4096, 100, &path)?;
+        let (db, f) = test_database()?;
         let pager = db.pager();
         let catalog = db.catalog();
         let coordinator = TransactionCoordinator::new(pager, catalog);

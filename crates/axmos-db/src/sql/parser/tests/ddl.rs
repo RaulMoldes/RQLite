@@ -1,5 +1,4 @@
-use crate::sql::ast::*;
-use crate::sql::parse_sql;
+use crate::sql::parser::ast::*;
 use crate::sql_test;
 use crate::types::DataTypeKind;
 

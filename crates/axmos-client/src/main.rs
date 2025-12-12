@@ -172,7 +172,8 @@ fn main() {
 }
 
 fn print_help() {
-    println!(r#"
+    println!(
+        r#"
 AxmosDB Client Commands:
 ========================
   :quit, :exit, \q    Exit the client
@@ -190,5 +191,6 @@ SQL Examples:
 Tips:
   - End queries with semicolon (;)
   - Multi-line queries are supported
-"#);
+"#
+    );
 }

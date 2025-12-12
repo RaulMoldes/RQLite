@@ -1,34 +1,30 @@
 use std::{
+    alloc::AllocError,
     collections::BinaryHeap,
     fmt::Debug,
     io::{Error as IoError, ErrorKind as IoErrorKind},
-    iter,
-    ops::{Bound, RangeBounds},
+    iter, mem,
+    ops::{Bound, Deref, DerefMut, RangeBounds},
     ptr::{self, NonNull},
+    slice,
 };
 
 use crate::{
+    DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, as_slice,
     configs::{
-        AXMO, AxmosDBConfig, CELL_ALIGNMENT, DEFAULT_CACHE_SIZE, DEFAULT_PAGE_SIZE,
-        IncrementalVaccum, MAX_PAGE_SIZE, MIN_PAGE_SIZE, PAGE_ALIGNMENT, TextEncoding,
+        AXMO, AxmosDBConfig, CELL_ALIGNMENT, DEFAULT_CACHE_SIZE, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
+        MIN_PAGE_SIZE, PAGE_ALIGNMENT,
     },
     storage::{
-        buffer::BufferWithMetadata,
-        cell::{CELL_HEADER_SIZE, Cell, Slot},
+        buffer::MemBlock,
+        cell::{CELL_HEADER_SIZE, CellHeader, CellMut, CellRef, OwnedCell, Slot},
         latches::Latch,
     },
     types::{PAGE_ZERO, PageId},
 };
-use std::ops::{Deref, DerefMut};
 
 fn max_payload_size_in(usable_space: usize) -> usize {
     (usable_space - CELL_HEADER_SIZE - Slot::SIZE) & !(CELL_ALIGNMENT as usize - 1)
-}
-
-#[inline]
-fn align_down(value: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    value & !(align - 1)
 }
 
 /// Slotted page header.
@@ -45,9 +41,9 @@ pub(crate) struct BtreePageHeader {
     pub(crate) padding: u32,
     pub(crate) num_slots: u16,
 }
-pub(crate) const BTREE_PAGE_HEADER_SIZE: usize = std::mem::size_of::<BtreePageHeader>();
+pub(crate) const BTREE_PAGE_HEADER_SIZE: usize = mem::size_of::<BtreePageHeader>();
 
-crate::as_slice!(BtreePageHeader);
+as_slice!(BtreePageHeader);
 #[derive(Debug, PartialEq, Clone, Copy)]
 #[repr(C, align(64))]
 pub(crate) struct OverflowPageHeader {
@@ -56,9 +52,9 @@ pub(crate) struct OverflowPageHeader {
     pub(crate) num_bytes: u32,
     pub(crate) padding: u32,
 }
-pub(crate) const OVERFLOW_HEADER_SIZE: usize = std::mem::size_of::<OverflowPageHeader>();
+pub(crate) const OVERFLOW_HEADER_SIZE: usize = mem::size_of::<OverflowPageHeader>();
 
-crate::as_slice!(OverflowPageHeader);
+as_slice!(OverflowPageHeader);
 
 impl Header for OverflowPageHeader {
     fn page_number(&self) -> PageId {
@@ -68,7 +64,7 @@ impl Header for OverflowPageHeader {
     fn alloc(size: u32) -> Self {
         let effective_size = size.next_multiple_of(PAGE_ALIGNMENT);
         debug_assert!(
-            std::mem::size_of::<OverflowPageHeader>().is_multiple_of(CELL_ALIGNMENT as usize),
+            mem::size_of::<OverflowPageHeader>().is_multiple_of(CELL_ALIGNMENT as usize),
             "Header size is not a multiple of cell alignment. Must ensure header is aligned"
         );
 
@@ -107,12 +103,11 @@ pub(crate) struct DatabaseHeader {
     pub(crate) free_pages: u32,
     pub(crate) cache_size: u16,
     pub(crate) min_keys: u8,
-    pub(crate) text_encoding: crate::TextEncoding,
-    pub(crate) incremental_vacuum_mode: crate::IncrementalVaccum,
+    pub(crate) num_siblings_per_side: u8,
 }
-pub(crate) const DB_HEADER_SIZE: usize = std::mem::size_of::<DatabaseHeader>();
+pub(crate) const DB_HEADER_SIZE: usize = mem::size_of::<DatabaseHeader>();
 
-crate::as_slice!(DatabaseHeader);
+as_slice!(DatabaseHeader);
 
 impl Header for DatabaseHeader {
     fn page_number(&self) -> PageId {
@@ -125,7 +120,7 @@ impl Header for DatabaseHeader {
 
     fn init(__size: u32, __page_number: PageId) -> Self {
         debug_assert!(
-            std::mem::size_of::<DatabaseHeader>().is_multiple_of(CELL_ALIGNMENT as usize),
+            mem::size_of::<DatabaseHeader>().is_multiple_of(CELL_ALIGNMENT as usize),
             "Header size is not a multiple of cell alignment. Must ensure header is aligned"
         );
         Self {
@@ -135,10 +130,10 @@ impl Header for DatabaseHeader {
             free_pages: 0,
             first_free_page: PAGE_ZERO,
             last_free_page: PAGE_ZERO,
-            text_encoding: TextEncoding::Utf8,
-            min_keys: 3, // DEFAULTS TO THREE
-            incremental_vacuum_mode: IncrementalVaccum::Disabled,
-            cache_size: DEFAULT_CACHE_SIZE,
+
+            min_keys: DEFAULT_BTREE_MIN_KEYS, // DEFAULTS TO THREE
+            num_siblings_per_side: DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE,
+            cache_size: DEFAULT_CACHE_SIZE as u16,
         }
     }
 }
@@ -158,7 +153,7 @@ impl Header for BtreePageHeader {
         let aligned_size = size.next_multiple_of(PAGE_ALIGNMENT);
 
         debug_assert!(
-            std::mem::size_of::<BtreePageHeader>().is_multiple_of(CELL_ALIGNMENT as usize),
+            mem::size_of::<BtreePageHeader>().is_multiple_of(CELL_ALIGNMENT as usize),
             "Header size is not a multiple of cell alignment. Must ensure header is aligned"
         );
 
@@ -178,7 +173,7 @@ impl Header for BtreePageHeader {
         let aligned_size = size.next_multiple_of(PAGE_ALIGNMENT);
 
         debug_assert!(
-            std::mem::size_of::<BtreePageHeader>().is_multiple_of(CELL_ALIGNMENT as usize),
+            mem::size_of::<BtreePageHeader>().is_multiple_of(CELL_ALIGNMENT as usize),
             "Header size is not a multiple of cell alignment. Must ensure header is aligned"
         );
         Self {
@@ -200,7 +195,7 @@ impl BtreePageHeader {
     }
 }
 
-pub(crate) type BtreePage = BufferWithMetadata<BtreePageHeader>;
+pub(crate) type BtreePage = MemBlock<BtreePageHeader>;
 
 impl Page for BtreePage {
     type Header = BtreePageHeader;
@@ -211,12 +206,7 @@ impl Page for BtreePage {
             "page size {size} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}"
         );
 
-        let mut buffer = BufferWithMetadata::<BtreePageHeader>::new_unchecked(
-            size as usize,
-            PAGE_ALIGNMENT as usize,
-        );
-
-        buffer.set_len(size as usize);
+        let mut buffer = MemBlock::<BtreePageHeader>::new(size as usize);
         *buffer.metadata_mut() = BtreePageHeader::alloc(size);
 
         buffer
@@ -280,12 +270,12 @@ impl BtreePage {
         unsafe { self.slot_array_non_null().as_mut() }
     }
 
-    unsafe fn cell_at_offset(&self, offset: u16) -> NonNull<Cell> {
+    unsafe fn cell_at_offset(&self, offset: u16) -> NonNull<CellHeader> {
         unsafe { self.data.byte_add(offset as usize).cast() }
     }
 
     /// Returns a pointer to the [`Cell`] located at the given slot.
-    pub(crate) fn get_cell_at(&self, index: Slot) -> NonNull<Cell> {
+    pub(crate) fn get_cell_at(&self, index: Slot) -> NonNull<CellHeader> {
         debug_assert!(
             index.0 <= self.num_slots(),
             "slot index {index} out of bounds for slot array of length {}",
@@ -296,22 +286,18 @@ impl BtreePage {
     }
 
     /// Read-only reference to a cell.
-    pub(crate) fn cell(&self, index: Slot) -> &Cell {
-        let cell = self.get_cell_at(index);
-        // SAFETY: Same as [`Self::cell_at_offset`].
-        unsafe { cell.as_ref() }
+    pub(crate) fn cell(&self, index: Slot) -> CellRef<'_> {
+        unsafe { CellRef::from_raw(self.get_cell_at(index)) }
     }
 
     /// Mutable reference to a cell.
-    pub(crate) fn cell_mut(&mut self, index: Slot) -> &mut Cell {
-        let mut cell = self.get_cell_at(index);
-        // SAFETY: Same as [`Self::cell_at_offset`].
-        unsafe { cell.as_mut() }
+    pub(crate) fn cell_mut(&mut self, index: Slot) -> CellMut<'_> {
+        unsafe { CellMut::from_raw(self.get_cell_at(index)) }
     }
 
     /// Returns an owned cell by cloning it.
-    fn owned_cell(&self, index: Slot) -> Cell {
-        self.cell(index).clone()
+    fn owned_cell(&self, index: Slot) -> OwnedCell {
+        OwnedCell::from_ref(self.cell(index))
     }
 
     /// Returns the child at the given `index`.
@@ -319,7 +305,7 @@ impl BtreePage {
         if index == self.num_slots() {
             self.metadata().right_child
         } else {
-            self.cell(index).metadata().left_child()
+            self.cell(index).left_child()
         }
     }
 
@@ -335,7 +321,7 @@ impl BtreePage {
         (0..len).map(|i| self.child(Slot(i)))
     }
 
-    pub(crate) fn iter_cells(&self) -> impl DoubleEndedIterator<Item = &Cell> + '_ {
+    pub(crate) fn iter_cells(&self) -> impl DoubleEndedIterator<Item = CellRef<'_>> + '_ {
         let len = self.num_slots();
         (0..len).map(|i| self.cell(Slot(i)))
     }
@@ -387,16 +373,16 @@ impl BtreePage {
     }
 
     /// Adds `cell` to this page, possibly overflowing the page.
-    pub(crate) fn push(&mut self, cell: Cell) {
+    pub(crate) fn push(&mut self, cell: OwnedCell) {
         self.insert(Slot(self.num_slots()), cell);
     }
 
     /// Attempts to insert the given `cell` in this page.
-    pub(crate) fn insert(&mut self, index: Slot, cell: Cell) -> Slot {
+    pub(crate) fn insert(&mut self, index: Slot, cell: OwnedCell) -> Slot {
         assert!(
-            cell.data.len() <= self.max_allowed_payload_size() as usize,
+            cell.data().len() <= self.max_allowed_payload_size() as usize,
             "attempt to store payload of size {} when max allowed payload size is {}",
-            cell.data.len(),
+            cell.data().len(),
             self.max_allowed_payload_size()
         );
 
@@ -446,10 +432,10 @@ impl BtreePage {
         // `last_used_offset` we get a valid pointer within the page where we
         // write the new cell.
         unsafe {
-            let cell_ptr = self.cell_at_offset(offset.try_into().unwrap());
-            cell_ptr.write(cell);
+            let dest = self.data.byte_add(offset as usize).cast::<u8>().as_ptr();
+            let dest_slice = slice::from_raw_parts_mut(dest, cell.total_size());
+            cell.write_to(dest_slice);
         };
-
         // Update header.
         self.metadata_mut().free_space_ptr -= cell_total_size;
 
@@ -473,12 +459,12 @@ impl BtreePage {
 
     /// Tries to replace the cell pointed by the given slot `index` with the
     /// `new_cell`.
-    pub(crate) fn replace(&mut self, index: Slot, new_cell: Cell) -> Cell {
+    pub(crate) fn replace(&mut self, index: Slot, new_cell: OwnedCell) -> OwnedCell {
         let old_cell = self.cell(index);
 
         // There's no way we can fit the new cell in this page, even if we
         // remove the one that has to be replaced.
-        if self.metadata().free_space as u16 + old_cell.total_size() < new_cell.total_size() {
+        if self.metadata().free_space as usize + old_cell.total_size() < new_cell.total_size() {
             panic!("Attempted to insert a cell on a page that was already full!");
         }
 
@@ -493,10 +479,9 @@ impl BtreePage {
             let owned_cell = self.owned_cell(index);
 
             // Overwrite the datas of the old cell.
-            let old_cell = self.cell_mut(index);
-            old_cell.data_mut()[..new_cell.data.len()].copy_from_slice(new_cell.data());
+            let mut old_cell = self.cell_mut(index);
+            old_cell.data_mut()[..new_cell.data().len()].copy_from_slice(new_cell.data());
             *old_cell.metadata_mut() = *new_cell.metadata();
-            old_cell.set_len(new_cell.len());
 
             self.metadata_mut().free_space_ptr += free_bytes;
             self.metadata_mut().free_space += free_bytes;
@@ -514,7 +499,7 @@ impl BtreePage {
     }
 
     /// Removes the cell pointed by the given slot `index`.
-    pub(crate) fn remove(&mut self, index: Slot) -> Cell {
+    pub(crate) fn remove(&mut self, index: Slot) -> OwnedCell {
         let len = self.num_slots();
 
         assert!(
@@ -559,8 +544,7 @@ impl BtreePage {
             // dereferencing the cell pointer should be safe as well.
             unsafe {
                 let cell = self.cell_at_offset(offset);
-                let size = cell.as_ref().total_size();
-
+                let size = CellRef::from_raw(cell).total_size();
                 destination_offset -= size as usize;
 
                 cell.cast::<u8>().copy_to(
@@ -579,7 +563,7 @@ impl BtreePage {
     pub(crate) fn drain(
         &mut self,
         range: impl RangeBounds<usize>,
-    ) -> impl Iterator<Item = Cell> + '_ {
+    ) -> impl Iterator<Item = OwnedCell> + '_ {
         let start = match range.start_bound() {
             Bound::Unbounded => 0,
             Bound::Excluded(i) => i + 1,
@@ -606,7 +590,7 @@ impl BtreePage {
                 // Now compute gained space and shift slots towards the left.
                 self.metadata_mut().free_space += (start..slot_index)
                     .map(|slot| self.cell(Slot(slot as u16)).storage_size())
-                    .sum::<u16>() as u32;
+                    .sum::<usize>() as u32;
 
                 self.slot_array_mut().copy_within(slot_index.., start);
 
@@ -618,8 +602,8 @@ impl BtreePage {
     }
 }
 
-pub(crate) type OverflowPage = BufferWithMetadata<OverflowPageHeader>;
-pub(crate) type PageZero = BufferWithMetadata<DatabaseHeader>;
+pub(crate) type OverflowPage = MemBlock<OverflowPageHeader>;
+pub(crate) type PageZero = MemBlock<DatabaseHeader>;
 
 impl Page for OverflowPage {
     type Header = OverflowPageHeader;
@@ -628,13 +612,7 @@ impl Page for OverflowPage {
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
             "page size {size} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}"
         );
-        let mut buf = BufferWithMetadata::<OverflowPageHeader>::new_unchecked(
-            size as usize,
-            PAGE_ALIGNMENT as usize,
-        );
-
-        // Pages cannot grow like cells do. Therefore we automatically set the length at the beginning and leave it as is.
-        buf.set_len(size as usize);
+        let mut buf = MemBlock::<OverflowPageHeader>::new(size as usize);
 
         *buf.metadata_mut() = OverflowPageHeader::alloc(size);
 
@@ -657,11 +635,8 @@ impl Page for PageZero {
     type Header = DatabaseHeader;
     /// Creates a new page in memory.
     fn alloc(size: u32) -> Self {
-        let mut buf = BufferWithMetadata::<DatabaseHeader>::new_unchecked(
-            size as usize,
-            PAGE_ALIGNMENT as usize,
-        );
-        buf.set_len(DB_HEADER_SIZE);
+        let mut buf = MemBlock::<DatabaseHeader>::new(size as usize);
+
         *buf.metadata_mut() = DatabaseHeader::alloc(size);
 
         buf
@@ -680,9 +655,8 @@ pub(crate) enum MemPage {
     Btree(BtreePage),
 }
 
-pub(crate) trait Page: Into<MemPage> + AsRef<[u8]> + AsMut<[u8]>
-where
-    Self: for<'a> TryFrom<(&'a [u8], usize), Error = &'static str>,
+pub(crate) trait Page:
+    Into<MemPage> + AsRef<[u8]> + AsMut<[u8]> + for<'a> TryFrom<&'a [u8], Error = AllocError>
 {
     type Header: Header;
 
@@ -709,7 +683,7 @@ impl MemPage {
     pub(crate) fn reinit_as<P>(&mut self)
     where
         P: Page,
-        BufferWithMetadata<P::Header>: Into<MemPage>,
+        MemBlock<P::Header>: Into<MemPage>,
     {
         let number = self.page_number();
         // SAFETY: We basically move out of self temporarily to create the new
@@ -719,7 +693,7 @@ impl MemPage {
         unsafe {
             let mem_page = ptr::from_mut(self);
 
-            let mut converted: BufferWithMetadata<_> = match mem_page.read() {
+            let mut converted: MemBlock<_> = match mem_page.read() {
                 Self::Zero(zero) => panic!(
                     "Attempted to reinitialize page zero. This is not valid. Page Zero is a reserved page to store the database header!"
                 ),
@@ -731,7 +705,7 @@ impl MemPage {
 
             let header = P::Header::init(size as u32, number);
             *converted.metadata_mut() = header;
-            converted.set_len(size);
+
             converted.data_mut().fill(0);
             mem_page.write(converted.into())
         }
@@ -881,216 +855,3 @@ impl<'p> TryFrom<&'p mut Latch<MemPage>> for &'p mut OverflowPage {
 
 unsafe impl Send for MemPage {}
 unsafe impl Sync for MemPage {}
-
-#[cfg(test)]
-crate::dynamic_buffer_tests!(
-    page_dyn,
-    BtreePageHeader,
-    size = DEFAULT_PAGE_SIZE as usize,
-    align = PAGE_ALIGNMENT as usize
-);
-
-#[cfg(test)]
-crate::dynamic_buffer_tests!(
-    page_dyn_large,
-    BtreePageHeader,
-    size = MAX_PAGE_SIZE as usize, // Test for the largest possible page size.
-    align = PAGE_ALIGNMENT as usize
-);
-
-#[cfg(test)]
-crate::dynamic_buffer_tests!(
-    ovf_page_dyn,
-    OverflowPageHeader,
-    size = DEFAULT_PAGE_SIZE as usize,
-    align = PAGE_ALIGNMENT as usize
-);
-#[cfg(test)]
-crate::static_buffer_tests!(
-    page_sta,
-    BtreePageHeader,
-    size = DEFAULT_PAGE_SIZE as usize,
-    align = PAGE_ALIGNMENT as usize
-);
-#[cfg(test)]
-crate::static_buffer_tests!(
-    ovf_page_sta,
-    OverflowPageHeader,
-    size = DEFAULT_PAGE_SIZE as usize,
-    align = PAGE_ALIGNMENT as usize
-);
-#[cfg(test)]
-crate::static_buffer_tests!(
-    page_zero,
-    DatabaseHeader,
-    size = DB_HEADER_SIZE,
-    align = PAGE_ALIGNMENT as usize
-);
-
-/// Specific tests for BtreePages.
-#[cfg(test)]
-mod btree_page_tests {
-    use super::*;
-    use crate::storage::cell::{Cell, Slot};
-    use crate::types::PageId;
-
-    #[test]
-    fn test_page_allocation() {
-        let mut page = BtreePage::alloc(MIN_PAGE_SIZE + 1);
-        assert_eq!(page.len() as u32, MIN_PAGE_SIZE + 1);
-        // Verify initial state
-        assert_eq!(page.num_slots(), 0);
-        assert_eq!(
-            page.capacity(),
-            MIN_PAGE_SIZE as usize + 1 - BTREE_PAGE_HEADER_SIZE
-        );
-        assert!(page.is_leaf());
-        assert!(page.metadata().page_number != PAGE_ZERO);
-        assert!(!page.is_interior());
-        assert!(!page.has_overflown());
-        assert!(page.has_underflown());
-        assert_eq!(
-            page.metadata().padding,
-            PAGE_ALIGNMENT * 2 - (MIN_PAGE_SIZE + 1)
-        );
-
-        // Check free space calculation
-        let expected_free_space = MIN_PAGE_SIZE + 1 - BTREE_PAGE_HEADER_SIZE as u32;
-
-        assert_eq!(page.metadata().free_space, expected_free_space);
-        assert_eq!(page.metadata().free_space_ptr, expected_free_space);
-
-        let header = page.metadata_mut();
-
-        // Test siblings
-        header.next_sibling = PageId::from(100);
-        header.previous_sibling = PageId::from(50);
-        assert_eq!(header.next_sibling, PageId::from(100));
-        assert_eq!(header.previous_sibling, PageId::from(50));
-
-        // Test content start pointer
-        assert_eq!(header.content_start_ptr(), BTREE_PAGE_HEADER_SIZE as u16);
-    }
-
-    #[test]
-    fn test_cell_ops() {
-        let mut page = BtreePage::alloc(MIN_PAGE_SIZE);
-
-        // Test push
-        let cell1 = Cell::new(b"first");
-
-        let cell2 = Cell::new(b"second");
-
-        assert!(cell1.len() == b"first".len());
-        page.push(cell1);
-
-        page.push(cell2);
-
-        assert_eq!(page.num_slots(), 2);
-        assert_eq!(page.cell(Slot(0)).used(), b"first");
-        assert_eq!(page.cell(Slot(1)).used(), b"second");
-
-        // Test insert at specific position
-        let cell3 = Cell::new(b"middle");
-        page.insert(Slot(1), cell3.clone());
-
-        assert_eq!(page.num_slots(), 3);
-        assert_eq!(page.cell(Slot(1)).used(), b"middle");
-        assert_eq!(page.cell(Slot(2)).used(), b"second");
-
-        // Test remove
-        let removed = page.remove(Slot(1));
-        assert_eq!(removed.used(), b"middle");
-        assert_eq!(page.num_slots(), 2);
-
-        // Add initial cell
-        page.push(Cell::new(b"original"));
-
-        // Replace with smaller cell.
-        // Case 1: Requires just overwriting the bytes f the old cell with the bytes if the new one.
-        // Also needs to set the new length to properly manage the padding.
-        let smaller = Cell::new(b"new");
-
-        let old = page.replace(Slot(2), smaller);
-        assert_eq!(old.used(), b"original");
-        assert_eq!(page.cell(Slot(2)).used(), b"new");
-
-        // Replace with larger cell
-        // Case 2: Requires removal of the old cell in order to make up space for the new one.
-        let larger = Cell::new(b"much longer replacement text");
-        page.replace(Slot(1), larger);
-        assert_eq!(page.cell(Slot(1)).used(), b"much longer replacement text");
-
-        // The other cells should still be valid.
-        assert_eq!(page.cell(Slot(0)).used(), b"first");
-        assert_eq!(page.cell(Slot(2)).used(), b"new");
-    }
-
-    #[test]
-    fn test_free_space() {
-        let mut page = BtreePage::alloc(MIN_PAGE_SIZE);
-        let initial_free = page.metadata().free_space;
-
-        // Add cell and check free space decreases
-        let cell = Cell::new(b"test data");
-        let storage_size = cell.storage_size();
-        page.push(cell);
-
-        assert_eq!(
-            page.metadata().free_space,
-            initial_free - storage_size as u32
-        );
-
-        // Remove cell and check free space increases
-        page.remove(Slot(0));
-        assert_eq!(page.metadata().free_space, initial_free);
-    }
-
-    #[test]
-    fn test_defragmentation() {
-        let mut page = BtreePage::alloc(4096);
-
-        // Add multiple cells
-        for i in 0..10 {
-            page.push(Cell::new(format!("cell {i}").as_bytes()));
-        }
-
-        // Remove some cells to create fragmentation
-        page.remove(Slot(2));
-        page.remove(Slot(4));
-        page.remove(Slot(6));
-
-        let free_space = page.metadata().free_space;
-        let effective = page.effective_free_space();
-
-        // After removing cells, effective free space might be less than total free space
-        // due to fragmentation
-
-        // Try to insert a cell that requires defragmentation
-        let large_cell = Cell::new(&[0u8; 100]);
-        if large_cell.storage_size() <= free_space as u16
-            && large_cell.storage_size() > effective as u16
-        {
-            // This should trigger defragmentation internally
-            page.insert(Slot(0), large_cell);
-
-            // After defragmentation, the cell should be inserted successfully
-            assert!(page.num_slots() > 0);
-        }
-    }
-
-    crate::test_page_casting!(
-        test_btree_overflow,
-        Btree,
-        BtreePage,
-        Overflow,
-        OverflowPage
-    );
-    crate::test_page_casting!(
-        test_overflow_btree,
-        Overflow,
-        OverflowPage,
-        Btree,
-        BtreePage
-    );
-}

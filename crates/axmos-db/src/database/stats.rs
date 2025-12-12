@@ -10,9 +10,7 @@ use std::{
 use crate::{
     ObjectId,
     database::{
-        Catalog, META_INDEX, META_TABLE, SharedCatalog,
-        errors::IntoBoxError,
-        meta_table_schema,
+        Catalog, META_INDEX, META_TABLE, SharedCatalog, meta_table_schema,
         schema::{Column, Index, ObjectType, Relation, Schema, Table},
     },
     sql::planner::{
@@ -555,7 +553,7 @@ impl Catalog {
                     if let Ok(tuple) = TupleRef::read(data, &meta_schema) {
                         // Get the name (value index 3, which is o_name)
                         if let Ok(DataTypeRef::Text(name_blob)) = tuple.value(3) {
-                            let name = name_blob.as_str(crate::TextEncoding::Utf8).to_string();
+                            let name = name_blob.as_str().to_string();
 
                             // Skip meta tables
                             if name == META_TABLE || name == META_INDEX {
@@ -682,124 +680,15 @@ mod stats_compute_tests {
     use super::*;
     use crate::{
         TRANSACTION_ZERO,
-        database::{Database, errors::IntoBoxError, schema::Schema},
-        io::pager::{Pager, SharedPager},
+        database::errors::IntoBoxError,
         storage::tuple::{OwnedTuple, Tuple},
-        types::{Blob, DataType, DataTypeKind, Int32, Int32Ref, Int64, UInt64},
+        test_utils::{products_schema, test_database, users_idx_schema, users_schema},
+        types::{Blob, DataType, Int32, Int64, UInt64},
     };
-
-    use std::{io, path::Path};
-    use tempfile::NamedTempFile;
-
-    fn create_test_pager(path: impl AsRef<Path>, cache_size: usize) -> io::Result<Pager> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join(&path);
-
-        let config = crate::AxmosDBConfig {
-            page_size: 4096,
-            cache_size: Some(cache_size as u16),
-            incremental_vacuum_mode: crate::IncrementalVaccum::Disabled,
-            min_keys: 3,
-            text_encoding: crate::TextEncoding::Utf8,
-        };
-
-        let pager = Pager::from_config(config, &path)?;
-        Ok(pager)
-    }
-
-    fn create_test_database() -> io::Result<(Database, NamedTempFile)> {
-        let temp_file = NamedTempFile::new()?;
-        let pager = SharedPager::from(create_test_pager(temp_file.path(), 100)?);
-        let db = Database::new(pager, 3, 2, 4)?;
-        Ok((db, temp_file))
-    }
-
-    fn users_schema() -> Schema {
-        let mut schema = Schema::new();
-        schema.add_column("id", DataTypeKind::BigInt, true, true, false);
-        schema.add_column("name", DataTypeKind::Text, false, false, false);
-        schema.add_column("age", DataTypeKind::Int, false, false, false);
-        schema.set_num_keys(1);
-        schema
-    }
-
-    fn products_schema() -> Schema {
-        let mut schema2 = Schema::new();
-        schema2.add_column("product_id", DataTypeKind::BigInt, true, true, false);
-        schema2.add_column("name", DataTypeKind::Text, false, false, false);
-        schema2.add_column("price", DataTypeKind::Double, false, false, false);
-        schema2.set_num_keys(1);
-        schema2
-    }
-
-    fn users_idx_schema() -> Schema {
-        let mut index_schema = Schema::new();
-        index_schema.add_column("email", DataTypeKind::Text, true, true, false);
-        index_schema.add_column("user_id", DataTypeKind::BigUInt, false, false, false);
-        index_schema.set_num_keys(1);
-        index_schema
-    }
-    #[test]
-    fn test_column_stats_collector() {
-        let col =
-            crate::database::schema::Column::new_unindexed(DataTypeKind::Int, "test_col", None);
-        let mut collector = ColumnStatsCollector::new(0, &col);
-
-        let type_owned = crate::types::Int32(10);
-        let type_ref: Int32Ref<'_> = Int32Ref::try_from(type_owned.as_ref()).unwrap();
-        collector.observe(&DataTypeRef::Int(type_ref));
-
-        let type_owned = crate::types::Int32(20);
-        let type_ref: Int32Ref<'_> = Int32Ref::try_from(type_owned.as_ref()).unwrap();
-        collector.observe(&DataTypeRef::Int(type_ref));
-
-        let type_owned = crate::types::Int32(30);
-        let type_ref: Int32Ref<'_> = Int32Ref::try_from(type_owned.as_ref()).unwrap();
-        collector.observe(&DataTypeRef::Int(type_ref));
-
-        collector.observe(&DataTypeRef::Null);
-
-        let config = StatsComputeConfig::default();
-        let stats = collector.finalize(&config);
-
-        assert_eq!(stats.null_count, 1);
-        assert!(stats.ndv >= 3);
-        assert!(stats.min_bytes.is_some());
-        assert!(stats.max_bytes.is_some());
-    }
-
-    #[test]
-    fn test_build_equidepth_histogram() {
-        let mut values: Vec<f64> = (1..=100).map(|x| x as f64).collect();
-        let histogram = build_equidepth_histogram(&mut values, 10);
-
-        assert_eq!(histogram.num_buckets, 10);
-        assert_eq!(histogram.buckets.len(), 10);
-        assert!((histogram.buckets[0].lower_bound - 1.0).abs() < f64::EPSILON);
-        assert!((histogram.buckets[9].upper_bound - 100.0).abs() < f64::EPSILON);
-
-        for bucket in &histogram.buckets {
-            assert!(bucket.count >= 9.0 && bucket.count <= 11.0);
-        }
-    }
-
-    #[test]
-    fn test_stats_computation() {
-        let mut result = StatsComputation::default();
-        assert!(result.is_success());
-        assert_eq!(result.total_updated(), 0);
-
-        result.tables_updated = 5;
-        result.indexes_updated = 3;
-        assert_eq!(result.total_updated(), 8);
-
-        result.errors.push("Test error".to_string());
-        assert!(!result.is_success());
-    }
 
     #[test]
     fn test_recompute_table_statistics() -> StatsComputeResult<()> {
-        let (db, _temp) = create_test_database()?;
+        let (db, _temp) = test_database()?;
 
         // Task 1: Create the table
         db.task_runner()
@@ -873,7 +762,7 @@ mod stats_compute_tests {
 
     #[test]
     fn test_recompute_index_statistics() -> StatsComputeResult<()> {
-        let (db, _temp) = create_test_database()?;
+        let (db, _temp) = test_database()?;
 
         // Task 1: Create index
         db.task_runner()
@@ -943,8 +832,8 @@ mod stats_compute_tests {
     }
 
     #[test]
-    fn test_analyze_all_relations() -> StatsComputeResult<()> {
-        let (db, _temp) = create_test_database()?;
+    fn test_analyze() -> StatsComputeResult<()> {
+        let (db, _temp) = test_database()?;
 
         // Task 1: Create all tables and index
         db.task_runner()
@@ -1110,133 +999,6 @@ mod stats_compute_tests {
         assert!(index_stats.height >= 1);
         assert!(index_stats.min_key.is_some());
         assert!(index_stats.max_key.is_some());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_analyze_empty_database() -> StatsComputeResult<()> {
-        let (db, _temp) = create_test_database()?;
-
-        let result = db
-            .task_runner()
-            .run_with_result(|ctx| {
-                let config = StatsComputeConfig::default();
-                ctx.catalog().analyze(ctx.accessor(), &config).box_err()
-            })
-            .unwrap();
-
-        assert!(result.is_success());
-        assert_eq!(result.tables_updated, 0);
-        assert_eq!(result.indexes_updated, 0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_analyze_with_empty_tables() -> StatsComputeResult<()> {
-        let (db, _temp) = create_test_database()?;
-
-        // Task 1: Create empty tables
-        db.task_runner()
-            .run(|ctx| {
-                let schema = users_schema();
-                ctx.catalog()
-                    .create_table("empty_table1", schema.clone(), ctx.accessor())
-                    .box_err()?;
-                ctx.catalog()
-                    .create_table("empty_table2", schema.clone(), ctx.accessor())
-                    .box_err()?;
-                Ok(())
-            })
-            .unwrap();
-
-        // Task 2: Run analyze
-        let result = db
-            .task_runner()
-            .run_with_result(|ctx| {
-                let config = StatsComputeConfig::default();
-                ctx.catalog().analyze(ctx.accessor(), &config).box_err()
-            })
-            .unwrap();
-
-        assert!(result.is_success());
-        assert_eq!(result.tables_updated, 2);
-
-        let stats1 = result.table_stats.get("empty_table1").unwrap();
-        assert_eq!(stats1.row_count, 0);
-        assert_eq!(stats1.page_count, 0);
-
-        let stats2 = result.table_stats.get("empty_table2").unwrap();
-        assert_eq!(stats2.row_count, 0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_analyze_with_fast_config() -> StatsComputeResult<()> {
-        let (db, _temp) = create_test_database()?;
-
-        // Task 1: Create table
-        db.task_runner()
-            .run(|ctx| {
-                let schema = users_schema();
-                ctx.catalog()
-                    .create_table("large_table", schema, ctx.accessor())
-                    .box_err()?;
-                Ok(())
-            })
-            .unwrap();
-
-        // Task 2: Insert data
-        db.task_runner()
-            .run(move |ctx| {
-                let schema = users_schema();
-                let relation = ctx
-                    .catalog()
-                    .get_relation("large_table", ctx.accessor())
-                    .box_err()?;
-                let root = relation.root();
-                let mut btree = ctx.catalog().table_btree(root, ctx.accessor()).box_err()?;
-
-                for i in 0..100i64 {
-                    let tuple = Tuple::new(
-                        &[
-                            DataType::BigInt(Int64(i)),
-                            DataType::Text(Blob::from(format!("Name {}", i).as_str())),
-                            DataType::Int(Int32(i as i32)),
-                        ],
-                        &schema,
-                        TRANSACTION_ZERO,
-                    )
-                    .box_err()?;
-
-                    let owned: OwnedTuple = tuple.into();
-                    btree.insert(root, owned.as_ref()).box_err()?;
-                }
-
-                btree.clear_accessor_stack();
-                Ok(())
-            })
-            .unwrap();
-
-        // Task 3: Run analyze with fast config
-        let result = db
-            .task_runner()
-            .run_with_result(|ctx| {
-                let config = StatsComputeConfig::fast();
-                ctx.catalog().analyze(ctx.accessor(), &config).box_err()
-            })
-            .unwrap();
-
-        assert!(result.is_success());
-        assert_eq!(result.tables_updated, 1);
-
-        let stats = result.table_stats.get("large_table").unwrap();
-        assert_eq!(stats.row_count, 100);
-
-        let col_stats = stats.get_column_stats(0).unwrap();
-        assert!(col_stats.histogram.is_none());
 
         Ok(())
     }

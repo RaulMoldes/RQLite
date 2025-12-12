@@ -1,6 +1,6 @@
 use crate::{
     database::schema::Schema,
-    sql::ast::{BinaryOperator, JoinType, UnaryOperator},
+    sql::parser::ast::{BinaryOperator, JoinType, UnaryOperator},
     types::{DataType, DataTypeKind, ObjectId},
 };
 

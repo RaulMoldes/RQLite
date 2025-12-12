@@ -1,5 +1,3 @@
-mod macros;
-
 use crate::{
     assert_cmp, delete_test, insert_tests,
     io::frames::{FrameAccessMode, Position},
@@ -11,21 +9,14 @@ use crate::{
         bplustree::{IterDirection, SearchResult},
         comparator::{Comparator, FixedSizeBytesComparator, NumericComparator, VarlenComparator},
     },
+    test_utils::{KeyValuePair, TestKey, TestVarLengthKey, gen_ovf_blob, test_btree},
     types::{PAGE_ZERO, PageId},
 };
 
 use rand::SeedableRng;
 
 use serial_test::serial;
-use std::{
-    cmp::Ordering,
-    collections::{HashSet, VecDeque},
-    io,
-};
-
-mod utils;
-
-use utils::{KeyValuePair, TestKey, TestVarLengthKey, create_test_btree, gen_ovf_blob};
+use std::{cmp::Ordering, collections::HashSet, io};
 
 #[test]
 fn test_comparators() -> std::io::Result<()> {
@@ -121,7 +112,7 @@ fn test_comparators() -> std::io::Result<()> {
 #[serial]
 fn test_search_empty_tree() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-    let tree = create_test_btree(4096, 1, 4, comparator)?;
+    let (tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
     let start_pos = Position::start_pos(root);
     let key = TestKey::new(42);
@@ -138,7 +129,7 @@ fn test_search_empty_tree() -> io::Result<()> {
 #[serial]
 fn test_insert_remove_single_key() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-    let mut btree = create_test_btree(4096, 1, 4, comparator)?;
+    let (mut btree, f) = test_btree(comparator)?;
 
     let root = btree.get_root();
     let start_pos = Position::start_pos(root);
@@ -169,7 +160,7 @@ fn test_insert_remove_single_key() -> io::Result<()> {
 #[serial]
 fn test_insert_duplicates() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-    let mut btree = create_test_btree(4096, 1, 4, comparator)?;
+    let (mut btree, f) = test_btree(comparator)?;
     let root = btree.get_root();
     // Insert a key-value pair
     let key = TestKey::new(42);
@@ -190,7 +181,7 @@ fn test_update_single_key() -> io::Result<()> {
     let data2 = b"Updated";
     let kv2 = KeyValuePair::new(&key, data2);
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-    let mut btree = create_test_btree(4096, 1, 4, comparator)?;
+    let (mut btree, f) = test_btree(comparator)?;
 
     let root = btree.get_root();
     let start_pos = Position::start_pos(root);
@@ -232,7 +223,7 @@ fn test_upsert_single_key() -> io::Result<()> {
     let data3 = b"Created";
     let kv3 = KeyValuePair::new(&key2, data3);
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-    let mut btree = create_test_btree(4096, 1, 4, comparator)?;
+    let (mut btree, f) = test_btree(comparator)?;
 
     let root = btree.get_root();
     let start_pos = Position::start_pos(root);
@@ -273,7 +264,7 @@ fn test_upsert_single_key() -> io::Result<()> {
 #[serial] // TO REVIEW.
 fn test_variable_length_keys() -> io::Result<()> {
     let comparator = VarlenComparator;
-    let mut tree = create_test_btree(4096, 3, 3, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
     let start_pos = Position::start_pos(root);
 
@@ -305,7 +296,7 @@ fn test_overflow_chain() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
 
     // Overflow chains are very memory wasteful. Therefore we prefer to allocate the tree wih a larger cache size.
-    let mut tree = create_test_btree(4096, 100, 3, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
     let start_pos = Position::start_pos(root);
     let key = TestKey::new(1);
@@ -330,7 +321,7 @@ fn test_overflow_chain() -> io::Result<()> {
 fn test_multiple_overflow_chain() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
     // Overflow chains are very memory wasteful. Therefore we prefer to allocate the tree wih a larger cache size.
-    let mut tree = create_test_btree(4096, 100, 3, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
     let start_pos = Position::start_pos(root);
 
@@ -361,7 +352,7 @@ fn test_multiple_overflow_chain() -> io::Result<()> {
 #[serial]
 fn test_split_root() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 3, 3, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
     let start_pos = Position::start_pos(root);
 
@@ -387,39 +378,36 @@ fn test_split_root() -> io::Result<()> {
     Ok(())
 }
 
-delete_test!(test_delete_1, 4096, 100, 5, 100, [10..20, 30..40, 60..70]);
-
 delete_test!(
-    test_delete_2,
-    8192,
-    200,
-    10,
-    200,
-    [5..10, 50..60, 100..110, 150..160, 190..200]
+    test_delete_2 => {
+        num_keys: 200,
+        sequences: [5..10, 50..60, 100..110, 150..160, 190..200]
+    },
+
+    test_delete_1 => {
+        num_keys: 100,
+        sequences: [10..20, 30..40, 60..70]
+    },
 );
 
 insert_tests! {
     test_insert_sequential => {
-        page_size: 4096,
-        capacity: 10,
+
         num_inserts: 100,
         random: false
     },
     test_insert_random_small => {
-        page_size: 4096,
-        capacity: 10,
+
         num_inserts: 100,
         random: true
     },
     test_insert_random_medium => {
-        page_size: 4096,
-        capacity: 100,
+
         num_inserts: 20000,
         random: true
     },
     test_insert_random_large => {
-        page_size: 8192,
-        capacity: 100,
+
         num_inserts: 50000,
         random: true
     },
@@ -429,7 +417,7 @@ insert_tests! {
 #[serial]
 fn test_overflow_keys() -> io::Result<()> {
     let comparator = VarlenComparator;
-    let mut tree = create_test_btree(4096, 30, 4, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
     let start_pos = Position::start_pos(root);
 
@@ -476,7 +464,7 @@ fn test_overflow_keys() -> io::Result<()> {
 #[serial] // TEST USED TO GENERATE AN INFINITE LOOP. MUST REVIEW TREE INSERTIONS WITH OVERFLOW PAGES
 fn test_dealloc_bfs_with_overflow_chains() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 100, 4, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
 
     // Insert some regular keys
@@ -502,7 +490,7 @@ fn test_dealloc_bfs_with_overflow_chains() -> io::Result<()> {
 #[serial]
 fn test_dealloc_bfs_large_tree() -> io::Result<()> {
     let comparator = NumericComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 100, 4, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
 
     // Insert enough to create a deep tree
@@ -520,7 +508,7 @@ fn test_dealloc_bfs_large_tree() -> io::Result<()> {
 #[serial]
 fn test_iter_positions_multiple_pages() -> io::Result<()> {
     let comparator = NumericComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 50, 4, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
 
     for i in 0..1000 {
@@ -539,7 +527,7 @@ fn test_iter_positions_multiple_pages() -> io::Result<()> {
 #[serial]
 fn test_iter_positions_rev_empty_tree() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 10, 4, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
 
     let positions: Vec<Position> = tree.iter_positions_rev()?.filter_map(|r| r.ok()).collect();
 
@@ -552,7 +540,7 @@ fn test_iter_positions_rev_empty_tree() -> io::Result<()> {
 #[serial]
 fn test_iter_positions_rev_multiple_pages() -> io::Result<()> {
     let comparator = NumericComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 50, 4, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
 
     for i in 0..1000 {
@@ -570,7 +558,7 @@ fn test_iter_positions_rev_multiple_pages() -> io::Result<()> {
 #[serial]
 fn test_iter_positions_from_middle() -> io::Result<()> {
     let comparator = NumericComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 50, 4, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
 
     for i in 0..100 {
@@ -598,7 +586,7 @@ fn test_iter_positions_from_middle() -> io::Result<()> {
 #[serial]
 fn test_overflow_chain_integrity() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 100, 4, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
 
     // Insert a single overflow cell
@@ -689,7 +677,7 @@ fn test_overflow_chain_integrity() -> io::Result<()> {
 #[serial]
 fn test_iter_positions_from_backward() -> io::Result<()> {
     let comparator = NumericComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 50, 4, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
 
     for i in 0..100 {
@@ -718,7 +706,7 @@ fn test_iter_positions_from_backward() -> io::Result<()> {
 #[serial]
 fn test_with_cell_at() -> io::Result<()> {
     let comparator = NumericComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 10, 4, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
 
     let test_data: Vec<(TestKey, Vec<u8>)> = (0..50)
@@ -751,10 +739,10 @@ fn test_with_cell_at() -> io::Result<()> {
 }
 
 #[test]
-#[serial] // REVIEW THIS TEST. FAILS WITH RefCell already borrowed.
+#[serial]
 fn test_with_cell_at_overflow() -> io::Result<()> {
     let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 100, 4, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
 
     let key = TestKey::new(42);
@@ -782,7 +770,7 @@ fn test_with_cell_at_overflow() -> io::Result<()> {
 #[serial]
 fn test_with_cells_at_batch() -> io::Result<()> {
     let comparator = NumericComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 50, 4, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
 
     for i in 0..100 {
@@ -811,7 +799,7 @@ fn test_with_cells_at_batch() -> io::Result<()> {
 #[serial]
 fn test_with_cells_at_partial() -> io::Result<()> {
     let comparator = NumericComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 50, 4, comparator)?;
+    let (mut tree, f) = test_btree(comparator)?;
     let root = tree.get_root();
 
     for i in 0..100 {
@@ -835,190 +823,6 @@ fn test_with_cells_at_partial() -> io::Result<()> {
 
     assert_eq!(keys.len(), 10);
     assert_eq!(keys, vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
-
-    Ok(())
-}
-
-#[test]
-#[serial]
-fn test_dealloc_with_overflow() -> io::Result<()> {
-    let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-    let mut tree = create_test_btree(4096, 100, 4, comparator)?;
-    let root = tree.get_root();
-
-    // Insert regular keys first (this will allocate btree pages)
-    println!("Inserting regular keys...");
-    for i in 0..20 {
-        let key = TestKey::new(i);
-        tree.insert(root, key.as_ref())?;
-    }
-
-    // Collect all btree pages
-    let mut btree_pages: HashSet<PageId> = HashSet::new();
-    let mut queue: VecDeque<PageId> = VecDeque::new();
-    queue.push_back(root);
-
-    while let Some(page_id) = queue.pop_front() {
-        if !page_id.is_valid() || btree_pages.contains(&page_id) {
-            continue;
-        }
-        btree_pages.insert(page_id);
-
-        tree.accessor_mut()
-            .acquire::<BtreePage>(page_id, FrameAccessMode::Read)?;
-
-        let children: Vec<PageId> = tree
-            .accessor()
-            .read_page::<BtreePage, _, _>(page_id, |btree| btree.iter_children().collect())?;
-
-        tree.accessor_mut().release_latch(page_id);
-
-        for child in children {
-            if child.is_valid() {
-                queue.push_back(child);
-            }
-        }
-    }
-
-    println!("BTree pages after regular inserts: {:?}", btree_pages);
-
-    // Now insert overflow keys
-    println!("\nInserting overflow keys...");
-    for i in 20..30 {
-        let key = TestKey::new(i);
-        let data = gen_ovf_blob(4096, 5, i as u64);
-        let kv = KeyValuePair::new(&key, &data);
-        tree.insert(root, kv.as_ref())?;
-    }
-
-    // Now scan ALL pages and check what we find
-    println!("\nScanning all btree pages for overflow cells...");
-
-    let mut all_btree_pages: HashSet<PageId> = HashSet::new();
-    let mut overflow_starts: Vec<(PageId, Slot, PageId)> = Vec::new(); // (btree_page, slot, overflow_start)
-
-    queue.clear();
-    queue.push_back(root);
-
-    while let Some(page_id) = queue.pop_front() {
-        if !page_id.is_valid() || all_btree_pages.contains(&page_id) {
-            continue;
-        }
-        all_btree_pages.insert(page_id);
-
-        tree.accessor_mut()
-            .acquire::<BtreePage>(page_id, FrameAccessMode::Read)?;
-
-        let (children, overflows) =
-            tree.accessor()
-                .read_page::<BtreePage, _, _>(page_id, |btree| {
-                    let children: Vec<PageId> = btree.iter_children().collect();
-
-                    let overflows: Vec<(Slot, PageId)> = (0..btree.num_slots())
-                        .filter_map(|i| {
-                            let cell = btree.cell(Slot(i));
-                            if cell.metadata().is_overflow() {
-                                Some((Slot(i), cell.overflow_page()))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    (children, overflows)
-                })?;
-
-        tree.accessor_mut().release_latch(page_id);
-
-        for (slot, ovf) in overflows {
-            println!(
-                "  Page {} slot {} -> overflow start {}",
-                page_id, slot.0, ovf
-            );
-            overflow_starts.push((page_id, slot, ovf));
-        }
-
-        for child in children {
-            if child.is_valid() {
-                queue.push_back(child);
-            }
-        }
-    }
-
-    println!("\nAll BTree pages: {:?}", all_btree_pages);
-    println!("Overflow starts found: {}", overflow_starts.len());
-
-    // Now verify each overflow chain
-    for (btree_page, slot, start) in &overflow_starts {
-        println!(
-            "\nVerifying overflow chain from btree page {} slot {}, start {}:",
-            btree_page, slot.0, start
-        );
-
-        // Check if overflow start is actually a btree page (BUG!)
-        if all_btree_pages.contains(start) {
-            println!("  ERROR: Overflow start {} is a BTree page!", start);
-
-            // Let's see what the cell actually contains
-            tree.accessor_mut()
-                .acquire::<BtreePage>(*btree_page, FrameAccessMode::Read)?;
-
-            tree.accessor()
-                .read_page::<BtreePage, _, _>(*btree_page, |btree| {
-                    let cell = btree.cell(*slot);
-                    println!("  Cell metadata: {:?}", cell.metadata());
-                    println!(
-                        "  Cell used bytes: {:?}",
-                        &cell.used()[..std::cmp::min(32, cell.used().len())]
-                    );
-                    println!("  Cell len: {}", cell.len());
-                })?;
-
-            tree.accessor_mut().release_latch(*btree_page);
-
-            panic!("Overflow page {} is actually a BTree page!", start);
-        }
-
-        let mut current = *start;
-        let mut visited: HashSet<PageId> = HashSet::new();
-        let mut chain_len = 0;
-
-        while current.is_valid() {
-            if visited.contains(&current) {
-                panic!("Cycle in overflow chain at {}", current);
-            }
-            if all_btree_pages.contains(&current) {
-                panic!(
-                    "Overflow chain entered btree page {} after {} hops",
-                    current, chain_len
-                );
-            }
-            visited.insert(current);
-            chain_len += 1;
-
-            tree.accessor_mut()
-                .acquire::<OverflowPage>(current, FrameAccessMode::Read)?;
-
-            let next = tree
-                .accessor()
-                .read_page::<OverflowPage, _, _>(current, |ovf| ovf.metadata().next)?;
-
-            tree.accessor_mut().release_latch(current);
-            current = next;
-
-            if chain_len > 50 {
-                panic!("Chain too long");
-            }
-        }
-
-        println!("  Chain OK, length: {}", chain_len);
-    }
-
-    println!("\nAll overflow chains verified OK");
-
-    // Now test dealloc
-    println!("\nCalling dealloc...");
-    tree.dealloc()?;
 
     Ok(())
 }

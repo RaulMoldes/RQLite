@@ -2,7 +2,8 @@ use crate::{
     io::{
         pager::SharedPager,
         wal::{
-            Abort, Begin, Commit, Delete, End, Insert, LogRecord, LogRecordType, Operation, Update,
+            Abort, Begin, Commit, Delete, End, Insert, LogRecordType, Operation, OwnedLogRecord,
+            Update,
         },
     },
     storage::tuple::OwnedTuple,
@@ -27,11 +28,11 @@ impl Logger {
         }
     }
 
-    pub fn build_rec<O>(&self, log_record_type: LogRecordType, operation: O) -> LogRecord
+    pub fn build_rec<O>(&self, log_record_type: LogRecordType, operation: O) -> OwnedLogRecord
     where
         O: Operation,
     {
-        let log = LogRecord::new(
+        let log = OwnedLogRecord::new(
             self.transaction_id,
             self.last_lsn.get(),
             operation.object_id(),

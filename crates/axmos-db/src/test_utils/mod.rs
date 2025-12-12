@@ -1,0 +1,142 @@
+use std::{
+    collections::HashMap,
+    io::{self, Error as IoError, ErrorKind},
+};
+use tempfile::{NamedTempFile, tempdir};
+
+use crate::{
+    AxmosDBConfig, DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE,
+    database::{Database, errors::IntoBoxError, schema::Schema},
+    io::{
+        disk::FileOperations,
+        pager::{Pager, SharedPager},
+    },
+    structures::{bplustree::BPlusTree, comparator::Comparator},
+    transactions::accessor::RcPageAccessor,
+    types::DataTypeKind,
+};
+
+mod btree;
+mod macros;
+mod sql;
+
+pub(crate) use btree::*;
+pub(crate) use sql::*;
+
+use once_cell::sync::Lazy;
+
+static PREDEFINED_SCHEMAS: Lazy<HashMap<&'static str, Schema>> = Lazy::new(|| {
+    let mut m = HashMap::new();
+    m.insert("users", users_schema());
+    m.insert("orders", orders_schema());
+    m.insert("products", products_schema());
+    m.insert("idx_users_email", users_idx_schema());
+    m.insert("order_items", order_items_schema());
+    m
+});
+
+pub(crate) fn test_pager() -> io::Result<(Pager, NamedTempFile)> {
+    let file = NamedTempFile::new()?;
+    let dir = tempdir()?;
+    let path = dir.path().join(file.path());
+    let config = AxmosDBConfig::default();
+    let mut pager = Pager::create(&path)?;
+    pager.init(config)?;
+    Ok((pager, file))
+}
+
+pub(crate) fn test_database() -> io::Result<(Database, NamedTempFile)> {
+    let temp_file = NamedTempFile::new()?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join(temp_file.path());
+    let config = crate::AxmosDBConfig::default();
+    let db = Database::new(config, &path)?;
+    Ok((db, temp_file))
+}
+
+pub(crate) fn users_schema() -> Schema {
+    let mut users_schema = Schema::new();
+    users_schema.add_column("id", DataTypeKind::Int, true, true, false);
+    users_schema.add_column("name", DataTypeKind::Text, false, false, false);
+    users_schema.add_column("email", DataTypeKind::Text, false, true, false); // NOT NULL
+    users_schema.add_column("age", DataTypeKind::Int, false, false, false);
+    users_schema.add_column("created_at", DataTypeKind::DateTime, false, false, false);
+    users_schema
+}
+pub(crate) fn orders_schema() -> Schema {
+    let mut orders_schema = Schema::new();
+    orders_schema.add_column("id", DataTypeKind::Int, true, true, false);
+    orders_schema.add_column("user_id", DataTypeKind::Int, false, false, false);
+    orders_schema.add_column("amount", DataTypeKind::Double, false, false, false);
+    orders_schema
+}
+
+pub(crate) fn products_schema() -> Schema {
+    let mut schema2 = Schema::new();
+    schema2.add_column("product_id", DataTypeKind::BigInt, true, true, false);
+    schema2.add_column("name", DataTypeKind::Text, false, false, false);
+    schema2.add_column("price", DataTypeKind::Double, false, false, false);
+    schema2.set_num_keys(1);
+    schema2
+}
+
+fn order_items_schema() -> Schema {
+    let mut order_items_schema = Schema::new();
+    order_items_schema.add_column("id", DataTypeKind::Int, true, true, false);
+    order_items_schema.add_column("order_id", DataTypeKind::Int, false, false, false);
+    order_items_schema.add_column("product_id", DataTypeKind::Int, false, false, false);
+    order_items_schema.add_column("quantity", DataTypeKind::Int, false, false, false);
+    order_items_schema
+}
+
+pub(crate) fn users_idx_schema() -> Schema {
+    let mut index_schema = Schema::new();
+    index_schema.add_column("email", DataTypeKind::Text, true, true, false);
+    index_schema.add_column("user_id", DataTypeKind::BigUInt, false, false, false);
+    index_schema.set_num_keys(1);
+    index_schema
+}
+
+pub(crate) fn test_db_with_tables(
+    table_names: Vec<String>,
+) -> io::Result<(Database, NamedTempFile)> {
+    let (db, tmp) = test_database()?;
+
+    db.task_runner()
+        .run(move |ctx| {
+            for name in table_names {
+                let schema = PREDEFINED_SCHEMAS
+                    .get(name.as_str())
+                    .ok_or_else(|| {
+                        IoError::new(
+                            ErrorKind::NotFound,
+                            format!("Schema not found for table: {}", name),
+                        )
+                    })
+                    .box_err()?;
+
+                ctx.catalog()
+                    .create_table(name.as_str(), schema.clone(), ctx.accessor())
+                    .box_err()?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    Ok((db, tmp))
+}
+
+pub(crate) fn test_btree<Cmp: Comparator + Clone>(
+    comparator: Cmp,
+) -> io::Result<(BPlusTree<Cmp>, NamedTempFile)> {
+    let (pager, f) = test_pager()?;
+    let shared_pager = SharedPager::from(pager);
+    let accessor = RcPageAccessor::new(shared_pager);
+    let tree = BPlusTree::new(
+        accessor,
+        DEFAULT_BTREE_MIN_KEYS as usize,
+        DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE as usize,
+        comparator,
+    )?;
+    Ok((tree, f))
+}

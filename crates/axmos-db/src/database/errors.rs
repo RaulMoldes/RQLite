@@ -11,7 +11,7 @@ use crate::{
     sql::{
         binder::ast::{BoundExpression, Function},
         executor::ExecutionState,
-        lexer::Token,
+        parser::Token,
         planner::physical::PhysicalOperator,
     },
     transactions::LogicalId,
@@ -20,7 +20,7 @@ use crate::{
 
 /// Thread pool errors
 #[derive(Debug)]
-pub(crate) enum ThreadPoolError {
+pub enum ThreadPoolError {
     ShutdownTimeout,
     ThreadJoinError(String),
     PoolShutdown,
@@ -186,7 +186,7 @@ impl From<TypeError> for IoError {
 
 /// Object already exists errors
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum AlreadyExists {
+pub enum AlreadyExists {
     Table(String),
     Index(String),
     Constraint(String),
@@ -456,7 +456,7 @@ impl From<TaskError> for PlanError {
 
 /// DDL errors (schema modifications)
 #[derive(Debug)]
-pub(crate) enum DdlError {
+pub enum DdlError {
     AlreadyExists(AlreadyExists),
     NotFound(String),
     InvalidObjectType(ObjectType),
@@ -576,7 +576,7 @@ impl From<TaskError> for OptimizerError {
 
 /// Builder errors (physical operator construction)
 #[derive(Debug)]
-pub(crate) enum BuilderError {
+pub enum BuilderError {
     InvalidOperator(PhysicalOperator),
     NumChildrenMismatch(usize, usize),
     Other(String),

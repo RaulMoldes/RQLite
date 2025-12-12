@@ -2,10 +2,10 @@ use crate::{
     io::{
         frames::{FrameAccessMode, FrameStack, Position},
         pager::SharedPager,
-        wal::LogRecord,
+        wal::OwnedLogRecord,
     },
     storage::{
-        buffer::BufferWithMetadata,
+        buffer::MemBlock,
         latches::Latch,
         page::{MemPage, Page},
     },
@@ -108,7 +108,7 @@ impl PageAccessor {
         access_mode: FrameAccessMode,
     ) -> std::io::Result<()>
     where
-        MemPage: From<P>,
+        MemPage: From<MemBlock<P::Header>>,
     {
         let latch_page = self.pager.write().read_page::<P>(page_id)?;
         self.stack_mut().acquire(page_id, latch_page, access_mode);
@@ -118,7 +118,7 @@ impl PageAccessor {
     pub(crate) fn alloc_page<P: Page>(&mut self) -> std::io::Result<PageId>
     where
         MemPage: From<P>,
-        BufferWithMetadata<P::Header>: Into<MemPage>,
+        MemBlock<P::Header>: Into<MemPage>,
     {
         let page = self.pager.write().alloc_frame()?;
         self.pager.write().cache_frame(page)
@@ -126,14 +126,14 @@ impl PageAccessor {
 
     pub(crate) fn dealloc_page<P: Page>(&mut self, id: PageId) -> std::io::Result<()>
     where
-        MemPage: From<P>,
+        MemPage: From<MemBlock<P::Header>>,
     {
         let cloned = self.pager.write().read_page::<P>(id)?.deep_copy();
         debug_assert!(
             cloned.page_number() == id,
             "MEMORY CORRUPTION. ID IN CACHE DOES NOT MATCH PHYSICAL ID"
         );
-        self.pager.write().dealloc_page(id)?;
+        self.pager.write().dealloc_page::<P>(id)?;
 
         Ok(())
     }
@@ -145,7 +145,7 @@ impl PageAccessor {
         P: Page + Clone,
         F: FnOnce(&mut P) -> R,
         for<'a> &'a mut Latch<MemPage>: TryInto<&'a mut P, Error = IoError>,
-        MemPage: From<P>,
+        MemPage: From<MemBlock<P::Header>>,
     {
         if let Some(guard) = self.stack_mut().get_mut(id) {
             let page_mut: &mut P = guard.try_into()?;
@@ -165,7 +165,7 @@ impl PageAccessor {
         P: Page + Clone,
         F: FnOnce(&P) -> R,
         for<'a> &'a Latch<MemPage>: TryInto<&'a P, Error = IoError>,
-        MemPage: From<P>,
+        MemPage: From<MemBlock<P::Header>>,
     {
         if let Some(guard) = self.stack_ref().get(id) {
             let page: &P = guard.try_into()?;
@@ -208,7 +208,7 @@ impl PageAccessor {
         P: Page + Clone,
         F: FnOnce(&P) -> io::Result<R>,
         for<'a> &'a Latch<MemPage>: TryInto<&'a P, Error = IoError>,
-        MemPage: From<P>,
+        MemPage: From<MemBlock<P::Header>>,
     {
         if let Some(guard) = self.stack_ref().get(id) {
             let page: &P = guard.try_into()?;
@@ -222,7 +222,7 @@ impl PageAccessor {
         ))
     }
 
-    pub(crate) fn push_to_log(&self, record: LogRecord) -> io::Result<()> {
+    pub(crate) fn push_to_log(&self, record: OwnedLogRecord) -> io::Result<()> {
         self.pager.write().push_to_log(record)
     }
 }

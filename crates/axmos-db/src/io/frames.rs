@@ -168,7 +168,12 @@ impl FrameStack {
         }
     }
 
-    pub(crate) fn acquire(&mut self, key: PageId, value: MemFrame<MemPage>, access_mode: FrameAccessMode) {
+    pub(crate) fn acquire(
+        &mut self,
+        key: PageId,
+        value: MemFrame<MemPage>,
+        access_mode: FrameAccessMode,
+    ) {
         if let Some(existing_latch) = self.latches.get(&key) {
             match (existing_latch, access_mode) {
                 (Latch::Upgradable(p), FrameAccessMode::Write) => {

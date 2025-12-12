@@ -3,8 +3,6 @@ macro_rules! insert_tests {
     (
         $(
             $name:ident => {
-                page_size: $page_size:expr,
-                capacity: $capacity:expr,
                 num_inserts: $num_inserts:expr,
                 random: $random:expr
             }
@@ -15,7 +13,7 @@ macro_rules! insert_tests {
             #[serial]
             fn $name() -> std::io::Result<()> {
                 let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-                let mut tree = create_test_btree($page_size, $capacity, 3, comparator)?;
+                let (mut tree, f) = test_btree(comparator)?;
                 let root = tree.get_root();
                 let start = Position::start_pos(root);
                 let keys: Vec<i32> = if $random {
@@ -58,12 +56,20 @@ macro_rules! insert_tests {
 
 #[macro_export]
 macro_rules! delete_test {
-    ($name:ident, $page_size:expr, $cache_size:expr, $min_keys:expr, $num_keys:expr, $delete_sequences:expr) => {
+   (
+        $(
+            $name:ident => {
+                num_keys: $num_keys:expr,
+                sequences: $delete_sequences:expr
+            }
+        ),* $(,)?
+    ) => {
+         $(
         #[test]
         #[serial]
         fn $name() -> std::io::Result<()> {
             let comparator = FixedSizeBytesComparator::with_type::<TestKey>();
-            let mut tree = create_test_btree($page_size, $cache_size, $min_keys, comparator)?;
+            let (mut tree, f) = test_btree(comparator)?;
             let root = tree.get_root();
             let start = Position::start_pos(root);
             // Insert all keys
@@ -115,6 +121,8 @@ macro_rules! delete_test {
 
             Ok(())
         }
+
+         )*
     };
 }
 
@@ -131,5 +139,17 @@ macro_rules! assert_cmp {
             $comparator.compare(&$lhs.as_bytes(), &$rhs.as_bytes())?,
             $expected
         );
+    };
+}
+
+#[macro_export]
+macro_rules! sql_test {
+    ($name:ident, $sql:expr, $expected:expr) => {
+        #[test]
+        fn $name() {
+            let parsed_result = $crate::test_utils::parse_sql($sql);
+            assert!(parsed_result.is_ok(), "parsing failed for SQL: {}", $sql);
+            assert_eq!(parsed_result.unwrap(), $expected);
+        }
     };
 }

@@ -1,6 +1,7 @@
-use crate::io::MemBuffer;
-use crate::io::disk::FileSystemBlockSize;
-use crate::io::disk::{DBFile, FileOperations, FileSystem};
+use crate::{
+    io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
+    storage::buffer::MemBlock,
+};
 use std::io::{Read, Write};
 use std::io::{Seek, SeekFrom};
 const TEST_PAGE_SIZE: u32 = 4096;
@@ -18,7 +19,7 @@ fn test_direct_io() -> std::io::Result<()> {
     let mut f = DBFile::create(path)?;
     let block_size = FileSystem::block_size(path)?;
     // Original data to write (aligned buffer)
-    let mut buffer = MemBuffer::alloc(BLOCK_SIZE, block_size)?;
+    let mut buffer: MemBlock<()> = MemBlock::new(block_size);
     buffer.as_mut()[..14].copy_from_slice(b"Hello O_DIRECT");
 
     // Write to file
@@ -32,7 +33,7 @@ fn test_direct_io() -> std::io::Result<()> {
     f.seek(SeekFrom::Start(0))?;
 
     // Prepare read buffer (aligned)
-    let mut zero_buf = MemBuffer::alloc(BLOCK_SIZE, block_size)?;
+    let mut zero_buf: MemBlock<()> = MemBlock::new(block_size);
 
     // Read back
     let read_bytes = f.read(zero_buf.as_mut())?;

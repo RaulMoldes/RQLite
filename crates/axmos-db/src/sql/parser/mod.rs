@@ -1,9 +1,16 @@
+pub(crate) mod ast;
+mod lexer;
+
+#[cfg(test)]
+mod tests;
+
+use ast::*;
+use lexer::Lexer;
+
+pub use lexer::Token;
+
 use crate::{
     database::errors::{ParseResult, ParserError},
-    sql::{
-        ast::*,
-        lexer::{Lexer, Token},
-    },
     types::DataTypeKind,
 };
 use std::mem;
@@ -16,7 +23,8 @@ pub(crate) struct Parser {
 }
 
 impl Parser {
-    pub(crate) fn new(mut lexer: Lexer) -> Self {
+    pub(crate) fn new(sql: &str) -> Self {
+        let mut lexer = Lexer::new(sql);
         let current_token = lexer.next_token();
         Parser {
             lexer,

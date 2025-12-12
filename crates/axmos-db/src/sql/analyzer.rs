@@ -7,9 +7,11 @@ use crate::{
         errors::{AlreadyExists, AnalyzerError, AnalyzerResult},
         schema::{Column, Relation},
     },
-    sql::ast::{
-        AlterAction, AlterColumnAction, ColumnConstraintExpr, Expr, SelectItem, SelectStatement,
-        Statement, TableConstraintExpr, TableReference, TransactionStatement, Values,
+    sql::parser::ast::{
+        AlterAction, AlterColumnAction, AlterTableStatement, ColumnConstraintExpr,
+        CreateIndexStatement, CreateTableStatement, DeleteStatement, DropTableStatement, Expr,
+        InsertStatement, SelectItem, SelectStatement, Statement, TableConstraintExpr,
+        TableReference, TransactionStatement, UpdateStatement, Values, WithStatement,
     },
     structures::bplustree::SearchResult,
     transactions::accessor::RcPageAccessor,
@@ -124,7 +126,7 @@ impl Analyzer {
         Ok(())
     }
 
-    fn analyze_with(&self, stmt: &crate::sql::ast::WithStatement) -> AnalyzerResult<()> {
+    fn analyze_with(&self, stmt: &WithStatement) -> AnalyzerResult<()> {
         // Validate each CTE query
         for (_, cte_query) in &stmt.ctes {
             self.analyze_select(cte_query)?;
@@ -134,7 +136,7 @@ impl Analyzer {
         self.analyze_select(&stmt.body)
     }
 
-    fn analyze_insert(&self, stmt: &crate::sql::ast::InsertStatement) -> AnalyzerResult<()> {
+    fn analyze_insert(&self, stmt: &InsertStatement) -> AnalyzerResult<()> {
         let relation = self.get_relation(&stmt.table)?;
         let schema = relation.schema();
 
@@ -180,10 +182,7 @@ impl Analyzer {
         Ok(())
     }
 
-    fn analyze_create_table(
-        &self,
-        stmt: &crate::sql::ast::CreateTableStatement,
-    ) -> AnalyzerResult<()> {
+    fn analyze_create_table(&self, stmt: &CreateTableStatement) -> AnalyzerResult<()> {
         // Check table doesn't already exist
         if let Ok(SearchResult::Found(_)) = self
             .catalog
@@ -291,10 +290,7 @@ impl Analyzer {
         Ok(())
     }
 
-    fn analyze_alter_table(
-        &self,
-        stmt: &crate::sql::ast::AlterTableStatement,
-    ) -> AnalyzerResult<()> {
+    fn analyze_alter_table(&self, stmt: &AlterTableStatement) -> AnalyzerResult<()> {
         let relation = self.get_relation(&stmt.table)?;
         let obj_set: HashSet<String> = relation
             .columns()
@@ -387,7 +383,7 @@ impl Analyzer {
         Ok(())
     }
 
-    fn analyze_delete(&self, stmt: &crate::sql::ast::DeleteStatement) -> AnalyzerResult<()> {
+    fn analyze_delete(&self, stmt: &DeleteStatement) -> AnalyzerResult<()> {
         self.get_relation(&stmt.table)?;
 
         if let Some(clause) = &stmt.where_clause {
@@ -397,7 +393,7 @@ impl Analyzer {
         Ok(())
     }
 
-    fn analyze_update(&self, stmt: &crate::sql::ast::UpdateStatement) -> AnalyzerResult<()> {
+    fn analyze_update(&self, stmt: &UpdateStatement) -> AnalyzerResult<()> {
         let relation = self.get_relation(&stmt.table)?;
         let schema = relation.schema();
 
@@ -423,17 +419,14 @@ impl Analyzer {
         Ok(())
     }
 
-    fn analyze_drop_table(&self, stmt: &crate::sql::ast::DropTableStatement) -> AnalyzerResult<()> {
+    fn analyze_drop_table(&self, stmt: &DropTableStatement) -> AnalyzerResult<()> {
         if !stmt.if_exists {
             self.get_relation(&stmt.table)?;
         }
         Ok(())
     }
 
-    fn analyze_create_index(
-        &self,
-        stmt: &crate::sql::ast::CreateIndexStatement,
-    ) -> AnalyzerResult<()> {
+    fn analyze_create_index(&self, stmt: &CreateIndexStatement) -> AnalyzerResult<()> {
         if self.get_relation(&stmt.name).is_ok() && !stmt.if_not_exists {
             return Err(AnalyzerError::AlreadyExists(AlreadyExists::Index(
                 stmt.name.clone(),
@@ -651,79 +644,13 @@ impl Analyzer {
 #[cfg(test)]
 mod analyzer_tests {
     use super::*;
-    use crate::{
-        AxmosDBConfig, IncrementalVaccum, TextEncoding,
-        database::{Database, errors::IntoBoxError, schema::Schema},
-        io::pager::{Pager, SharedPager},
-        sql::{lexer::Lexer, parser::Parser},
-    };
+    use crate::test_utils::{analyze_sql, test_db_with_tables};
     use serial_test::serial;
-    use std::path::Path;
-
-    fn users_schema() -> Schema {
-        let mut users_schema = Schema::new();
-        users_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        users_schema.add_column("name", DataTypeKind::Text, false, false, false);
-        users_schema.add_column("email", DataTypeKind::Text, false, true, false); // NOT NULL
-        users_schema.add_column("age", DataTypeKind::Int, false, false, false);
-        users_schema.add_column("created_at", DataTypeKind::DateTime, false, false, false);
-        users_schema
-    }
-
-    fn orders_schema() -> Schema {
-        let mut orders_schema = Schema::new();
-        orders_schema.add_column("id", DataTypeKind::Int, true, true, false);
-        orders_schema.add_column("user_id", DataTypeKind::Int, false, false, false);
-        orders_schema.add_column("amount", DataTypeKind::Double, false, false, false);
-        orders_schema
-    }
-
-    fn create_db(path: impl AsRef<Path>) -> std::io::Result<Database> {
-        let config = AxmosDBConfig {
-            page_size: 4096,
-            cache_size: Some(100),
-            incremental_vacuum_mode: IncrementalVaccum::Disabled,
-            min_keys: 3,
-            text_encoding: TextEncoding::Utf8,
-        };
-
-        let pager = Pager::from_config(config, &path)?;
-        let db = Database::new(SharedPager::from(pager), 3, 2, 5)?;
-
-        db.task_runner()
-            .run(|ctx| {
-                let schema = users_schema();
-                ctx.catalog()
-                    .create_table("users", schema, ctx.accessor())
-                    .box_err()?;
-                let schema = orders_schema();
-                ctx.catalog()
-                    .create_table("orders", schema, ctx.accessor())
-                    .box_err()?;
-                Ok(())
-            })
-            .unwrap();
-
-        Ok(db)
-    }
-
-    fn analyze_sql(sql: String, db: &Database) -> AnalyzerResult<()> {
-        db.task_runner().run(move |ctx| {
-            let lexer = Lexer::new(&sql);
-            let mut parser = Parser::new(lexer);
-            let stmt = parser.parse().box_err()?;
-            let mut analyzer = Analyzer::new(ctx.catalog(), ctx.accessor());
-            analyzer.analyze(&stmt).box_err()?;
-            Ok(())
-        })?;
-        Ok(())
-    }
 
     #[test]
     #[serial]
     fn test_insert_unknown_column() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql(
             "INSERT INTO users (id, unknown) VALUES (1, 'x')".to_string(),
@@ -735,8 +662,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_update_unknown_column() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql("UPDATE users SET unknown = 'x'".to_string(), &db);
         assert!(matches!(result, Err(AnalyzerError::NotFound(_))));
@@ -745,8 +671,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_not_null_violation_insert() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql(
             "INSERT INTO users (id, name, email) VALUES (1, 'John', NULL)".to_string(),
@@ -761,8 +686,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_not_null_violation_update() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql(
             "UPDATE users SET email = NULL WHERE id = 1".to_string(),
@@ -777,8 +701,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_column_value_count_mismatch() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql(
             "INSERT INTO users (id, name) VALUES (1, 'John', 'extra')".to_string(),
@@ -793,8 +716,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_invalid_int_value() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql(
             "INSERT INTO users (id, name, email, age) VALUES (1, 'John', 'j@t.com', 'not_int')"
@@ -807,8 +729,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_arithmetic_overflow() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql(
             "INSERT INTO users (id, name, email, age) VALUES (9999999999999, 'John', 'j@t.com', 25)".to_string(),
@@ -823,8 +744,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_invalid_datetime_format() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql(
             "INSERT INTO users (id, name, email, age, created_at) VALUES (1, 'John', 'j@t.com', 25, 'bad-date')".to_string(),
@@ -836,8 +756,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_valid_datetime_format() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql(
             "INSERT INTO users (id, name, email, age, created_at) VALUES (1, 'John', 'j@t.com', 25, '2024-01-15T10:30:00')".to_string(),
@@ -849,8 +768,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_table_already_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql("CREATE TABLE users (id INT)".to_string(), &db);
         assert!(matches!(
@@ -862,8 +780,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_duplicate_column() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql("CREATE TABLE test (id INT, id TEXT)".to_string(), &db);
         assert!(matches!(result, Err(AnalyzerError::DuplicatedColumn(_))));
@@ -872,8 +789,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_multiple_primary_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql(
             "CREATE TABLE test (id INT PRIMARY KEY, code INT PRIMARY KEY)".to_string(),
@@ -885,8 +801,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_foreign_key_invalid_column() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql(
             "CREATE TABLE test (id INT, user_id INT REFERENCES users(nonexistent))".to_string(),
@@ -898,8 +813,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_alter_add_existing_column() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql("ALTER TABLE users ADD COLUMN name TEXT".to_string(), &db);
         assert!(matches!(
@@ -911,8 +825,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_alter_drop_nonexistent_column() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql("ALTER TABLE users DROP COLUMN nonexistent".to_string(), &db);
         assert!(matches!(result, Err(AnalyzerError::MissingColumns)));
@@ -921,8 +834,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_subquery_in_where_validated() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         // Valid nested subquery
         let result = analyze_sql(
@@ -935,8 +847,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_exists_subquery_validated() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql(
             "SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)"
@@ -950,8 +861,7 @@ mod analyzer_tests {
     #[serial]
 
     fn test_subquery_in_select_validated() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
 
         let result = analyze_sql(
             "SELECT name,(SELECT COUNT(*) FROM orders WHERE user_id = users.id) FROM users"
@@ -964,16 +874,14 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_valid_select() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
         assert!(analyze_sql("SELECT * FROM users WHERE age > 18".to_string(), &db).is_ok());
     }
 
     #[test]
     #[serial]
     fn test_valid_insert() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
         assert!(
             analyze_sql(
                 "INSERT INTO users (id, name, email, age) VALUES (1, 'John', 'j@t.com', 25)"
@@ -987,8 +895,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_valid_join() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
         assert!(
             analyze_sql(
                 "SELECT * FROM users u JOIN orders o ON u.id = o.user_id".to_string(),
@@ -1001,32 +908,28 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_valid_update() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
         assert!(analyze_sql("UPDATE users SET name = 'Ramon'".to_string(), &db).is_ok());
     }
 
     #[test]
     #[serial]
     fn test_valid_delete() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
         assert!(analyze_sql("DELETE FROM users WHERE name = 'Ramon'".to_string(), &db).is_ok());
     }
 
     #[test]
     #[serial]
     fn test_valid_drop_table() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
         assert!(analyze_sql("DROP TABLE users".to_string(), &db).is_ok());
     }
 
     #[test]
     #[serial]
     fn test_valid_alter() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
         assert!(
             analyze_sql(
                 "ALTER TABLE users ALTER COLUMN name SET NOT NULL".to_string(),
@@ -1039,8 +942,7 @@ mod analyzer_tests {
     #[test]
     #[serial]
     fn test_valid_subqueries() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = create_db(dir.path().join("test.db")).unwrap();
+        let (db, f) = test_db_with_tables(vec!["users".to_string(), "orders".to_string()]).unwrap();
         // FAILS IF YOU ADD THE COMMA. WE ARE USING CURRENTLY THE COMMA AS A CONTINUATION MARKER FOR SUBQUERIES.
         assert!(
             analyze_sql(

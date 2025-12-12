@@ -2,7 +2,7 @@ use crate::{
     CELL_ALIGNMENT,
     io::frames::{FrameAccessMode, Position},
     storage::{
-        cell::{CELL_HEADER_SIZE, Cell, Slot},
+        cell::{CELL_HEADER_SIZE, CellRef, OwnedCell, Slot},
         page::{BTREE_PAGE_HEADER_SIZE, BtreePage, OverflowPage},
     },
     transactions::accessor::{PageAccessor, RcPageAccessor},
@@ -10,6 +10,7 @@ use crate::{
 };
 
 use super::comparator::Comparator;
+
 use std::{
     cell::{Ref, RefMut},
     cmp::{Ordering, Reverse, min},
@@ -167,7 +168,7 @@ where
 
     /// Helper that acquires overflow latches, reassembles payload, and returns it.
     /// Handles the full lifecycle of overflow page access.
-    fn get_cell_payload(&self, cell: &Cell) -> io::Result<Payload<'_>> {
+    fn get_cell_payload(&self, cell: CellRef<'_>) -> io::Result<Payload<'_>> {
         if cell.metadata().is_overflow() {
             let overflow_pages =
                 self.acquire_overflow_chain(cell.overflow_page(), usize::MAX, 0)?;
@@ -180,7 +181,7 @@ where
 
             Ok(payload)
         } else {
-            Ok(Payload::Boxed(cell.used().to_vec().into_boxed_slice()))
+            Ok(Payload::Boxed(cell.payload().to_vec().into_boxed_slice()))
         }
     }
 
@@ -223,10 +224,12 @@ where
             SearchResult::Found(position) => {
                 let page_id = position.page();
                 let slot = position.slot();
-                let cell = self
+                let payload = self
                     .accessor()
-                    .read_page::<BtreePage, _, _>(page_id, |p| p.cell(slot).clone())?;
-                Ok(Some(self.get_cell_payload(&cell)?))
+                    .try_read_page::<BtreePage, _, _>(page_id, |p| {
+                        self.get_cell_payload(p.cell(slot))
+                    })?;
+                Ok(Some(payload))
             }
         }
     }
@@ -296,7 +299,9 @@ where
 
                         // Moved the check upwards to avoid cloning when it is not necessary.
                         if !cell.metadata().is_overflow()
-                            && self.comparator.compare(search_key, cell.used().as_ref())?
+                            && self
+                                .comparator
+                                .compare(search_key, cell.payload().as_ref())?
                                 == Ordering::Less
                         {
                             result = SearchResult::Found(Position::new(
@@ -320,23 +325,23 @@ where
                         self.accessor()
                             .read_page::<BtreePage, _, _>(page_id, |btreepage| {
                                 let cell = btreepage.cell(Slot(i));
-                                cell.clone()
+                                OwnedCell::from(cell)
                             })?;
 
-                    let required_size = if (cell.used().len() - mem::size_of::<PageId>())
+                    let required_size = if (cell.payload().len() - mem::size_of::<PageId>())
                         >= mem::size_of::<VarInt>()
                         || self.comparator.is_fixed_size()
                     {
-                        self.comparator.key_size(cell.used())?
+                        self.comparator.key_size(cell.payload())?
                     } else {
                         usize::MAX
                     };
 
-                    let initial_bytes = cell.used().len() - mem::size_of::<PageId>();
+                    let initial_bytes = cell.payload().len() - mem::size_of::<PageId>();
                     let start = cell.overflow_page();
                     let overflow_pages =
                         self.acquire_overflow_chain(start, required_size, initial_bytes)?;
-                    let payload = self.reassemble_payload(&cell, &overflow_pages);
+                    let payload = self.reassemble_payload(cell.as_cell_ref(), &overflow_pages);
                     if self.comparator.compare(search_key, payload.as_ref())? == Ordering::Less {
                         result = SearchResult::Found(Position::new(
                             cell.metadata().left_child(),
@@ -377,7 +382,7 @@ where
 
                         // Moved the check upwards to avoid cloning when it is not necessary.
                         if !cell.metadata().is_overflow() {
-                            match self.comparator.compare(search_key, cell.used())? {
+                            match self.comparator.compare(search_key, cell.payload())? {
                                 Ordering::Less => {
                                     result = SlotSearchResult::FoundBetween(Position::new(
                                         page_id,
@@ -407,25 +412,26 @@ where
                         self.accessor()
                             .read_page::<BtreePage, _, _>(page_id, |btreepage| {
                                 let cell = btreepage.cell(Slot(i));
-                                cell.clone()
+                                OwnedCell::from(cell)
                             })?;
 
                     let content: Payload = if cell.metadata().is_overflow() {
-                        let required_size = if (cell.used().len() - std::mem::size_of::<PageId>())
+                        let required_size = if (cell.payload().len()
+                            - std::mem::size_of::<PageId>())
                             >= std::mem::size_of::<VarInt>()
                             || self.comparator.is_fixed_size()
                         {
-                            self.comparator.key_size(cell.used())?
+                            self.comparator.key_size(cell.payload())?
                         } else {
                             usize::MAX
                         };
-                        let initial_bytes = cell.used().len() - mem::size_of::<PageId>();
+                        let initial_bytes = cell.payload().len() - mem::size_of::<PageId>();
                         let start = cell.overflow_page();
                         let overflow_pages =
                             self.acquire_overflow_chain(start, required_size, initial_bytes)?;
-                        self.reassemble_payload(&cell, &overflow_pages)
+                        self.reassemble_payload(cell.as_cell_ref(), &overflow_pages)
                     } else {
-                        Payload::Reference(cell.used())
+                        Payload::Reference(cell.payload())
                     };
 
                     match self.comparator.compare(search_key, content.as_ref())? {
@@ -479,7 +485,7 @@ where
                         // Moved the check upwards to avoid cloning when it is not necessary.
                         if !cell.metadata().is_overflow() {
                             // The key content is always the first bytes of the cell
-                            match self.comparator.compare(search_key, cell.used())? {
+                            match self.comparator.compare(search_key, cell.payload())? {
                                 Ordering::Equal => {
                                     return Ok(None);
                                 }
@@ -496,26 +502,27 @@ where
             if let Some(flag) = is_overflow {
                 if flag {
                     // If the cell is overflow, then we have to clone, there is no way around.
-                    let cell =
+                    let cell: OwnedCell =
                         self.accessor()
                             .read_page::<BtreePage, _, _>(page_id, |btreepage| {
                                 let cell = btreepage.cell(mid);
-                                cell.clone()
+                                OwnedCell::from_ref(cell)
                             })?;
-                    let required_size = if (cell.used().len() - std::mem::size_of::<PageId>())
-                        >= std::mem::size_of::<VarInt>()
+
+                    let required_size = if (cell.payload().len() - mem::size_of::<PageId>())
+                        >= mem::size_of::<VarInt>()
                         || self.comparator.is_fixed_size()
                     {
-                        self.comparator.key_size(cell.used())?
+                        self.comparator.key_size(cell.payload())?
                     } else {
                         usize::MAX
                     };
 
-                    let initial_bytes = cell.used().len() - mem::size_of::<PageId>();
+                    let initial_bytes = cell.payload().len() - mem::size_of::<PageId>();
                     let start = cell.overflow_page();
                     let overflow_pages =
                         self.acquire_overflow_chain(start, required_size, initial_bytes)?;
-                    let content = self.reassemble_payload(&cell, &overflow_pages);
+                    let content = self.reassemble_payload(cell.as_cell_ref(), &overflow_pages);
                     if mid == Slot(0) {
                         println!("SEARCHING FOR cero ");
                     };
@@ -716,7 +723,7 @@ where
     }
 
     /// Deallocates a cell, the current RcPageAccessor will be responsible for deallocating all overflow pages.
-    fn free_cell(&self, cell: Cell) -> io::Result<()> {
+    fn free_cell(&self, cell: OwnedCell) -> io::Result<()> {
         if !cell.metadata().is_overflow() {
             return Ok(());
         }
@@ -742,7 +749,7 @@ where
         Ok(())
     }
 
-    fn build_cell(&self, remaining_space: usize, payload: &[u8]) -> io::Result<Cell> {
+    fn build_cell(&self, remaining_space: usize, payload: &[u8]) -> io::Result<OwnedCell> {
         let page_size = self.accessor().get_page_size();
 
         let v = remaining_space.saturating_sub(Slot::SIZE);
@@ -764,12 +771,12 @@ where
         ); // Clamp to the remaining space
 
         if payload.len() <= max_payload_size {
-            return Ok(Cell::new(payload));
+            return Ok(OwnedCell::new(payload));
         }
 
         let mut overflow_page_number = self.accessor_mut().alloc_page::<OverflowPage>()?;
 
-        let cell = Cell::new_overflow(&payload[..max_payload_size], overflow_page_number);
+        let cell = OwnedCell::new_overflow(&payload[..max_payload_size], overflow_page_number);
 
         let mut stored_bytes = max_payload_size;
 
@@ -860,12 +867,11 @@ where
     /// Splits a mutable slice of cells into two parts, assuming they are sorted by key.
     /// Useful for cell redistribution.
     fn split_cells<'cells>(
-        &mut self,
-        cells: &'cells mut [Cell],
-    ) -> io::Result<(&'cells [Cell], &'cells [Cell])> {
+        cells: &'cells mut [OwnedCell],
+    ) -> io::Result<(&'cells [OwnedCell], &'cells [OwnedCell])> {
         // Assumes cells are sorted
-        let sizes: Vec<u16> = cells.iter().map(|cell| cell.total_size()).collect();
-        let total_size: u16 = sizes.iter().sum();
+        let sizes: Vec<usize> = cells.iter().map(|cell| cell.total_size()).collect();
+        let total_size: usize = sizes.iter().sum();
         let half_size = total_size.div_ceil(2);
 
         // Look for the point where the accumulated result crosses the mid point.
@@ -908,14 +914,14 @@ where
                 node.drain(..).collect::<Vec<_>>()
             })?;
 
-        let (left_cells, right_cells) = self.split_cells(&mut cells)?;
+        let (left_cells, right_cells) = Self::split_cells(&mut cells)?;
 
         let mut propagated_cell = if was_leaf {
             right_cells.first().unwrap().clone()
         } else {
             left_cells.last().unwrap().clone()
         };
-        propagated_cell.metadata_mut().left_child = new_left;
+        propagated_cell.set_left_child(new_left);
 
         // Now we move part of the cells to one node and the other part to the other node.
         self.accessor_mut()
@@ -1139,11 +1145,11 @@ where
                 let mut first_cell_child = self
                     .accessor()
                     .read_page::<BtreePage, _, _>(first_child_next, |node| {
-                        node.cell(Slot(0)).clone()
+                        OwnedCell::from_ref(node.cell(Slot(0)))
                     })?;
 
                 // Make the copied cell point to our right child and push it to the chain.
-                first_cell_child.metadata_mut().left_child = right_child;
+                first_cell_child.set_left_child(right_child);
                 cells.push_back(first_cell_child);
             };
 
@@ -1158,7 +1164,7 @@ where
         }
 
         // Obtain the maximum data that we can fit on this page.
-        let usable_space = BtreePage::overflow_threshold(page_size) as u16;
+        let usable_space = BtreePage::overflow_threshold(page_size);
 
         // These two arrays track the redistribution computation of the rebalancing algorithm.
         let mut total_size_in_each_page = vec![0];
@@ -1186,8 +1192,7 @@ where
 
             // Iterate backwards, moving cells towards the right.
             for i in (1..=(total_size_in_each_page.len() - 1)).rev() {
-                while total_size_in_each_page[i] < BtreePage::underflow_threshold(page_size) as u16
-                {
+                while total_size_in_each_page[i] < BtreePage::underflow_threshold(page_size) {
                     number_of_cells_per_page[i] += 1;
                     total_size_in_each_page[i] += &cells[divider_cell].storage_size();
 
@@ -1199,7 +1204,7 @@ where
 
             // Second page has more data than the first one, make a little
             // adjustment to keep it left biased.
-            if total_size_in_each_page[0] < BtreePage::underflow_threshold(page_size) as u16 {
+            if total_size_in_each_page[0] < BtreePage::underflow_threshold(page_size) {
                 number_of_cells_per_page[0] += 1;
                 number_of_cells_per_page[1] -= 1;
             };
@@ -1305,8 +1310,8 @@ where
                     // For leaf nodes, we always propagate the first cell of the next node.
                     if i < siblings.len() - 1 && is_leaf {
                         let mut divider = cells.front().unwrap().clone();
-                        node.metadata_mut().right_child = divider.metadata().left_child;
-                        divider.metadata_mut().left_child = siblings[i].pointer;
+                        node.metadata_mut().right_child = divider.left_child();
+                        divider.set_left_child(siblings[i].pointer);
                         return Ok(Some(divider));
 
                     // For interior nodes there are two possible cases.
@@ -1314,8 +1319,8 @@ where
                     // On that case we simply propagate our last cell and also use it as our right most.
                     } else if !is_leaf && (i < siblings.len() - 1 || right_frontier.is_some()) {
                         let mut divider = cells.pop_front().unwrap();
-                        node.metadata_mut().right_child = divider.metadata().left_child;
-                        divider.metadata_mut().left_child = siblings[i].pointer;
+                        node.metadata_mut().right_child = divider.left_child();
+                        divider.set_left_child(siblings[i].pointer);
                         return Ok(Some(divider));
 
                     // CASE B: We are the right most of the parent,
@@ -1354,7 +1359,7 @@ where
                     // For leaf nodes, we propagate the first child as a divider.
                     // For interior nodes this is not necessary as we use the last child of the previous sibling instead.
                     if is_leaf {
-                        Ok(Some(node.cell(Slot(0)).clone()))
+                        Ok(Some(OwnedCell::from(node.cell(Slot(0)))))
                     } else {
                         Ok(None)
                     }
@@ -1384,7 +1389,7 @@ where
         if let Some(mut divider) = frontier_divider {
             self.accessor_mut()
                 .write_page::<BtreePage, _, _>(parent_page, |node| {
-                    divider.metadata_mut().left_child = last_sibling.pointer;
+                    divider.set_left_child(last_sibling.pointer);
                     node.insert(last_sibling.slot, divider);
                 })?;
         };
@@ -1700,9 +1705,11 @@ where
     ) -> io::Result<()> {
         let mut separator = self
             .accessor()
-            .read_page::<BtreePage, _, _>(right_child, |node| node.cell(Slot(0)).clone())?;
+            .read_page::<BtreePage, _, _>(right_child, |node| {
+                OwnedCell::from(node.cell(Slot(0)))
+            })?;
 
-        separator.metadata_mut().left_child = left_child;
+        separator.set_left_child(left_child);
 
         self.accessor_mut()
             .write_page::<BtreePage, _, _>(parent, |node| {
@@ -1758,12 +1765,13 @@ where
         let mut string = format!("{{\"page\":\"{number}\",\"entries\":[");
 
         if !page.is_empty() {
-            let key = &page.cell(Slot(0)).used();
+            let cell = page.cell(Slot(0));
+            let key = cell.payload();
             string.push_str(&format!("{key:?}"));
 
             for i in 1..page.num_slots() {
                 string.push(',');
-                string.push_str(&format!("{:?}", &page.cell(Slot(i)).used()));
+                string.push_str(&format!("{:?}", &page.cell(Slot(i)).payload()));
             }
         }
 
@@ -1785,8 +1793,8 @@ where
 
     /// Reassembles payload when overflow page latches are already held.
     /// Does not acquire any new latches.
-    fn reassemble_payload(&self, cell: &Cell, overflow_pages: &[PageId]) -> Payload<'_> {
-        let mut payload = Vec::from(&cell.used()[..cell.len() - std::mem::size_of::<PageId>()]);
+    fn reassemble_payload(&self, cell: CellRef<'_>, overflow_pages: &[PageId]) -> Payload<'_> {
+        let mut payload = Vec::from(&cell.payload()[..cell.len() - std::mem::size_of::<PageId>()]);
 
         for &ovf_page in overflow_pages {
             self.accessor()
@@ -1832,7 +1840,7 @@ where
                 .accessor()
                 .read_page::<BtreePage, _, _>(page_id, |btree| {
                     let cell = btree.cell(slot);
-                    self.reassemble_payload(&cell, &overflow_pages)
+                    self.reassemble_payload(cell, &overflow_pages)
                 })?;
 
             let result = f(payload.as_ref());
@@ -1847,7 +1855,7 @@ where
             self.accessor()
                 .read_page::<BtreePage, _, _>(page_id, |btree| {
                     let cell = btree.cell(slot);
-                    f(cell.used())
+                    f(cell.payload())
                 })?
         };
 
@@ -1913,7 +1921,7 @@ where
                         self.accessor()
                             .read_page::<BtreePage, _, _>(page_id, |btree| {
                                 let cell = btree.cell(slot);
-                                self.reassemble_payload(&cell, &overflow_pages)
+                                self.reassemble_payload(cell, &overflow_pages)
                             })?;
 
                     let result = f(pos, payload.as_ref());
@@ -1928,7 +1936,7 @@ where
                     self.accessor()
                         .read_page::<BtreePage, _, _>(page_id, |btree| {
                             let cell = btree.cell(slot);
-                            f(pos, cell.used())
+                            f(pos, cell.payload())
                         })?
                 };
 

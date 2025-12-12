@@ -8,8 +8,8 @@ use crate::{
         errors::{EvalResult, EvaluationError, TypeError, TypeResult},
         schema::Schema,
     },
-    sql::ast::{BinaryOperator, UnaryOperator},
     sql::binder::ast::{BoundColumnRef, BoundExpression, Function},
+    sql::parser::ast::{BinaryOperator, UnaryOperator},
     types::{Blob, DataType, DataTypeKind, UInt8},
 };
 use std::collections::HashSet;
@@ -308,8 +308,8 @@ impl<'a> ExpressionEvaluator<'a> {
         match (str_a, str_b) {
             (DataType::Text(a_blob), DataType::Text(b_blob)) => {
                 // Convert each Blob to String using UTF-8
-                let a_str = a_blob.to_string(crate::TextEncoding::Utf8);
-                let b_str = b_blob.to_string(crate::TextEncoding::Utf8);
+                let a_str = a_blob.to_string();
+                let b_str = b_blob.to_string();
 
                 // Concatenate strings
                 let concatenated = format!("{}{}", a_str, b_str);
@@ -563,7 +563,7 @@ impl Callable for Concat {
         for arg in args {
             match arg {
                 DataType::Text(blob) => {
-                    let s = blob.to_string(crate::TextEncoding::Utf8);
+                    let s = blob.to_string();
                     result.push_str(&s);
                 }
                 other => {
@@ -614,7 +614,7 @@ impl Callable for LTrim {
 
         match &args[0] {
             DataType::Text(blob) => {
-                let s = blob.to_string(crate::TextEncoding::Utf8);
+                let s = blob.to_string();
                 let trimmed = s.trim_start(); // left trim
                 Ok(DataType::Text(Blob::from(trimmed)))
             }
@@ -634,7 +634,7 @@ impl Callable for RTrim {
 
         match &args[0] {
             DataType::Text(blob) => {
-                let s = blob.to_string(crate::TextEncoding::Utf8);
+                let s = blob.to_string();
                 let trimmed = s.trim_end(); // right trim
                 Ok(DataType::Text(Blob::from(trimmed)))
             }
@@ -654,7 +654,7 @@ impl Callable for Lower {
 
         match &args[0] {
             DataType::Text(blob) => {
-                let s = blob.to_string(crate::TextEncoding::Utf8);
+                let s = blob.to_string();
                 Ok(DataType::Text(Blob::from(s.to_lowercase().as_str())))
             }
             other => Err(EvaluationError::Type(TypeError::TypeMismatch {
@@ -673,7 +673,7 @@ impl Callable for Upper {
 
         match &args[0] {
             DataType::Text(blob) => {
-                let s = blob.to_string(crate::TextEncoding::Utf8);
+                let s = blob.to_string();
                 Ok(DataType::Text(Blob::from(s.to_uppercase().as_str())))
             }
             other => Err(EvaluationError::Type(TypeError::TypeMismatch {
@@ -692,7 +692,7 @@ impl Callable for Length {
 
         match &args[0] {
             DataType::Text(blob) => {
-                let s = blob.to_string(crate::TextEncoding::Utf8);
+                let s = blob.to_string();
                 Ok(DataType::BigUInt(crate::UInt64::from(
                     s.chars().count() as u64
                 )))

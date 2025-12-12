@@ -1,15 +1,7 @@
-use crate::{
-    AxmosDBConfig, IncrementalVaccum, TextEncoding,
-    io::pager::{Pager, SharedPager},
-    structures::{bplustree::BPlusTree, comparator::Comparator},
-    transactions::accessor::RcPageAccessor,
-    types::VarInt,
-};
-
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use std::io;
-use tempfile::tempdir;
+
+use crate::types::VarInt;
 
 #[derive(Debug, Clone)]
 pub struct KeyValuePair {
@@ -81,29 +73,6 @@ impl TestVarLengthKey {
         bytes_data.extend_from_slice(self.0.as_ref());
         bytes_data
     }
-}
-
-pub fn create_test_btree<Cmp: Comparator + Clone>(
-    page_size: u32,
-    capacity: usize,
-    min_keys: usize,
-    comparator: Cmp,
-) -> io::Result<BPlusTree<Cmp>> {
-    let dir = tempdir()?;
-    let path = dir.path().join("test_btree.db");
-
-    let config = AxmosDBConfig {
-        page_size,
-        cache_size: Some(capacity as u16),
-        incremental_vacuum_mode: IncrementalVaccum::Disabled,
-        min_keys: min_keys as u8,
-        text_encoding: TextEncoding::Utf8,
-    };
-
-    let shared_pager = SharedPager::from(Pager::from_config(config, &path)?);
-
-    let accessor = RcPageAccessor::new(shared_pager);
-    BPlusTree::new(accessor, min_keys, 2, comparator)
 }
 
 pub fn gen_random_bytes(size: usize, seed: u64) -> Vec<u8> {

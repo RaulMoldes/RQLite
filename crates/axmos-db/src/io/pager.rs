@@ -1,21 +1,25 @@
 use crate::{
     AxmosDBConfig, DEFAULT_CACHE_SIZE, DEFAULT_PAGE_SIZE, PAGE_ALIGNMENT,
     io::{
-        MemBuffer,
         cache::PageCache,
         disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
         frames::MemFrame,
-        wal::{LogRecord, WriteAheadLog},
+        wal::{OwnedLogRecord, WriteAheadLog},
     },
     make_shared,
     storage::{
-        buffer::BufferWithMetadata,
+        buffer::MemBlock,
         page::{DatabaseHeader, Header, MemPage, OverflowPage, Page, PageZero},
     },
     types::{PAGE_ZERO, PageId},
 };
 
-use std::io::{self, Error as IoError, ErrorKind, Read, Seek, Write};
+use std::{
+    io::{self, Error as IoError, ErrorKind, Read, Seek, SeekFrom, Write},
+    mem,
+    path::Path,
+    ptr,
+};
 
 /// Implementation of a pager.
 #[derive(Debug)]
@@ -43,12 +47,12 @@ impl Read for Pager {
 }
 
 impl Seek for Pager {
-    fn seek(&mut self, pos: std::io::SeekFrom) -> io::Result<u64> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         self.file.seek(pos)
     }
 }
 impl FileOperations for Pager {
-    fn create(path: impl AsRef<std::path::Path>) -> io::Result<Self>
+    fn create(path: impl AsRef<Path>) -> io::Result<Self>
     where
         Self: Sized,
     {
@@ -67,7 +71,7 @@ impl FileOperations for Pager {
         })
     }
 
-    fn open(path: impl AsRef<std::path::Path>) -> io::Result<Self>
+    fn open(path: impl AsRef<Path>) -> io::Result<Self>
     where
         Self: Sized,
     {
@@ -88,7 +92,7 @@ impl FileOperations for Pager {
         })
     }
 
-    fn remove(path: impl AsRef<std::path::Path>) -> io::Result<()> {
+    fn remove(path: impl AsRef<Path>) -> io::Result<()> {
         DBFile::remove(&path)?;
         let dir = path.as_ref().parent().expect("Not a directory");
         let wal_path = dir.join("axmos.log");
@@ -111,26 +115,21 @@ impl FileOperations for Pager {
 }
 
 impl Pager {
-    pub(crate) fn from_config(
-        config: AxmosDBConfig,
-        path: impl AsRef<std::path::Path>,
-    ) -> io::Result<Self> {
+    pub(crate) fn from_config(config: AxmosDBConfig, path: impl AsRef<Path>) -> io::Result<Self> {
         let mut pager = Pager::create(path)?;
         pager.init(config)?;
         Ok(pager)
     }
     pub(crate) fn init(&mut self, config: AxmosDBConfig) -> io::Result<()> {
-        self.cache
-            .set_capacity(config.cache_size.unwrap_or(DEFAULT_CACHE_SIZE) as usize);
+        self.cache.set_capacity(config.cache_size as usize);
 
         let mut page_zero: PageZero = PageZero::alloc(config.page_size);
         page_zero.metadata_mut().page_size = config.page_size;
-        page_zero.metadata_mut().incremental_vacuum_mode = config.incremental_vacuum_mode;
-        page_zero.metadata_mut().min_keys = config.min_keys;
-        page_zero.metadata_mut().text_encoding = config.text_encoding;
-        page_zero.metadata_mut().cache_size = config.cache_size.unwrap_or(DEFAULT_CACHE_SIZE);
+        page_zero.metadata_mut().min_keys = config.min_keys_per_page;
+        page_zero.metadata_mut().cache_size = config.cache_size;
+        page_zero.metadata_mut().num_siblings_per_side = config.num_siblings_per_side;
 
-        self.file.seek(std::io::SeekFrom::Start(0))?;
+        self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(page_zero.as_ref())?;
 
         self.header = *page_zero.metadata();
@@ -148,34 +147,22 @@ impl Pager {
         Ok(())
     }
 
-    pub(crate) fn push_to_log(&mut self, record: LogRecord) -> io::Result<()> {
+    pub(crate) fn push_to_log(&mut self, record: OwnedLogRecord) -> io::Result<()> {
         self.wal.push(record)
     }
 
     pub(crate) fn load_db_header(f: &mut DBFile, block_size: usize) -> io::Result<DatabaseHeader> {
-        f.seek(std::io::SeekFrom::Start(0))?;
-        let mut buf = MemBuffer::alloc(block_size, block_size)?;
-        f.read_exact(&mut buf)?;
+        f.seek(SeekFrom::Start(0))?;
+        let mut block: MemBlock<()> = MemBlock::new(block_size);
+        f.read_exact(block.as_mut())?;
 
         // SAFETY: This is safe since the header is always written at the beggining of the file and alignment requirements are guaranteed.
         let header = unsafe {
-            std::ptr::read(
-                buf.as_ref()[..std::mem::size_of::<DatabaseHeader>()].as_ptr()
-                    as *const DatabaseHeader,
-            )
+            ptr::read(block.as_ref()[..mem::size_of::<DatabaseHeader>()].as_ptr()
+                as *const DatabaseHeader)
         };
 
         Ok(header)
-    }
-
-    pub(crate) fn config(&self) -> AxmosDBConfig {
-        AxmosDBConfig {
-            incremental_vacuum_mode: self.header.incremental_vacuum_mode,
-            min_keys: self.header.min_keys,
-            text_encoding: self.header.text_encoding,
-            cache_size: Some(self.header.cache_size),
-            page_size: self.page_size(),
-        }
     }
 
     /// Compute the offset at which a page is placed given the database header size and the page id.
@@ -220,7 +207,7 @@ impl Pager {
             content.len().is_multiple_of(PAGE_ALIGNMENT as usize),
             "Invalid content length. Must at least write a full page !"
         );
-        self.file.seek(std::io::SeekFrom::Start(offset))?;
+        self.file.seek(SeekFrom::Start(offset))?;
         self.file.write_all(content)?;
 
         Ok(())
@@ -245,7 +232,7 @@ impl Pager {
             (offset as usize).is_multiple_of(PAGE_ALIGNMENT as usize),
             "Invalid content offset. Must be aligned!"
         );
-        self.file.seek(std::io::SeekFrom::Start(offset))?;
+        self.file.seek(SeekFrom::Start(offset))?;
         self.file.read_exact(buffer)?;
         Ok(())
     }
@@ -257,7 +244,7 @@ impl Pager {
     pub(crate) fn alloc_frame<P: Page>(&mut self) -> io::Result<MemFrame<MemPage>>
     where
         MemPage: From<P>,
-        BufferWithMetadata<P::Header>: Into<MemPage>,
+        MemBlock<P::Header>: Into<MemPage>,
     {
         let free_page = self.header.first_free_page;
         let last_free = self.header.last_free_page;
@@ -315,7 +302,7 @@ impl Pager {
 
     pub(crate) fn read_page<P: Page>(&mut self, id: PageId) -> io::Result<MemFrame<MemPage>>
     where
-        MemPage: From<P>,
+        MemPage: From<MemBlock<P::Header>>,
     {
         // First we try to go to the cache.
         if let Some(page) = self.cache.get(&id) {
@@ -324,18 +311,12 @@ impl Pager {
 
         // That was a cache miss.
         // we need to go to the disk to find the page.
-        let mut buffer = MemBuffer::alloc(self.page_size() as usize, PAGE_ALIGNMENT as usize)?;
-        self.read_block_unchecked(id, &mut buffer)?;
+        let mut buffer: MemBlock<()> = MemBlock::new(self.page_size() as usize);
+        self.read_block_unchecked(id, buffer.as_mut())?;
 
-        let page = P::try_from((&buffer, PAGE_ALIGNMENT as usize)).map_err(|msg| {
-            IoError::new(
-                ErrorKind::InvalidData,
-                format!("Failed to convert page from bytes: {msg}"),
-            )
-        })?;
-
+        let page = buffer.cast::<P::Header>();
         debug_assert_eq!(
-            page.page_number(),
+            page.metadata().page_number(),
             id,
             "PAGE NUMBER READ FROM DISK SHOULD MATCH THE ASKED PAGE NUMBER. OTHERWISE INDICATES MEMORY CORRUPTION"
         );
@@ -362,7 +343,7 @@ impl Pager {
 
     pub(crate) fn dealloc_page<P: Page>(&mut self, id: PageId) -> io::Result<()>
     where
-        MemPage: From<P>,
+        MemPage: From<MemBlock<P::Header>>,
     {
         let last_free_page = self.header.last_free_page;
         let first_free_page = self.header.first_free_page;
@@ -402,43 +383,30 @@ impl Pager {
 make_shared! {SharedPager, Pager}
 
 #[cfg(test)]
-mod tests {
+mod pager_tests {
 
     use super::*;
-    use crate::storage::page::{BTREE_PAGE_HEADER_SIZE, BtreePage};
+    use crate::{
+        storage::{
+            cell::OwnedCell,
+            page::{BTREE_PAGE_HEADER_SIZE, BtreePage},
+        },
+        test_utils::test_pager,
+    };
     use serial_test::serial;
-    use std::path::Path;
-    use tempfile::tempdir;
-
-    fn create_test_pager(path: impl AsRef<Path>, cache_size: usize) -> io::Result<Pager> {
-        let dir = tempdir()?;
-        let path = dir.path().join(&path);
-
-        let config = crate::AxmosDBConfig {
-            page_size: 4096,
-            cache_size: Some(cache_size as u16),
-            incremental_vacuum_mode: crate::IncrementalVaccum::Disabled,
-            min_keys: 3,
-            text_encoding: crate::TextEncoding::Utf8,
-        };
-
-        let mut pager = Pager::create(&path)?;
-        pager.init(config)?;
-        Ok(pager)
-    }
 
     #[test]
     #[serial]
     fn test_single_page_rw() -> io::Result<()> {
-        let mut pager = create_test_pager("test.db", 16)?;
+        let (mut pager, f) = test_pager()?;
         let page_size = pager.page_size();
         let mut page1 = BtreePage::alloc(page_size);
         let page_id = page1.metadata().page_number;
         assert!(page_id != crate::types::PAGE_ZERO, "Invalid page number!");
         let result = pager.write_block_unchecked(page_id, page1.as_mut());
         assert!(result.is_ok(), "Page writing to disk failed!");
-        let mut buf = MemBuffer::alloc(pager.page_size() as usize, PAGE_ALIGNMENT as usize)?;
-        pager.read_block_unchecked(page_id, &mut buf)?;
+        let mut buf: MemBlock<()> = MemBlock::new(pager.page_size() as usize);
+        pager.read_block_unchecked(page_id, buf.as_mut())?;
         assert_eq!(
             buf.as_ref(),
             page1.as_ref(),
@@ -451,13 +419,13 @@ mod tests {
     #[test]
     #[serial]
     fn test_multiple_pages_rw() -> io::Result<()> {
-        let mut pager = create_test_pager("test.db", 16)?;
+        let (mut pager, f) = test_pager()?;
         let page_size = pager.page_size();
         let mut pages = Vec::new();
         let num_pages = 10;
         let total_size = num_pages * page_size;
 
-        let mut raw_buffer = MemBuffer::alloc(total_size as usize, PAGE_ALIGNMENT as usize)?;
+        let mut raw_buffer: MemBlock<()> = MemBlock::new(total_size as usize);
 
         let mut offset = 0;
         // Accumulate all pages in our buffers.
@@ -479,12 +447,11 @@ mod tests {
             total_page_size, total_size as usize,
             "Total size was not as expected"
         );
-        pager.write_block_unchecked(pages[0].metadata().page_number, &mut raw_buffer)?;
+        pager.write_block_unchecked(pages[0].metadata().page_number, raw_buffer.as_mut())?;
 
         for page in pages {
             // Try to read page 1 back.
-            let mut buf =
-                MemBuffer::alloc(page.metadata().page_size as usize, PAGE_ALIGNMENT as usize)?;
+            let mut buf: MemBlock<()> = MemBlock::new(page.metadata().page_size as usize);
 
             pager.read_block_unchecked(page.metadata().page_number, buf.as_mut())?;
             assert_eq!(
@@ -500,7 +467,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_cache_eviction() -> io::Result<()> {
-        let mut pager = create_test_pager("test.db", 16)?;
+        let (mut pager, f) = test_pager()?;
         let page_size = pager.page_size();
         let cache_size = 2; // Set a small cache capacity to force eviction.
         pager.cache = PageCache::with_capacity(cache_size);
@@ -543,9 +510,8 @@ mod tests {
 
     #[test]
     #[serial]
-    #[cfg(not(miri))]
     fn test_dirty_page() -> io::Result<()> {
-        let mut pager = create_test_pager("test.db", 16)?;
+        let (mut pager, f) = test_pager()?;
         pager.cache = PageCache::with_capacity(1); // Cache pequeña
 
         // Create a dirty page
@@ -561,7 +527,7 @@ mod tests {
         let _id_2 = pager.cache_frame(frame)?;
 
         // Verify it has been written out to disk.
-        let mut buf = MemBuffer::alloc(pager.page_size() as usize, PAGE_ALIGNMENT as usize)?;
+        let mut buf: MemBlock<()> = MemBlock::new(pager.page_size() as usize);
         pager.read_block_unchecked(id1, buf.as_mut())?;
 
         Ok(())
@@ -570,7 +536,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_dealloc_page() -> io::Result<()> {
-        let mut pager = create_test_pager("test.db", 16)?;
+        let (mut pager, f) = test_pager()?;
 
         // Allocate and deallocate pages
         let frame = pager.alloc_frame::<BtreePage>()?;
@@ -604,7 +570,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_page_reusability() -> io::Result<()> {
-        let mut pager = create_test_pager("test.db", 2)?;
+        let (mut pager, f) = test_pager()?;
         let num_pages = 350;
         let num_cells = 15;
         let mut ids: std::collections::HashSet<PageId> =
@@ -620,7 +586,7 @@ mod tests {
         for i in ids.iter() {
             let mut page = pager.read_page::<BtreePage>(*i)?;
             for i in 0..num_cells {
-                let cell = crate::storage::cell::Cell::new(b"Hello");
+                let cell = OwnedCell::new(b"Hello");
                 page.try_with_variant_mut::<BtreePage, _, _, _>(|p| {
                     p.push(cell.clone());
                 })
