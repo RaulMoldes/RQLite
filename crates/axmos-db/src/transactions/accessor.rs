@@ -2,12 +2,12 @@ use crate::{
     io::{
         frames::{FrameAccessMode, FrameStack, Position},
         pager::SharedPager,
-        wal::OwnedRecord,
     },
     storage::{
         buffer::MemBlock,
         latches::Latch,
         page::{MemPage, Page},
+        wal::OwnedRecord,
     },
     types::PageId,
 };

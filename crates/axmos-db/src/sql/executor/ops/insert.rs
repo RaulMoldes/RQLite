@@ -1,15 +1,18 @@
 use crate::{
     database::{
-        errors::{ExecutionResult, QueryExecutionError, TypeError},
+        errors::{ExecutionResult, QueryExecutionError},
         schema::{ObjectType, Relation, Schema},
     },
     sql::{
-        executor::{ExecutionState, ExecutionStats, Executor, Row, context::ExecutionContext},
+        executor::{
+            ExecutionState, ExecutionStats, Executor, Row, context::ExecutionContext,
+            ops::cast_to_column_type,
+        },
         planner::physical::PhysInsertOp,
     },
-    storage::tuple::{OwnedTuple, Tuple},
+    storage::tuple::Tuple,
     transactions::LogicalId,
-    types::{DataType, DataTypeKind, UInt64},
+    types::{DataType, UInt64},
 };
 
 pub(crate) struct Insert {
@@ -62,7 +65,7 @@ impl Insert {
             if input_idx < row.len() && schema_col_idx < schema_columns.len() {
                 let expected_type = schema_columns[schema_col_idx].dtype;
                 let value = row[input_idx].clone();
-                let casted_value = Self::cast_to_column_type(value, expected_type)?;
+                let casted_value = cast_to_column_type(value, expected_type)?;
                 full_values[schema_col_idx] = casted_value;
             }
         }
@@ -70,13 +73,12 @@ impl Insert {
         let logical_id = LogicalId::new(self.op.table_id, next_row);
 
         let tuple = Tuple::new(&full_values, schema, tx_id)?;
-        let bytes: OwnedTuple = tuple.into();
 
-        let logger = self.ctx.logger();
-        logger.log_insert(self.op.table_id, bytes.clone())?;
+        //  let logger = self.ctx.logger();
+        //  logger.log_insert(self.op.table_id, bytes.clone())?;
 
         let mut btree = catalog.table_btree(relation.root(), accessor.clone())?;
-        btree.insert(relation.root(), bytes.as_ref())?;
+        btree.insert(relation.root(), tuple)?;
         btree.clear_accessor_stack();
 
         // Maintain indexes - insert entries for all composite/single indexes
@@ -96,32 +98,16 @@ impl Insert {
             index_values.push(DataType::BigUInt(next_row));
 
             let index_tuple = Tuple::new(&index_values, index_schema, tx_id)?;
-            let index_bytes: OwnedTuple = index_tuple.into();
 
             let mut index_btree =
                 catalog.index_btree(index_relation.root(), index_schema, accessor.clone())?;
-            index_btree.insert(index_relation.root(), index_bytes.as_ref())?;
+            index_btree.insert(index_relation.root(), index_tuple)?;
             index_btree.clear_accessor_stack();
         }
 
         catalog.update_relation(relation, accessor)?;
 
         Ok(logical_id)
-    }
-
-    fn cast_to_column_type(
-        value: DataType,
-        expected_kind: DataTypeKind,
-    ) -> ExecutionResult<DataType> {
-        if value.kind() == expected_kind {
-            return Ok(value);
-        }
-        value.try_cast(expected_kind).map_err(|_| {
-            QueryExecutionError::Type(TypeError::CastError {
-                from: value.kind(),
-                to: expected_kind,
-            })
-        })
     }
 }
 

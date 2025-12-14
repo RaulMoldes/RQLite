@@ -23,10 +23,11 @@ impl From<Slot> for UInt16 {
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct CellHeader {
     left_child: PageId,
-    size: u16,
+    // Size here represents the total size of the cell, including padding.
+    size: u64, // We do not know how much data are we going to store on a cell. When creating overflow pages it can become quite big so it is best to be prepared.
     padding: u8,
     is_overflow: bool,
 }
@@ -34,26 +35,42 @@ pub struct CellHeader {
 pub const CELL_HEADER_SIZE: usize = mem::size_of::<CellHeader>();
 
 impl CellHeader {
+    pub fn new(padding: usize, payload_size: usize, is_overflow: bool) -> Self {
+
+        CellHeader {
+            left_child: PageId::from(0),
+            size: (payload_size + padding) as u64,
+            is_overflow,
+            padding: padding as u8,
+        }
+    }
+
+    #[inline]
     pub fn is_overflow(&self) -> bool {
         self.is_overflow
     }
 
-    pub fn size(&self) -> u16 {
+    #[inline]
+    pub fn size(&self) -> u64 {
         self.size
     }
 
+    #[inline]
     pub fn padding(&self) -> u8 {
         self.padding
     }
 
+    #[inline]
     pub fn left_child(&self) -> PageId {
         self.left_child
     }
 
+    #[inline]
     pub fn set_left_child(&mut self, child: PageId) {
         self.left_child = child;
     }
 
+    #[inline]
     pub fn set_overflow(&mut self, is_overflow: bool) {
         self.is_overflow = is_overflow;
     }
@@ -239,20 +256,13 @@ pub struct OwnedCell {
 impl OwnedCell {
     /// Creates a new cell from a payload slice.
     pub fn new(payload: &[u8]) -> Self {
-        let padded_size = (payload.len() + CELL_HEADER_SIZE)
-            .next_multiple_of(CELL_ALIGNMENT as usize)
-            - CELL_HEADER_SIZE;
-        let padding = padded_size - payload.len();
+        let padding = Self::compute_padding(payload.len());
+        let padded_size = payload.len() + padding;
 
         let mut data = vec![0u8; padded_size].into_boxed_slice();
         data[..payload.len()].copy_from_slice(payload);
 
-        let header = CellHeader {
-            left_child: PageId::from(0),
-            size: padded_size as u16,
-            is_overflow: false,
-            padding: padding as u8,
-        };
+        let header = CellHeader::new(padding, payload.len(), false);
 
         Self {
             header,
@@ -262,23 +272,46 @@ impl OwnedCell {
 
     /// Creates a new overflow cell.
     pub fn new_overflow(payload: &[u8], overflow_page: PageId) -> Self {
-        let total_payload_len = payload.len() + mem::size_of::<PageId>();
-        let padded_size = (total_payload_len + CELL_HEADER_SIZE)
-            .next_multiple_of(CELL_ALIGNMENT as usize)
-            - CELL_HEADER_SIZE;
-        let padding = padded_size - total_payload_len;
+        let payload_size = payload.len() + mem::size_of::<PageId>();
+        let padding = Self::compute_padding(payload_size);
+        let padded_size = payload_size + padding;
 
         let mut data = vec![0u8; padded_size].into_boxed_slice();
         data[..payload.len()].copy_from_slice(payload);
         data[payload.len()..payload.len() + mem::size_of::<PageId>()]
             .copy_from_slice(&overflow_page.to_be_bytes());
 
-        let header = CellHeader {
-            left_child: PageId::from(0),
-            size: padded_size as u16,
-            is_overflow: true,
-            padding: padding as u8,
-        };
+        let header = CellHeader::new(padding, payload_size, true);
+
+        Self {
+            header,
+            payload: data,
+        }
+    }
+
+    #[inline]
+    fn compute_padding(payload_size: usize) -> usize {
+        let padded_size = (payload_size + CELL_HEADER_SIZE)
+            .next_multiple_of(CELL_ALIGNMENT as usize)
+            - CELL_HEADER_SIZE;
+        padded_size - payload_size
+    }
+
+    /// Creates a cell by having the caller write directly to the payload
+    pub fn new_with_writer<F>(payload_size: usize, writer: F) -> Self
+    where
+        F: FnOnce(&mut [u8]) -> usize,
+    {
+        let padding = Self::compute_padding(payload_size);
+        let padded_size = payload_size + padding;
+
+        let mut data = vec![0u8; padded_size].into_boxed_slice();
+        let written = writer(&mut data[..payload_size]);
+
+        debug_assert_eq!(written, payload_size);
+        // By default cells are not overflow.
+        // Overflow must be set by the builder
+        let header = CellHeader::new(padding, payload_size, false);
 
         Self {
             header,
@@ -323,6 +356,12 @@ impl OwnedCell {
     /// Payload without padding.
     pub fn payload(&self) -> &[u8] {
         &self.payload[..self.len()]
+    }
+
+    /// Mutable payload without padding.
+    pub fn payload_mut(&mut self) -> &mut [u8] {
+        let len = self.len();
+        &mut self.payload[..len]
     }
 
     /// Length of actual payload (excluding padding).
@@ -396,6 +435,11 @@ impl OwnedCell {
             header: &mut self.header,
             data: &mut self.payload,
         }
+    }
+
+    // Consumes the cell and returns the payload as a boxed slice
+    pub fn into_boxed_slice(self) -> Box<[u8]> {
+        Box::from(self.payload())
     }
 }
 

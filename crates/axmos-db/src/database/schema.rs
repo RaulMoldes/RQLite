@@ -1,17 +1,16 @@
 use crate::{
-    TRANSACTION_ZERO,
     database::meta_table_schema,
     io::{AsBytes, read_string_unchecked, read_type_from_buf, write_string_unchecked},
     repr_enum,
     sql::planner::stats::{IndexStatistics, TableStatistics},
-    storage::tuple::{OwnedTuple, Tuple, TupleRef},
+    storage::tuple::TupleRef,
     structures::comparator::{
         CompositeComparator, DynComparator, FixedSizeBytesComparator, NumericComparator,
         SignedNumericComparator, VarlenComparator,
     },
     types::{
-        Blob, DataType, DataTypeKind, DataTypeRef, ObjectId, PAGE_ZERO, PageId, UInt8, UInt64,
-        VarInt, varint::MAX_VARINT_LEN,
+        Blob, DataType, DataTypeKind, DataTypeRef, ObjectId, PAGE_ZERO, PageId, UInt64, VarInt,
+        varint::MAX_VARINT_LEN,
     },
 };
 
@@ -761,34 +760,8 @@ impl Relation {
         self.root().is_valid()
     }
 
-    pub(crate) fn into_boxed_tuple(self) -> std::io::Result<OwnedTuple> {
-        let root_page = if self.root() != PAGE_ZERO {
-            DataType::BigUInt(UInt64::from(self.root()))
-        } else {
-            DataType::Null
-        };
-
-        // Serialize metadata in-place
-        let metadata = DataType::Blob(self.metadata_as_blob()?);
-
-        let schema = meta_table_schema();
-        let t = Tuple::new(
-            &[
-                DataType::BigUInt(UInt64::from(self.id())),
-                root_page,
-                DataType::Byte(UInt8::from(self.object_type() as u8)),
-                metadata,
-                DataType::Text(Blob::from(self.name())),
-            ],
-            &schema,
-            TRANSACTION_ZERO, // PLACEHOLDER. MUST DO THIS INSIDE A TRANSACTION IDEALLY
-        )?;
-
-        Ok(t.into())
-    }
-
-    fn metadata_as_blob(&self) -> std::io::Result<Blob> {
-        let mut buffer = std::io::Cursor::new(Vec::new());
+    pub fn metadata_as_blob(&self) -> io::Result<Blob> {
+        let mut buffer = io::Cursor::new(Vec::new());
         self.schema().write_to(&mut buffer)?;
 
         match self {
@@ -1206,287 +1179,111 @@ repr_enum!(
     }
 );
 
-#[cfg(test)]
-mod serialization_tests {
-    use super::*;
-    use crate::serialize_test;
-    use crate::types::{Int32, Int64};
+#[macro_export]
+macro_rules! schema {
 
-    serialize_test!(
-        test_serialization_1,
-        Column::new_unindexed(DataTypeKind::Int, "test_column", None),
-        "Column serialization failed"
-    );
+    (
+        keys: $num_keys:expr,
+        $(
+            $name:ident : $kind:ident $( { $($meta:tt)* } )?
+        ),+ $(,)?
+    ) => {{
+        use std::collections::HashMap;
+        use $crate::database::schema::{Column, Schema, Constraint};
+        use $crate::types::DataTypeKind;
 
-    serialize_test!(
-        test_serialization_2,
-        {
-            let mut col = Column::new_unindexed(DataTypeKind::Text, "user_name", None);
-            col.add_constraint("pk".to_string(), Constraint::PrimaryKey);
-            col.add_constraint("nn".to_string(), Constraint::NonNull);
-            col.add_constraint("uniq".to_string(), Constraint::Unique);
-            col
-        },
-        "Column with constraints serialization failed"
-    );
+        let columns: Vec<Column> = vec![
+            $(
+                schema!(@column
+                    $name,
+                    $kind
+                    $(, { $($meta)* })?
+                )
+            ),+
+        ];
 
-    serialize_test!(
-        test_serialization_3,
-        {
-            let mut col = Column::new_unindexed(DataTypeKind::BigInt, "user_id", None);
-            let fk = ForeignKey::new("users".to_string(), "id".to_string());
-            col.add_constraint("fk_user".to_string(), Constraint::ForeignKey(fk));
-            col
-        },
-        "Column with FK serialization failed"
-    );
+        Schema::from_columns(&columns, $num_keys)
+    }};
 
-    serialize_test!(
-        test_serialization_4,
-        {
-            let mut col = Column::new_unindexed(DataTypeKind::Int, "status", None);
-            col.add_constraint(
-                "default".to_string(),
-                Constraint::Default(DataType::Int(Int32(42))),
-            );
-            col
-        },
-        "Column with default value serialization failed"
-    );
 
-    serialize_test!(
-        test_serialization_5,
-        Column::new(
-            DataTypeKind::Text,
-            "email",
-            Some("idx_email".to_string()),
-            None
-        ),
-        "Column with index serialization failed"
-    );
+    (@column $name:ident, $kind:ident) => {
+        Column::new_unindexed(
+            DataTypeKind::$kind,
+            stringify!($name),
+            None,
+        )
+    };
 
-    serialize_test!(
-        test_serialization_6,
-        Schema::new(),
-        "Empty schema serialization failed"
-    );
 
-    serialize_test!(
-        test_serialization_7,
-        {
-            let mut schema = Schema::new();
-            schema.add_column("id", DataTypeKind::BigInt, true, true, false);
-            schema.add_column("name", DataTypeKind::Text, false, true, false);
-            schema.add_column("email", DataTypeKind::Text, false, false, true);
-            schema.add_column("age", DataTypeKind::Int, false, false, false);
-            schema
-        },
-        "Schema with columns serialization failed"
-    );
+    (@column $name:ident, $kind:ident, { $($meta:tt)* }) => {{
+        let mut constraints: HashMap<String, Constraint> = HashMap::new();
+        let mut index: Option<String> = None;
 
-    serialize_test!(
-        test_serialization_8,
-        {
-            let mut schema = Schema::new();
-            schema.add_column("id", DataTypeKind::BigInt, false, true, false);
-            schema.add_column("email", DataTypeKind::Text, false, true, false);
-            schema.add_constraint(TableConstraint::PrimaryKey(vec!["id".to_string()]));
-            schema.add_constraint(TableConstraint::Unique(vec!["email".to_string()]));
-            schema
-        },
-        "Schema with table constraints serialization failed"
-    );
+        schema!(@parse_meta constraints, index, $($meta)*);
 
-    serialize_test!(
-        test_serialization_9,
-        {
-            let mut schema = Schema::new();
-            schema.add_column("user_id", DataTypeKind::BigInt, false, true, false);
-            schema.add_column("product_id", DataTypeKind::BigInt, false, true, false);
-            schema.add_column("quantity", DataTypeKind::Int, false, true, false);
-            schema.add_constraint(TableConstraint::PrimaryKey(vec![
-                "user_id".to_string(),
-                "product_id".to_string(),
-            ]));
-            schema
-        },
-        "Schema with composite PK serialization failed"
-    );
-
-    serialize_test!(
-        test_serialization_10,
-        {
-            let mut schema = Schema::new();
-            schema.add_column("id", DataTypeKind::BigInt, true, true, false);
-            schema.add_column("user_id", DataTypeKind::BigInt, false, true, false);
-            schema.add_column("product_id", DataTypeKind::BigInt, false, true, false);
-
-            schema.add_constraint(TableConstraint::ForeignKey {
-                columns: vec!["user_id".to_string()],
-                ref_table: "users".to_string(),
-                ref_columns: vec!["id".to_string()],
-            });
-
-            schema.add_constraint(TableConstraint::ForeignKey {
-                columns: vec!["product_id".to_string()],
-                ref_table: "products".to_string(),
-                ref_columns: vec!["id".to_string()],
-            });
-            schema
-        },
-        "Schema with foreign keys serialization failed"
-    );
-
-    serialize_test!(
-        test_serialization_11,
-        {
-            let mut schema = Schema::new();
-
-            let mut col1 = Column::new_unindexed(DataTypeKind::BigInt, "id", None);
-            col1.add_constraint("pk".to_string(), Constraint::PrimaryKey);
-            col1.set_index("idx_id".to_string());
-            schema.push_column(col1);
-
-            let mut col2 = Column::new_unindexed(DataTypeKind::Text, "email", None);
-            col2.add_constraint("unique_email".to_string(), Constraint::Unique);
-            col2.add_constraint("nn_email".to_string(), Constraint::NonNull);
-            schema.push_column(col2);
-
-            let mut col3 = Column::new_unindexed(DataTypeKind::Int, "status", None);
-            col3.add_constraint(
-                "default_status".to_string(),
-                Constraint::Default(DataType::Int(Int32(1))),
-            );
-            schema.push_column(col3);
-
-            let mut col4 = Column::new_unindexed(DataTypeKind::BigInt, "org_id", None);
-            let fk = ForeignKey::new("organizations".to_string(), "id".to_string());
-            col4.add_constraint("fk_org".to_string(), Constraint::ForeignKey(fk));
-            schema.push_column(col4);
-
-            schema.add_constraint(TableConstraint::Unique(vec![
-                "email".to_string(),
-                "org_id".to_string(),
-            ]));
-
-            schema
-        },
-        "Complex schema serialization failed"
-    );
-
-    serialize_test!(
-        test_serialization_12,
-        ForeignKey::new("parent_table".to_string(), "parent_column".to_string()),
-        "ForeignKey serialization failed"
-    );
-
-    serialize_test!(
-        test_serialization_13,
-        Column::new_unindexed(DataTypeKind::Text, "", None),
-        "Empty string column name serialization failed"
-    );
-
-    serialize_test!(
-        test_serialization_14,
-        {
-            let long_name = "a".repeat(1000);
-            Column::new_unindexed(DataTypeKind::Text, &long_name, None)
-        },
-        "Long string column name serialization failed"
-    );
-
-    serialize_test!(
-        test_serialization_15,
-        Column::new_unindexed(DataTypeKind::Text, "用户名_", None),
-        "Unicode column name serialization failed"
-    );
-
-    serialize_test!(
-        test_serialization_16,
-        {
-            let mut schema = Schema::new();
-            let mut col = Column::new(
-                DataTypeKind::Text,
-                "test_col",
-                Some("idx_test".to_string()),
+        if constraints.is_empty() && index.is_none() {
+            Column::new_unindexed(
+                DataTypeKind::$kind,
+                stringify!($name),
                 None,
-            );
-            col.add_constraint("pk".to_string(), Constraint::PrimaryKey);
-            col.add_constraint("nn".to_string(), Constraint::NonNull);
-            col.add_constraint("uniq".to_string(), Constraint::Unique);
-            col.add_constraint(
-                "def".to_string(),
-                Constraint::Default(DataType::Text(Blob::from("default_value"))),
-            );
-            col.add_constraint(
-                "fk".to_string(),
-                Constraint::ForeignKey(ForeignKey::new(
-                    "ref_table".to_string(),
-                    "ref_col".to_string(),
-                )),
-            );
-            schema.push_column(col);
-            schema
-        },
-        "Schema with all constraint types failed"
-    );
+            )
+        } else {
+            Column::new(
+                DataTypeKind::$kind,
+                stringify!($name),
+                index,
+                if constraints.is_empty() { None } else { Some(constraints) },
+            )
+        }
+    }};
 
-    serialize_test!(
-        test_serialization_18,
-        {
-            let mut schema = Schema::new();
-            for i in 0..127 {
-                schema.add_column(&format!("col_{i}"), DataTypeKind::Int, false, false, false);
-            }
-            schema
-        },
-        "Schema with 127 columns failed"
-    );
 
-    serialize_test!(
-        test_serialization_19,
-        {
-            let mut schema = Schema::new();
-            for i in 0..128 {
-                schema.add_column(&format!("col_{i}"), DataTypeKind::Int, false, false, false);
-            }
-            schema
-        },
-        "Schema with 128 columns failed"
-    );
+    (@parse_meta $constraints:ident, $index:ident,) => {};
 
-    serialize_test!(
-        test_serialization_20,
-        {
-            let mut schema = Schema::new();
 
-            let mut col_int = Column::new_unindexed(DataTypeKind::Int, "int_col", None);
-            col_int.add_constraint(
-                "def_int".to_string(),
-                Constraint::Default(DataType::Int(Int32(42))),
-            );
-            schema.push_column(col_int);
+    (@parse_meta $constraints:ident, $index:ident, $key:ident : $val:expr) => {
+        schema!(@meta $constraints, $index, $key : $val);
+    };
 
-            let mut col_text = Column::new_unindexed(DataTypeKind::Text, "text_col", None);
-            col_text.add_constraint(
-                "def_text".to_string(),
-                Constraint::Default(DataType::Text(Blob::from("hello"))),
-            );
-            schema.push_column(col_text);
 
-            let mut col_bigint = Column::new_unindexed(DataTypeKind::BigInt, "bigint_col", None);
-            col_bigint.add_constraint(
-                "def_bigint".to_string(),
-                Constraint::Default(DataType::BigInt(Int64(9999999))),
-            );
-            schema.push_column(col_bigint);
+    (@parse_meta $constraints:ident, $index:ident, $key:ident : $val:expr, $($rest:tt)*) => {
+        schema!(@meta $constraints, $index, $key : $val);
+        schema!(@parse_meta $constraints, $index, $($rest)*);
+    };
 
-            let mut col_null = Column::new_unindexed(DataTypeKind::Null, "null_col", None);
-            col_null.add_constraint("def_null".to_string(), Constraint::Default(DataType::Null));
-            schema.push_column(col_null);
 
-            schema
-        },
-        "Schema with different default types failed"
-    );
+    (@meta $constraints:ident, $index:ident, index : $idx:expr) => {
+        $index = Some($idx.to_string());
+    };
+
+    (@meta $constraints:ident, $index:ident, primary_key : $name:expr) => {
+        $constraints.insert(
+            $name.to_string(),
+            Constraint::PrimaryKey,
+        );
+    };
+
+    (@meta $constraints:ident, $index:ident, unique : $name:expr) => {
+        $constraints.insert(
+            $name.to_string(),
+            Constraint::Unique,
+        );
+    };
+
+    (@meta $constraints:ident, $index:ident, not_null : $name:expr) => {
+        $constraints.insert(
+            $name.to_string(),
+            Constraint::NonNull,
+        );
+    };
+
+    (@meta $constraints:ident, $index:ident, foreign_key : $fk:expr) => {
+        $constraints.insert(
+            $fk.0.to_string(),
+            Constraint::ForeignKey {
+                table: $fk.1.to_string(),
+                column: $fk.2.to_string(),
+            },
+        );
+    };
 }

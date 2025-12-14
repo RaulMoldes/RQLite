@@ -9,7 +9,7 @@ id_type!(WorkerId, __GLOBAL_WORKER_COUNT, "WorkerId");
 id_type!(BlockId, __GLOBAL_BLOCK_COUNT, "BlockId");
 
 pub fn initialize_block_count(val: u64) {
-     __GLOBAL_BLOCK_COUNT.store(val, std::sync::atomic::Ordering::Relaxed);
+    __GLOBAL_BLOCK_COUNT.store(val, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn initialize_atomics() {

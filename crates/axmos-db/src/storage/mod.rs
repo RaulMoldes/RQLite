@@ -3,9 +3,10 @@ pub mod cell;
 pub mod latches;
 pub mod page;
 pub mod tuple;
+pub mod wal;
 
 use crate::types::DataTypeRef;
-use tuple::{TupleRef, TupleRefMut};
+use tuple::TupleRef;
 
 #[macro_export]
 macro_rules! impl_display_tuple {
@@ -96,4 +97,3 @@ macro_rules! impl_display_tuple {
 }
 
 impl_display_tuple!(TupleRef<'a, 'b>, "TupleRef");
-impl_display_tuple!(TupleRefMut<'a, 'b>, "TupleRefMut");

@@ -52,6 +52,30 @@ impl LogicalId {
     }
 }
 
+// Macro for creating snapshots with low boilerplate.
+#[macro_export]
+macro_rules! snapshot {
+    (xid: $xid:expr, xmin: $xmin:expr, xmax: $xmax:expr) => {{
+        $crate::transactions::Snapshot::new(
+            $crate::types::TransactionId::from($xid as u64),
+            $crate::types::TransactionId::from($xmin as u64),
+            $crate::types::TransactionId::from($xmax as u64),
+            std::collections::HashSet::new(),
+        )
+    }};
+
+    (xid: $xid:expr, xmin: $xmin:expr, xmax: $xmax:expr, active: [$($active:expr),* $(,)?]) => {{
+        let mut active_set = std::collections::HashSet::new();
+        $(active_set.insert($crate::types::TransactionId::from($active as u64));)*
+        $crate::transactions::Snapshot::new(
+            $crate::types::TransactionId::from($xid as u64),
+            $crate::types::TransactionId::from($xmin as u64),
+            $crate::types::TransactionId::from($xmax as u64),
+            active_set,
+        )
+    }};
+}
+
 /// Snapshot of the database state at transaction start time.
 /// Used to determine tuple visibility under snapshot isolation.
 #[derive(Debug, Clone)]
@@ -80,8 +104,18 @@ impl Snapshot {
             active_txs: active,
         }
     }
+    #[inline]
+    pub fn xmin(&self) -> TransactionId {
+        self.xmin
+    }
+
+    #[inline]
+    pub fn xmax(&self) -> TransactionId {
+        self.xmax
+    }
 
     /// Returns the transaction ID that owns this snapshot
+    #[inline]
     pub fn xid(&self) -> TransactionId {
         self.xid
     }
@@ -140,8 +174,11 @@ pub enum TransactionState {
 /// Metadata for a single transaction
 #[derive(Debug)]
 pub struct TransactionMetadata {
+    /// Transaction ID
     id: TransactionId,
+    /// Transaction state
     state: TransactionState,
+    /// Snapshot of the transaction coordinator at the time the transaction was created.
     snapshot: Snapshot,
     /// Tuples read by this transaction
     read_set: HashSet<LogicalId>,

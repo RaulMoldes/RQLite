@@ -4,12 +4,13 @@ use crate::{
         cache::PageCache,
         disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
         frames::MemFrame,
-        wal::{OwnedRecord, WriteAheadLog},
+        wal::WriteAheadLog,
     },
     make_shared,
     storage::{
         buffer::MemBlock,
         page::{DatabaseHeader, Header, MemPage, OverflowPage, Page, PageZero},
+        wal::OwnedRecord,
     },
     types::{PAGE_ZERO, PageId},
 };

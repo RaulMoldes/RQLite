@@ -1,19 +1,22 @@
 use crate::{
-    CELL_ALIGNMENT,
     io::frames::{FrameAccessMode, Position},
     storage::{
-        cell::{CELL_HEADER_SIZE, CellRef, OwnedCell, Slot},
+        cell::{CellRef, OwnedCell, Slot},
         page::{BTREE_PAGE_HEADER_SIZE, BtreePage, OverflowPage},
     },
+    structures::builder::KeyBytes,
     transactions::accessor::{PageAccessor, RcPageAccessor},
     types::{PAGE_ZERO, PageId, VarInt},
 };
 
-use super::comparator::Comparator;
+use super::{
+    builder::{CellBuilder, IntoCell},
+    comparator::Comparator,
+};
 
 use std::{
     cell::{Ref, RefMut},
-    cmp::{Ordering, Reverse, min},
+    cmp::{Ordering, Reverse},
     collections::{BTreeMap, BinaryHeap, HashSet, VecDeque},
     io::{self, Error as IoError, ErrorKind},
     marker::PhantomData,
@@ -166,25 +169,6 @@ where
         self.accessor_mut().clear_stack();
     }
 
-    /// Helper that acquires overflow latches, reassembles payload, and returns it.
-    /// Handles the full lifecycle of overflow page access.
-    fn get_cell_payload(&self, cell: CellRef<'_>) -> io::Result<Payload<'_>> {
-        if cell.metadata().is_overflow() {
-            let overflow_pages =
-                self.acquire_overflow_chain(cell.overflow_page(), usize::MAX, 0)?;
-            let payload = self.reassemble_payload(cell, &overflow_pages);
-
-            // Release overflow latches
-            for ovf_page in overflow_pages {
-                self.accessor_mut().release_latch(ovf_page);
-            }
-
-            Ok(payload)
-        } else {
-            Ok(Payload::Boxed(cell.payload().to_vec().into_boxed_slice()))
-        }
-    }
-
     /// Acquires latches on overflow pages, but only as many as needed to get required_size bytes.
     /// Can be used to acquire a full overflow chain if required_size is USIZE::MAX and initial bytes is 0.
     fn acquire_overflow_chain(
@@ -224,11 +208,30 @@ where
             SearchResult::Found(position) => {
                 let page_id = position.page();
                 let slot = position.slot();
-                let payload = self
+                let (owned_cell, needs_reassemble) = self
                     .accessor()
                     .try_read_page::<BtreePage, _, _>(page_id, |p| {
-                        self.get_cell_payload(p.cell(slot))
+                        let cell = p.cell(slot);
+                        Ok((OwnedCell::from(cell), cell.is_overflow()))
                     })?;
+
+                if !needs_reassemble {
+                    dbg!("Cell did not need reassembly");
+                    // This is not being called.
+                    return Ok(Some(Payload::Boxed(owned_cell.into_boxed_slice())));
+                };
+
+                let overflow_pages =
+                    self.acquire_overflow_chain(owned_cell.overflow_page(), usize::MAX, 0)?;
+                let payload = self.reassemble_payload(owned_cell.as_cell_ref(), &overflow_pages);
+
+                // THere are four overflow pages.
+
+                // Release overflow latches
+                for ovf_page in overflow_pages {
+                    self.accessor_mut().release_latch(ovf_page);
+                }
+
                 Ok(Some(payload))
             }
         }
@@ -237,7 +240,7 @@ where
     /// Traverses the full tree from the root to the leaf in order to find the position of the key it is asked for.
     pub(crate) fn search_from_root(
         &self,
-        entry: &[u8],
+        entry: KeyBytes<'_>,
         access_mode: FrameAccessMode,
     ) -> io::Result<SearchResult> {
         self.search(&self.root_pos(), entry, access_mode)
@@ -249,7 +252,7 @@ where
     pub(crate) fn search(
         &self,
         start: &Position,
-        entry: &[u8],
+        entry: KeyBytes<'_>,
         access_mode: FrameAccessMode,
     ) -> io::Result<SearchResult> {
         let start_page = start.page();
@@ -284,7 +287,7 @@ where
     }
 
     /// Finds the most suitable child to store a particular entry at a given page.
-    fn find_child(&self, page_id: PageId, search_key: &[u8]) -> io::Result<SearchResult> {
+    fn find_child(&self, page_id: PageId, search_key: KeyBytes<'_>) -> io::Result<SearchResult> {
         let (num_slots, right_child) = self
             .accessor()
             .read_page::<BtreePage, _, _>(page_id, |p| (p.num_slots(), p.metadata().right_child))?;
@@ -301,7 +304,7 @@ where
                         if !cell.metadata().is_overflow()
                             && self
                                 .comparator
-                                .compare(search_key, cell.payload().as_ref())?
+                                .compare(search_key.as_ref(), cell.payload().as_ref())?
                                 == Ordering::Less
                         {
                             result = SearchResult::Found(Position::new(
@@ -342,7 +345,11 @@ where
                     let overflow_pages =
                         self.acquire_overflow_chain(start, required_size, initial_bytes)?;
                     let payload = self.reassemble_payload(cell.as_cell_ref(), &overflow_pages);
-                    if self.comparator.compare(search_key, payload.as_ref())? == Ordering::Less {
+                    if self
+                        .comparator
+                        .compare(search_key.as_ref(), payload.as_ref())?
+                        == Ordering::Less
+                    {
                         result = SearchResult::Found(Position::new(
                             cell.metadata().left_child(),
                             Slot(i),
@@ -363,7 +370,7 @@ where
     /// [`SlotSearchResult::FoundInplace`]: The slot was found to be at a specific position in the page slot array (duplicate key or exact match).
     /// [`SlotSearchResult::FoundBetween`]: The slot was found to be between two existing slots in the page slot array (best case).
     /// [`SlotSearchResult::NotFound`]: The slot was not found in the slot array, then the key should be inserted at the end of the page or an error will be thrown (depends on the case).
-    fn find_slot(&self, page_id: PageId, search_key: &[u8]) -> io::Result<SlotSearchResult> {
+    fn find_slot(&self, page_id: PageId, search_key: KeyBytes<'_>) -> io::Result<SlotSearchResult> {
         let num_slots = self
             .accessor()
             .read_page::<BtreePage, _, _>(page_id, |p| p.num_slots())?;
@@ -382,7 +389,10 @@ where
 
                         // Moved the check upwards to avoid cloning when it is not necessary.
                         if !cell.metadata().is_overflow() {
-                            match self.comparator.compare(search_key, cell.payload())? {
+                            match self
+                                .comparator
+                                .compare(search_key.as_ref(), cell.payload())?
+                            {
                                 Ordering::Less => {
                                     result = SlotSearchResult::FoundBetween(Position::new(
                                         page_id,
@@ -434,7 +444,10 @@ where
                         Payload::Reference(cell.payload())
                     };
 
-                    match self.comparator.compare(search_key, content.as_ref())? {
+                    match self
+                        .comparator
+                        .compare(search_key.as_ref(), content.as_ref())?
+                    {
                         Ordering::Less => {
                             result =
                                 SlotSearchResult::FoundBetween(Position::new(page_id, Slot(i)));
@@ -463,7 +476,11 @@ where
     ///  - [SearchResult::Found] if it finds the key it is looking for. The position contains the actual found position.
     ///
     /// - [SearchResult::NotFound] if it does not find the key it is looking for.  The position will include the last slot index in the page.
-    fn binary_search_key(&self, page_id: PageId, search_key: &[u8]) -> io::Result<SearchResult> {
+    fn binary_search_key(
+        &self,
+        page_id: PageId,
+        search_key: KeyBytes<'_>,
+    ) -> io::Result<SearchResult> {
         let mut slot_count: Slot = self
             .accessor()
             .read_page::<BtreePage, _, _>(page_id, |p| p.num_slots())?
@@ -485,7 +502,10 @@ where
                         // Moved the check upwards to avoid cloning when it is not necessary.
                         if !cell.metadata().is_overflow() {
                             // The key content is always the first bytes of the cell
-                            match self.comparator.compare(search_key, cell.payload())? {
+                            match self
+                                .comparator
+                                .compare(search_key.as_ref(), cell.payload())?
+                            {
                                 Ordering::Equal => {
                                     return Ok(None);
                                 }
@@ -523,11 +543,12 @@ where
                     let overflow_pages =
                         self.acquire_overflow_chain(start, required_size, initial_bytes)?;
                     let content = self.reassemble_payload(cell.as_cell_ref(), &overflow_pages);
-                    if mid == Slot(0) {
-                        println!("SEARCHING FOR cero ");
-                    };
+
                     // The key content is always the first bytes of the cell
-                    match self.comparator.compare(search_key, content.as_ref())? {
+                    match self
+                        .comparator
+                        .compare(search_key.as_ref(), content.as_ref())?
+                    {
                         Ordering::Equal => {
                             return Ok(SearchResult::Found(Position::new(page_id, mid)));
                         }
@@ -547,9 +568,10 @@ where
 
     /// Inserts a key at the corresponding position in the Btree.
     /// Returns an [io::Error] if the key already exists.
-    pub(crate) fn insert(&mut self, page_id: PageId, data: &[u8]) -> io::Result<()> {
+    pub(crate) fn insert<T: IntoCell>(&mut self, page_id: PageId, data: T) -> io::Result<()> {
+        let key = data.key_bytes();
         let start_pos = Position::start_pos(page_id);
-        let search_result = self.search(&start_pos, data, FrameAccessMode::Write)?;
+        let search_result = self.search(&start_pos, key, FrameAccessMode::Write)?;
 
         match search_result {
             SearchResult::Found(pos) => Err(IoError::new(
@@ -573,21 +595,13 @@ where
     /// Uses the [find_slot] function in order to find the best fit slot for the cell given its key.
     /// Assumes the page is a leaf page.
     /// This method must not be called on interior nodes.
-    fn insert_cell(&mut self, page_id: PageId, data: &[u8]) -> io::Result<()> {
+    fn insert_cell<T: IntoCell>(&mut self, page_id: PageId, data: T) -> io::Result<()> {
+        let key = data.key_bytes();
         // Find the corresponding slot in the leaf page.
-        let slot_result = self.find_slot(page_id, data)?;
+        let slot_result = self.find_slot(page_id, key)?;
 
-        let free_space = self
-            .accessor()
-            .read_page::<BtreePage, _, _>(page_id, |btreepage| {
-                min(
-                    btreepage.max_allowed_payload_size(),
-                    btreepage.metadata().free_space as u16,
-                )
-            })? as usize;
-
-        // TODO: FIGURE OUT HOW TO MOVE THIS LOGIC TO THE PAGER.
-        let cell = self.build_cell(free_space, data)?;
+        let builder = CellBuilder::for_allocation(page_id, self.min_keys, self.accessor.clone())?;
+        let cell = builder.build_cell(data)?;
 
         match slot_result {
             // Slot not found so we just append the cell at the end of the page.
@@ -620,16 +634,12 @@ where
 
     /// Updates the cell content on a given leaf page at the given [Position].
     /// Assumes the position pointer is valid and the page is a leaf page.
-    fn update_cell(&mut self, pos: Position, data: &[u8]) -> io::Result<()> {
+    fn update_cell<T: IntoCell>(&mut self, pos: Position, data: T) -> io::Result<()> {
         let page_id = pos.page();
         let slot = pos.slot();
-        let free_space = self
-            .accessor_mut()
-            .read_page::<BtreePage, _, _>(page_id, |btreepage| {
-                btreepage.max_allowed_payload_size()
-            })? as usize;
-
-        let cell = self.build_cell(free_space, data)?;
+        let key = data.key_bytes();
+        let builder = CellBuilder::for_allocation(page_id, self.min_keys, self.accessor.clone())?;
+        let cell = builder.build_cell(data)?;
 
         // Replace the contents of the page.
         let old_cell = self
@@ -640,7 +650,7 @@ where
             })?;
 
         // Deallocate the cell
-        self.free_cell(old_cell)?;
+        builder.free_cell(old_cell)?;
 
         let status = self.check_node_status(page_id)?;
 
@@ -654,9 +664,10 @@ where
 
     /// Inserts a key at the corresponding position in the Btree.
     /// Updates its contents if it already exists.
-    pub(crate) fn upsert(&mut self, page_id: PageId, data: &[u8]) -> io::Result<()> {
+    pub(crate) fn upsert<T: IntoCell>(&mut self, page_id: PageId, data: T) -> io::Result<()> {
+        let key = data.key_bytes();
         let start_pos = Position::start_pos(page_id);
-        let search_result = self.search(&start_pos, data, FrameAccessMode::Write)?;
+        let search_result = self.search(&start_pos, key, FrameAccessMode::Write)?;
 
         match search_result {
             SearchResult::Found(pos) => self.update_cell(pos, data)?, // This logic is similar to [self.insert]
@@ -673,9 +684,10 @@ where
 
     /// Updates a key at the corresponding position in the Btree.
     /// Returns an [IoError] if the key is not found.
-    pub(crate) fn update(&mut self, page_id: PageId, data: &[u8]) -> io::Result<()> {
+    pub(crate) fn update<T: IntoCell>(&mut self, page_id: PageId, data: T) -> io::Result<()> {
         let start_pos = Position::start_pos(page_id);
-        let search_result = self.search(&start_pos, data, FrameAccessMode::Write)?;
+        let key = data.key_bytes();
+        let search_result = self.search(&start_pos, key, FrameAccessMode::Write)?;
 
         match search_result {
             SearchResult::Found(pos) => self.update_cell(pos, data),
@@ -691,13 +703,13 @@ where
 
     /// Removes the entry corresponding to the given key if it exists.
     /// Returns an [IoError] if the key is not found.
-    pub(crate) fn remove(&mut self, page_id: PageId, key: &[u8]) -> io::Result<()> {
+    pub(crate) fn remove(&mut self, page_id: PageId, key: KeyBytes<'_>) -> io::Result<()> {
         let start_pos = Position::start_pos(page_id);
         let search = self.search(&start_pos, key, FrameAccessMode::Write)?;
 
         match search {
-            SearchResult::NotFound(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
+            SearchResult::NotFound(_) => Err(IoError::new(
+                ErrorKind::NotFound,
                 "Key not found on page. Cannot remove",
             )),
             SearchResult::Found(pos) => {
@@ -706,7 +718,9 @@ where
                 let cell = self
                     .accessor_mut()
                     .write_page::<BtreePage, _, _>(page_id, |btreepage| btreepage.remove(slot))?;
-                self.free_cell(cell)?;
+
+                let builder = CellBuilder::for_deallocation(self.min_keys, self.accessor.clone());
+                builder.free_cell(cell)?;
 
                 let status = self.check_node_status(page_id)?;
 
@@ -720,102 +734,6 @@ where
         // Cleanup traversal here.
         self.accessor_mut().clear_stack();
         Ok(())
-    }
-
-    /// Deallocates a cell, the current RcPageAccessor will be responsible for deallocating all overflow pages.
-    fn free_cell(&self, cell: OwnedCell) -> io::Result<()> {
-        if !cell.metadata().is_overflow() {
-            return Ok(());
-        }
-
-        let mut overflow_page = cell.overflow_page();
-
-        while overflow_page.is_valid() {
-            self.accessor_mut()
-                .acquire::<OverflowPage>(overflow_page, FrameAccessMode::Read)?;
-
-            let next = self
-                .accessor()
-                .read_page::<OverflowPage, _, _>(overflow_page, |overflow| {
-                    overflow.metadata().next
-                })?;
-
-            self.accessor_mut()
-                .dealloc_page::<OverflowPage>(overflow_page)?;
-
-            overflow_page = next;
-        }
-
-        Ok(())
-    }
-
-    fn build_cell(&self, remaining_space: usize, payload: &[u8]) -> io::Result<OwnedCell> {
-        let page_size = self.accessor().get_page_size();
-
-        let v = remaining_space.saturating_sub(Slot::SIZE);
-
-        // Store payload in chunks, link overflow pages and return the cell.
-        let mut max_payload_size_in_page: usize = if v <= CELL_ALIGNMENT as usize {
-            0
-        } else {
-            ((v - 1) / CELL_ALIGNMENT as usize) * CELL_ALIGNMENT as usize
-        };
-
-        max_payload_size_in_page = max_payload_size_in_page
-            .saturating_sub(std::mem::size_of::<PageId>())
-            .saturating_sub(CELL_HEADER_SIZE);
-
-        let max_payload_size = min(
-            BtreePage::ideal_max_payload_size(page_size, self.min_keys),
-            max_payload_size_in_page,
-        ); // Clamp to the remaining space
-
-        if payload.len() <= max_payload_size {
-            return Ok(OwnedCell::new(payload));
-        }
-
-        let mut overflow_page_number = self.accessor_mut().alloc_page::<OverflowPage>()?;
-
-        let cell = OwnedCell::new_overflow(&payload[..max_payload_size], overflow_page_number);
-
-        let mut stored_bytes = max_payload_size;
-
-        // Note that here we cannot release the latch on an overflow page until all the chain is written. This might waste a lot of memory  as it will keep overflow pages pinned. It is a tradeoff between correctness and efficiency, and for a database, we prefer to play the correctness side of the story.
-        loop {
-            self.accessor_mut()
-                .acquire::<OverflowPage>(overflow_page_number, FrameAccessMode::Write)?;
-
-            let overflow_bytes = min(
-                OverflowPage::usable_space(page_size) as usize,
-                payload[stored_bytes..].len(),
-            );
-
-            self.accessor_mut().write_page::<OverflowPage, _, _>(
-                overflow_page_number,
-                |overflow_page| {
-                    overflow_page.data_mut()[..overflow_bytes]
-                        .copy_from_slice(&payload[stored_bytes..stored_bytes + overflow_bytes]);
-                    overflow_page.metadata_mut().num_bytes = overflow_bytes as _;
-                    overflow_page.metadata_mut().next = PAGE_ZERO;
-                    stored_bytes += overflow_bytes;
-                },
-            )?;
-            if stored_bytes >= payload.len() {
-                break;
-            }
-
-            let next_overflow_page = self.accessor_mut().alloc_page::<OverflowPage>()?;
-
-            self.accessor_mut().write_page::<OverflowPage, _, _>(
-                overflow_page_number,
-                |overflow_page| {
-                    overflow_page.metadata_mut().next = next_overflow_page;
-                },
-            )?;
-
-            overflow_page_number = next_overflow_page;
-        }
-        Ok(cell)
     }
 
     /// Balance shallower algorithm inspired by SQLite (balance shallower)
@@ -1088,7 +1006,7 @@ where
 
         // Read the page size from the pager.
         let page_size = self.accessor().get_page_size();
-        let mut cells = std::collections::VecDeque::new();
+        let mut cells = VecDeque::new();
 
         // As we remove cells from the parent, slots shrink towards the left.
         // Therefore we need to always remove the first slot in order to clean up the parent node.
@@ -1794,7 +1712,7 @@ where
     /// Reassembles payload when overflow page latches are already held.
     /// Does not acquire any new latches.
     fn reassemble_payload(&self, cell: CellRef<'_>, overflow_pages: &[PageId]) -> Payload<'_> {
-        let mut payload = Vec::from(&cell.payload()[..cell.len() - std::mem::size_of::<PageId>()]);
+        let mut payload = Vec::from(&cell.payload()[..cell.len() - mem::size_of::<PageId>()]);
 
         for &ovf_page in overflow_pages {
             self.accessor()
@@ -2095,7 +2013,7 @@ where
     /// Creates an iterator over cell slots from the provided position in the tree.
     fn iter_positions_from_with_access_mode(
         &mut self,
-        key: &[u8],
+        key: KeyBytes<'_>,
         direction: IterDirection,
         access_mode: FrameAccessMode,
     ) -> io::Result<BPlusTreePositionIterator<Cmp>> {
@@ -2124,7 +2042,7 @@ where
 
     pub(crate) fn iter_positions_from(
         &mut self,
-        key: &[u8],
+        key: KeyBytes<'_>,
         direction: IterDirection,
     ) -> io::Result<BPlusTreePositionIterator<Cmp>> {
         self.iter_positions_from_with_access_mode(key, direction, FrameAccessMode::Read)
@@ -2132,7 +2050,7 @@ where
 
     pub(crate) fn iter_positions_from_mut(
         &mut self,
-        key: &[u8],
+        key: KeyBytes<'_>,
         direction: IterDirection,
     ) -> io::Result<BPlusTreePositionIterator<Cmp>> {
         self.iter_positions_from_with_access_mode(key, direction, FrameAccessMode::Write)
@@ -2234,13 +2152,6 @@ where
         }
 
         Ok(())
-    }
-
-    /// Updates a cell at a known position without traversal.
-    /// Assumes the caller already holds appropriate latches (via DML scan).
-    pub(crate) fn update_at(&mut self, pos: Position, data: &[u8]) -> io::Result<()> {
-        self.update_cell(pos, data)
-        // Note: don't clear_accessor_stack() here (let the scan manage it)
     }
 }
 

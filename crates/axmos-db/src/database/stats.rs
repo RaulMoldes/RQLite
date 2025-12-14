@@ -681,7 +681,7 @@ mod stats_compute_tests {
     use crate::{
         TRANSACTION_ZERO,
         database::errors::IntoBoxError,
-        storage::tuple::{OwnedTuple, Tuple},
+        storage::tuple::Tuple,
         test_utils::{products_schema, test_database, users_idx_schema, users_schema},
         types::{Blob, DataType, Int32, Int64, UInt64},
     };
@@ -723,9 +723,7 @@ mod stats_compute_tests {
                         TRANSACTION_ZERO,
                     )
                     .box_err()?;
-
-                    let owned: OwnedTuple = tuple.into();
-                    btree.insert(root, owned.as_ref()).box_err()?;
+                    btree.insert(root, tuple).box_err()?;
                 }
 
                 btree.clear_accessor_stack();
@@ -801,8 +799,7 @@ mod stats_compute_tests {
                     )
                     .box_err()?;
 
-                    let owned: OwnedTuple = tuple.into();
-                    btree.insert(root, owned.as_ref()).box_err()?;
+                    btree.insert(root, tuple).box_err()?;
                 }
 
                 btree.clear_accessor_stack();
@@ -877,9 +874,7 @@ mod stats_compute_tests {
                         TRANSACTION_ZERO,
                     )
                     .box_err()?;
-
-                    let owned: OwnedTuple = tuple.into();
-                    btree.insert(root, owned.as_ref()).box_err()?;
+                    btree.insert(root, tuple).box_err()?;
                 }
 
                 btree.clear_accessor_stack();
@@ -910,8 +905,7 @@ mod stats_compute_tests {
                     )
                     .box_err()?;
 
-                    let owned: OwnedTuple = tuple.into();
-                    btree.insert(root, owned.as_ref()).box_err()?;
+                    btree.insert(root, tuple).box_err()?;
                 }
 
                 btree.clear_accessor_stack();
@@ -944,8 +938,7 @@ mod stats_compute_tests {
                     )
                     .box_err()?;
 
-                    let owned: OwnedTuple = tuple.into();
-                    btree.insert(root, owned.as_ref()).box_err()?;
+                    btree.insert(root, tuple).box_err()?;
                 }
 
                 btree.clear_accessor_stack();

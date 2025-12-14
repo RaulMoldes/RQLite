@@ -11,11 +11,12 @@ use crate::{
     io::{
         disk::FileOperations,
         pager::{Pager, SharedPager},
-        wal::{OwnedRecord, RecordRef, RecordType},
     },
+    schema,
+    storage::wal::{OwnedRecord, RecordRef, RecordType},
     structures::{bplustree::BPlusTree, comparator::Comparator},
     transactions::accessor::RcPageAccessor,
-    types::{DataTypeKind, LogId, ObjectId, TransactionId},
+    types::{LogId, ObjectId, TransactionId},
 };
 
 mod btree;
@@ -57,46 +58,45 @@ pub(crate) fn test_database() -> io::Result<(Database, NamedTempFile)> {
 }
 
 pub(crate) fn users_schema() -> Schema {
-    let mut users_schema = Schema::new();
-    users_schema.add_column("id", DataTypeKind::Int, true, true, false);
-    users_schema.add_column("name", DataTypeKind::Text, false, false, false);
-    users_schema.add_column("email", DataTypeKind::Text, false, true, false); // NOT NULL
-    users_schema.add_column("age", DataTypeKind::Int, false, false, false);
-    users_schema.add_column("created_at", DataTypeKind::DateTime, false, false, false);
-    users_schema
+    schema!(keys: 1,
+        id: Int { primary_key: "id_pk", not_null: "id_nn" },
+        name: Text,
+        email: Text { not_null: "email_nn" },
+        age: Int,
+        created_at: DateTime
+    )
 }
+
 pub(crate) fn orders_schema() -> Schema {
-    let mut orders_schema = Schema::new();
-    orders_schema.add_column("id", DataTypeKind::Int, true, true, false);
-    orders_schema.add_column("user_id", DataTypeKind::Int, false, false, false);
-    orders_schema.add_column("amount", DataTypeKind::Double, false, false, false);
-    orders_schema
+    schema!(keys: 1,
+        id: Int { primary_key: "id_pk", not_null: "id_nn" },
+        user_id: Int,
+        amount: Double
+    )
 }
 
 pub(crate) fn products_schema() -> Schema {
-    let mut schema2 = Schema::new();
-    schema2.add_column("product_id", DataTypeKind::BigInt, true, true, false);
-    schema2.add_column("name", DataTypeKind::Text, false, false, false);
-    schema2.add_column("price", DataTypeKind::Double, false, false, false);
-    schema2.set_num_keys(1);
-    schema2
+    schema!(keys: 1,
+        product_id: BigInt { primary_key: "product_id_pk", not_null: "product_id_nn" },
+        name: Text,
+        price: Double
+    )
 }
 
-fn order_items_schema() -> Schema {
-    let mut order_items_schema = Schema::new();
-    order_items_schema.add_column("id", DataTypeKind::Int, true, true, false);
-    order_items_schema.add_column("order_id", DataTypeKind::Int, false, false, false);
-    order_items_schema.add_column("product_id", DataTypeKind::Int, false, false, false);
-    order_items_schema.add_column("quantity", DataTypeKind::Int, false, false, false);
-    order_items_schema
+pub(crate) fn order_items_schema() -> Schema {
+    schema!(keys: 1,
+        id: Int { primary_key: "id_pk", not_null: "id_nn" },
+        order_id: Int,
+        product_id: Int,
+        quantity: Int
+    )
 }
 
 pub(crate) fn users_idx_schema() -> Schema {
-    let mut index_schema = Schema::new();
-    index_schema.add_column("email", DataTypeKind::Text, true, true, false);
-    index_schema.add_column("user_id", DataTypeKind::BigUInt, false, false, false);
-    index_schema.set_num_keys(1);
-    index_schema
+    schema!(keys: 1,
+        email: Text { primary_key: "email_pk", not_null: "email_nn" },
+        user_id: BigUInt
+    )
 }
 
 pub(crate) fn test_db_with_tables(

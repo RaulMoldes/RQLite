@@ -6,7 +6,17 @@ MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test
 
 # TODO LIST:
 
-1. Implement the executor (order of priority):
+0. Review bplustree tests which are failing after the last refactoring iteration.
+
+0.1. Need to fully implement wal recovery.
+
+0.2. Review storage architeture. I think i could use page zero to store data too as i have done with the WAL.
+
+1. Refactor and properly test (need to create a full test suite) for optimizer planner and executor.
+
+2. Completely mplement the executor (order of priority):
+
+   - Current impl of update/delete does not handle overflow pages properly.
 
    - JOIN
 
@@ -15,6 +25,3 @@ MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test
    - SORT (PARTIALLY DONE):
      - Currently, an in memory quicksort + limit is implemented and tested.
      - We should add external merge sort or some other way of performing sort on disk.
-
-
-2. Need to create a full test suite for optimizer planner and executor.

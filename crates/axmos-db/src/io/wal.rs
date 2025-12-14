@@ -1,23 +1,15 @@
 use crate::{
-    as_slice,
     io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
-    repr_enum,
-    storage::{buffer::MemBlock, tuple::OwnedTuple},
-    types::{BLOCK_ZERO, BlockId, LogId, OBJECT_ZERO, ObjectId, TransactionId, initialize_block_count},
+    storage::wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock},
+    types::{LogId, OBJECT_ZERO, ObjectId, TransactionId, initialize_block_count},
 };
 
 use std::{
     collections::VecDeque,
     fs,
     io::{self, Error as IoError, ErrorKind, Read, Seek, SeekFrom, Write},
-    mem,
     path::Path,
-    ptr::{self, NonNull},
-    slice,
 };
-
-pub const WAL_RECORD_ALIGNMENT: usize = 64;
-pub const WAL_BLOCK_SIZE: usize = 4 * 1024 * 10; // 40KB blocks
 
 pub trait Operation {
     fn op_type(&self) -> RecordType;
@@ -97,12 +89,12 @@ impl Operation for Abort {
 #[repr(C)]
 pub struct Update {
     oid: ObjectId,
-    old: OwnedTuple,
-    new: OwnedTuple,
+    old: Box<[u8]>,
+    new: Box<[u8]>,
 }
 
 impl Update {
-    pub(crate) fn new(oid: ObjectId, old: OwnedTuple, new: OwnedTuple) -> Self {
+    pub(crate) fn new(oid: ObjectId, old: Box<[u8]>, new: Box<[u8]>) -> Self {
         Self { oid, old, new }
     }
 }
@@ -125,11 +117,11 @@ impl Operation for Update {
 #[repr(C)]
 pub struct Insert {
     oid: ObjectId,
-    new: OwnedTuple,
+    new: Box<[u8]>,
 }
 
 impl Insert {
-    pub(crate) fn new(oid: ObjectId, new: OwnedTuple) -> Self {
+    pub(crate) fn new(oid: ObjectId, new: Box<[u8]>) -> Self {
         Self { oid, new }
     }
 }
@@ -152,11 +144,11 @@ impl Operation for Insert {
 #[repr(C)]
 pub struct Delete {
     oid: ObjectId,
-    old: OwnedTuple,
+    old: Box<[u8]>,
 }
 
 impl Delete {
-    pub(crate) fn new(oid: ObjectId, old: OwnedTuple) -> Self {
+    pub(crate) fn new(oid: ObjectId, old: Box<[u8]>) -> Self {
         Self { oid, old }
     }
 }
@@ -207,470 +199,11 @@ impl RecordBuilder {
     }
 }
 
-repr_enum!(pub enum RecordType: u8 {
-    Begin = 0x00,
-    Commit = 0x01,
-    Abort = 0x02,
-    End = 0x03,
-    Alloc = 0x04,
-    Dealloc = 0x05,
-    Update = 0x06,
-    Delete = 0x07,
-    Insert = 0x08,
-    CreateTable = 0x09,
-});
-
-#[derive(Debug, Clone, Copy, Default)]
-#[repr(C, align(64))]
-pub struct WalHeader {
-    pub(crate) block_number: BlockId,
-
-    pub(crate) first_lsn: LogId,
-    pub(crate) last_lsn: LogId,
-
-    pub(crate) global_start_lsn: LogId,
-    pub(crate) global_last_lsn: LogId,
-
-    pub(crate) used_bytes: u32,
-    pub(crate) num_records: u32,
-
-    pub(crate) block_size: u32,
-    pub(crate) total_blocks: u32,
-    pub(crate) total_entries: u32,
-
-    pub(crate) last_block_used: u32,
-}
-
-pub const WAL_HEADER_SIZE: usize = mem::size_of::<WalHeader>();
-
-impl WalHeader {
-    fn new(block_size: u32) -> Self {
-        Self {
-            block_number: BLOCK_ZERO,
-            block_size,
-            total_blocks: 1,
-            total_entries: 0,
-            first_lsn: LogId::from(0),
-            last_lsn: LogId::from(0),
-            global_start_lsn: LogId::from(0),
-            global_last_lsn: LogId::from(0),
-            last_block_used: 0,
-            num_records: 0,
-            used_bytes: 0,
-        }
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self as *const WalHeader as *const u8, WAL_HEADER_SIZE) }
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Self {
-        assert!(bytes.len() >= WAL_HEADER_SIZE);
-        unsafe { ptr::read(bytes.as_ptr() as *const WalHeader) }
-    }
-}
-
-as_slice!(WalHeader);
-
-#[derive(Debug, Clone, Copy, Default)]
-#[repr(C, align(64))]
-pub struct BlockHeader {
-    pub(crate) first_lsn: LogId,
-    pub(crate) last_lsn: LogId,
-    pub(crate) block_number: BlockId,
-    pub(crate) used_bytes: u32,
-    pub(crate) num_records: u32,
-
-    pub(crate) padding: [u8; 24],
-}
-
-pub const WAL_BLOCK_HEADER_SIZE: usize = mem::size_of::<BlockHeader>();
-
-impl BlockHeader {
-    fn new() -> Self {
-        Self {
-            block_number: BlockId::new(),
-            used_bytes: 0,
-            num_records: 0,
-            first_lsn: LogId::from(0),
-            last_lsn: LogId::from(0),
-            padding: [0; 24],
-        }
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        unsafe {
-            slice::from_raw_parts(
-                self as *const BlockHeader as *const u8,
-                WAL_BLOCK_HEADER_SIZE,
-            )
-        }
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Self {
-        assert!(bytes.len() >= WAL_BLOCK_HEADER_SIZE);
-        unsafe { ptr::read(bytes.as_ptr() as *const BlockHeader) }
-    }
-}
-
-as_slice!(BlockHeader);
-
-#[derive(Debug, Clone, Copy)]
-#[repr(C, align(64))]
-pub struct RecordHeader {
-    pub(crate) lsn: LogId,
-    pub(crate) tid: TransactionId,
-    pub(crate) prev_lsn: LogId,
-    pub(crate) object_id: ObjectId,
-    pub(crate) total_size: u32,
-    pub(crate) undo_len: u16,
-    pub(crate) redo_len: u16,
-    pub(crate) log_type: RecordType,
-    pub(crate) padding: [u8; 7],
-}
-
-as_slice!(RecordHeader);
-
-pub const RECORD_HEADER_SIZE: usize = mem::size_of::<RecordHeader>();
-
-impl RecordHeader {
-    fn new(
-        tid: TransactionId,
-        object_id: ObjectId,
-        prev_lsn: Option<LogId>,
-        total_size: u32,
-        undo_len: u16,
-        redo_len: u16,
-        log_type: RecordType,
-    ) -> Self {
-        Self {
-            lsn: LogId::new(),
-            tid,
-            prev_lsn: prev_lsn.unwrap_or(LogId::from(0)),
-            object_id,
-            total_size,
-            undo_len,
-            redo_len,
-            log_type,
-            padding: [0; 7],
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct OwnedRecord {
-    header: RecordHeader,
-    payload: Box<[u8]>,
-}
-
-impl OwnedRecord {
-    pub fn new(
-        tid: TransactionId,
-        prev_lsn: Option<LogId>,
-        object_id: ObjectId,
-        log_type: RecordType,
-        undo_payload: &[u8],
-        redo_payload: &[u8],
-    ) -> Self {
-        let payload_size = (undo_payload.len() + redo_payload.len() + RECORD_HEADER_SIZE)
-            .next_multiple_of(WAL_RECORD_ALIGNMENT)
-            - RECORD_HEADER_SIZE;
-
-        let mut payload = vec![0u8; payload_size].into_boxed_slice();
-        payload[..undo_payload.len()].copy_from_slice(undo_payload);
-        payload[undo_payload.len()..undo_payload.len() + redo_payload.len()]
-            .copy_from_slice(redo_payload);
-
-        let header = RecordHeader::new(
-            tid,
-            object_id,
-            prev_lsn,
-            (RECORD_HEADER_SIZE + payload_size) as u32,
-            undo_payload.len() as u16,
-            redo_payload.len() as u16,
-            log_type,
-        );
-
-        Self { header, payload }
-    }
-
-    pub fn lsn(&self) -> LogId {
-        self.header.lsn
-    }
-
-    pub fn total_size(&self) -> usize {
-        RECORD_HEADER_SIZE + self.payload.len()
-    }
-
-    pub fn header(&self) -> &RecordHeader {
-        &self.header
-    }
-
-    pub fn payload(&self) -> &[u8] {
-        &self.payload
-    }
-
-    pub fn undo_data(&self) -> &[u8] {
-        &self.payload[..self.header.undo_len as usize]
-    }
-
-    pub fn redo_data(&self) -> &[u8] {
-        let start = self.header.undo_len as usize;
-        let end = start + self.header.redo_len as usize;
-        &self.payload[start..end]
-    }
-
-    pub fn write_to(&self, buffer: &mut [u8]) -> usize {
-        buffer[..RECORD_HEADER_SIZE].copy_from_slice(self.header.as_ref());
-        buffer[RECORD_HEADER_SIZE..self.total_size()].copy_from_slice(&self.payload);
-        self.total_size()
-    }
-
-    pub fn as_record_ref(&self) -> RecordRef<'_> {
-        RecordRef {
-            header: &self.header,
-            data: self.payload(),
-        }
-    }
-
-
-    pub fn from_ref(reference: RecordRef<'_>) -> Self {
-        Self {
-            header: *reference.header,
-            payload: reference.data.into(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct RecordRef<'a> {
-    header: &'a RecordHeader,
-    data: &'a [u8],
-}
-
-impl<'a> RecordRef<'a> {
-
-    pub fn from_raw(ptr: NonNull<RecordHeader>) -> Self {
-        unsafe {
-            let header = ptr.as_ref();
-            let data_ptr = ptr.byte_add(RECORD_HEADER_SIZE).cast::<u8>().as_ptr();
-            let data = slice::from_raw_parts(data_ptr, header.total_size as usize);
-            Self { header, data }
-        }
-    }
-
-
-    pub fn header(&self) -> &RecordHeader {
-        self.header
-    }
-
-    pub fn lsn(&self) -> LogId {
-        self.header.lsn
-    }
-
-    pub fn tid(&self) -> TransactionId {
-        self.header.tid
-    }
-
-    pub fn log_type(&self) -> RecordType {
-        self.header.log_type
-    }
-
-    pub fn undo_data(&self) -> &[u8] {
-        let start = RECORD_HEADER_SIZE;
-        let end = start + self.header.undo_len as usize;
-        &self.data[start..end]
-    }
-
-    pub fn redo_data(&self) -> &[u8] {
-        let start = RECORD_HEADER_SIZE + self.header.undo_len as usize;
-        let end = start + self.header.redo_len as usize;
-        &self.data[start..end]
-    }
-
-    pub fn total_size(&self) -> usize {
-        self.header.total_size as usize
-    }
-
-    pub fn to_owned(&self) -> OwnedRecord {
-        OwnedRecord::new(
-            self.header.tid,
-            if self.header.prev_lsn == LogId::from(0) {
-                None
-            } else {
-                Some(self.header.prev_lsn)
-            },
-            self.header.object_id,
-            self.header.log_type,
-            self.undo_data(),
-            self.redo_data(),
-        )
-    }
-}
-
-type WalBlock = MemBlock<BlockHeader>;
-type BlockZero = MemBlock<WalHeader>;
-
-impl WalBlock {
-    pub(crate) fn id(&self) -> BlockId {
-        self.metadata().block_number
-    }
-
-    fn record_at_offset(&self, offset: usize) -> NonNull<RecordHeader> {
-        unsafe { self.data.byte_add(offset).cast() }
-    }
-
-    fn record(&self, offset: usize) -> RecordRef<'_> {
-        RecordRef::from_raw(self.record_at_offset(offset))
-    }
-
-    fn record_owned(&self, offset: usize) -> OwnedRecord {
-        OwnedRecord::from_ref(RecordRef::from_raw(self.record_at_offset(offset)))
-    }
-
-    fn try_push(&mut self, record: OwnedRecord) -> io::Result<LogId> {
-        let record_size = record.total_size();
-
-        if self.available_space() < record_size {
-            return Err(IoError::new(
-                ErrorKind::InvalidInput,
-                "Data too large for this block.",
-            ));
-        };
-
-        let lsn = record.lsn();
-        let offset = self.metadata().used_bytes as usize;
-        let dest = &mut self.data_mut()[offset..];
-
-        record.write_to(dest);
-        self.metadata_mut().used_bytes += record_size as u32;
-
-        if self.metadata().first_lsn == LogId::from(0) {
-            self.metadata_mut().first_lsn = lsn;
-        };
-        self.metadata_mut().last_lsn = lsn;
-        self.metadata_mut().num_records += 1;
-
-        Ok(lsn)
-    }
-
-    fn available_space(&self) -> usize {
-        self.capacity()
-            .saturating_sub(self.metadata().used_bytes as usize)
-    }
-}
-
-impl BlockZero {
-    pub(crate) fn id(&self) -> BlockId {
-        BLOCK_ZERO
-    }
-
-    pub(crate) fn try_push(&mut self, record: OwnedRecord) -> io::Result<LogId> {
-        let record_size = record.total_size();
-
-        if self.available_space() < record_size {
-            return Err(IoError::new(
-                ErrorKind::InvalidInput,
-                "Data too large for this block.",
-            ));
-        };
-
-        let lsn = record.lsn();
-        let offset = self.metadata().used_bytes as usize;
-        let dest = &mut self.data_mut()[offset..];
-
-        record.write_to(dest);
-        self.metadata_mut().used_bytes += record_size as u32;
-
-        if self.metadata().global_start_lsn == LogId::from(0) {
-            self.metadata_mut().global_start_lsn = lsn;
-            self.metadata_mut().first_lsn = lsn;
-        };
-        self.metadata_mut().last_lsn = lsn;
-        self.metadata_mut().global_last_lsn = lsn;
-        self.metadata_mut().num_records += 1;
-        self.metadata_mut().total_entries += 1;
-
-        Ok(lsn)
-    }
-
-    fn available_space(&self) -> usize {
-        self.capacity()
-            .saturating_sub(self.metadata().used_bytes as usize)
-    }
-
-
-    fn record_at_offset(&self, offset: usize) -> NonNull<RecordHeader> {
-        unsafe { self.data.byte_add(offset).cast() }
-    }
-
-    fn record(&self, offset: usize) -> RecordRef<'_> {
-        RecordRef::from_raw(self.record_at_offset(offset))
-    }
-
-    fn record_owned(&self, offset: usize) -> OwnedRecord {
-        OwnedRecord::from_ref(RecordRef::from_raw(self.record_at_offset(offset)))
-    }
-}
-
-#[derive(Debug)]
-enum DynBlock {
-    Zero(BlockZero),
-    Other(WalBlock),
-}
-
-impl DynBlock {
-
-    pub fn used_bytes(&self) -> usize {
-        match self {
-            DynBlock::Zero(b) => b.metadata().used_bytes as usize,
-            DynBlock::Other(b) => b.metadata().used_bytes as usize,
-        }
-    }
-
-    pub fn id(&self) -> BlockId {
-        match self {
-            DynBlock::Zero(b) => b.id(),
-            DynBlock::Other(b) => b.id(),
-        }
-    }
-
-    pub fn available_space(&self) -> usize {
-        match self {
-            DynBlock::Zero(b) => b.available_space(),
-            DynBlock::Other(b) => b.available_space(),
-        }
-    }
-
-    pub fn try_push(&mut self, record: OwnedRecord) -> io::Result<LogId> {
-        match self {
-            DynBlock::Zero(b) => b.try_push(record),
-            DynBlock::Other(b) => b.try_push(record),
-        }
-    }
-
-
-    pub fn record_owned(&self, offset: usize) -> OwnedRecord {
-        match self {
-            DynBlock::Zero(b) => b.record_owned(offset),
-            DynBlock::Other(b) => b.record_owned(offset)
-        }
-    }
-
-
-    pub fn record(&self, offset: usize) -> RecordRef<'_> {
-        match self {
-            DynBlock::Zero(b) => b.record(offset),
-            DynBlock::Other(b) => b.record(offset)
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct WriteAheadLog {
-    header: WalHeader,
-    current_block: DynBlock,
-    flush_queue: VecDeque<DynBlock>,
+    header: BlockZero,
+    current_block: Option<WalBlock>,
+    flush_queue: VecDeque<WalBlock>,
     file: DBFile,
     block_size: usize,
 }
@@ -680,14 +213,13 @@ impl FileOperations for WriteAheadLog {
         let file = DBFile::create(&path)?;
         let fs_block_size = FileSystem::block_size(&path)?;
         let block_size = WAL_BLOCK_SIZE.next_multiple_of(fs_block_size);
-        let zero = BlockZero::new(block_size);
-        let header = WalHeader::from_bytes(zero.metadata().as_ref());
-        let current_block = DynBlock::Zero(zero);
+        let header = BlockZero::allocate(block_size);
+
         initialize_block_count(1); // Initialize the in-memory block counter.
 
         Ok(Self {
             header,
-            current_block,
+            current_block: None,
             flush_queue: VecDeque::new(),
             file,
             block_size,
@@ -697,26 +229,27 @@ impl FileOperations for WriteAheadLog {
     fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let mut file = DBFile::open(&path)?;
         let fs_block_size = FileSystem::block_size(&path)?;
-
+        let default_block_size = WAL_BLOCK_SIZE.next_multiple_of(fs_block_size);
 
         // Read block 0 (global header)
-        let mut tmp_header_buf: MemBlock<()> = MemBlock::new(fs_block_size);
+        let mut header_buf: BlockZero = BlockZero::new(default_block_size);
         file.seek(SeekFrom::Start(0))?;
-        file.read_exact(tmp_header_buf.as_mut())?;
+        file.read_exact(header_buf.as_mut())?;
 
-        let header = WalHeader::from_bytes(tmp_header_buf.as_ref());
-        let block_size = header.block_size as usize;
-        let block_count = header.total_blocks as u64;
+        // Usar el block_size del archivo, o el default si es 0
+        let block_size = header_buf.metadata().wal_header.block_size as usize;
+        let block_size = if block_size == 0 {
+            default_block_size
+        } else {
+            block_size
+        };
+
+        let block_count = header_buf.metadata().wal_header.total_blocks as u64;
         initialize_block_count(block_count);
 
-        // Load the lnext block
-        let current_block = DynBlock::Other(WalBlock::new(block_size));
-
-
-
         Ok(Self {
-            header,
-            current_block,
+            header: header_buf,
+            current_block: None, // If needed, will be allocated on push.
             flush_queue: VecDeque::new(),
             file,
             block_size,
@@ -733,8 +266,8 @@ impl FileOperations for WriteAheadLog {
 
     fn truncate(&mut self) -> io::Result<()> {
         self.file.truncate()?;
-        self.header = WalHeader::new(self.block_size as u32);
-        self.current_block = DynBlock::Zero(BlockZero::new(self.block_size));
+        self.header = BlockZero::allocate(self.block_size as usize);
+        self.current_block = None;
         self.flush_queue.clear();
         Ok(())
     }
@@ -764,11 +297,11 @@ impl Seek for WriteAheadLog {
 
 impl WriteAheadLog {
     /// Maximum record size that can fit in a single block
-    pub fn max_record_size(&self) -> usize {
-        self.block_size - WAL_BLOCK_HEADER_SIZE
+    pub(crate) fn max_record_size(&self) -> usize {
+        WalBlock::usable_space(self.block_size as usize) as usize
     }
 
-    pub fn push(&mut self, record: OwnedRecord) -> io::Result<()> {
+    pub(crate) fn push(&mut self, record: OwnedRecord) -> io::Result<()> {
         let record_size = record.total_size();
 
         // Check if record can ever fit in a block
@@ -783,101 +316,103 @@ impl WriteAheadLog {
             ));
         }
 
-        // If record doesn't fit in current block, rotate
-        if !self.current_block.available_space() <= record_size {
+        let lsn = record.lsn();
+
+        // Update global stats in header
+        if self.header.metadata().wal_header.global_start_lsn.is_none() {
+            self.header.metadata_mut().wal_header.global_start_lsn = Some(lsn);
+        }
+        self.header.metadata_mut().wal_header.global_last_lsn = Some(lsn);
+        self.header.metadata_mut().wal_header.total_entries += 1;
+
+        // Try to write to block zero first
+        if self.current_block.is_none() {
+            if self.header.available_space() >= record_size {
+                self.header.try_push(record)?;
+                return Ok(());
+            }
+            // Block zero is full, create first current_block
+            self.current_block = Some(WalBlock::new(self.block_size));
+        }
+
+        // Write to current_block
+        let block = self.current_block.as_mut().unwrap();
+
+        if block.available_space() < record_size {
             self.rotate_block()?;
         }
 
-        // Update global stats
-        let lsn = record.lsn();
-        if self.header.global_start_lsn == LogId::from(0) {
-            self.header.global_start_lsn = lsn;
-            self.header.first_lsn = lsn;
-        }
-        self.header.last_lsn = lsn;
-        self.header.global_last_lsn = lsn;
-        self.header.total_entries += 1;
+        self.current_block.as_mut().unwrap().try_push(record)?;
 
-        // Write record to current block
-        self.current_block.try_push(record)?;
-
-        Ok(())
-    }
-
-    fn write_header(&mut self) -> io::Result<()> {
-        self.file.seek(SeekFrom::Start(0u64))?;
-        self.file.write_all(self.header.as_ref())?;
         Ok(())
     }
 
     fn rotate_block(&mut self) -> io::Result<()> {
-        let new_block = DynBlock::Other(WalBlock::new(self.block_size));
-        let full_block = mem::replace(&mut self.current_block, new_block);
-        self.flush_queue.push_back(full_block);
-
+        if let Some(full_block) = self.current_block.take() {
+            self.flush_queue.push_back(full_block);
+        }
+        self.current_block = Some(WalBlock::new(self.block_size));
         Ok(())
     }
 
     pub fn perform_flush(&mut self) -> io::Result<()> {
-
-        let blocks_already_flushed = self.header.total_blocks;
-        let mut write_offset = self.block_size as u64 * (blocks_already_flushed as u64 + 1);
-
-
+        // Block 0 always exists, additional blocks start at index 1
+        let mut block_number: u32 = 1;
+        let mut write_offset = self.block_size as u64;
 
         // Flush queued blocks
-        self.file.seek(SeekFrom::Start(write_offset))?;
         while let Some(block) = self.flush_queue.pop_front() {
-
-            match block {
-                DynBlock::Zero(b) => {
-                    assert_eq!(write_offset, 0, "Invalid write offset for block zero");
-                    self.file.write_all(b.as_ref())?;
-                },
-                DynBlock::Other(b) => {
-                    self.file.write_all(b.as_ref())?;
-                }
-            }
-            self.header.total_blocks += 1;
+            self.file.seek(SeekFrom::Start(write_offset))?;
+            self.file.write_all(block.as_ref())?;
+            block_number += 1;
             write_offset += self.block_size as u64;
         }
 
         // Flush current block if it has data
-        if self.current_block.used_bytes() > 0 {
-
-            match &self.current_block {
-                DynBlock::Zero(b) => {
-                    assert_eq!(write_offset, 0, "Invalid write offset for block zero");
-                    self.file.write_all(b.as_ref())?;
-                },
-                DynBlock::Other(b) => {
-                    self.file.write_all(b.as_ref())?;
-                }
+        if let Some(ref block) = self.current_block {
+            if block.metadata().used_bytes > 0 {
+                self.file.seek(SeekFrom::Start(write_offset))?;
+                self.file.write_all(block.as_ref())?;
+                block_number += 1;
             }
-
-            self.header.total_blocks += 1;
-            self.header.last_block_used = self.current_block.used_bytes() as u32;
         }
 
-        // Write global header to block 0
-        self.write_header()?;
+        // Update header metadata
+        self.header.metadata_mut().wal_header.total_blocks = block_number;
+
+        if let Some(ref block) = self.current_block {
+            self.header.metadata_mut().wal_header.last_block_used =
+                block.metadata().used_bytes as u32;
+        } else {
+            self.header.metadata_mut().wal_header.last_block_used =
+                self.header.metadata().block_header.used_bytes as u32;
+        }
+
+        // Write block zero (siempre al principio)
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.write_all(self.header.as_ref())?;
 
         self.file.sync_all()
     }
 
+    fn write_header(&mut self) -> io::Result<()> {
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.write_all(self.header.as_ref())?;
+        Ok(())
+    }
 
     pub fn stats(&self) -> WalStats {
+        let header = self.header.metadata();
         WalStats {
-            start_lsn: self.header.global_start_lsn,
-            last_lsn: self.header.last_lsn,
-            total_entries: self.header.total_entries,
-            total_blocks: self.header.total_blocks,
+            start_lsn: header.wal_header.global_start_lsn.unwrap_or_default(),
+            last_lsn: header.wal_header.global_last_lsn.unwrap_or_default(),
+            total_entries: header.wal_header.total_entries,
+            total_blocks: header.wal_header.total_blocks,
             pending_blocks: self.flush_queue.len(),
             block_size: self.block_size,
         }
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct WalStats {
@@ -889,83 +424,223 @@ pub struct WalStats {
     pub block_size: usize,
 }
 
-
-
-pub struct  WalReader<'a> {
+pub(crate) struct WalReader<'a> {
     file: &'a mut DBFile,
-    block_queue: Vec<DynBlock>,
+    header: BlockZero,
+    block_queue: Vec<WalBlock>,
     read_ahead_size: usize,
     current_block_offset: usize,
-    current_block_index: usize,
+    current_block_index: Option<usize>, // None = reading from header, Some(i) = reading from block_queue[i]
     file_offset: u64,
-    last_flushed_offset: u64,
-    block_size: u32
+    total_blocks: u32,
+    block_size: usize,
 }
 
-
-
-
-
 impl<'a> WalReader<'a> {
-
-    fn new(file: &'a mut DBFile, read_ahead_size: usize, block_size: usize, last_flushed_offset: usize) -> io::Result<Self> {
-        let read_ahead_size = read_ahead_size.next_multiple_of(block_size).max(last_flushed_offset);
-        let num_blocks = read_ahead_size /  block_size;
-
-        let mut buffer = Vec::with_capacity(num_blocks);
-        let mut block_zero = BlockZero::new(block_size);
+    pub(crate) fn new(
+        file: &'a mut DBFile,
+        read_ahead_size: usize,
+        block_size: usize,
+        total_blocks: u32,
+    ) -> io::Result<Self> {
+        // Read block zero (header)
+        let mut header = BlockZero::new(block_size);
         file.seek(SeekFrom::Start(0))?;
-        file.read_exact(block_zero.as_mut())?;
-        buffer.push(DynBlock::Zero(block_zero));
+        file.read_exact(header.as_mut())?;
+
+        let read_ahead_size = read_ahead_size.next_multiple_of(block_size);
+        let num_blocks_to_read =
+            (read_ahead_size / block_size).min(total_blocks.saturating_sub(1) as usize);
+
+        let mut block_queue = Vec::with_capacity(num_blocks_to_read);
         let mut file_offset: u64 = block_size as u64;
 
-        while buffer.len() < num_blocks {
+        // Pre-load blocks (excluding block zero which is the header)
+        for _ in 0..num_blocks_to_read {
+            if file_offset >= (total_blocks as u64 * block_size as u64) {
+                break;
+            }
             let mut block = WalBlock::new(block_size);
             file.seek(SeekFrom::Start(file_offset))?;
             file.read_exact(block.as_mut())?;
-            buffer.push(DynBlock::Other(block));
+            block_queue.push(block);
             file_offset += block_size as u64;
-        };
+        }
 
-
-        Ok(Self { file, block_queue: buffer, read_ahead_size, current_block_offset: 0, file_offset, current_block_index: 0, block_size: block_size as u32, last_flushed_offset: last_flushed_offset as u64 })
-
-
+        Ok(Self {
+            file,
+            header,
+            block_queue,
+            read_ahead_size,
+            current_block_offset: 0,
+            current_block_index: None, // Start reading from header
+            file_offset,
+            total_blocks,
+            block_size,
+        })
     }
 
-    fn reload_from(&mut self, offset: u64, num_blocks: usize) -> io::Result<bool>{
-        let last_load = self.last_flushed_offset.saturating_sub(self.block_size as u64);
-        if self.file_offset >= last_load {
+    fn header_used_bytes(&self) -> usize {
+        self.header.metadata().block_header.used_bytes as usize
+    }
+
+    fn reload_blocks(&mut self) -> io::Result<bool> {
+        let last_valid_offset = self.total_blocks as u64 * self.block_size as u64;
+
+        if self.file_offset >= last_valid_offset {
             return Ok(false);
         }
 
-        while self.block_queue.len() < num_blocks && self.file_offset <= last_load {
-            let mut block = WalBlock::new(self.block_size as usize);
+        self.block_queue.clear();
+        let num_blocks = self.read_ahead_size / self.block_size;
+
+        for _ in 0..num_blocks {
+            if self.file_offset >= last_valid_offset {
+                break;
+            }
+            let mut block = WalBlock::new(self.block_size);
             self.file.seek(SeekFrom::Start(self.file_offset))?;
             self.file.read_exact(block.as_mut())?;
-            self.block_queue.push(DynBlock::Other(block));
+            self.block_queue.push(block);
             self.file_offset += self.block_size as u64;
-        };
-        self.current_block_index = 0;
-        Ok(true)
+        }
+
+        Ok(!self.block_queue.is_empty())
     }
 
-    fn next_ref(&mut self) -> io::Result<Option<RecordRef<'_>>> {
+    pub(crate) fn next_ref(&mut self) -> io::Result<Option<RecordRef<'_>>> {
+        loop {
+            match self.current_block_index {
+                // Reading from header (block zero)
+                None => {
+                    if self.current_block_offset >= self.header_used_bytes() {
+                        // Header exhausted, move to block queue
+                        if self.block_queue.is_empty() {
+                            if !self.reload_blocks()? {
+                                return Ok(None);
+                            }
+                        }
+                        self.current_block_index = Some(0);
+                        self.current_block_offset = 0;
+                        continue; // Re-evaluate with new state
+                    }
 
-        if self.current_block_offset >= self.block_queue[self.current_block_index].used_bytes() {
-            self.current_block_index +=1;
-            self.current_block_offset = 0;
-        };
+                    let record = self.header.record(self.current_block_offset);
+                    self.current_block_offset += record.total_size();
+                    return Ok(Some(record));
+                }
 
-        if self.current_block_index >= self.block_queue.len()  {
-            let num_blocks = self.read_ahead_size /  self.block_size as usize;
-            if !self.reload_from(self.file_offset, num_blocks)?{
-                return Ok(None);
-            };
-        };
+                // Reading from block queue
+                Some(idx) => {
+                    // Check if we need more blocks
+                    if idx >= self.block_queue.len() {
+                        if !self.reload_blocks()? {
+                            return Ok(None);
+                        }
+                        self.current_block_index = Some(0);
+                        self.current_block_offset = 0;
+                        continue; // Re-evaluate with new state
+                    }
 
-        let record = self.block_queue[self.current_block_index].record(self.current_block_offset);
-        self.current_block_offset += record.total_size() as usize;
-        Ok(Some(record))
+                    let used = self.block_queue[idx].metadata().used_bytes as usize;
+
+                    if self.current_block_offset >= used {
+                        // Move to next block
+                        self.current_block_index = Some(idx + 1);
+                        self.current_block_offset = 0;
+                        continue; // Re-evaluate with new state
+                    }
+
+                    let record = self.block_queue[idx].record(self.current_block_offset);
+                    self.current_block_offset += record.total_size();
+                    return Ok(Some(record));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod write_ahead_logging_tests {
+    use super::*;
+    use crate::wal_lifecycle_test;
+
+    wal_lifecycle_test! {
+        name: test_wal_single_batch_small,
+        tid: 1,
+        oid: 1,
+        batches: [
+            { count: 10, undo_sizes: [16, 32], redo_sizes: [32, 64] },
+        ],
+    }
+
+    wal_lifecycle_test! {
+        name: test_wal_multiple_batches,
+        tid: 42,
+        oid: 100,
+        batches: [
+            { count: 50, undo_sizes: [16, 32, 64, 128, 256], redo_sizes: [32, 64, 96, 128, 192] },
+            { count: 75, undo_sizes: [64, 128], redo_sizes: [96, 192] },
+        ],
+    }
+
+    wal_lifecycle_test! {
+        name: test_wal_many_small_records,
+        tid: 1,
+        oid: 1,
+        batches: [
+            { count: 500, undo_sizes: [8], redo_sizes: [16] },
+        ],
+    }
+
+    wal_lifecycle_test! {
+        name: test_wal_large_records,
+        tid: 99,
+        oid: 88,
+        batches: [
+            { count: 50, undo_sizes: [1024, 2048], redo_sizes: [2048, 4096] },
+        ],
+        read_ahead_multiplier: 2,
+    }
+
+    wal_lifecycle_test! {
+        name: test_wal_mixed_sizes,
+        tid: 7,
+        oid: 14,
+        batches: [
+            { count: 20, undo_sizes: [8, 16, 32], redo_sizes: [16, 32, 64] },
+            { count: 30, undo_sizes: [256, 512], redo_sizes: [512, 1024] },
+            { count: 25, undo_sizes: [64], redo_sizes: [128] },
+        ],
+    }
+
+    wal_lifecycle_test! {
+        name: test_wal_stress,
+        tid: 1000,
+        oid: 2000,
+        batches: [
+            { count: 100, undo_sizes: [32, 64, 128], redo_sizes: [64, 128, 256] },
+            { count: 150, undo_sizes: [16, 32], redo_sizes: [32, 64] },
+            { count: 200, undo_sizes: [64, 128, 256, 512], redo_sizes: [128, 256, 512, 1024] },
+        ],
+    }
+
+    wal_lifecycle_test! {
+        name: test_wal_empty_payloads,
+        tid: 1,
+        oid: 1,
+        batches: [
+            { count: 20, undo_sizes: [0], redo_sizes: [0] },
+        ],
+    }
+
+    wal_lifecycle_test! {
+        name: test_wal_asymmetric_payloads,
+        tid: 5,
+        oid: 10,
+        batches: [
+            { count: 30, undo_sizes: [0, 8, 16], redo_sizes: [128, 256, 512] },
+            { count: 30, undo_sizes: [256, 512], redo_sizes: [0, 8] },
+        ],
     }
 }

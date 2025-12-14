@@ -1,11 +1,9 @@
 use crate::{
     io::{
         pager::SharedPager,
-        wal::{
-            Abort, Begin, Commit, Delete, End, Insert, Operation, OwnedRecord, RecordType, Update,
-        },
+        wal::{Abort, Begin, Commit, Delete, End, Insert, Operation, Update},
     },
-    storage::tuple::OwnedTuple,
+    storage::wal::{OwnedRecord, RecordType},
     types::{LogId, ObjectId, TransactionId},
 };
 
@@ -72,7 +70,7 @@ impl Logger {
         self.pager.write().push_to_log(rec)
     }
 
-    pub(crate) fn log_insert(&self, table: ObjectId, data: OwnedTuple) -> io::Result<()> {
+    pub(crate) fn log_insert(&self, table: ObjectId, data: Box<[u8]>) -> io::Result<()> {
         let op = Insert::new(table, data);
         let rec = self.build_rec(RecordType::Insert, op);
         self.pager.write().push_to_log(rec)
@@ -81,15 +79,15 @@ impl Logger {
     pub(crate) fn log_update(
         &self,
         table: ObjectId,
-        old_data: OwnedTuple,
-        new_data: OwnedTuple,
+        old_data: Box<[u8]>,
+        new_data: Box<[u8]>,
     ) -> io::Result<()> {
         let op = Update::new(table, old_data, new_data);
         let rec = self.build_rec(RecordType::Insert, op);
         self.pager.write().push_to_log(rec)
     }
 
-    pub(crate) fn log_delete(&self, table: ObjectId, old_data: OwnedTuple) -> io::Result<()> {
+    pub(crate) fn log_delete(&self, table: ObjectId, old_data: Box<[u8]>) -> io::Result<()> {
         let op = Delete::new(table, old_data);
         let rec = self.build_rec(RecordType::Insert, op);
         self.pager.write().push_to_log(rec)

@@ -15,13 +15,14 @@ use crate::{
     database::{
         errors::{BoxError, IntoBoxError, TaskResult, TransactionResult},
         runner::{TaskContext, TaskRunner},
-        schema::{Column, Constraint, Index, Relation, Schema, Table},
+        schema::{Index, Relation, Schema, Table},
         stats::CatalogStatsProvider,
     },
     io::{
         frames::FrameAccessMode,
         pager::{Pager, SharedPager},
     },
+    schema,
     sql::{
         binder::Binder,
         executor::{Row, build::ExecutorBuilder, context::ExecutionContext},
@@ -30,15 +31,16 @@ use crate::{
     },
     storage::{
         page::BtreePage,
-        tuple::{OwnedTuple, Tuple, TupleRef},
+        tuple::{Tuple, TupleRef},
     },
     structures::{
         bplustree::{BPlusTree, SearchResult},
+        builder::AsKeyBytes,
         comparator::{DynComparator, NumericComparator},
     },
     transactions::{TransactionCoordinator, accessor::RcPageAccessor},
     types::{
-        Blob, DataType, DataTypeKind, ObjectId, PAGE_ZERO, PageId, UInt64, get_next_object,
+        Blob, DataType, DataTypeRef, ObjectId, PAGE_ZERO, PageId, UInt8, UInt64, get_next_object,
         initialize_atomics,
     },
 };
@@ -51,34 +53,19 @@ pub(crate) const META_INDEX: &str = "rqindex";
 /// META TABLES AND META INDEXES ARE SPECIAL.
 /// THIS IS WHY TO MANAGE THE PRIMARY KEY OF THIS TABLES WE USE THE OBJECT ID ATOMIC INSTEAD OF THE STANDARD ROW-ID. THIS ALLOWS FOR FASTER ACCESS, AND ENSURES THE IDENTIFIER OF EACH TABLE ON EACH OF THE METAS IS THE SAME.
 pub(crate) fn meta_idx_schema() -> Schema {
-    Schema::from_columns(
-        [
-            Column::new_unindexed(DataTypeKind::Text, "o_name", None),
-            Column::new_unindexed(DataTypeKind::BigUInt, "row_id", None),
-        ]
-        .as_ref(),
-        1,
+    schema!(keys: 1,
+        o_name: Text,
+        row_id: BigUInt
     )
 }
-pub(crate) fn meta_table_schema() -> Schema {
-    let mut key_constraints = HashMap::new();
-    key_constraints.insert("name_pkey".to_string(), Constraint::PrimaryKey);
 
-    Schema::from_columns(
-        [
-            Column::new_unindexed(DataTypeKind::BigUInt, "row_id", None),
-            Column::new_unindexed(DataTypeKind::BigUInt, "o_root", None),
-            Column::new_unindexed(DataTypeKind::Byte, "o_type", None),
-            Column::new_unindexed(DataTypeKind::Blob, "o_metadata", None),
-            Column::new(
-                DataTypeKind::Text,
-                "o_name",
-                Some(META_INDEX.to_string()),
-                Some(key_constraints),
-            ),
-        ]
-        .as_ref(),
-        1,
+pub(crate) fn meta_table_schema() -> Schema {
+    schema!(keys: 1,
+        row_id: BigUInt,
+        o_root: BigUInt,
+        o_type: Byte,
+        o_metadata: Blob,
+        o_name: Text { index: META_INDEX, primary_key: "name_pkey" }
     )
 }
 
@@ -101,6 +88,8 @@ impl Database {
 pub(crate) struct Catalog {
     meta_table: PageId,
     meta_index: PageId,
+    meta_table_schema: Schema,
+    meta_index_schema: Schema,
     btree_min_keys: usize,
     btree_num_siblings_per_side: usize,
 }
@@ -133,6 +122,8 @@ impl Catalog {
         Self {
             meta_table: PAGE_ZERO,
             meta_index: PAGE_ZERO,
+            meta_table_schema: meta_table_schema(),
+            meta_index_schema: meta_idx_schema(),
             btree_min_keys: min_keys,
             btree_num_siblings_per_side: siblings_per_side,
         }
@@ -157,6 +148,8 @@ impl Catalog {
         let catalog = Catalog {
             meta_table: meta_table_root,
             meta_index: meta_index_root,
+            meta_table_schema: meta_table_schema(),
+            meta_index_schema: meta_idx_schema(),
             btree_min_keys: min_keys,
             btree_num_siblings_per_side: siblings_per_side,
         };
@@ -248,6 +241,40 @@ impl Catalog {
         )
     }
 
+    pub(crate) fn meta_table_schema(&self) -> &Schema {
+        &self.meta_table_schema
+    }
+
+    pub(crate) fn meta_index_schema(&self) -> &Schema {
+        &self.meta_index_schema
+    }
+
+    /// Converts a relation into a tuple for storage.
+    pub(crate) fn relation_as_tuple(&self, relation: &Relation) -> io::Result<Tuple<'_>> {
+        let root_page = if relation.root() != PAGE_ZERO {
+            DataType::BigUInt(UInt64::from(relation.root()))
+        } else {
+            DataType::Null
+        };
+
+        // Serialize metadata in-place
+        let metadata = DataType::Blob(relation.metadata_as_blob()?);
+
+        let t = Tuple::new(
+            &[
+                DataType::BigUInt(UInt64::from(relation.id())),
+                root_page,
+                DataType::Byte(UInt8::from(relation.object_type() as u8)),
+                metadata,
+                DataType::Text(Blob::from(relation.name())),
+            ],
+            self.meta_table_schema(),
+            TRANSACTION_ZERO, // PLACEHOLDER. MUST DO THIS INSIDE A TRANSACTION IDEALLY
+        )?;
+
+        Ok(t)
+    }
+
     /// Stores a new relation in the meta table using the provided RcPageAccessor.
     pub(crate) fn store_relation(
         &self,
@@ -261,11 +288,11 @@ impl Catalog {
 
         let mut btree = self.table_btree(self.meta_table, accessor.clone())?; // Increments the RcPageAccessor's ref count
         let obj_id = obj.id();
-        let tuple = obj.into_boxed_tuple()?;
+        let tuple = self.relation_as_tuple(&obj)?;
         btree.clear_accessor_stack();
 
         // Will replace existing relation if it exists.
-        btree.upsert(self.meta_table, tuple.as_ref())?;
+        btree.upsert(self.meta_table, tuple)?;
 
         Ok(obj_id)
     }
@@ -277,9 +304,9 @@ impl Catalog {
         accessor: RcPageAccessor,
     ) -> io::Result<()> {
         let mut btree = self.table_btree(self.meta_table, accessor.clone())?;
-        let tuple = obj.into_boxed_tuple()?;
+        let tuple = self.relation_as_tuple(&obj)?;
         btree.clear_accessor_stack();
-        btree.update(self.meta_table, tuple.as_ref())?;
+        btree.update(self.meta_table, tuple)?;
         Ok(())
     }
 
@@ -307,9 +334,9 @@ impl Catalog {
 
         let blob = Blob::from(rel.name());
         meta_index.clear_accessor_stack();
-        meta_index.remove(self.meta_index, blob.as_ref())?;
+        meta_index.remove(self.meta_index, blob.as_key_bytes())?;
         meta_table.clear_accessor_stack();
-        meta_table.remove(self.meta_table, rel.id().as_ref())?;
+        meta_table.remove(self.meta_table, rel.id().as_key_bytes())?;
 
         Ok(())
     }
@@ -333,8 +360,8 @@ impl Catalog {
         )?;
 
         btree.clear_accessor_stack();
-        let boxed: OwnedTuple = tuple.into();
-        btree.insert(self.meta_index, boxed.as_ref())?;
+
+        btree.insert(self.meta_index, tuple)?;
 
         Ok(())
     }
@@ -359,7 +386,7 @@ impl Catalog {
     ) -> io::Result<SearchResult> {
         let meta_idx = self.index_btree(self.meta_index, &meta_idx_schema(), accessor)?;
         let blob = Blob::from(name);
-        meta_idx.search_from_root(blob.as_ref(), FrameAccessMode::Read)
+        meta_idx.search_from_root(blob.as_key_bytes(), FrameAccessMode::Read)
     }
 
     /// Obtains a relation from the meta table if it exists, using the provided RcPageAccessor.
@@ -371,7 +398,7 @@ impl Catalog {
         let meta_idx = self.index_btree(self.meta_index, &meta_idx_schema(), accessor.clone())?;
 
         let blob = Blob::from(name);
-        let bytes: &[u8] = blob.as_ref();
+        let bytes = blob.as_key_bytes();
 
         let result = meta_idx.search_from_root(bytes, FrameAccessMode::Read)?;
 
@@ -392,7 +419,7 @@ impl Catalog {
         let tuple = TupleRef::read(payload.as_ref(), &schema)?;
 
         let id = match tuple.value(0)? {
-            crate::types::DataTypeRef::BigUInt(v) => ObjectId::from(v.to_owned()),
+            DataTypeRef::BigUInt(v) => ObjectId::from(v.to_owned()),
             _ => {
                 // DEVUELVE NULL. PARECE UN ERROR EN REINTERPRET CAST.
 
@@ -414,7 +441,7 @@ impl Catalog {
     ) -> io::Result<Relation> {
         let meta_table = self.table_btree(self.meta_table, accessor.clone())?;
         let bytes: &[u8] = id.as_ref();
-        let result = meta_table.search_from_root(id.as_ref(), FrameAccessMode::Read)?;
+        let result = meta_table.search_from_root(id.as_key_bytes(), FrameAccessMode::Read)?;
         let payload = match result {
             SearchResult::Found(_) => meta_table.get_payload(result)?.ok_or_else(|| {
                 IoError::new(ErrorKind::NotFound, "Object not found in meta table")

@@ -13,7 +13,11 @@
 
 use crate::{types::VarInt, varint::MAX_VARINT_LEN};
 
-use std::{cmp::Ordering, io, mem, usize};
+use std::{
+    cmp::Ordering,
+    io::{self, Error as IoError, ErrorKind},
+    mem, usize,
+};
 
 /// Detects if the platform is little-endian at compile time.
 #[cfg(target_endian = "little")]
@@ -25,7 +29,7 @@ const IS_LITTLE_ENDIAN: bool = false;
 /// Subtracts two variable length byte keys.
 /// Returns the `diff` in bytes with VarInt length prefix.
 /// Assumes that lhs > rhs (lexicographically).
-fn subtract_bytes(lhs: &[u8], rhs: &[u8]) -> io::Result<Box<[u8]>> {
+pub(crate) fn subtract_bytes(lhs: &[u8], rhs: &[u8]) -> io::Result<Box<[u8]>> {
     let (longer, shorter) = if lhs.len() >= rhs.len() {
         (lhs, rhs)
     } else {
@@ -62,8 +66,8 @@ fn subtract_bytes(lhs: &[u8], rhs: &[u8]) -> io::Result<Box<[u8]>> {
     }
 
     if borrow != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        return Err(IoError::new(
+            ErrorKind::InvalidInput,
             "lhs must be greater than rhs",
         ));
     }
@@ -190,7 +194,7 @@ impl NumericComparator {
 
     /// Reads bytes as u64 using platform-native byte order.
     #[inline]
-    fn read_native_u64(&self, bytes: &[u8]) -> u64 {
+    pub fn read_native_u64(&self, bytes: &[u8]) -> u64 {
         let mut value: u64 = 0;
 
         if IS_LITTLE_ENDIAN {
@@ -605,335 +609,5 @@ impl Ranger for CompositeComparator {
 
         // All columns equal
         Ok(Box::from([]))
-    }
-}
-
-#[cfg(test)]
-mod comparators_tests {
-    use super::*;
-    use crate::types::Blob;
-    use std::io;
-
-    #[test]
-    fn test_platform_endianness_detection() {
-        // Verify the compile-time constant matches runtime check
-        let runtime_le = cfg!(target_endian = "little");
-        assert_eq!(IS_LITTLE_ENDIAN, runtime_le);
-
-        println!(
-            "Platform is {}",
-            if IS_LITTLE_ENDIAN {
-                "little-endian"
-            } else {
-                "big-endian"
-            }
-        );
-    }
-
-    #[test]
-    fn test_numeric_comparator_native_order() -> io::Result<()> {
-        let comparator = NumericComparator::with_type::<u64>();
-
-        let a = 100u64;
-        let b = 50u64;
-
-        // Use native byte representation (what as_slice! produces)
-        let a_bytes = a.to_ne_bytes();
-        let b_bytes = b.to_ne_bytes();
-
-        assert_eq!(comparator.compare(&a_bytes, &b_bytes)?, Ordering::Greater);
-        assert_eq!(comparator.compare(&b_bytes, &a_bytes)?, Ordering::Less);
-        assert_eq!(comparator.compare(&a_bytes, &a_bytes)?, Ordering::Equal);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_numeric_comparator_range_bytes() -> io::Result<()> {
-        let comparator = NumericComparator::with_type::<u64>();
-
-        let a = 100u64;
-        let b = 30u64;
-
-        let a_bytes = a.to_ne_bytes();
-        let b_bytes = b.to_ne_bytes();
-
-        let diff = comparator.range_bytes(&a_bytes, &b_bytes)?;
-
-        // Read back the difference using native order
-        let diff_value = comparator.read_native_u64(&diff);
-        assert_eq!(diff_value, 70);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_signed_numeric_comparator() -> io::Result<()> {
-        let comparator = SignedNumericComparator::with_type::<i64>();
-
-        let a = -10i64;
-        let b = 10i64;
-        let c = -20i64;
-
-        let a_bytes = a.to_ne_bytes();
-        let b_bytes = b.to_ne_bytes();
-        let c_bytes = c.to_ne_bytes();
-
-        // -10 < 10
-        assert_eq!(comparator.compare(&a_bytes, &b_bytes)?, Ordering::Less);
-        // -10 > -20
-        assert_eq!(comparator.compare(&a_bytes, &c_bytes)?, Ordering::Greater);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_fixed_size_bytes_comparator() -> io::Result<()> {
-        let comparator = FixedSizeBytesComparator::for_size(4);
-
-        // Lexicographic: [0, 1, 0, 0] < [1, 0, 0, 0]
-        let a = &[0u8, 1, 0, 0];
-        let b = &[1u8, 0, 0, 0];
-
-        assert_eq!(comparator.compare(a, b)?, Ordering::Less);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_fixed_size_bytes_range() -> io::Result<()> {
-        let comparator = FixedSizeBytesComparator::for_size(2);
-
-        // Big-endian: [0x01, 0x00] = 256, [0x00, 0xFF] = 255
-        let lhs = &[0x01u8, 0x00];
-        let rhs = &[0x00u8, 0xFF];
-
-        let result = comparator.range_bytes(lhs, rhs)?;
-        assert_eq!(&result[..], &[0x00, 0x01]); // 256 - 255 = 1
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_varlen_comparator() -> io::Result<()> {
-        let comparator = VarlenComparator;
-
-        let blob1 = Blob::from("apple");
-        let blob2 = Blob::from("banana");
-
-        // "apple" < "banana" lexicographically
-        assert_eq!(
-            comparator.compare(blob1.as_ref(), blob2.as_ref())?,
-            Ordering::Less
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_varlen_comparator_equal() -> io::Result<()> {
-        let comparator = VarlenComparator;
-
-        let blob1 = Blob::from("hello");
-        let blob2 = Blob::from("hello");
-
-        assert_eq!(
-            comparator.compare(blob1.as_ref(), blob2.as_ref())?,
-            Ordering::Equal
-        );
-
-        let range = comparator.range_bytes(blob1.as_ref(), blob2.as_ref())?;
-        assert!(range.is_empty());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_subtract_bytes_simple() -> io::Result<()> {
-        let result = subtract_bytes(&[5], &[3])?;
-        let (len, offset) = VarInt::from_encoded_bytes(&result)?;
-        let len_usize: usize = len.try_into()?;
-        assert_eq!(len_usize, 1usize);
-        assert_eq!(result[offset], 2);
-        Ok(())
-    }
-
-    #[test]
-    fn test_subtract_bytes_with_borrow() -> io::Result<()> {
-        // 0x0100 - 0x00FF = 0x0001
-        let result = subtract_bytes(&[0x01, 0x00], &[0x00, 0xFF])?;
-        let (_, offset) = VarInt::from_encoded_bytes(&result)?;
-        assert_eq!(&result[offset..], &[0x01]);
-        Ok(())
-    }
-
-    #[test]
-    fn test_dyn_comparator_dispatch() -> io::Result<()> {
-        let numeric = DynComparator::StrictNumeric(NumericComparator::for_size(8));
-        let lexical = DynComparator::FixedSizeBytes(FixedSizeBytesComparator::for_size(8));
-
-        let a = 256u64.to_ne_bytes();
-        let b = 255u64.to_ne_bytes();
-
-        // Numeric comparison: 256 > 255
-        assert_eq!(numeric.compare(&a, &b)?, Ordering::Greater);
-
-        // For lexicographic on native-endian bytes, result depends on platform
-        // On little-endian: [0, 1, 0, 0, 0, 0, 0, 0] vs [255, 0, 0, 0, 0, 0, 0, 0]
-        // 0 < 255, so a < b lexicographically on LE
-        // On big-endian: [0, 0, 0, 0, 0, 0, 1, 0] vs [0, 0, 0, 0, 0, 0, 0, 255]
-        // Same comparison
-        let lex_result = lexical.compare(&a, &b)?;
-
-        if IS_LITTLE_ENDIAN {
-            assert_eq!(lex_result, Ordering::Less);
-        }
-        // Big-endian would have different result based on actual bytes
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_composite_two_integers() -> io::Result<()> {
-        // Composite key: (i32, i32)
-        let comparator = CompositeComparator::new(vec![
-            DynComparator::SignedNumeric(SignedNumericComparator::for_size(4)),
-            DynComparator::SignedNumeric(SignedNumericComparator::for_size(4)),
-        ]);
-
-        // Key (1, 2) vs (1, 3)
-        let mut key_a = Vec::new();
-        key_a.extend_from_slice(&1i32.to_ne_bytes());
-        key_a.extend_from_slice(&2i32.to_ne_bytes());
-
-        let mut key_b = Vec::new();
-        key_b.extend_from_slice(&1i32.to_ne_bytes());
-        key_b.extend_from_slice(&3i32.to_ne_bytes());
-
-        // (1, 2) < (1, 3) because first columns equal, second column 2 < 3
-        assert_eq!(comparator.compare(&key_a, &key_b)?, Ordering::Less);
-
-        // Key (2, 1) vs (1, 100)
-        let mut key_c = Vec::new();
-        key_c.extend_from_slice(&2i32.to_ne_bytes());
-        key_c.extend_from_slice(&1i32.to_ne_bytes());
-
-        let mut key_d = Vec::new();
-        key_d.extend_from_slice(&1i32.to_ne_bytes());
-        key_d.extend_from_slice(&100i32.to_ne_bytes());
-
-        // (2, 1) > (1, 100) because first column 2 > 1
-        assert_eq!(comparator.compare(&key_c, &key_d)?, Ordering::Greater);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_composite_int_and_text() -> io::Result<()> {
-        use crate::types::Blob;
-
-        // Composite key: (i64, Text)
-        let comparator = CompositeComparator::new(vec![
-            DynComparator::SignedNumeric(SignedNumericComparator::for_size(8)),
-            DynComparator::Variable(VarlenComparator),
-        ]);
-
-        // Key (1, "apple") vs (1, "banana")
-        let blob_a = Blob::from("apple");
-        let blob_b = Blob::from("banana");
-
-        let mut key_a = Vec::new();
-        key_a.extend_from_slice(&1i64.to_ne_bytes());
-        key_a.extend_from_slice(blob_a.as_ref());
-
-        let mut key_b = Vec::new();
-        key_b.extend_from_slice(&1i64.to_ne_bytes());
-        key_b.extend_from_slice(blob_b.as_ref());
-
-        // (1, "apple") < (1, "banana")
-        assert_eq!(comparator.compare(&key_a, &key_b)?, Ordering::Less);
-
-        // Key (2, "apple") vs (1, "zebra")
-        let blob_z = Blob::from("zebra");
-
-        let mut key_c = Vec::new();
-        key_c.extend_from_slice(&2i64.to_ne_bytes());
-        key_c.extend_from_slice(blob_a.as_ref());
-
-        let mut key_d = Vec::new();
-        key_d.extend_from_slice(&1i64.to_ne_bytes());
-        key_d.extend_from_slice(blob_z.as_ref());
-
-        // (2, "apple") > (1, "zebra") because 2 > 1
-        assert_eq!(comparator.compare(&key_c, &key_d)?, Ordering::Greater);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_composite_key_size() -> io::Result<()> {
-        use crate::types::Blob;
-
-        // Composite key: (i32, Text)
-        let comparator = CompositeComparator::new(vec![
-            DynComparator::SignedNumeric(SignedNumericComparator::for_size(4)),
-            DynComparator::Variable(VarlenComparator),
-        ]);
-
-        let blob = Blob::from("hello");
-        let mut key = Vec::new();
-        key.extend_from_slice(&42i32.to_ne_bytes());
-        key.extend_from_slice(blob.as_ref());
-
-        let size = comparator.key_size(&key)?;
-        // 4 bytes for i32 + varint(5) + 5 bytes for "hello" = 4 + 1 + 5 = 10
-        assert_eq!(size, 10);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_composite_equal_keys() -> io::Result<()> {
-        let comparator = CompositeComparator::new(vec![
-            DynComparator::StrictNumeric(NumericComparator::for_size(8)),
-            DynComparator::StrictNumeric(NumericComparator::for_size(8)),
-        ]);
-
-        let mut key = Vec::new();
-        key.extend_from_slice(&100u64.to_ne_bytes());
-        key.extend_from_slice(&200u64.to_ne_bytes());
-
-        assert_eq!(comparator.compare(&key, &key)?, Ordering::Equal);
-
-        let range = comparator.range_bytes(&key, &key)?;
-        assert!(range.is_empty());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_composite_range_bytes() -> io::Result<()> {
-        let comparator = CompositeComparator::new(vec![
-            DynComparator::StrictNumeric(NumericComparator::for_size(4)),
-            DynComparator::StrictNumeric(NumericComparator::for_size(4)),
-        ]);
-
-        // (10, 5) vs (10, 3) - differ on second column
-        let mut key_a = Vec::new();
-        key_a.extend_from_slice(&10u32.to_ne_bytes());
-        key_a.extend_from_slice(&5u32.to_ne_bytes());
-
-        let mut key_b = Vec::new();
-        key_b.extend_from_slice(&10u32.to_ne_bytes());
-        key_b.extend_from_slice(&3u32.to_ne_bytes());
-
-        let range = comparator.range_bytes(&key_a, &key_b)?;
-
-        // Should be range of second column: |5 - 3| = 2
-        let num_comp = NumericComparator::for_size(4);
-        let diff = num_comp.read_native_u64(&range);
-        assert_eq!(diff, 2);
-
-        Ok(())
     }
 }
