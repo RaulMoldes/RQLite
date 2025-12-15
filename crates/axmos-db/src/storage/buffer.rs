@@ -19,7 +19,7 @@ pub struct MemBlock<M> {
 
 impl<M> MemBlock<M> {
     // This function must be used to allocate 'owned' Buffers.
-    fn alloc(size: usize) -> Result<NonNull<[u8]>, AllocError> {
+    fn allocate_zeroed(size: usize) -> Result<NonNull<[u8]>, AllocError> {
         assert!(
             PAGE_ALIGNMENT as usize >= mem::align_of::<M>(),
             "Alignment {PAGE_ALIGNMENT} is too small for type {} which requires {} bytes",
@@ -62,7 +62,7 @@ impl<M> MemBlock<M> {
     /// If the fields of the header need values other than 0 for initialization
     /// then they should be written manually after this function call.
     pub fn new(size: usize) -> Self {
-        let ptr = Self::alloc(size).expect("Allocation error. Unable to allocate buffer");
+        let ptr = Self::allocate_zeroed(size).expect("Allocation error. Unable to allocate buffer");
         unsafe { Self::from_non_null(ptr) }
     }
 
@@ -136,8 +136,8 @@ impl<M> MemBlock<M> {
     }
 
     /// Number of bytes that can be used to store data.
-    pub fn usable_space(size: usize) -> u32 {
-        (size - mem::size_of::<M>()) as u32
+    pub fn usable_space(size: usize) -> usize {
+        size - mem::size_of::<M>()
     }
 
     /// Returns a read-only reference to the header.
@@ -237,16 +237,6 @@ impl<M> Drop for MemBlock<M> {
     }
 }
 
-pub trait AsBuffer<T> {
-    fn cast(self) -> MemBlock<T>;
-}
-
-impl<M, T> AsBuffer<T> for MemBlock<M> {
-    fn cast(self) -> MemBlock<T> {
-        self.cast()
-    }
-}
-
 /// Copies the content of the given slice into a new memory buffer
 impl<M> TryFrom<&[u8]> for MemBlock<M> {
     type Error = AllocError;
@@ -258,11 +248,17 @@ impl<M> TryFrom<&[u8]> for MemBlock<M> {
             return Err(AllocError);
         }
 
-        let mut ptr = Self::alloc(value.len())?;
+        let mut ptr = Self::allocate_zeroed(value.len())?;
 
         unsafe {
             ptr.as_mut().copy_from_slice(value);
             Ok(Self::from_non_null(ptr))
         }
     }
+}
+
+/// Trait for defining frames that are allocatable by the pager.
+/// Most structures are going to need to be allocated in some way, and header initialization must be done separately.
+pub(crate) trait Allocatable {
+    fn alloc(size: u32) -> Self;
 }

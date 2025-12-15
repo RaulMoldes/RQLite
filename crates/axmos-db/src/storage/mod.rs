@@ -1,13 +1,18 @@
 pub mod buffer;
 pub mod cell;
 pub mod latches;
+pub mod ops;
 pub mod page;
-pub mod tuple;
+pub(crate) use ops::PageOps;
+//pub mod tuple;
 pub mod wal;
 
-use crate::types::DataTypeRef;
-use tuple::TupleRef;
+#[cfg(miri)]
+mod tests;
 
+//use crate::types::DataTypeRef;
+//use tuple::TupleRef;
+/*
 #[macro_export]
 macro_rules! impl_display_tuple {
     ($tuple_type:ty, $name:expr) => {
@@ -97,3 +102,4 @@ macro_rules! impl_display_tuple {
 }
 
 impl_display_tuple!(TupleRef<'a, 'b>, "TupleRef");
+*/

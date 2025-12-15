@@ -38,7 +38,6 @@ impl AsRef<[u8]> for KeyValuePair {
     }
 }
 
-
 impl From<KeyValuePair> for Box<[u8]> {
     fn from(value: KeyValuePair) -> Self {
         Box::from(value.as_ref())
@@ -83,7 +82,6 @@ impl AsRef<[u8]> for TestKey {
         }
     }
 }
-
 
 impl From<TestKey> for Box<[u8]> {
     fn from(value: TestKey) -> Self {
@@ -138,7 +136,6 @@ impl AsRef<[u8]> for TestVarLengthKey {
         &self.encoded
     }
 }
-
 
 impl From<TestVarLengthKey> for Box<[u8]> {
     fn from(value: TestVarLengthKey) -> Self {
@@ -196,13 +193,11 @@ impl From<RawBytes> for OwnedCell {
     }
 }
 
-
 impl From<RawBytes> for Box<[u8]> {
     fn from(value: RawBytes) -> Self {
         Box::from(value.as_ref())
     }
 }
-
 
 impl AsRef<[u8]> for RawBytes {
     fn as_ref(&self) -> &[u8] {

@@ -1,4 +1,4 @@
-use crate::{io::frames::MemFrame, storage::page::MemPage, types::PageId};
+use crate::{io::frames::MemFrame, types::PageId};
 
 use indexmap::IndexMap;
 use std::{
@@ -27,7 +27,7 @@ impl std::fmt::Display for MemoryStats {
 #[derive(Debug)]
 pub(crate) struct PageCache {
     capacity: usize,
-    frames: IndexMap<PageId, MemFrame<MemPage>>,
+    frames: IndexMap<PageId, MemFrame>,
     cursor: usize,
     stats: MemoryStats, // Tracking stats
 }
@@ -72,11 +72,7 @@ impl PageCache {
     }
 
     /// Add a list of frames to the buffer pool.
-    pub fn insert(
-        &mut self,
-        id: PageId,
-        frame: MemFrame<MemPage>,
-    ) -> io::Result<Option<MemFrame<MemPage>>> {
+    pub fn insert(&mut self, id: PageId, frame: MemFrame) -> io::Result<Option<MemFrame>> {
         // If the frame already exists, update it
         if self.frames.contains_key(&id) {
             if let Some(old_frame) = self.frames.get_mut(&id) {
@@ -97,7 +93,7 @@ impl PageCache {
         Ok(evicted)
     }
 
-    pub fn evict(&mut self) -> io::Result<Option<MemFrame<MemPage>>> {
+    pub fn evict(&mut self) -> io::Result<Option<MemFrame>> {
         if self.frames.is_empty() {
             return Ok(None);
         };
@@ -129,7 +125,7 @@ impl PageCache {
         ))
     }
 
-    pub fn get(&mut self, id: &PageId) -> Option<MemFrame<MemPage>> {
+    pub fn get(&mut self, id: &PageId) -> Option<MemFrame> {
         if let Some(frame) = self.frames.get(id) {
             self.stats.cache_hits += 1;
             return Some((*frame).clone());
@@ -140,7 +136,7 @@ impl PageCache {
         None
     }
 
-    pub fn clear(&mut self) -> Vec<MemFrame<MemPage>> {
+    pub fn clear(&mut self) -> Vec<MemFrame> {
         let mut remaining_frames = Vec::with_capacity(self.frames.len());
         for (_, frame) in self.frames.drain(..) {
             // We do not do any checks here because this is like a force-eviction of all pages, useful when a crash happens and we need to write everything to the disk as is.

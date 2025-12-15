@@ -10,7 +10,9 @@ pub mod frames;
 pub mod pager;
 pub mod wal;
 
-use crate::types::{DataType, DataTypeKind, VarInt, reinterpret_cast, varint::MAX_VARINT_LEN};
+use crate::types::varint::{MAX_VARINT_LEN, VarInt};
+
+//use crate::types::{DataType, DataTypeKind, VarInt, reinterpret_cast, varint::MAX_VARINT_LEN};
 use std::io::{Read, Seek, Write};
 
 #[cfg(test)]
@@ -60,6 +62,7 @@ pub fn write_variable_length<W: Write>(buf: &mut W, s: &[u8]) -> std::io::Result
     Ok(())
 }
 
+/*
 pub fn read_type_from_buf<R: Read + Seek>(
     dtype: DataTypeKind,
     buf: &mut R,
@@ -82,3 +85,4 @@ pub fn read_type_from_buf<R: Read + Seek>(
         Ok(reinterpret_cast(dtype, &full_buf)?.0.to_owned())
     }
 }
+*/

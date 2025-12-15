@@ -124,14 +124,13 @@ impl CellBuilder {
         let max_payload_size: usize = self.compute_available_space();
         let total_size = data.serialized_size();
 
-
         // If the cell fits in a single page simply return the built cell.
         if total_size <= max_payload_size {
             return Ok(data.into());
         };
 
         // At this point we have to split the payload.
-        let payload : Box<[u8]> = data.into();
+        let payload: Box<[u8]> = data.into();
         let page_size = self.accessor().get_page_size();
         let mut overflow_page_number = self.accessor_mut().alloc_page::<OverflowPage>()?;
 

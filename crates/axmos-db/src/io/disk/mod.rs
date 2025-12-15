@@ -6,24 +6,26 @@ pub mod windows;
 use std::{
     fs::{self, File, Metadata},
     io::{self, Read, Seek, Write},
-    os::fd::AsRawFd,
-    path::Path,
+    os::{fd::AsRawFd, unix::prelude::RawFd},
+    path::{Path, PathBuf},
 };
 
+/// Trait to obtain the file system block size.
+/// It is the job of the target platform to implement it.
 pub(crate) trait FileSystemBlockSize {
     fn block_size(path: impl AsRef<Path>) -> io::Result<usize>;
 }
 
 /// Trait for opening a file depending on the OS.
 pub(crate) trait Open {
-    fn open(self, path: impl AsRef<Path>) -> io::Result<std::fs::File>;
+    fn open(self, path: impl AsRef<Path>) -> io::Result<File>;
 }
 
 pub(crate) struct FileSystem;
 
 pub(crate) struct OpenOptions {
     /// Inner [`std::fs::OpenOptions`] instance.
-    inner: std::fs::OpenOptions,
+    inner: fs::OpenOptions,
     /// Bypasses OS cache.
     bypass_cache: bool,
     /// When calling write() makes sure that data reaches disk before returning.
@@ -93,26 +95,35 @@ impl OpenOptions {
     }
 }
 
+/// We need additional operations over the File than what Rust [fs::File] provides us.
+///
+/// This trait includes operations for opening, creating, truncating and syncing files to disk.
 pub(crate) trait FileOperations: Seek + Read + Write {
+    /// Create a new empty file
     fn create(path: impl AsRef<Path>) -> io::Result<Self>
     where
         Self: Sized;
 
+    /// Open an existing file
     fn open(path: impl AsRef<Path>) -> io::Result<Self>
     where
         Self: Sized;
 
+    /// Remove the file at the target path
     fn remove(path: impl AsRef<Path>) -> io::Result<()>;
 
+    /// Truncate the file to 0 bytes
     fn truncate(&mut self) -> io::Result<()>;
 
+    /// Sync the file content to disk.
     fn sync_all(&self) -> io::Result<()>;
 }
 
+/// Wrapper over file that contains also path information
 #[derive(Debug)]
 pub struct DBFile {
     f: File,
-    p: std::path::PathBuf,
+    p: PathBuf,
 }
 
 impl DBFile {
@@ -148,25 +159,28 @@ impl Write for DBFile {
 }
 
 impl AsRawFd for DBFile {
-    fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
+    fn as_raw_fd(&self) -> RawFd {
         self.f.as_raw_fd()
     }
 }
 
 impl FileOperations for DBFile {
+    /// Create the DBFile
     fn create(path: impl AsRef<Path>) -> io::Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
             fs::create_dir_all(parent)?
         }
 
+        // We create the file with the following flags:
         let f = FileSystem::options()
             .create(true)
             .truncate(true)
-            .read(true)
-            .write(true)
-            .bypass_cache(true)
-            .sync_on_write(false)
+            .read(true) // O_READ in Linux
+            .write(true) // O_WRITE
+            .bypass_cache(true) // This is basically O_DIRECT. Forces the writes directly to SSD instead of being buffered by the OS cache
+            .sync_on_write(false) // This is O_DSYNC (not used for now)
             .open(&path)?;
+
         Ok(Self {
             f,
             p: path.as_ref().to_path_buf(),
@@ -174,6 +188,7 @@ impl FileOperations for DBFile {
     }
 
     fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        // Same flags as for create except here we are reading an existing file
         let f = FileSystem::options()
             .read(true)
             .write(true)
@@ -186,14 +201,17 @@ impl FileOperations for DBFile {
         })
     }
 
+    // Forcefully remove he file
     fn remove(path: impl AsRef<Path>) -> io::Result<()> {
         fs::remove_file(path)
     }
 
+    // truncate the file to 0 len
     fn truncate(&mut self) -> io::Result<()> {
         self.f.set_len(0)
     }
 
+    // sync the file to disk
     fn sync_all(&self) -> io::Result<()> {
         File::sync_all(&self.f)
     }

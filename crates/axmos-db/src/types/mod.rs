@@ -30,10 +30,10 @@ pub use varint::VarInt;
 #[cfg(test)]
 mod tests;
 
-#[derive(AxmosDataType, Debug, Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub enum DataType {
     #[default]
-    #[null]
+    //#[null]
     Null,
 
     SmallInt(Int8),
@@ -58,12 +58,12 @@ pub enum DataType {
 
     Byte(UInt8),
 
-    #[non_arith]
-    #[non_copy]
+    //#[non_arith]
+    // #[non_copy]
     Blob(Blob),
 
-    #[non_arith]
-    #[non_copy]
+    // #[non_arith]
+    // #[non_copy]
     Text(Blob),
 
     Date(Date),

@@ -25,7 +25,7 @@ impl From<Slot> for UInt16 {
 #[derive(Debug, PartialEq, Clone, Copy)]
 #[repr(C, align(8))]
 pub struct CellHeader {
-    left_child: PageId,
+    left_child: Option<PageId>,
     // Size here represents the total size of the cell, including padding.
     size: u64, // We do not know how much data are we going to store on a cell. When creating overflow pages it can become quite big so it is best to be prepared.
     padding: u8,
@@ -36,9 +36,8 @@ pub const CELL_HEADER_SIZE: usize = mem::size_of::<CellHeader>();
 
 impl CellHeader {
     pub fn new(padding: usize, payload_size: usize, is_overflow: bool) -> Self {
-
         CellHeader {
-            left_child: PageId::from(0),
+            left_child: None,
             size: (payload_size + padding) as u64,
             is_overflow,
             padding: padding as u8,
@@ -61,13 +60,13 @@ impl CellHeader {
     }
 
     #[inline]
-    pub fn left_child(&self) -> PageId {
+    pub fn left_child(&self) -> Option<PageId> {
         self.left_child
     }
 
     #[inline]
     pub fn set_left_child(&mut self, child: PageId) {
-        self.left_child = child;
+        self.left_child = Some(child);
     }
 
     #[inline]
@@ -98,56 +97,86 @@ impl<'a> CellRef<'a> {
         }
     }
 
+    #[inline]
     pub fn metadata(&self) -> &CellHeader {
         self.header
     }
 
     /// Full data slice including padding.
+    #[inline]
     pub fn data(&self) -> &[u8] {
         self.data
     }
 
     /// Payload without padding.
+    #[inline]
     pub fn payload(&self) -> &[u8] {
         &self.data[..self.len()]
     }
 
     /// Length of actual payload (excluding padding).
+    #[inline]
     pub fn len(&self) -> usize {
         self.header.size as usize - self.header.padding as usize
     }
 
     /// Total size in bytes (header + data).
+    #[inline]
     pub fn total_size(&self) -> usize {
         CELL_HEADER_SIZE + self.header.size as usize
     }
 
     /// Storage size (header + data + slot pointer).
+    #[inline]
     pub fn storage_size(&self) -> usize {
         self.total_size() + Slot::SIZE
     }
 
-    pub fn left_child(&self) -> PageId {
+    /// Optional left child if set
+    #[inline]
+    pub fn left_child(&self) -> Option<PageId> {
         self.header.left_child
     }
 
+    /// Whether this cell is overflow
+    #[inline]
     pub fn is_overflow(&self) -> bool {
         self.header.is_overflow
     }
 
     /// Returns the overflow page if this is an overflow cell.
     /// Returns PAGE_ZERO if not an overflow cell.
-    pub fn overflow_page(&self) -> PageId {
+    /// Overflow page pointer is stored at the end of the cell (last four bytes) on overflow cells.
+    pub fn overflow_page(&self) -> Option<PageId> {
         if !self.header.is_overflow {
-            return PageId::from(0);
+            return None;
         }
 
-        let start = self.len() - std::mem::size_of::<PageId>();
-        PageId::from_be_bytes(
+        let start = self.len() - mem::size_of::<PageId>();
+        Some(PageId::from_be_bytes(
             self.payload()[start..]
                 .try_into()
                 .expect("failed deserializing overflow page number"),
-        )
+        ))
+    }
+
+    /// Writes this cell into a byte buffer at the given offset.
+    /// Returns the number of bytes written.
+    ///
+    /// # Panics
+    /// Panics if the buffer doesn't have enough space.
+    pub fn write_to(&self, buffer: &mut [u8]) -> usize {
+        let header_bytes = unsafe {
+            slice::from_raw_parts(
+                self.header as *const CellHeader as *const u8,
+                CELL_HEADER_SIZE,
+            )
+        };
+
+        buffer[..CELL_HEADER_SIZE].copy_from_slice(header_bytes);
+        buffer[CELL_HEADER_SIZE..self.total_size()].copy_from_slice(self.data);
+
+        self.total_size()
     }
 }
 
@@ -157,6 +186,7 @@ impl PartialEq for CellRef<'_> {
     }
 }
 
+/// Mutable reference to a cell
 #[derive(Debug)]
 pub struct CellMut<'a> {
     header: &'a mut CellHeader,
@@ -182,71 +212,120 @@ impl<'a> CellMut<'a> {
         }
     }
 
-    pub fn as_ref(&self) -> CellRef<'_> {
+    #[inline]
+    /// Coerces the mutable reference into a shared one
+    pub fn as_cell_ref(&self) -> CellRef<'_> {
         CellRef {
             header: self.header,
             data: self.data,
         }
     }
 
+    #[inline]
+    /// See [CellRef<'_>::metadata]
     pub fn metadata(&self) -> &CellHeader {
         self.header
     }
 
+    #[inline]
+    /// See [CellRef<'_>::metadata]
     pub fn metadata_mut(&mut self) -> &mut CellHeader {
         self.header
     }
 
+    #[inline]
+    /// See [CellRef<'_>::data]
     pub fn data(&self) -> &[u8] {
         self.data
     }
 
+    #[inline]
+    /// See [CellRef<'_>::data]
     pub fn data_mut(&mut self) -> &mut [u8] {
         self.data
     }
 
+    #[inline]
+    /// See [CellRef<'_>::payload]
     pub fn payload(&self) -> &[u8] {
         &self.data[..self.len()]
     }
 
+    #[inline]
+    /// See [CellRef<'_>::payload]
     pub fn payload_mut(&mut self) -> &mut [u8] {
         let len = self.len();
         &mut self.data[..len]
     }
 
+    #[inline]
+    /// See [CellRef<'_>::len]
     pub fn len(&self) -> usize {
         self.header.size as usize - self.header.padding as usize
     }
 
+    #[inline]
+    /// See [CellRef<'_>::total_size]
     pub fn total_size(&self) -> usize {
         CELL_HEADER_SIZE + self.header.size as usize
     }
 
+    #[inline]
+    /// See [CellRef<'_>::storage_size]
     pub fn storage_size(&self) -> usize {
         self.total_size() + Slot::SIZE
     }
 
-    pub fn left_child(&self) -> PageId {
+    #[inline]
+    /// See [CellRef<'_>::left_child]
+    pub fn left_child(&self) -> Option<PageId> {
         self.header.left_child
     }
 
+    #[inline]
+    /// See [CellRef<'_>::is_overflow]
     pub fn is_overflow(&self) -> bool {
         self.header.is_overflow
     }
 
-    pub fn overflow_page(&self) -> PageId {
-        self.as_ref().overflow_page()
+    #[inline]
+    /// See [CellRef<'_>::overflow_page]
+    pub fn overflow_page(&self) -> Option<PageId> {
+        self.as_cell_ref().overflow_page()
     }
 
+    #[inline]
+    /// Set the left child of the cell
     pub fn set_left_child(&mut self, child: PageId) {
-        self.header.left_child = child;
+        self.header.left_child = Some(child);
     }
 
-    pub fn set_overflow(&mut self, is_overflow: bool) {
-        self.header.is_overflow = is_overflow;
+    /// Writes this cell into a byte buffer at the given offset.
+    /// Returns the number of bytes written.
+    ///
+    /// # Panics
+    /// Panics if the buffer doesn't have enough space.
+    pub fn write_to(&self, buffer: &mut [u8]) -> usize {
+        let header_bytes = unsafe {
+            slice::from_raw_parts(
+                self.header as *const CellHeader as *const u8,
+                CELL_HEADER_SIZE,
+            )
+        };
+
+        buffer[..CELL_HEADER_SIZE].copy_from_slice(header_bytes);
+        buffer[CELL_HEADER_SIZE..self.total_size()].copy_from_slice(&self.data);
+
+        self.total_size()
     }
 }
 
+/// Cell is a self-contained data structure that is made up of a header and a payload in the heap.
+/// When writing to a page, we need to make sure to match alignment requirements [CELL_ALIGNMENT]
+/// Note that alignment is computed taking into account the size of the header, that is the [OwnedCell::total_size].
+///
+/// We do it by first computing the total unaligned size that the cell will occupy (payload + header),
+/// then aligning to the next valid offset, and finally substracting the header back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OwnedCell {
     header: CellHeader,
@@ -254,7 +333,7 @@ pub struct OwnedCell {
 }
 
 impl OwnedCell {
-    /// Creates a new cell from a payload slice.
+    /// Creates a new owned cell from a payload slice.
     pub fn new(payload: &[u8]) -> Self {
         let padding = Self::compute_padding(payload.len());
         let padded_size = payload.len() + padding;
@@ -290,33 +369,13 @@ impl OwnedCell {
     }
 
     #[inline]
+    /// Computes the padding required in order to align the given [payload_size]
+    /// to [CELL_ALIGNMENT]
     fn compute_padding(payload_size: usize) -> usize {
         let padded_size = (payload_size + CELL_HEADER_SIZE)
             .next_multiple_of(CELL_ALIGNMENT as usize)
             - CELL_HEADER_SIZE;
         padded_size - payload_size
-    }
-
-    /// Creates a cell by having the caller write directly to the payload
-    pub fn new_with_writer<F>(payload_size: usize, writer: F) -> Self
-    where
-        F: FnOnce(&mut [u8]) -> usize,
-    {
-        let padding = Self::compute_padding(payload_size);
-        let padded_size = payload_size + padding;
-
-        let mut data = vec![0u8; padded_size].into_boxed_slice();
-        let written = writer(&mut data[..payload_size]);
-
-        debug_assert_eq!(written, payload_size);
-        // By default cells are not overflow.
-        // Overflow must be set by the builder
-        let header = CellHeader::new(padding, payload_size, false);
-
-        Self {
-            header,
-            payload: data,
-        }
     }
 
     /// Creates an OwnedCell from a CellRef by copying its data.
@@ -335,73 +394,91 @@ impl OwnedCell {
         }
     }
 
+    #[inline]
+    /// See [CellRef<'_>::metadata]
     pub fn metadata(&self) -> &CellHeader {
         &self.header
     }
 
+    #[inline]
+    /// See [CellRef<'_>::metadata]
     pub fn metadata_mut(&mut self) -> &mut CellHeader {
         &mut self.header
     }
 
-    /// Full data slice including padding.
+    #[inline]
+    /// Full data slice including padding
     pub fn data(&self) -> &[u8] {
         &self.payload
     }
 
+    #[inline]
     /// Mutable data slice including padding.
     pub fn data_mut(&mut self) -> &mut [u8] {
         &mut self.payload
     }
 
+    #[inline]
     /// Payload without padding.
     pub fn payload(&self) -> &[u8] {
         &self.payload[..self.len()]
     }
 
+    #[inline]
     /// Mutable payload without padding.
     pub fn payload_mut(&mut self) -> &mut [u8] {
         let len = self.len();
         &mut self.payload[..len]
     }
 
-    /// Length of actual payload (excluding padding).
+    #[inline]
+    /// See [CellRef<'_>::len]
     pub fn len(&self) -> usize {
         self.header.size as usize - self.header.padding as usize
     }
 
-    /// Total size in bytes (header + data).
+    #[inline]
+    /// See [CellRef<'_>::total_size]
     pub fn total_size(&self) -> usize {
         CELL_HEADER_SIZE + self.header.size as usize
     }
 
-    /// Storage size (header + data + slot pointer).
+    #[inline]
+    /// See [CellRef<'_>::storage_size]
     pub fn storage_size(&self) -> usize {
         self.total_size() + Slot::SIZE
     }
 
-    pub fn left_child(&self) -> PageId {
+    #[inline]
+    /// See [CellRef<'_>::left_child]
+    pub fn left_child(&self) -> Option<PageId> {
         self.header.left_child
     }
 
+    #[inline]
+    /// Set the left child to a new value.
     pub fn set_left_child(&mut self, child: PageId) {
-        self.header.left_child = child;
+        self.header.left_child = Some(child);
     }
 
+    #[inline]
+    /// See [CellRef<'_>::is_overflow]
     pub fn is_overflow(&self) -> bool {
         self.header.is_overflow
     }
 
-    pub fn overflow_page(&self) -> PageId {
+    /// See [CellRef<'_>::overflow_page]
+    pub fn overflow_page(&self) -> Option<PageId> {
         if !self.header.is_overflow {
-            return PageId::from(0);
+            return None;
         }
 
         let start = self.len() - mem::size_of::<PageId>();
-        PageId::from_be_bytes(
+        Some(PageId::from_be_bytes(
             self.payload()[start..]
                 .try_into()
                 .expect("failed deserializing overflow page number"),
-        )
+        ))
     }
 
     /// Writes this cell into a byte buffer at the given offset.
@@ -423,23 +500,19 @@ impl OwnedCell {
         self.total_size()
     }
 
+    /// Get a reference to the cell
     pub fn as_cell_ref(&self) -> CellRef<'_> {
         CellRef {
             header: &self.header,
             data: &self.payload,
         }
     }
-
+    /// Get a mutable reference to the cell
     pub fn as_cell_mut(&mut self) -> CellMut<'_> {
         CellMut {
             header: &mut self.header,
             data: &mut self.payload,
         }
-    }
-
-    // Consumes the cell and returns the payload as a boxed slice
-    pub fn into_boxed_slice(self) -> Box<[u8]> {
-        Box::from(self.payload())
     }
 }
 

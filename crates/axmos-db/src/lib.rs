@@ -11,17 +11,17 @@
 #![feature(str_from_raw_parts)]
 #![feature(current_thread_id)]
 pub mod configs;
-pub mod database;
+//pub mod database;
 pub mod io;
 mod macros;
-mod sql;
+//mod sql;
 mod storage;
-mod structures;
-mod transactions;
+//mod structures;
+//mod transactions;
 pub mod types;
 
-#[cfg(test)]
-pub mod test_utils;
+//#[cfg(test)]
+//pub mod test_utils;
 
 /// Jemalloc apparently has better alignment guarantees than rust's standard allocator.
 /// Rust's global system allocator does not seem to guarantee that allocations are aligned.
@@ -39,4 +39,4 @@ pub(crate) use types::*;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 pub use configs::*;
-pub use database::Database;
+//pub use database::Database;

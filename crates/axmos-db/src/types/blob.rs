@@ -4,8 +4,9 @@
 //! It implements AxmosValueType as a dynamic-size type.
 
 use crate::{
-    from_blob, impl_axmos_hashable,
-    structures::comparator::{Comparator, VarlenComparator},
+    from_blob,
+    impl_axmos_hashable,
+    // structures::comparator::{Comparator, VarlenComparator},
     types::{
         Date, DateTime, Float32, Float64, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
         VarInt,
@@ -344,7 +345,7 @@ impl From<&[u8; 8]> for Blob {
         Blob(blob_buffer.into_boxed_slice())
     }
 }
-
+/*
 impl PartialOrd for Blob {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let comp = VarlenComparator;
@@ -364,7 +365,7 @@ impl<'a> PartialOrd for BlobRefMut<'a> {
         let comp = VarlenComparator;
         comp.compare(self.as_ref(), other.as_ref()).ok()
     }
-}
+}*/
 
 impl PartialEq for Blob {
     fn eq(&self, other: &Self) -> bool {
