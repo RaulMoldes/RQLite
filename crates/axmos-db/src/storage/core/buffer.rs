@@ -4,9 +4,15 @@ use std::{
     fmt::{self, Debug},
     mem::{self, ManuallyDrop},
     ptr::NonNull,
+    slice,
 };
 
-use crate::PAGE_ALIGNMENT;
+use crate::{
+    PAGE_ALIGNMENT,
+    storage::core::traits::{
+        Buffer, BufferOps, ComposedBuffer, ComposedMetadata, Identifiable, Writable,
+    },
+};
 
 pub struct MemBlock<M> {
     /// Total size of the buffer (size of header + size of data).
@@ -257,8 +263,88 @@ impl<M> TryFrom<&[u8]> for MemBlock<M> {
     }
 }
 
-/// Trait for defining frames that are allocatable by the pager.
-/// Most structures are going to need to be allocated in some way, and header initialization must be done separately.
-pub(crate) trait Allocatable {
-    fn alloc(size: u32) -> Self;
+impl<M> ComposedBuffer for MemBlock<M>
+where
+    M: ComposedMetadata,
+    Self: BufferOps,
+{
+    type DataItemHeader = M::ItemHeader;
+
+    // Writes a new item to a composed buffer.
+    // SAFETY: `last_used_offset` keeps track of where the last cell was
+    // written. By substracting the total size of the new cell to
+    // `last_used_offset` we get a valid pointer within the page where we
+    // write the new cell.
+    unsafe fn write_item_to_offset(
+        &self,
+        offset: u64,
+        item: impl Writable<Header = Self::DataItemHeader>,
+    ) {
+        unsafe {
+            let dest = self.data.byte_add(offset as usize).cast::<u8>().as_ptr();
+            let dest_slice = slice::from_raw_parts_mut(dest, item.total_size());
+
+            item.write_to(dest_slice);
+        }
+    }
+
+    unsafe fn item_at_offset(&self, offset: u64) -> NonNull<Self::DataItemHeader> {
+        unsafe { self.data.byte_add(offset as usize).cast() }
+    }
+}
+
+impl<M> Buffer for MemBlock<M>
+where
+    M: Identifiable + Copy + AsRef<[u8]>,
+{
+    type Header = M;
+
+    fn header(&self) -> &Self::Header {
+        self.metadata()
+    }
+
+    fn header_mut(&mut self) -> &mut Self::Header {
+        self.metadata_mut()
+    }
+
+    fn data_non_null(&self) -> NonNull<[u8]> {
+        self.data
+    }
+
+    fn data(&self) -> &[u8] {
+        self.data()
+    }
+
+    fn data_mut(&mut self) -> &mut [u8] {
+        self.data_mut()
+    }
+
+    fn capacity(&self) -> usize {
+        Self::usable_space(self.size as usize) as usize
+    }
+
+    fn usable_space(&self, size: usize) -> usize {
+        Self::usable_space(size)
+    }
+}
+
+// Macro to create aligned buffers inline.
+#[macro_export]
+macro_rules! aligned_buf {
+    ($size:expr) => {{
+        use $crate::storage::core::buffer::MemBlock;
+
+        let buffer: MemBlock<()> = MemBlock::new($size);
+        buffer
+    }};
+
+    ($size:expr, $val: expr) => {{
+        use $crate::storage::core::buffer::MemBlock;
+
+        let mut buffer: MemBlock<()> = MemBlock::new($size);
+
+        buffer.data_mut().fill($val);
+
+        buffer
+    }};
 }

@@ -1,16 +1,19 @@
 use crate::{
-    AxmosDBConfig, DEFAULT_CACHE_SIZE,  PAGE_ALIGNMENT,
+    AxmosDBConfig, DEFAULT_CACHE_SIZE, PAGE_ALIGNMENT,
     io::{
         cache::PageCache,
         disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
-        frames::{ MemFrame},
+        frames::MemFrame,
         wal::WriteAheadLog,
     },
     make_shared,
     storage::{
-        buffer::{Allocatable, MemBlock},
+        core::{
+            buffer::MemBlock,
+            traits::{Buffer, BufferOps},
+        },
         latches::PageLatch,
-        page::{ OverflowPage, OverflowPageHeader, PageZero, PageZeroHeader},
+        page::{OverflowPage, PageZero, PageZeroHeader},
         wal::OwnedRecord,
     },
     types::{PAGE_ZERO, PageId},
@@ -18,9 +21,7 @@ use crate::{
 
 use std::{
     io::{self, Error as IoError, ErrorKind, Read, Seek, SeekFrom, Write},
-
     path::Path,
-
 };
 
 /// Implementation of a pager.
@@ -151,16 +152,16 @@ impl Pager {
     }
 
     /// Allocates page zero from the provided configuration
-    pub(crate) fn alloc_page_zero(&mut self, config: AxmosDBConfig) -> io::Result<PageZero> {
+    fn alloc_page_zero(&mut self, config: AxmosDBConfig) -> io::Result<PageZero> {
         self.cache.set_capacity(config.cache_size as usize);
 
-        let mut page_zero: PageZero = PageZero::alloc(config);
+        let mut page_zero: PageZero = PageZero::from_config(config);
         page_zero.metadata_mut().page_size = config.page_size;
         page_zero.metadata_mut().min_keys = config.min_keys_per_page;
         page_zero.metadata_mut().cache_size = config.cache_size;
         page_zero.metadata_mut().num_siblings_per_side = config.num_siblings_per_side;
 
-        self.write_block(PAGE_ZERO, page_zero.as_ref())?;
+        self.write_block(PAGE_ZERO, page_zero.as_ref(), config.page_size as usize)?;
 
         Ok(page_zero)
     }
@@ -171,68 +172,92 @@ impl Pager {
     }
 
     /// Load block zero from disk
-    pub(crate) fn load_page_zero(&mut self, block_size: usize) -> io::Result<PageZero> {
+    fn load_page_zero(&mut self, block_size: usize) -> io::Result<PageZero> {
         self.load_block::<PageZeroHeader>(0, block_size)
     }
 
     /// Load a block from disk at the given offset and of the given size.
-    pub(crate) fn load_block<M>(
-        &mut self,
-        offset: u64,
-        block_size: usize,
-    ) -> io::Result<MemBlock<M>> {
+    fn load_block<M>(&mut self, offset: u64, block_size: usize) -> io::Result<MemBlock<M>> {
         let mut block: MemBlock<M> = MemBlock::new(block_size);
-        self.read_block(PAGE_ZERO, block.as_mut());
+        self.read_block(PAGE_ZERO, block.as_mut(), block_size)?;
         Ok(block)
     }
 
     /// Apply a read-only callback to any page type
-    fn with_page<P, F, R>(&self, frame: &MemFrame, f: F) -> io::Result<R>
+    pub(crate) fn with_page<P, F, R>(&mut self, id: PageId, f: F) -> io::Result<R>
     where
+        P: Buffer,
+        MemFrame: From<MemBlock<P::Header>> + From<P>,
         F: FnOnce(&P) -> R,
         for<'a> &'a P: TryFrom<&'a PageLatch, Error = IoError>,
     {
+        let frame = self.read_page::<P>(id)?;
         let latch = frame.read();
         let page: &P = (&latch).try_into()?;
         Ok(f(page))
     }
 
     /// Apply a mutable callback to any page type
-    fn with_page_mut<P, F, R>(&self, frame: &MemFrame, f: F) -> io::Result<R>
+    pub(crate) fn with_page_mut<P, F, R>(&mut self, id: PageId, f: F) -> io::Result<R>
     where
+        P: Buffer,
+        MemFrame: From<MemBlock<P::Header>> + From<P>,
         F: FnOnce(&mut P) -> R,
         for<'a> &'a mut P: TryFrom<&'a mut PageLatch, Error = IoError>,
     {
+        let mut frame = self.read_page::<P>(id)?;
+        frame.mark_dirty();
         let mut latch = frame.write();
         let page: &mut P = (&mut latch).try_into()?;
+
         Ok(f(page))
     }
 
     /// Apply a fallible read-only callback to any page type
-    fn try_with_page<P, F, R>(&self, frame: &MemFrame, f: F) -> io::Result<R>
+    pub(crate) fn try_with_page<P, F, R>(&mut self, id: PageId, f: F) -> io::Result<R>
     where
+        P: Buffer,
+        MemFrame: From<MemBlock<P::Header>> + From<P>,
         F: FnOnce(&P) -> io::Result<R>,
         for<'a> &'a P: TryFrom<&'a PageLatch, Error = IoError>,
     {
+        let frame = self.read_page::<P>(id)?;
         let latch = frame.read();
         let page: &P = (&latch).try_into()?;
         f(page)
     }
 
     /// Apply a fallible mutable callback to any page type
-    fn try_with_page_mut<P, F, R>(&self, frame: &MemFrame, f: F) -> io::Result<R>
+    pub(crate) fn try_with_page_mut<P, F, R>(&mut self, id: PageId, f: F) -> io::Result<R>
     where
+        P: Buffer,
+        MemFrame: From<MemBlock<P::Header>> + From<P>,
         F: FnOnce(&mut P) -> io::Result<R>,
         for<'a> &'a mut P: TryFrom<&'a mut PageLatch, Error = IoError>,
     {
+        let mut frame = self.read_page::<P>(id)?;
+        frame.mark_dirty();
         let mut latch = frame.write();
         let page: &mut P = (&mut latch).try_into()?;
         f(page)
     }
 
+    /// Check if the pager is intialized
+    pub(crate) fn is_initialized(&self) -> bool {
+        self.page_zero.is_some()
+    }
+
+    /// Attempt to get page zero as a frame. Panics if we are not initialized.
     fn page_zero_frame(&self) -> io::Result<&MemFrame> {
         self.page_zero
             .as_ref()
+            .ok_or(IoError::new(ErrorKind::Other, "pager not initialized"))
+    }
+
+    /// Attempt to get page zero as a frame. Panics if we are not initialized.
+    fn page_zero_frame_mut(&mut self) -> io::Result<&mut MemFrame> {
+        self.page_zero
+            .as_mut()
             .ok_or(IoError::new(ErrorKind::Other, "pager not initialized"))
     }
 
@@ -241,15 +266,22 @@ impl Pager {
     where
         F: FnOnce(&PageZero) -> R,
     {
-        self.with_page::<PageZero, _, _>(self.page_zero_frame()?, f)
+        let frame = self.page_zero_frame()?;
+        let latch = frame.read();
+        let page: &PageZero = (&latch).try_into()?;
+        Ok(f(page))
     }
 
     // Utility to execute a mutable callback on page zero.
-    fn with_page_zero_mut<F, R>(&self, f: F) -> io::Result<R>
+    fn with_page_zero_mut<F, R>(&mut self, f: F) -> io::Result<R>
     where
         F: FnOnce(&mut PageZero) -> R,
     {
-        self.with_page_mut::<PageZero, _, _>(self.page_zero_frame()?, f)
+        let frame = self.page_zero_frame_mut()?;
+        frame.mark_dirty();
+        let mut latch = frame.write();
+        let page: &mut PageZero = (&mut latch).try_into()?;
+        Ok(f(page))
     }
 
     fn page_size(&self) -> io::Result<usize> {
@@ -292,9 +324,13 @@ impl Pager {
 
     /// Write a block directly to the underlying disk using DirectIO.
     /// The caller must ensure that the size of the provided buffer is aligned for [O_DIRECT].
-    fn write_block(&mut self, start_page_number: PageId, content: &[u8]) -> io::Result<()> {
-        let size = self.page_size()?;
-        let offset = Self::page_offset(start_page_number, size as u64);
+    fn write_block(
+        &mut self,
+        start_page_number: PageId,
+        content: &[u8],
+        block_size: usize,
+    ) -> io::Result<()> {
+        let offset = Self::page_offset(start_page_number, block_size as u64);
 
         Self::validate_alignment_of(offset as usize, PAGE_ALIGNMENT as usize)?;
         // Content pointer must also be aligned.
@@ -309,12 +345,15 @@ impl Pager {
     }
 
     /// Read a block back from the disk into an output buffer.
-    fn read_block(&mut self, start_page_number: PageId, buffer: &mut [u8]) -> io::Result<()> {
-        // Content pointer must also be aligned.
-        let size = self.page_size()?;
+    fn read_block(
+        &mut self,
+        start_page_number: PageId,
+        buffer: &mut [u8],
+        block_size: usize,
+    ) -> io::Result<()> {
         Self::validate_alignment_of(buffer.as_ptr() as usize, PAGE_ALIGNMENT as usize)?;
         Self::validate_alignment_of(buffer.len() as usize, PAGE_ALIGNMENT as usize)?;
-        let offset = Self::page_offset(start_page_number, size as u64);
+        let offset = Self::page_offset(start_page_number, block_size as u64);
         Self::validate_alignment_of(offset as usize, PAGE_ALIGNMENT as usize)?;
 
         self.file.seek(SeekFrom::Start(offset))?;
@@ -323,15 +362,13 @@ impl Pager {
     }
 
     /// Allocate a new page with the given <H> header.
-    pub(crate) fn allocate_page<H>(&mut self) -> io::Result<MemFrame>
+    pub(crate) fn allocate_page<P>(&mut self) -> io::Result<PageId>
     where
-        MemFrame: From<MemBlock<H>>,
-        MemBlock<H>: Allocatable,
+        MemFrame: From<P> + From<MemBlock<P::Header>>,
+        P: BufferOps,
     {
         let (id, mut mem_page) = if let Some(page_id) = self.first_free_page()? {
-
-            let page = self.read_page::<OverflowPageHeader>(page_id)?;
-            let next = self.with_page::<OverflowPage, _, _>(&page, |overflow| overflow.next())?;
+            let next = self.with_page::<OverflowPage, _, _>(page_id, |overflow| overflow.next())?;
 
             self.try_set_first_free_page(next)?;
 
@@ -340,19 +377,20 @@ impl Pager {
             {
                 self.try_set_last_free_page(None)?;
             }
-
-
-            (page_id, page.reinit_as::<H>())
+            let page = self.read_page::<P>(page_id)?;
+            (page_id, page.reinit_as::<P::Header>())
         } else {
             // TODO: Think how to best do this part
-            let page = MemBlock::<H>::alloc(self.page_size()? as u32);
+            let page = P::alloc(self.page_size()? as u32);
             let frame = MemFrame::from(page);
             let id = frame.page_number();
             (id, frame)
         };
         mem_page.mark_dirty();
+        let id = mem_page.page_number();
+        self.cache_frame(mem_page)?;
 
-        Ok(mem_page)
+        Ok(id)
     }
 
     /// Adds a frame to the cache, possibly evicting another one from it and writing its contents to disk thereby.
@@ -360,13 +398,14 @@ impl Pager {
     /// As we are doing write ahead logging instead of shadow paging, we can safely perform NO-STEAL, NO FORCE behaviour.
     /// - **NO-STEAL:** Dirty pages are not written to disk immediately upon modification unless eviction occurs.
     /// - **NO-FORCE:** Writes to disk do not happen automatically at transaction commit; only when evicted.
-    pub(crate) fn cache_frame(&mut self, frame: MemFrame) -> io::Result<PageId> {
+    fn cache_frame(&mut self, frame: MemFrame) -> io::Result<PageId> {
         let id = frame.page_number();
-        if let Some(evicted) = self.cache.insert(id, frame)? {
+        if let Some(evicted) = self.cache.insert(frame)? {
             let evicted_id = evicted.page_number();
 
             if evicted.is_dirty() {
-                self.write_block(evicted_id, evicted.write().as_mut())?;
+                let page_size = self.page_size()?;
+                self.write_block(evicted_id, evicted.write().as_mut(), page_size)?;
             };
         };
         Ok(id)
@@ -379,9 +418,10 @@ impl Pager {
     /// After reading it, if any page was evicted, goes to the disk to write its contents.
     ///
     /// See [Pager::write_block]
-    pub(crate) fn read_page<H>(&mut self, id: PageId) -> io::Result<MemFrame>
+    pub(crate) fn read_page<P>(&mut self, id: PageId) -> io::Result<MemFrame>
     where
-        MemFrame: From<MemBlock<H>>,
+        P: Buffer,
+        MemFrame: From<MemBlock<P::Header>> + From<P>,
     {
         // Someone asked for page zero, which we have on our local private cache so we return it.
         if id == PAGE_ZERO {
@@ -402,24 +442,21 @@ impl Pager {
 
         // That was a cache miss.
         // we need to go to the disk to find the page.
-        let mut buffer: MemBlock<H> = MemBlock::new(page_size);
-        self.read_block(id, buffer.as_mut())?;
-        let page = buffer.cast::<H>();
+        let mut buffer: MemBlock<P::Header> = MemBlock::new(page_size);
+
+        self.read_block(id, buffer.as_mut(), page_size)?;
+        let page = buffer.cast::<P::Header>();
 
         let mem_page = MemFrame::from(page);
-        if let Some(evicted) = self.cache.insert(id, mem_page)?
-            && evicted.is_dirty()
-        {
-            let evicted_id = evicted.page_number();
-            self.write_block(evicted_id, evicted.write().as_mut())?;
-        };
+        self.cache_frame(mem_page)?;
 
         Ok(self.cache.get(&id).unwrap())
     }
 
-    pub(crate) fn dealloc_page<H>(&mut self, id: PageId) -> io::Result<()>
+    pub(crate) fn dealloc_page<P>(&mut self, id: PageId) -> io::Result<()>
     where
-        MemFrame: From<MemBlock<H>>,
+        P: Buffer,
+        MemFrame: From<MemBlock<<P as Buffer>::Header>> + From<P>,
     {
         // Someone asked for page zero, which we have on our local private cache so we return it.
         if id == PAGE_ZERO {
@@ -433,270 +470,25 @@ impl Pager {
 
         // Set the first free page in the header
         if first_free_page.is_none() {
-            self.try_set_first_free_page(Some(id));
+            self.try_set_first_free_page(Some(id))?;
         };
 
         if let Some(last_free_id) = self.last_free_page()? {
             // Read the free page and set the next page.
-            let previous_page = self.read_page::<OverflowPageHeader>(last_free_id)?;
 
-            self.with_page_mut::<OverflowPage, _, _>(&previous_page, |overflow| {
+            self.with_page_mut::<OverflowPage, _, _>(last_free_id, |overflow| {
                 overflow.metadata_mut().next = Some(last_free_id);
             })?;
         };
 
-        let mem_page = self.read_page::<H>(id)?.dealloc();
-        self.try_set_first_free_page(Some(id));
-
+        let mem_page = self.read_page::<P>(id)?.dealloc();
+        self.try_set_first_free_page(Some(id))?;
+        let page_size = self.page_size()?;
         // Probably not necessary
-        self.write_block(id, mem_page.write().as_mut())?;
+        self.write_block(id, mem_page.write().as_mut(), page_size)?;
 
         Ok(())
     }
 }
 
 make_shared! {SharedPager, Pager}
-/*#[cfg(test)]
-mod pager_tests {
-
-    use super::*;
-    use crate::{
-        storage::{
-            cell::OwnedCell,
-            page::{BTREE_PAGE_HEADER_SIZE, BtreePage},
-        },
-        test_utils::test_pager,
-    };
-    use serial_test::serial;
-
-    #[test]
-    #[serial]
-    fn test_single_page_rw() -> io::Result<()> {
-        let (mut pager, f) = test_pager()?;
-        let page_size = pager.page_size();
-        let mut page1 = BtreePage::alloc(page_size);
-        let page_id = page1.metadata().page_number;
-        assert!(page_id != crate::types::PAGE_ZERO, "Invalid page number!");
-        let result = pager.write_block_unchecked(page_id, page1.as_mut());
-        assert!(result.is_ok(), "Page writing to disk failed!");
-        let mut buf: MemBlock<()> = MemBlock::new(pager.page_size() as usize);
-        pager.read_block_unchecked(page_id, buf.as_mut())?;
-        assert_eq!(
-            buf.as_ref(),
-            page1.as_ref(),
-            "Retrieved content should match the allocated page!!"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    #[serial]
-    fn test_multiple_pages_rw() -> io::Result<()> {
-        let (mut pager, f) = test_pager()?;
-        let page_size = pager.page_size();
-        let mut pages = Vec::new();
-        let num_pages = 10;
-        let total_size = num_pages * page_size;
-
-        let mut raw_buffer: MemBlock<()> = MemBlock::new(total_size as usize);
-
-        let mut offset = 0;
-        // Accumulate all pages in our buffers.
-        for i in 0..num_pages {
-            let page = BtreePage::alloc(page_size);
-            let page_id = page.metadata().page_number;
-            assert!(
-                page_id != crate::types::PAGE_ZERO,
-                "Invalid page number for Pg {i}!"
-            );
-            let page_bytes = page.as_ref();
-            raw_buffer.as_mut()[offset..offset + page_bytes.len()].copy_from_slice(page_bytes);
-            offset += page_bytes.len();
-            pages.push(page);
-        }
-        // When writing a lot of pages we need to ensure the block size is aligned.
-        let total_page_size: usize = pages.iter().map(|p| p.as_ref().len()).sum();
-        assert_eq!(
-            total_page_size, total_size as usize,
-            "Total size was not as expected"
-        );
-        pager.write_block_unchecked(pages[0].metadata().page_number, raw_buffer.as_mut())?;
-
-        for page in pages {
-            // Try to read page 1 back.
-            let mut buf: MemBlock<()> = MemBlock::new(page.metadata().page_size as usize);
-
-            pager.read_block_unchecked(page.metadata().page_number, buf.as_mut())?;
-            assert_eq!(
-                buf.as_ref(),
-                page.as_ref(),
-                "Retrieved content should match the allocated page!!"
-            );
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    #[serial]
-    fn test_cache_eviction() -> io::Result<()> {
-        let (mut pager, f) = test_pager()?;
-        let page_size = pager.page_size();
-        let cache_size = 2; // Set a small cache capacity to force eviction.
-        pager.cache = PageCache::with_capacity(cache_size);
-
-        // Assigns more pages than those that would fit in the cache
-        let mut page_ids = Vec::new();
-        for _ in 0..2 {
-            let frame = pager.alloc_frame::<BtreePage>()?;
-            let id = pager.cache_frame(frame)?;
-
-            page_ids.push(id);
-        }
-        {
-            // Write some content on page 1.
-            let mut page1 = pager.read_page::<BtreePage>(page_ids[0])?;
-
-            page1
-                .try_with_variant_mut::<BtreePage, _, _, _>(|p| {
-                    p.metadata_mut().right_child = PageId::from(311);
-                })
-                .unwrap();
-        };
-
-        // Allocate a new page.
-        let frame = pager.alloc_frame::<BtreePage>()?;
-        let id = pager.cache_frame(frame)?;
-        page_ids.push(id);
-
-        // First page should have been expelled.
-        assert!(pager.cache.get(&page_ids[0]).is_none());
-        let read_page = pager.read_page::<BtreePage>(page_ids[0])?;
-
-        read_page
-            .try_with_variant::<BtreePage, _, _, _>(|p| {
-                assert_eq!(p.metadata().right_child, PageId::from(311));
-            })
-            .unwrap();
-        Ok(())
-    }
-
-    #[test]
-    #[serial]
-    fn test_dirty_page() -> io::Result<()> {
-        let (mut pager, f) = test_pager()?;
-        pager.cache = PageCache::with_capacity(1); // Cache pequeña
-
-        // Create a dirty page
-        let frame = pager.alloc_frame::<BtreePage>()?;
-        let id1 = pager.cache_frame(frame)?;
-        {
-            let mut frame = pager.cache.get(&id1).unwrap();
-            frame.mark_dirty();
-        }
-
-        // Force eviction with a dirty page
-        let frame = pager.alloc_frame::<BtreePage>()?;
-        let _id_2 = pager.cache_frame(frame)?;
-
-        // Verify it has been written out to disk.
-        let mut buf: MemBlock<()> = MemBlock::new(pager.page_size() as usize);
-        pager.read_block_unchecked(id1, buf.as_mut())?;
-
-        Ok(())
-    }
-
-    #[test]
-    #[serial]
-    fn test_dealloc_page() -> io::Result<()> {
-        let (mut pager, f) = test_pager()?;
-
-        // Allocate and deallocate pages
-        let frame = pager.alloc_frame::<BtreePage>()?;
-        let id1 = pager.cache_frame(frame)?;
-
-        let frame = pager.alloc_frame::<BtreePage>()?;
-        let id2 = pager.cache_frame(frame)?;
-
-        pager.dealloc_page::<BtreePage>(id1)?;
-
-        // Verify they are marked as free
-        assert_eq!(pager.header.first_free_page, id1);
-        assert_eq!(pager.header.last_free_page, id1);
-
-        // Deallocate the second page
-        pager.dealloc_page::<BtreePage>(id2)?;
-
-        // Check that the free list was properly built.
-        let page1 = pager.read_page::<OverflowPage>(id1)?;
-
-        let next_free = page1
-            .try_with_variant::<OverflowPage, _, _, _>(|free| free.metadata().next)
-            .unwrap();
-
-        assert_eq!(next_free, id2);
-        assert_eq!(pager.header.last_free_page, id2);
-
-        Ok(())
-    }
-
-    #[test]
-    #[serial]
-    fn test_page_reusability() -> io::Result<()> {
-        let (mut pager, f) = test_pager()?;
-        let num_pages = 350;
-        let num_cells = 15;
-        let mut ids: std::collections::HashSet<PageId> =
-            std::collections::HashSet::with_capacity(num_pages as usize);
-
-        for _ in 0..num_pages {
-            let frame = pager.alloc_frame::<BtreePage>()?;
-            let id = pager.cache_frame(frame)?;
-            ids.insert(id);
-        }
-
-        // Allocate and deallocate pages
-        for i in ids.iter() {
-            let mut page = pager.read_page::<BtreePage>(*i)?;
-            for i in 0..num_cells {
-                let cell = OwnedCell::new(b"Hello");
-                page.try_with_variant_mut::<BtreePage, _, _, _>(|p| {
-                    p.push(cell.clone());
-                })
-                .unwrap();
-            }
-
-            let mut removed = Vec::new();
-
-            page.try_with_variant_mut::<BtreePage, _, _, _>(|p| {
-                removed.extend(p.drain(..));
-                p.metadata_mut().free_space_ptr = 4096 - BTREE_PAGE_HEADER_SIZE as u32;
-            })
-            .unwrap();
-
-            pager.dealloc_page::<BtreePage>(*i)?;
-        }
-
-        // Allocate and deallocate pages
-        for _ in 0..num_pages {
-            let frame = pager.alloc_frame::<BtreePage>()?;
-            let id = pager.cache_frame(frame)?;
-            assert!(ids.contains(&id), "SHOULD REUSE A DEALLOCATED PAGE");
-            let read_page = pager.read_page::<BtreePage>(id)?;
-            read_page
-                .try_with_variant::<BtreePage, _, _, _>(|page| {
-                    assert!(
-                        page.page_number() == id,
-                        "MEMORY CORRUPTION. ASKED FOR PAGE {id} BUT GOT {}",
-                        page.page_number()
-                    );
-                    assert!(page.is_empty(), "PAGE SHOULD BE EMPTY AFTER REALLOCATING");
-                })
-                .unwrap();
-        }
-
-        Ok(())
-    }
-}
-*/

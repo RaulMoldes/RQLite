@@ -1,11 +1,10 @@
 use crate::{
     as_slice, repr_enum,
     storage::{
-        PageOps,
-        buffer::MemBlock,
         cell::Slot,
+        core::{buffer::MemBlock, traits::Buffer},
         latches::{Latch, PageLatch},
-        page::{BtreePage, OverflowPage, OverflowPageHeader, PageZero},
+        page::{BtreePage, OverflowPage, PageZero},
     },
     types::PageId,
 };
@@ -15,7 +14,6 @@ use std::{
     collections::HashMap,
     fmt::{self, Display, Formatter, Result as FmtResult},
     io::{Error as IoError, ErrorKind},
-    ptr,
     sync::{Arc, atomic::AtomicBool, atomic::Ordering},
 };
 
@@ -223,9 +221,9 @@ pub(crate) enum MemFrame {
 impl MemFrame {
     pub(crate) fn page_number(&self) -> PageId {
         match self {
-            Self::Btree(p) => p.read().page_number(),
-            Self::Zero(p) => p.read().page_number(),
-            Self::Overflow(p) => p.read().page_number(),
+            Self::Btree(p) => p.read().id(),
+            Self::Zero(p) => p.read().id(),
+            Self::Overflow(p) => p.read().id(),
         }
     }
 

@@ -186,10 +186,10 @@ impl Generator for KindEnumGenerator {
                     }
                 }
 
-                pub fn from_repr(value: u8) -> crate::database::errors::TypeResult<Self> {
+                pub fn from_repr(value: u8) -> crate::common::errors::TypeResult<Self> {
                     match value {
                         #(#variant_values => Ok(Self::#variant_names),)*
-                        _ => Err(crate::database::errors::TypeError::Other(format!("Cannot convert from value {value} to DataType"))),
+                        _ => Err(crate::common::errors::TypeError::Other(format!("Cannot convert from value {value} to DataType"))),
                     }
                 }
 
@@ -255,7 +255,7 @@ impl Generator for KindEnumGenerator {
             }
 
             impl TryFrom<u8> for #kind_name {
-                type Error = crate::database::errors::TypeError;
+                type Error = crate::common::errors::TypeError;
 
                 fn try_from(value: u8) -> Result<Self, Self::Error> {
                     Self::from_repr(value)
@@ -516,7 +516,7 @@ impl CastGenerator {
                                 #kind_name::#tvn => {
                                     <#ty as crate::types::core::AxmosCastable<#tty>>::try_cast(inner)
                                         .map(#name::#tvn)
-                                        .ok_or_else(|| crate::database::errors::TypeError::CastError {
+                                        .ok_or_else(|| crate::common::errors::TypeError::CastError {
                                             from: #kind_name::#vn,
                                             to: target,
                                         })
@@ -529,7 +529,7 @@ impl CastGenerator {
                         Self::#vn(inner) => {
                             match target {
                                 #(#target_arms)*
-                                _ => Err(crate::database::errors::TypeError::CastError {
+                                _ => Err(crate::common::errors::TypeError::CastError {
                                     from: self.kind(),
                                     to: target,
                                 }),
@@ -542,7 +542,7 @@ impl CastGenerator {
                             if target.is_null() {
                                 Ok(Self::#vn)
                             } else {
-                                Err(crate::database::errors::TypeError::CastError {
+                                Err(crate::common::errors::TypeError::CastError {
                                     from: #kind_name::#vn,
                                     to: target,
                                 })
@@ -556,7 +556,7 @@ impl CastGenerator {
         quote! {
             impl #name {
                 /// Try to cast this value to a different type.
-                pub fn try_cast(&self, target: #kind_name) -> Result<Self, crate::database::errors::TypeError> {
+                pub fn try_cast(&self, target: #kind_name) -> Result<Self, crate::common::errors::TypeError> {
                     if self.kind() == target {
                         return Ok(self.clone());
                     }
@@ -1317,7 +1317,7 @@ impl Generator for NumericTypeGenerator {
                 }
 
                 /// Perform a binary arithmetic operation with automatic type promotion.
-                pub fn arithmetic_op<F>(&self, other: &Self, hint: Option<#kind_name>, op: F) -> crate::database::errors::TypeResult<Self>
+                pub fn arithmetic_op<F>(&self, other: &Self, hint: Option<#kind_name>, op: F) -> crate::common::errors::TypeResult<Self>
                 where
                     F: FnOnce(crate::types::core::Number, crate::types::core::Number) -> crate::types::core::Number,
                 {
@@ -1327,33 +1327,33 @@ impl Generator for NumericTypeGenerator {
 
                     let (l, r) = match promoted {
                         crate::types::core::NumClass::Signed => {
-                            let l = self.as_i64_checked().ok_or_else(||     crate::database::errors::TypeError::Other(
+                            let l = self.as_i64_checked().ok_or_else(||     crate::common::errors::TypeError::Other(
                                 "Cannot convert to signed".to_string()
                             ))?;
-                            let r = other.as_i64_checked().ok_or_else(||     crate::database::errors::TypeError::Other(
+                            let r = other.as_i64_checked().ok_or_else(||     crate::common::errors::TypeError::Other(
                                 "Cannot convert to signed".to_string()
                             ))?;
                             (crate::types::core::Number::Signed(l), crate::types::core::Number::Signed(r))
                         }
                         crate::types::core::NumClass::Unsigned => {
-                            let l = self.as_u64_checked().ok_or_else(||     crate::database::errors::TypeError::Other(
+                            let l = self.as_u64_checked().ok_or_else(||     crate::common::errors::TypeError::Other(
                                 "Cannot convert to unsigned".to_string()
                             ))?;
-                            let r = other.as_u64_checked().ok_or_else(||     crate::database::errors::TypeError::Other(
+                            let r = other.as_u64_checked().ok_or_else(||     crate::common::errors::TypeError::Other(
                                 "Cannot convert to unsigned".to_string()
                             ))?;
                             (crate::types::core::Number::Unsigned(l), crate::types::core::Number::Unsigned(r))
                         }
                         crate::types::core::NumClass::Float => {
-                            let l = self.as_f64_checked().ok_or_else(||     crate::database::errors::TypeError::Other(
+                            let l = self.as_f64_checked().ok_or_else(||     crate::common::errors::TypeError::Other(
                                 "Cannot convert to float".to_string()
                             ))?;
-                            let r = other.as_f64_checked().ok_or_else(||     crate::database::errors::TypeError::Other(
+                            let r = other.as_f64_checked().ok_or_else(||     crate::common::errors::TypeError::Other(
                                 "Cannot convert to float".to_string()
                             ))?;
                             (crate::types::core::Number::Float(l), crate::types::core::Number::Float(r))
                         },
-                        crate::types::core::NumClass::Unknown => return Err(crate::database::errors::TypeError::Other(
+                        crate::types::core::NumClass::Unknown => return Err(crate::common::errors::TypeError::Other(
                                 "Invalid datatype".to_string()
                             ))
                     };
@@ -1684,19 +1684,19 @@ impl ArithmeticGenerator {
                         }
                     }
                 } else if v.inner_type.is_some() {
-                    quote! { (Self::#vn(_), Self::#vn(_)) => Err(crate::database::errors::TypeError::NullOperation) }
+                    quote! { (Self::#vn(_), Self::#vn(_)) => Err(crate::common::errors::TypeError::NullOperation) }
                 } else {
-                    quote! { (Self::#vn, Self::#vn) => Err(crate::database::errors::TypeError::NullOperation) }
+                    quote! { (Self::#vn, Self::#vn) => Err(crate::common::errors::TypeError::NullOperation) }
                 }
             })
             .collect();
 
         quote! {
             /// Perform checked arithmetic, returning error on type mismatch.
-            pub fn #method_ident(&self, rhs: &Self) -> Result<Self, crate::database::errors::TypeError> {
+            pub fn #method_ident(&self, rhs: &Self) -> Result<Self, crate::common::errors::TypeError> {
                 match (self, rhs) {
                     #(#match_arms,)*
-                    (left, right) => Err(crate::database::errors::TypeError::TypeMismatch {
+                    (left, right) => Err(crate::common::errors::TypeError::TypeMismatch {
                         left: left.kind(),
                         right: right.kind(),
                     }),

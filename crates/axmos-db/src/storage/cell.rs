@@ -1,6 +1,7 @@
 use crate::{
-    CELL_ALIGNMENT, scalar,
+    CELL_ALIGNMENT, as_slice, scalar,
     types::{PageId, UInt16},
+    writable_layout,
 };
 
 use std::{fmt::Debug, mem, ptr::NonNull, slice};
@@ -32,6 +33,7 @@ pub struct CellHeader {
     is_overflow: bool,
 }
 
+as_slice!(CellHeader);
 pub const CELL_HEADER_SIZE: usize = mem::size_of::<CellHeader>();
 
 impl CellHeader {
@@ -120,16 +122,10 @@ impl<'a> CellRef<'a> {
         self.header.size as usize - self.header.padding as usize
     }
 
-    /// Total size in bytes (header + data).
-    #[inline]
-    pub fn total_size(&self) -> usize {
-        CELL_HEADER_SIZE + self.header.size as usize
-    }
-
     /// Storage size (header + data + slot pointer).
     #[inline]
     pub fn storage_size(&self) -> usize {
-        self.total_size() + Slot::SIZE
+        mem::size_of::<CellHeader>() + self.data().len() + Slot::SIZE
     }
 
     /// Optional left child if set
@@ -158,25 +154,6 @@ impl<'a> CellRef<'a> {
                 .try_into()
                 .expect("failed deserializing overflow page number"),
         ))
-    }
-
-    /// Writes this cell into a byte buffer at the given offset.
-    /// Returns the number of bytes written.
-    ///
-    /// # Panics
-    /// Panics if the buffer doesn't have enough space.
-    pub fn write_to(&self, buffer: &mut [u8]) -> usize {
-        let header_bytes = unsafe {
-            slice::from_raw_parts(
-                self.header as *const CellHeader as *const u8,
-                CELL_HEADER_SIZE,
-            )
-        };
-
-        buffer[..CELL_HEADER_SIZE].copy_from_slice(header_bytes);
-        buffer[CELL_HEADER_SIZE..self.total_size()].copy_from_slice(self.data);
-
-        self.total_size()
     }
 }
 
@@ -265,15 +242,9 @@ impl<'a> CellMut<'a> {
     }
 
     #[inline]
-    /// See [CellRef<'_>::total_size]
-    pub fn total_size(&self) -> usize {
-        CELL_HEADER_SIZE + self.header.size as usize
-    }
-
-    #[inline]
     /// See [CellRef<'_>::storage_size]
     pub fn storage_size(&self) -> usize {
-        self.total_size() + Slot::SIZE
+        mem::size_of::<CellHeader>() + self.data().len() + Slot::SIZE
     }
 
     #[inline]
@@ -298,25 +269,6 @@ impl<'a> CellMut<'a> {
     /// Set the left child of the cell
     pub fn set_left_child(&mut self, child: PageId) {
         self.header.left_child = Some(child);
-    }
-
-    /// Writes this cell into a byte buffer at the given offset.
-    /// Returns the number of bytes written.
-    ///
-    /// # Panics
-    /// Panics if the buffer doesn't have enough space.
-    pub fn write_to(&self, buffer: &mut [u8]) -> usize {
-        let header_bytes = unsafe {
-            slice::from_raw_parts(
-                self.header as *const CellHeader as *const u8,
-                CELL_HEADER_SIZE,
-            )
-        };
-
-        buffer[..CELL_HEADER_SIZE].copy_from_slice(header_bytes);
-        buffer[CELL_HEADER_SIZE..self.total_size()].copy_from_slice(&self.data);
-
-        self.total_size()
     }
 }
 
@@ -481,25 +433,6 @@ impl OwnedCell {
         ))
     }
 
-    /// Writes this cell into a byte buffer at the given offset.
-    /// Returns the number of bytes written.
-    ///
-    /// # Panics
-    /// Panics if the buffer doesn't have enough space.
-    pub fn write_to(&self, buffer: &mut [u8]) -> usize {
-        let header_bytes = unsafe {
-            slice::from_raw_parts(
-                &self.header as *const CellHeader as *const u8,
-                CELL_HEADER_SIZE,
-            )
-        };
-
-        buffer[..CELL_HEADER_SIZE].copy_from_slice(header_bytes);
-        buffer[CELL_HEADER_SIZE..self.total_size()].copy_from_slice(&self.payload);
-
-        self.total_size()
-    }
-
     /// Get a reference to the cell
     pub fn as_cell_ref(&self) -> CellRef<'_> {
         CellRef {
@@ -545,3 +478,7 @@ impl<'a> From<&'a mut OwnedCell> for CellMut<'a> {
         }
     }
 }
+
+writable_layout!(OwnedCell, CellHeader, header, payload);
+writable_layout!(CellRef<'_>, CellHeader, header, data, lifetime);
+writable_layout!(CellMut<'_>, CellHeader, header, data, lifetime);

@@ -49,6 +49,10 @@ impl PageCache {
     pub fn num_frames(&self) -> usize {
         self.frames.len()
     }
+
+    pub fn get_capacity(&self) -> usize {
+        self.capacity
+    }
 }
 
 impl PageCache {
@@ -72,7 +76,8 @@ impl PageCache {
     }
 
     /// Add a list of frames to the buffer pool.
-    pub fn insert(&mut self, id: PageId, frame: MemFrame) -> io::Result<Option<MemFrame>> {
+    pub fn insert(&mut self, frame: MemFrame) -> io::Result<Option<MemFrame>> {
+        let id = frame.page_number();
         // If the frame already exists, update it
         if self.frames.contains_key(&id) {
             if let Some(old_frame) = self.frames.get_mut(&id) {

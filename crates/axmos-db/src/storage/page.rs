@@ -1,22 +1,18 @@
-use std::{
-    fmt::Debug,
-    io::{Error as IoError, ErrorKind},
-    iter, mem,
-    ops::{Bound, RangeBounds},
-    ptr::NonNull,
-    slice,
-};
+use std::{fmt::Debug, mem};
 
 use crate::{
-    DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, as_slice,
-    configs::{
-        AXMO, AxmosDBConfig, CELL_ALIGNMENT, DEFAULT_CACHE_SIZE, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
-        MIN_PAGE_SIZE, PAGE_ALIGNMENT,
+    DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, DEFAULT_POOL_SIZE, as_slice,
+    common::{
+        AXMO, AxmosDBConfig, DEFAULT_CACHE_SIZE, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MIN_PAGE_SIZE,
+        PAGE_ALIGNMENT,
     },
     storage::{
-        buffer::{Allocatable, MemBlock},
-        cell::{CELL_HEADER_SIZE, CellHeader, CellMut, CellRef, OwnedCell, Slot},
-        ops::PageOps,
+        BtreeMetadata, Identifiable,
+        cell::{CellHeader, Slot},
+        core::{
+            buffer::MemBlock,
+            traits::{BtreeBuffer, Buffer, BufferOps, ComposedMetadata},
+        },
     },
     types::{PAGE_ZERO, PageId},
 };
@@ -25,7 +21,7 @@ pub(crate) const SIGNATURE_SIZE: usize = 64; // Ed25519
 pub(crate) const SIGNATURE_OFFSET: usize = PAGE_ZERO_HEADER_SIZE - SIGNATURE_SIZE;
 
 /// Slotted page header.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[repr(C, align(64))]
 pub(crate) struct BtreePageHeader {
     pub(crate) page_number: PageId,
@@ -186,302 +182,37 @@ pub(crate) type BtreePage = MemBlock<BtreePageHeader>;
 pub(crate) type PageZero = MemBlock<PageZeroHeader>;
 pub(crate) type OverflowPage = MemBlock<OverflowPageHeader>;
 
-impl PageOps for PageZero {
-    const HEADER_SIZE: usize = PAGE_ZERO_HEADER_SIZE;
-
-    fn total_capacity(&self) -> usize {
-        self.capacity()
+/// All pages are [Buffer].
+impl BufferOps for PageZero {
+    fn available_space(&self) -> usize {
+        self.metadata().free_space as usize
     }
 
-    fn total_usable_space(&self, size: usize) -> usize {
-        Self::usable_space(size)
-    }
-
-    /// Obtain the offset at which the content data starts (after the slot array)
-    fn content_start_ptr(&self) -> u16 {
-        (self.num_slots() as usize * Slot::SIZE + PAGE_ZERO_HEADER_SIZE) as u16
-    }
-
-    fn page_number(&self) -> PageId {
-        self.metadata().page_number
-    }
-
-    /// Obtain the number of slots in the page.
-    fn num_slots(&self) -> u16 {
-        self.metadata().num_slots
-    }
-
-    /// Get a valid pointer to the start of the slot array (after the header)
-    fn slot_array_non_null(&self) -> NonNull<[u16]> {
-        NonNull::slice_from_raw_parts(self.data.cast(), self.num_slots() as usize)
-    }
-
-    /// Get a cell at a given offset in the page.
-    unsafe fn cell_at_offset(&self, offset: u16) -> NonNull<CellHeader> {
-        unsafe { self.data.byte_add(offset as usize).cast() }
-    }
-
-    /// Get the free space in the page.
-    fn free_space(&self) -> u32 {
-        self.metadata().free_space
-    }
-
-    /// Get the free space pointer.
-    /// On the slotted pages architecture, slots grow towards the end of the page while the cells grow upwards towards the beginning. The free space pointer is the pointer from the beginning of the page where the last inserted cell data ends.
-    fn free_space_pointer(&self) -> u32 {
-        self.metadata().free_space_ptr
-    }
-
-    /// Get the rightmost child of the page if it is set.
-    fn right_child(&self) -> Option<PageId> {
-        self.metadata().right_child
-    }
-
-    /// Write the content of a cell at a given offset in the page.
-    ///
-    /// # SAFETY
-    ///
-    /// This function is unsafe.
-    /// The caller must ensure the offset is valid (respects [CELL_ALIGNMENT]) and be aware that this function does not check if you are replacing the content of an existing cell.
-    unsafe fn write_cell_unchecked(&mut self, offset: u32, cell: CellRef<'_>) {
-        let total_size = cell.total_size() as u32;
-        let storage_size = cell.storage_size() as u32;
-        // Write new cell.
-        // SAFETY: `last_used_offset` keeps track of where the last cell was
-        // written. By substracting the total size of the new cell to
-        // `last_used_offset` we get a valid pointer within the page where we
-        // write the new cell.
-        unsafe {
-            let dest = self.data.byte_add(offset as usize).cast::<u8>().as_ptr();
-            let dest_slice = slice::from_raw_parts_mut(dest, cell.total_size());
-            cell.write_to(dest_slice);
-        };
-    }
-
-    /// Utilities to update tracking stats.
-    /// Increase the amount of free space in the page.
-    fn add_free_space(&mut self, space: u32) {
-        self.metadata_mut().free_space += space;
-    }
-
-    /// Utilities to update tracking stats.
-    /// Decrease the amount of free space in the page.
-    fn remove_free_space(&mut self, space: u32) {
-        self.metadata_mut().free_space -= space;
-    }
-
-    /// Utilities to update tracking stats.
-    /// Move upwards the free space pointer (cell was removed)
-    fn free_space_pointer_up(&mut self, bytes: u32) {
-        self.metadata_mut().free_space_ptr -= bytes;
-    }
-
-    /// Move downwards the free space pointer (cell was added)
-    fn free_space_pointer_down(&mut self, bytes: u32) {
-        self.metadata_mut().free_space_ptr += bytes;
-    }
-
-    /// Reset the free space pointer to a new value
-    fn reset_free_space_pointer(&mut self, offset: u32) {
-        self.metadata_mut().free_space_ptr = offset;
-    }
-
-    /// Reset the free space to a new value
-    fn reset_free_space(&mut self, bytes: u32) {
-        self.metadata_mut().free_space = bytes;
-    }
-    /// Reset the num slots to a new value
-    fn reset_num_slots(&mut self, num: u16) {
-        self.metadata_mut().num_slots = num;
-    }
-
-    /// Add slots to the page
-    fn add_slots(&mut self, num: u16) {
-        self.metadata_mut().num_slots += num;
-    }
-
-    /// Remove slots from the page
-    fn remove_slots(&mut self, num: u16) {
-        self.metadata_mut().num_slots -= num;
-    }
-
-    /// Get the page's next sibling (useful when iterating over the btree during scans.)
-    fn next_sibling(&self) -> Option<PageId> {
-        self.metadata().next_sibling
-    }
-    /// Set the next sibling value
-    fn set_next_sibling(&mut self, next: PageId) {
-        self.metadata_mut().next_sibling = Some(next);
-    }
-
-    /// Get the page's next sibling (useful when reverse iterating over the btree during scans.)
-    fn prev_sibling(&self) -> Option<PageId> {
-        self.metadata().previous_sibling
-    }
-
-    /// Set the prev sibling value
-    fn set_prev_sibling(&mut self, next: PageId) {
-        self.metadata_mut().previous_sibling = Some(next);
-    }
-}
-
-impl PageZero {
-    /// Allocate a new [`PageZero`] with the given configuration, initializing the header accordingly.
-    pub(crate) fn alloc(config: AxmosDBConfig) -> Self {
+    fn alloc(size: u32) -> Self {
         assert!(
-            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&config.page_size),
+            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
             "page size {} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}",
-            config.page_size
+            size
         );
 
         // The buffer is internally aligned to [`PAGE_ALIGNMENT`]
-        let mut buffer = MemBlock::<PageZeroHeader>::new(config.page_size as usize);
-        *buffer.metadata_mut() = PageZeroHeader::from_config(config);
+        let mut buffer = MemBlock::<PageZeroHeader>::new(size as usize);
+        *buffer.metadata_mut() = PageZeroHeader::new(
+            size,
+            DEFAULT_BTREE_MIN_KEYS,
+            DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE,
+            DEFAULT_POOL_SIZE,
+        );
 
         buffer
     }
 }
 
-impl PageOps for BtreePage {
-    const HEADER_SIZE: usize = BTREE_PAGE_HEADER_SIZE;
-
-    fn total_capacity(&self) -> usize {
-        self.capacity()
+impl BufferOps for BtreePage {
+    fn available_space(&self) -> usize {
+        self.metadata().free_space as usize
     }
 
-    fn total_usable_space(&self, size: usize) -> usize {
-        Self::usable_space(size)
-    }
-
-    /// Obtain the offset at which the content data starts (after the slot array)
-    fn content_start_ptr(&self) -> u16 {
-        (self.num_slots() as usize * Slot::SIZE + BTREE_PAGE_HEADER_SIZE) as u16
-    }
-
-    fn page_number(&self) -> PageId {
-        self.metadata().page_number
-    }
-
-    /// Obtain the number of slots in the page.
-    fn num_slots(&self) -> u16 {
-        self.metadata().num_slots
-    }
-
-    /// Get a valid pointer to the start of the slot array (after the header)
-    fn slot_array_non_null(&self) -> NonNull<[u16]> {
-        NonNull::slice_from_raw_parts(self.data.cast(), self.num_slots() as usize)
-    }
-
-    /// Get a cell at a given offset in the page.
-    unsafe fn cell_at_offset(&self, offset: u16) -> NonNull<CellHeader> {
-        unsafe { self.data.byte_add(offset as usize).cast() }
-    }
-
-    /// Get the free space in the page.
-    fn free_space(&self) -> u32 {
-        self.metadata().free_space
-    }
-
-    /// Get the free space pointer.
-    /// On the slotted pages architecture, slots grow towards the end of the page while the cells grow upwards towards the beginning. The free space pointer is the pointer from the beginning of the page where the last inserted cell data ends.
-    fn free_space_pointer(&self) -> u32 {
-        self.metadata().free_space_ptr
-    }
-
-    /// Get the rightmost child of the page if it is set.
-    fn right_child(&self) -> Option<PageId> {
-        self.metadata().right_child
-    }
-
-    /// Write the content of a cell at a given offset in the page.
-    ///
-    /// # SAFETY
-    ///
-    /// This function is unsafe.
-    /// The caller must ensure the offset is valid (respects [CELL_ALIGNMENT]) and be aware that this function does not check if you are replacing the content of an existing cell.
-    unsafe fn write_cell_unchecked(&mut self, offset: u32, cell: CellRef<'_>) {
-        let total_size = cell.total_size() as u32;
-        let storage_size = cell.storage_size() as u32;
-        // Write new cell.
-        // SAFETY: `last_used_offset` keeps track of where the last cell was
-        // written. By substracting the total size of the new cell to
-        // `last_used_offset` we get a valid pointer within the page where we
-        // write the new cell.
-        unsafe {
-            let dest = self.data.byte_add(offset as usize).cast::<u8>().as_ptr();
-            let dest_slice = slice::from_raw_parts_mut(dest, cell.total_size());
-            cell.write_to(dest_slice);
-        };
-    }
-
-    /// Utilities to update tracking stats.
-    /// Increase the amount of free space in the page.
-    fn add_free_space(&mut self, space: u32) {
-        self.metadata_mut().free_space += space;
-    }
-
-    /// Utilities to update tracking stats.
-    /// Decrease the amount of free space in the page.
-    fn remove_free_space(&mut self, space: u32) {
-        self.metadata_mut().free_space -= space;
-    }
-
-    /// Utilities to update tracking stats.
-    /// Move upwards the free space pointer (cell was removed)
-    fn free_space_pointer_up(&mut self, bytes: u32) {
-        self.metadata_mut().free_space_ptr -= bytes;
-    }
-
-    /// Move downwards the free space pointer (cell was added)
-    fn free_space_pointer_down(&mut self, bytes: u32) {
-        self.metadata_mut().free_space_ptr += bytes;
-    }
-
-    /// Reset the free space pointer to a new value
-    fn reset_free_space_pointer(&mut self, offset: u32) {
-        self.metadata_mut().free_space_ptr = offset;
-    }
-
-    /// Reset the free space to a new value
-    fn reset_free_space(&mut self, bytes: u32) {
-        self.metadata_mut().free_space = bytes;
-    }
-    /// Reset the num slots to a new value
-    fn reset_num_slots(&mut self, num: u16) {
-        self.metadata_mut().num_slots = num;
-    }
-
-    /// Add slots to the page
-    fn add_slots(&mut self, num: u16) {
-        self.metadata_mut().num_slots += num;
-    }
-
-    /// Remove slots from the page
-    fn remove_slots(&mut self, num: u16) {
-        self.metadata_mut().num_slots -= num;
-    }
-
-    /// Get the page's next sibling (useful when iterating over the btree during scans.)
-    fn next_sibling(&self) -> Option<PageId> {
-        self.metadata().next_sibling
-    }
-    /// Set the next sibling value
-    fn set_next_sibling(&mut self, next: PageId) {
-        self.metadata_mut().next_sibling = Some(next);
-    }
-
-    /// Get the page's next sibling (useful when reverse iterating over the btree during scans.)
-    fn prev_sibling(&self) -> Option<PageId> {
-        self.metadata().previous_sibling
-    }
-
-    /// Set the prev sibling value
-    fn set_prev_sibling(&mut self, next: PageId) {
-        self.metadata_mut().previous_sibling = Some(next);
-    }
-}
-
-impl Allocatable for BtreePage {
     /// Allocate a new [`BtreePage`] of the given size, initializing the header accordingly
     fn alloc(page_size: u32) -> Self {
         assert!(
@@ -496,9 +227,267 @@ impl Allocatable for BtreePage {
     }
 }
 
+impl Identifiable for OverflowPageHeader {
+    type IdType = PageId;
+    fn id(&self) -> Self::IdType {
+        self.page_number
+    }
+}
+
+impl Identifiable for BtreePageHeader {
+    type IdType = PageId;
+    fn id(&self) -> Self::IdType {
+        self.page_number
+    }
+}
+
+impl Identifiable for PageZeroHeader {
+    type IdType = PageId;
+    fn id(&self) -> Self::IdType {
+        self.page_number
+    }
+}
+
+impl BufferOps for OverflowPage {
+    /// Alocate a new [OverflowPage] of the given [page_size]
+    fn alloc(page_size: u32) -> Self {
+        assert!(
+            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&page_size),
+            "page size {page_size} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}"
+        );
+
+        let mut buf = MemBlock::<OverflowPageHeader>::new(page_size as usize);
+        let id = PageId::new();
+        *buf.metadata_mut() = OverflowPageHeader::new(id, page_size);
+
+        buf
+    }
+
+    fn available_space(&self) -> usize {
+        self.usable_space(self.capacity()) - self.metadata().num_bytes as usize
+    }
+}
+
+/// Only [PageZero] and [BtreePage] are [ComposedBuffer] since Overflow pages do not have cells.
+impl ComposedMetadata for BtreePageHeader {
+    type ItemHeader = CellHeader;
+}
+
+impl ComposedMetadata for PageZeroHeader {
+    type ItemHeader = CellHeader;
+}
+
+impl BtreeMetadata for BtreePageHeader {
+    /// Obtain the offset at which the content data starts (after the slot array)
+    fn content_start_ptr(&self) -> u16 {
+        (self.num_slots() as usize * Slot::SIZE + mem::size_of::<Self>()) as u16
+    }
+
+    /// Obtain the number of slots in the page.
+    fn num_slots(&self) -> u16 {
+        self.num_slots
+    }
+
+    /// Get the free space in the page.
+    fn free_space(&self) -> u32 {
+        self.free_space
+    }
+
+    /// Get the free space pointer.
+    /// On the slotted pages architecture, slots grow towards the end of the page while the cells grow upwards towards the beginning. The free space pointer is the pointer from the beginning of the page where the last inserted cell data ends.
+    fn free_space_pointer(&self) -> u32 {
+        self.free_space_ptr
+    }
+
+    /// Get the rightmost child of the page if it is set.
+    fn right_child(&self) -> Option<PageId> {
+        self.right_child
+    }
+
+    /// Utilities to update tracking stats.
+    /// Increase the amount of free space in the page.
+    fn add_free_space(&mut self, space: u32) {
+        self.free_space += space;
+    }
+
+    /// Utilities to update tracking stats.
+    /// Decrease the amount of free space in the page.
+    fn remove_free_space(&mut self, space: u32) {
+        self.free_space -= space;
+    }
+
+    /// Utilities to update tracking stats.
+    /// Move upwards the free space pointer (cell was removed)
+    fn free_space_pointer_up(&mut self, bytes: u32) {
+        self.free_space_ptr -= bytes;
+    }
+
+    /// Move downwards the free space pointer (cell was added)
+    fn free_space_pointer_down(&mut self, bytes: u32) {
+        self.free_space_ptr += bytes;
+    }
+
+    /// Reset the free space pointer to a new value
+    fn reset_free_space_pointer(&mut self, offset: u32) {
+        self.free_space_ptr = offset;
+    }
+
+    /// Reset the free space to a new value
+    fn reset_free_space(&mut self, bytes: u32) {
+        self.free_space = bytes;
+    }
+    /// Reset the num slots to a new value
+    fn reset_num_slots(&mut self, num: u16) {
+        self.num_slots = num;
+    }
+
+    /// Add slots to the page
+    fn add_slots(&mut self, num: u16) {
+        self.num_slots += num;
+    }
+
+    /// Remove slots from the page
+    fn remove_slots(&mut self, num: u16) {
+        self.num_slots -= num;
+    }
+
+    /// Get the page's next sibling (useful when iterating over the btree during scans.)
+    fn next_sibling(&self) -> Option<PageId> {
+        self.next_sibling
+    }
+    /// Set the next sibling value
+    fn set_next_sibling(&mut self, next: PageId) {
+        self.next_sibling = Some(next);
+    }
+
+    /// Get the page's next sibling (useful when reverse iterating over the btree during scans.)
+    fn prev_sibling(&self) -> Option<PageId> {
+        self.previous_sibling
+    }
+
+    /// Set the prev sibling value
+    fn set_prev_sibling(&mut self, prev: PageId) {
+        self.previous_sibling = Some(prev);
+    }
+}
+
+impl BtreeMetadata for PageZeroHeader {
+    /// Obtain the offset at which the content data starts (after the slot array)
+    fn content_start_ptr(&self) -> u16 {
+        (self.num_slots() as usize * Slot::SIZE + mem::size_of::<Self>()) as u16
+    }
+
+    /// Obtain the number of slots in the page.
+    fn num_slots(&self) -> u16 {
+        self.num_slots
+    }
+
+    /// Get the free space in the page.
+    fn free_space(&self) -> u32 {
+        self.free_space
+    }
+
+    /// Get the free space pointer.
+    /// On the slotted pages architecture, slots grow towards the end of the page while the cells grow upwards towards the beginning. The free space pointer is the pointer from the beginning of the page where the last inserted cell data ends.
+    fn free_space_pointer(&self) -> u32 {
+        self.free_space_ptr
+    }
+
+    /// Get the rightmost child of the page if it is set.
+    fn right_child(&self) -> Option<PageId> {
+        self.right_child
+    }
+
+    /// Utilities to update tracking stats.
+    /// Increase the amount of free space in the page.
+    fn add_free_space(&mut self, space: u32) {
+        self.free_space += space;
+    }
+
+    /// Utilities to update tracking stats.
+    /// Decrease the amount of free space in the page.
+    fn remove_free_space(&mut self, space: u32) {
+        self.free_space -= space;
+    }
+
+    /// Utilities to update tracking stats.
+    /// Move upwards the free space pointer (cell was removed)
+    fn free_space_pointer_up(&mut self, bytes: u32) {
+        self.free_space_ptr -= bytes;
+    }
+
+    /// Move downwards the free space pointer (cell was added)
+    fn free_space_pointer_down(&mut self, bytes: u32) {
+        self.free_space_ptr += bytes;
+    }
+
+    /// Reset the free space pointer to a new value
+    fn reset_free_space_pointer(&mut self, offset: u32) {
+        self.free_space_ptr = offset;
+    }
+
+    /// Reset the free space to a new value
+    fn reset_free_space(&mut self, bytes: u32) {
+        self.free_space = bytes;
+    }
+    /// Reset the num slots to a new value
+    fn reset_num_slots(&mut self, num: u16) {
+        self.num_slots = num;
+    }
+
+    /// Add slots to the page
+    fn add_slots(&mut self, num: u16) {
+        self.num_slots += num;
+    }
+
+    /// Remove slots from the page
+    fn remove_slots(&mut self, num: u16) {
+        self.num_slots -= num;
+    }
+
+    /// Get the page's next sibling (useful when iterating over the btree during scans.)
+    fn next_sibling(&self) -> Option<PageId> {
+        self.next_sibling
+    }
+    /// Set the next sibling value
+    fn set_next_sibling(&mut self, next: PageId) {
+        self.next_sibling = Some(next);
+    }
+
+    /// Get the page's next sibling (useful when reverse iterating over the btree during scans.)
+    fn prev_sibling(&self) -> Option<PageId> {
+        self.previous_sibling
+    }
+
+    /// Set the prev sibling value
+    fn set_prev_sibling(&mut self, prev: PageId) {
+        self.previous_sibling = Some(prev);
+    }
+}
+
+impl BtreeBuffer for PageZero {}
+impl BtreeBuffer for BtreePage {}
+
+impl PageZero {
+    /// Allocate a new [`PageZero`] with the given configuration, initializing the header accordingly.
+    pub(crate) fn from_config(config: AxmosDBConfig) -> Self {
+        assert!(
+            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&config.page_size),
+            "page size {} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}",
+            config.page_size
+        );
+
+        // The buffer is internally aligned to [`PAGE_ALIGNMENT`]
+        let mut buffer = MemBlock::<PageZeroHeader>::new(config.page_size as usize);
+        *buffer.metadata_mut() = PageZeroHeader::from_config(config);
+
+        buffer
+    }
+}
+
 impl BtreePage {
     pub(crate) fn dealloc(self) -> OverflowPage {
-        let number = self.page_number();
+        let number = self.id();
         // Casts the page into an overflowpage and overwrites the header maintaining our current page id. This is necessary because the pager needs to work with consistent page numbers.
         let mut converted: MemBlock<OverflowPageHeader> = self.cast();
         let size = converted.size();
@@ -514,26 +503,7 @@ impl BtreePage {
 
 /// Overflow page logic goes here.
 /// The good thing with overflow pages is that we can reuse its structure with free pages too, since they just have the header and the data content.
-impl Allocatable for OverflowPage {
-    /// Alocate a new [OverflowPage] of the given [page_size]
-    fn alloc(page_size: u32) -> Self {
-        assert!(
-            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&page_size),
-            "page size {page_size} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}"
-        );
-
-        let mut buf = MemBlock::<OverflowPageHeader>::new(page_size as usize);
-        let id = PageId::new();
-        *buf.metadata_mut() = OverflowPageHeader::new(id, page_size);
-
-        buf
-    }
-}
-
 impl OverflowPage {
-    /// Size of the header in an overflow page
-    pub(crate) const HEADER_SIZE: usize = OVERFLOW_HEADER_SIZE;
-
     /// Returns the page number (page id) of this overflow page.
     pub(crate) fn page_number(&self) -> PageId {
         self.metadata().page_number

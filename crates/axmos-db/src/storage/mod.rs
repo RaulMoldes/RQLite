@@ -1,11 +1,11 @@
-pub mod buffer;
 pub mod cell;
+pub mod core;
 pub mod latches;
-pub mod ops;
 pub mod page;
-pub(crate) use ops::PageOps;
+pub(crate) use core::traits::*;
 //pub mod tuple;
 pub mod wal;
+
 
 #[cfg(miri)]
 mod tests;

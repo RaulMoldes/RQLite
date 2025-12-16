@@ -1,3 +1,6 @@
+pub mod errors;
+pub use errors::*;
+
 use std::thread;
 
 pub(crate) const DEFAULT_NUM_WORKERS: usize = 4;

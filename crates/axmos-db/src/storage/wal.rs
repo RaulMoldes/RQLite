@@ -1,16 +1,18 @@
 /// This module includes the main data structures that represent Write Ahead Log blocks and records.
 use crate::{
     CELL_ALIGNMENT, as_slice, repr_enum,
-    storage::buffer::MemBlock,
+    storage::{
+        WalMetadata,
+        core::{
+            buffer::MemBlock,
+            traits::{Buffer, BufferOps, ComposedMetadata, Identifiable, WalBuffer},
+        },
+    },
     types::{BlockId, LogId, ObjectId, TransactionId},
+    writable_layout,
 };
 
-use std::{
-    io::{self, Error as IoError, ErrorKind},
-    mem,
-    ptr::NonNull,
-    slice,
-};
+use std::{mem, ptr::NonNull, slice};
 
 /// Module constants
 pub(crate) const WAL_RECORD_ALIGNMENT: usize = CELL_ALIGNMENT as usize;
@@ -62,6 +64,8 @@ pub struct BlockZeroHeader {
     pub(crate) block_header: BlockHeader,
     pub(crate) wal_header: WalHeader,
 }
+
+as_slice!(BlockZeroHeader);
 
 impl BlockHeader {
     // As wal blocks are never deallocated (there is no concept of free block in memory as happens with pages, when we need a new block we simply allocate it), there is no issue in always creating block ids in the header initialization. Blocks are also never modified once they are flushed to disk, which makes sequential access easiar. As we do with pages, we can access the offset of a specific block in the file by computing: [BlockId] *  [block_size].
@@ -189,12 +193,6 @@ impl OwnedRecord {
     }
 
     #[inline]
-    /// Return the total size of the record (including header)
-    pub fn total_size(&self) -> usize {
-        RECORD_HEADER_SIZE + self.payload.len()
-    }
-
-    #[inline]
     /// Return the header as a reference
     pub fn metadata(&self) -> &RecordHeader {
         &self.header
@@ -229,13 +227,6 @@ impl OwnedRecord {
         let start = self.header.undo_len as usize;
         let end = start + self.header.redo_len as usize;
         &self.payload[start..end]
-    }
-
-    /// Write the record to a mutable slice
-    pub fn write_to(&self, buffer: &mut [u8]) -> usize {
-        buffer[..RECORD_HEADER_SIZE].copy_from_slice(self.header.as_ref());
-        buffer[RECORD_HEADER_SIZE..self.total_size()].copy_from_slice(&self.payload);
-        self.total_size()
     }
 
     /// Return a reference to this record
@@ -336,152 +327,484 @@ impl<'a> RecordRef<'a> {
     }
 }
 
+writable_layout!(RecordRef<'_>, RecordHeader, header, data, lifetime);
+writable_layout!(OwnedRecord, RecordHeader, header, payload);
+
 pub(crate) type BlockZero = MemBlock<BlockZeroHeader>;
 pub(crate) type WalBlock = MemBlock<BlockHeader>;
 
-/// Standard wal block (all of them but block zero)
-impl WalBlock {
-    /// Allocates a new Wal Block of the given size
-    pub(crate) fn alloc(size: usize) -> Self {
-        Self::new(size)
+impl BufferOps for BlockZero {
+    fn alloc(size: u32) -> Self {
+        Self::new(size as usize)
     }
 
-    #[inline]
-    /// Return the block number of this block
-    fn block_number(&self) -> BlockId {
-        self.metadata().block_number
+    fn available_space(&self) -> usize {
+        self.usable_space(self.capacity())
+            .saturating_sub(self.metadata().block_header.used_bytes as usize)
+    }
+}
+
+impl BufferOps for WalBlock {
+    fn alloc(size: u32) -> Self {
+        Self::new(size as usize)
     }
 
-    /// Get a pointer to a record at a given offset
-    ///
-    /// # SAFETY
-    /// The caller must ensure that the offset stays valid (there is an actual record at that poistion in memory).
-    unsafe fn record_at_offset(&self, offset: usize) -> NonNull<RecordHeader> {
-        unsafe { self.data.byte_add(offset).cast() }
-    }
-
-    /// Reconstruct a record view at a given offset in the block
-    ///
-    /// # SAFETY
-    ///
-    /// See [WalBlock::record_at_offset]
-    pub(crate) fn record(&self, offset: usize) -> RecordRef<'_> {
-        unsafe { RecordRef::from_raw(self.record_at_offset(offset)) }
-    }
-
-    /// Reconstruct an owned record at a given offset in the block
-    ///
-    /// # SAFETY
-    ///
-    /// See [WalBlock::record_at_offset]
-    pub(crate) fn record_owned(&self, offset: usize) -> OwnedRecord {
-        unsafe { OwnedRecord::from_ref(RecordRef::from_raw(self.record_at_offset(offset))) }
-    }
-
-    /// Attempts to push a record at the end of the block.
-    /// If the record does not fit, returns an error.
-    pub(crate) fn try_push(&mut self, record: OwnedRecord) -> io::Result<LogId> {
-        let record_size = record.total_size();
-
-        if self.available_space() < record_size {
-            return Err(IoError::new(
-                ErrorKind::InvalidInput,
-                "Data too large for this block.",
-            ));
-        };
-
-        let lsn = record.lsn();
-        let offset = self.metadata().used_bytes as usize;
-        let dest = &mut self.data_mut()[offset..];
-
-        record.write_to(dest);
-        self.metadata_mut().used_bytes += record_size as u64;
-
-        if self.metadata().block_first_lsn.is_none() {
-            self.metadata_mut().block_first_lsn = Some(lsn);
-        };
-        self.metadata_mut().block_last_lsn = Some(lsn);
-
-        Ok(lsn)
-    }
-
-    /// Utility to compute the available space in the block.
-    pub(crate) fn available_space(&self) -> usize {
-        self.capacity()
+    fn available_space(&self) -> usize {
+        self.usable_space(self.capacity())
             .saturating_sub(self.metadata().used_bytes as usize)
     }
 }
 
-impl BlockZero {
-    // Allocates a new Wal Block of the given size
-    pub(crate) fn alloc(size: usize) -> Self {
-        Self::new(size)
+impl ComposedMetadata for BlockHeader {
+    type ItemHeader = RecordHeader;
+}
+
+impl ComposedMetadata for BlockZeroHeader {
+    type ItemHeader = RecordHeader;
+}
+
+impl WalMetadata for BlockHeader {
+    fn last_lsn(&self) -> Option<LogId> {
+        self.block_last_lsn
     }
 
-    #[inline]
-    /// Return the block number of this block
-    fn block_number(&self) -> BlockId {
-        self.metadata().block_header.block_number
+    fn start_lsn(&self) -> Option<LogId> {
+        self.block_first_lsn
     }
 
-    /// Get a pointer to a record at a given offset
-    ///
-    /// # SAFETY
-    /// The caller must ensure that the offset stays valid (there is an actual record at that poistion in memory).
-    unsafe fn record_at_offset(&self, offset: usize) -> NonNull<RecordHeader> {
-        unsafe { self.data.byte_add(offset).cast() }
+    fn set_last_lsn(&mut self, lsn: LogId) {
+        self.block_last_lsn = Some(lsn);
     }
 
-    /// Reconstruct a record view at a given offset in the block
-    ///
-    /// # SAFETY
-    ///
-    /// See [WalBlock::record_at_offset]
-    pub(crate) fn record(&self, offset: usize) -> RecordRef<'_> {
-        unsafe { RecordRef::from_raw(self.record_at_offset(offset)) }
+    fn set_start_lsn(&mut self, lsn: LogId) {
+        self.block_first_lsn = Some(lsn);
     }
 
-    /// Reconstruct an owned record at a given offset in the block
-    ///
-    /// # SAFETY
-    ///
-    /// See [WalBlock::record_at_offset]
-    pub(crate) fn record_owned(&self, offset: usize) -> OwnedRecord {
-        unsafe { OwnedRecord::from_ref(RecordRef::from_raw(self.record_at_offset(offset))) }
+    fn increment_write_offset(&mut self, added_bytes: usize) {
+        self.used_bytes += added_bytes as u64
     }
 
-    /// Attempts to push a record at the end of the block.
-    /// If the record does not fit, returns an error.
-    pub fn try_push(&mut self, record: OwnedRecord) -> io::Result<LogId> {
-        let record_size = record.total_size();
+    fn total_used_bytes(&self) -> usize {
+        self.used_bytes as usize
+    }
+}
 
-        if self.available_space() < record_size {
-            return Err(IoError::new(
-                ErrorKind::InvalidInput,
-                "Data too large for this block.",
-            ));
-        };
-
-        let lsn = record.lsn();
-        let offset = self.metadata().block_header.used_bytes as usize;
-        let dest = &mut self.data_mut()[offset..];
-
-        record.write_to(dest);
-        self.metadata_mut().block_header.used_bytes += record_size as u64;
-
-        if self.metadata().block_header.block_first_lsn.is_none() {
-            self.metadata_mut().block_header.block_first_lsn = Some(lsn);
-        };
-        self.metadata_mut().block_header.block_last_lsn = Some(lsn);
-
-        // Wal header gets updated in [`WriteAheadLog::push`]
-
-        Ok(lsn)
+impl WalMetadata for BlockZeroHeader {
+    fn last_lsn(&self) -> Option<LogId> {
+        self.block_header.block_last_lsn
     }
 
-    /// Utility to compute the available space in the block.
-    pub(crate) fn available_space(&self) -> usize {
-        self.capacity()
-            .saturating_sub(self.metadata().block_header.used_bytes as usize)
+    fn start_lsn(&self) -> Option<LogId> {
+        self.block_header.block_first_lsn
     }
+
+    fn set_last_lsn(&mut self, lsn: LogId) {
+        self.block_header.block_last_lsn = Some(lsn);
+    }
+
+    fn set_start_lsn(&mut self, lsn: LogId) {
+        self.block_header.block_first_lsn = Some(lsn);
+    }
+
+    fn increment_write_offset(&mut self, added_bytes: usize) {
+        self.block_header.used_bytes += added_bytes as u64
+    }
+
+    fn total_used_bytes(&self) -> usize {
+        self.block_header.used_bytes as usize
+    }
+}
+
+impl WalBuffer for BlockZero {}
+impl WalBuffer for WalBlock {}
+
+impl Identifiable for BlockHeader {
+    type IdType = BlockId;
+    fn id(&self) -> Self::IdType {
+        self.block_number
+    }
+}
+
+impl Identifiable for BlockZeroHeader {
+    type IdType = BlockId;
+    fn id(&self) -> Self::IdType {
+        self.block_header.block_number
+    }
+}
+
+/// Macro to create WAL (Write-Ahead Logging) records inline.
+///
+/// # Syntax
+///
+/// The macro supports different types of records with optional parameters:
+///
+/// ## Begin Record
+/// ```rust no-run
+/// record!(begin 123);
+/// record!(begin_tid transaction_id);
+/// ```
+///
+/// ## Commit Record
+/// ```rust  no-run
+/// record!(commit 456);
+/// record!(commit 456, prev: Some(lsn));
+/// ```
+///
+/// ## Update Record
+/// ```rust no-run
+/// record!(update 789, 1, b"old_data", b"new_data");
+/// record!(update 789, 1, prev: Some(lsn), b"old", b"new");
+/// ```
+///
+/// ## Insert Record
+/// ```rust no-run
+/// record!(insert 999, 2, b"data_to_insert");
+/// record!(insert 999, 2, prev: Some(lsn), b"data");
+/// ```
+///
+/// ## Delete Record
+/// ```rust  no-run
+/// record!(delete 111, 3, b"data_to_delete");
+/// record!(delete 111, 3, prev: Some(lsn), b"data");
+/// ```
+///
+/// ## Dynamic Record Type (accepts RecordType expression)
+/// ```rust no-run
+/// let rec_type = RecordType::Update;
+/// record!(type: rec_type, tid: 1, oid: 2, undo: b"old", redo: b"new");
+/// record!(type: rec_type, tid: 1, oid: 2, prev: Some(lsn), undo: b"old", redo: b"new");
+///
+/// // With sized payloads (generates vec![0; size])
+/// record!(type: rec_type, tid: 1, oid: 2, undo_size: 64, redo_size: 128);
+/// ```
+#[macro_export]
+macro_rules! record {
+    // Begin records.
+    (begin $tid:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            None,
+            $crate::types::ObjectId::default(),
+            $crate::storage::wal::RecordType::Begin,
+            &[],
+            &[],
+        )
+    }};
+
+    (begin_tid $tid:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $tid,
+            None,
+            $crate::types::ObjectId::default(),
+            $crate::storage::wal::RecordType::Begin,
+            &[],
+            &[],
+        )
+    }};
+
+    // Commit records
+    (commit $tid:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            None,
+            $crate::types::ObjectId::default(),
+            $crate::storage::wal::RecordType::Commit,
+            &[],
+            &[],
+        )
+    }};
+
+    (commit $tid:expr, prev: $prev_lsn:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            $prev_lsn,
+            $crate::types::ObjectId::default(),
+            $crate::storage::wal::RecordType::Commit,
+            &[],
+            &[],
+        )
+    }};
+
+    (commit_tid $tid:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $tid,
+            None,
+            $crate::types::ObjectId::default(),
+            $crate::storage::wal::RecordType::Commit,
+            &[],
+            &[],
+        )
+    }};
+
+    (commit_tid $tid:expr, prev: $prev_lsn:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $tid,
+            $prev_lsn,
+            $crate::types::ObjectId::default(),
+            $crate::storage::wal::RecordType::Commit,
+            &[],
+            &[],
+        )
+    }};
+
+    // Abort records
+    (abort $tid:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            None,
+            $crate::types::ObjectId::default(),
+            $crate::storage::wal::RecordType::Abort,
+            &[],
+            &[],
+        )
+    }};
+
+    (abort $tid:expr, prev: $prev_lsn:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            $prev_lsn,
+            $crate::types::ObjectId::default(),
+            $crate::storage::wal::RecordType::Abort,
+            &[],
+            &[],
+        )
+    }};
+
+    // End records
+    (end $tid:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            None,
+            $crate::types::ObjectId::default(),
+            $crate::storage::wal::RecordType::End,
+            &[],
+            &[],
+        )
+    }};
+
+    (end $tid:expr, prev: $prev_lsn:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            $prev_lsn,
+            $crate::types::ObjectId::default(),
+            $crate::storage::wal::RecordType::End,
+            &[],
+            &[],
+        )
+    }};
+
+    // Update records
+    (update $tid:expr, $oid:expr, $old:expr, $new:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            None,
+            $crate::types::ObjectId::from($oid as u64),
+            $crate::storage::wal::RecordType::Update,
+            $old,
+            $new,
+        )
+    }};
+
+    (update $tid:expr, $oid:expr, prev: $prev_lsn:expr, $old:expr, $new:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            $prev_lsn,
+            $crate::types::ObjectId::from($oid as u64),
+            $crate::storage::wal::RecordType::Update,
+            $old,
+            $new,
+        )
+    }};
+
+    (update_tid $tid:expr, $oid:expr, $old:expr, $new:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $tid,
+            None,
+            $oid,
+            $crate::storage::wal::RecordType::Update,
+            $old,
+            $new,
+        )
+    }};
+
+    (update_tid $tid:expr, $oid:expr, prev: $prev_lsn:expr, $old:expr, $new:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $tid,
+            $prev_lsn,
+            $oid,
+            $crate::storage::wal::RecordType::Update,
+            $old,
+            $new,
+        )
+    }};
+
+    // Insert records
+    (insert $tid:expr, $oid:expr, $data:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            None,
+            $crate::types::ObjectId::from($oid as u64),
+            $crate::storage::wal::RecordType::Insert,
+            &[],
+            $data,
+        )
+    }};
+
+    (insert $tid:expr, $oid:expr, prev: $prev_lsn:expr, $data:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            $prev_lsn,
+            $crate::types::ObjectId::from($oid as u64),
+            $crate::storage::wal::RecordType::Insert,
+            &[],
+            $data,
+        )
+    }};
+
+    (insert_tid $tid:expr, $oid:expr, $data:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $tid,
+            None,
+            $oid,
+            $crate::storage::wal::RecordType::Insert,
+            &[],
+            $data,
+        )
+    }};
+
+    (insert_tid $tid:expr, $oid:expr, prev: $prev_lsn:expr, $data:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $tid,
+            $prev_lsn,
+            $oid,
+            $crate::storage::wal::RecordType::Insert,
+            &[],
+            $data,
+        )
+    }};
+
+    // Delete records
+    (delete $tid:expr, $oid:expr, $old_data:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            None,
+            $crate::types::ObjectId::from($oid as u64),
+            $crate::storage::wal::RecordType::Delete,
+            $old_data,
+            &[],
+        )
+    }};
+
+    (delete $tid:expr, $oid:expr, prev: $prev_lsn:expr, $old_data:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            $prev_lsn,
+            $crate::types::ObjectId::from($oid as u64),
+            $crate::storage::wal::RecordType::Delete,
+            $old_data,
+            &[],
+        )
+    }};
+
+    (delete_tid $tid:expr, $oid:expr, $old_data:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $tid,
+            None,
+            $oid,
+            $crate::storage::wal::RecordType::Delete,
+            $old_data,
+            &[],
+        )
+    }};
+
+    (delete_tid $tid:expr, $oid:expr, prev: $prev_lsn:expr, $old_data:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $tid,
+            $prev_lsn,
+            $oid,
+            $crate::storage::wal::RecordType::Delete,
+            $old_data,
+            &[],
+        )
+    }};
+
+    // Basic dynamic type with data slices
+    (rec_type: $rec_type:expr, tid: $tid:expr, oid: $oid:expr, undo: $undo:expr, redo: $redo:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            None,
+            $crate::types::ObjectId::from($oid as u64),
+            $rec_type,
+            $undo,
+            $redo,
+        )
+    }};
+
+    // Dynamic type with prev_lsn and data slices
+    (rec_type: $rec_type:expr, tid: $tid:expr, oid: $oid:expr, prev: $prev_lsn:expr, undo: $undo:expr, redo: $redo:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            $prev_lsn,
+            $crate::types::ObjectId::from($oid as u64),
+            $rec_type,
+            $undo,
+            $redo,
+        )
+    }};
+
+    // Dynamic type with sized payloads (generates zero-filled vecs)
+    (rec_type: $rec_type:expr, tid: $tid:expr, oid: $oid:expr, undo_size: $undo_size:expr, redo_size: $redo_size:expr) => {{
+        let undo_data = vec![0u8; $undo_size];
+        let redo_data = vec![0u8; $redo_size];
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            None,
+            $crate::types::ObjectId::from($oid as u64),
+            $rec_type,
+            &undo_data,
+            &redo_data,
+        )
+    }};
+
+    // Dynamic type with prev_lsn and sized payloads
+    (rec_type: $rec_type:expr, tid: $tid:expr, oid: $oid:expr, prev: $prev_lsn:expr, undo_size: $undo_size:expr, redo_size: $redo_size:expr) => {{
+        let undo_data = vec![0u8; $undo_size];
+        let redo_data = vec![0u8; $redo_size];
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            $prev_lsn,
+            $crate::types::ObjectId::from($oid as u64),
+            $rec_type,
+            &undo_data,
+            &redo_data,
+        )
+    }};
+
+    // Dynamic type with TransactionId and ObjectId directly
+    (rec_type: $rec_type:expr, tid_raw: $tid:expr, oid_raw: $oid:expr, undo: $undo:expr, redo: $redo:expr) => {{ $crate::storage::wal::OwnedRecord::new($tid, None, $oid, $rec_type, $undo, $redo) }};
+
+    (rec_type: $rec_type:expr, tid_raw: $tid:expr, oid_raw: $oid:expr, prev: $prev_lsn:expr, undo: $undo:expr, redo: $redo:expr) => {{ $crate::storage::wal::OwnedRecord::new($tid, $prev_lsn, $oid, $rec_type, $undo, $redo) }};
+
+    // Static type identifier pattern (e.g., record!(Update 1, 2, b"old", b"new"))
+    ($type:ident $tid:expr, $oid:expr, $undo:expr, $redo:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            None,
+            $crate::types::ObjectId::from($oid as u64),
+            $crate::storage::wal::RecordType::$type,
+            $undo,
+            $redo,
+        )
+    }};
+
+    ($type:ident $tid:expr, $oid:expr, prev: $prev_lsn:expr, $undo:expr, $redo:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $crate::types::TransactionId::from($tid as u64),
+            $prev_lsn,
+            $crate::types::ObjectId::from($oid as u64),
+            $crate::storage::wal::RecordType::$type,
+            $undo,
+            $redo,
+        )
+    }};
 }

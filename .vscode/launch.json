@@ -6,7 +6,7 @@
       "request": "launch",
       "name": "Debug Rust test (AxmosDB)",
       "program": "${workspaceFolder}/target/debug/deps/axmosdb-da3c2c772435937f",
-      "args": ["--nocapture", "test_overflow_chain"],
+      "args": ["--nocapture", "test_pager_create_and_open"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {

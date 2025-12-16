@@ -10,13 +10,13 @@
 #![feature(concat_bytes)]
 #![feature(str_from_raw_parts)]
 #![feature(current_thread_id)]
-pub mod configs;
+pub mod common;
 //pub mod database;
 pub mod io;
 mod macros;
 //mod sql;
 mod storage;
-//mod structures;
+mod structures;
 //mod transactions;
 pub mod types;
 
@@ -38,5 +38,5 @@ pub(crate) use types::*;
 #[cfg(not(miri))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
-pub use configs::*;
+pub use common::*;
 //pub use database::Database;

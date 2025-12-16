@@ -28,29 +28,6 @@ pub type RowId = UInt64;
 /// Last commit timestamp per tuple
 type TupleCommitLog = Arc<RwLock<HashMap<LogicalId, u64>>>;
 
-/// Logical identifier for a tuple (table + row)
-#[derive(Debug, PartialEq, Eq, Ord, PartialOrd, Hash, Clone, Copy)]
-pub struct LogicalId(ObjectId, RowId);
-
-impl std::fmt::Display for LogicalId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Table {}, row {}", self.0, self.1)
-    }
-}
-
-impl LogicalId {
-    pub fn new(table: ObjectId, row: RowId) -> Self {
-        Self(table, row)
-    }
-
-    pub fn table(&self) -> ObjectId {
-        self.0
-    }
-
-    pub fn row(&self) -> RowId {
-        self.1
-    }
-}
 
 // Macro for creating snapshots with low boilerplate.
 #[macro_export]

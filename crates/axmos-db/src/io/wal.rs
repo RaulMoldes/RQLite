@@ -1,7 +1,10 @@
 use crate::{
     io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
-    storage::wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock},
-    types::{LogId, OBJECT_ZERO, ObjectId, TransactionId, initialize_block_count},
+    storage::{
+        BufferOps, WalBuffer, Writable,
+        wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock},
+    },
+    types::{LogId, ObjectId, initialize_block_count},
 };
 
 use std::{
@@ -13,7 +16,7 @@ use std::{
 
 pub trait Operation {
     fn op_type(&self) -> RecordType;
-    fn object_id(&self) -> ObjectId;
+    fn object_id(&self) -> Option<ObjectId>;
     fn undo(&self) -> &[u8];
     fn redo(&self) -> &[u8];
 }
@@ -24,8 +27,8 @@ impl Operation for Begin {
     fn op_type(&self) -> RecordType {
         RecordType::Begin
     }
-    fn object_id(&self) -> ObjectId {
-        OBJECT_ZERO
+    fn object_id(&self) -> Option<ObjectId> {
+        None
     }
     fn redo(&self) -> &[u8] {
         &[]
@@ -41,8 +44,8 @@ impl Operation for End {
     fn op_type(&self) -> RecordType {
         RecordType::End
     }
-    fn object_id(&self) -> ObjectId {
-        OBJECT_ZERO
+    fn object_id(&self) -> Option<ObjectId> {
+        None
     }
     fn redo(&self) -> &[u8] {
         &[]
@@ -58,8 +61,8 @@ impl Operation for Commit {
     fn op_type(&self) -> RecordType {
         RecordType::Commit
     }
-    fn object_id(&self) -> ObjectId {
-        OBJECT_ZERO
+    fn object_id(&self) -> Option<ObjectId> {
+        None
     }
     fn redo(&self) -> &[u8] {
         &[]
@@ -75,8 +78,8 @@ impl Operation for Abort {
     fn op_type(&self) -> RecordType {
         RecordType::Abort
     }
-    fn object_id(&self) -> ObjectId {
-        OBJECT_ZERO
+    fn object_id(&self) -> Option<ObjectId> {
+        None
     }
     fn redo(&self) -> &[u8] {
         &[]
@@ -103,8 +106,8 @@ impl Operation for Update {
     fn op_type(&self) -> RecordType {
         RecordType::Update
     }
-    fn object_id(&self) -> ObjectId {
-        self.oid
+    fn object_id(&self) -> Option<ObjectId> {
+        Some(self.oid)
     }
     fn redo(&self) -> &[u8] {
         self.new.as_ref()
@@ -130,8 +133,8 @@ impl Operation for Insert {
     fn op_type(&self) -> RecordType {
         RecordType::Insert
     }
-    fn object_id(&self) -> ObjectId {
-        self.oid
+    fn object_id(&self) -> Option<ObjectId> {
+        Some(self.oid)
     }
     fn redo(&self) -> &[u8] {
         self.new.as_ref()
@@ -157,45 +160,14 @@ impl Operation for Delete {
     fn op_type(&self) -> RecordType {
         RecordType::Delete
     }
-    fn object_id(&self) -> ObjectId {
-        self.oid
+    fn object_id(&self) -> Option<ObjectId> {
+        Some(self.oid)
     }
     fn redo(&self) -> &[u8] {
         &[]
     }
     fn undo(&self) -> &[u8] {
         self.old.as_ref()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-pub struct RecordBuilder {
-    tx_id: TransactionId,
-    last_lsn: Option<LogId>,
-}
-
-impl RecordBuilder {
-    pub(crate) fn for_transaction(tx_id: TransactionId) -> Self {
-        Self {
-            tx_id,
-            last_lsn: None,
-        }
-    }
-
-    pub(crate) fn build_rec<O>(&mut self, operation: O) -> OwnedRecord
-    where
-        O: Operation,
-    {
-        let log = OwnedRecord::new(
-            self.tx_id,
-            self.last_lsn,
-            operation.object_id(),
-            operation.op_type(),
-            operation.undo(),
-            operation.redo(),
-        );
-        self.last_lsn = Some(log.lsn());
-        log
     }
 }
 
@@ -213,7 +185,7 @@ impl FileOperations for WriteAheadLog {
         let file = DBFile::create(&path)?;
         let fs_block_size = FileSystem::block_size(&path)?;
         let block_size = WAL_BLOCK_SIZE.next_multiple_of(fs_block_size);
-        let header = BlockZero::allocate(block_size);
+        let header = BlockZero::alloc(block_size as u32);
 
         initialize_block_count(1); // Initialize the in-memory block counter.
 
@@ -266,7 +238,7 @@ impl FileOperations for WriteAheadLog {
 
     fn truncate(&mut self) -> io::Result<()> {
         self.file.truncate()?;
-        self.header = BlockZero::allocate(self.block_size as usize);
+        self.header = BlockZero::alloc(self.block_size as u32);
         self.current_block = None;
         self.flush_queue.clear();
         Ok(())
@@ -328,7 +300,7 @@ impl WriteAheadLog {
         // Try to write to block zero first
         if self.current_block.is_none() {
             if self.header.available_space() >= record_size {
-                self.header.try_push(record)?;
+                self.header.try_push(lsn, record)?;
                 return Ok(());
             }
             // Block zero is full, create first current_block
@@ -342,7 +314,7 @@ impl WriteAheadLog {
             self.rotate_block()?;
         }
 
-        self.current_block.as_mut().unwrap().try_push(record)?;
+        self.current_block.as_mut().unwrap().try_push(lsn, record)?;
 
         Ok(())
     }
@@ -380,7 +352,7 @@ impl WriteAheadLog {
         // Update header metadata
         self.header.metadata_mut().wal_header.total_blocks = block_number;
 
-        if let Some(ref block) = self.current_block {
+        if let Some(block) = self.current_block.take() {
             self.header.metadata_mut().wal_header.last_block_used =
                 block.metadata().used_bytes as u32;
         } else {
@@ -411,6 +383,15 @@ impl WriteAheadLog {
             pending_blocks: self.flush_queue.len(),
             block_size: self.block_size,
         }
+    }
+
+    pub(crate) fn reader(&mut self, read_ahead_amount: usize) -> io::Result<WalReader<'_>> {
+        WalReader::new(
+            &mut self.file,
+            self.block_size * read_ahead_amount, // Small read-ahead to test reloading
+            self.block_size,
+            self.header.metadata().wal_header.total_blocks,
+        )
     }
 }
 
@@ -525,7 +506,7 @@ impl<'a> WalReader<'a> {
                         continue; // Re-evaluate with new state
                     }
 
-                    let record = self.header.record(self.current_block_offset);
+                    let record = self.header.record(self.current_block_offset as u64);
                     self.current_block_offset += record.total_size();
                     return Ok(Some(record));
                 }
@@ -551,7 +532,7 @@ impl<'a> WalReader<'a> {
                         continue; // Re-evaluate with new state
                     }
 
-                    let record = self.block_queue[idx].record(self.current_block_offset);
+                    let record = self.block_queue[idx].record(self.current_block_offset as u64);
                     self.current_block_offset += record.total_size();
                     return Ok(Some(record));
                 }
@@ -560,87 +541,8 @@ impl<'a> WalReader<'a> {
     }
 }
 
-#[cfg(test)]
-mod write_ahead_logging_tests {
-    use super::*;
-    use crate::wal_lifecycle_test;
-
-    wal_lifecycle_test! {
-        name: test_wal_single_batch_small,
-        tid: 1,
-        oid: 1,
-        batches: [
-            { count: 10, undo_sizes: [16, 32], redo_sizes: [32, 64] },
-        ],
-    }
-
-    wal_lifecycle_test! {
-        name: test_wal_multiple_batches,
-        tid: 42,
-        oid: 100,
-        batches: [
-            { count: 50, undo_sizes: [16, 32, 64, 128, 256], redo_sizes: [32, 64, 96, 128, 192] },
-            { count: 75, undo_sizes: [64, 128], redo_sizes: [96, 192] },
-        ],
-    }
-
-    wal_lifecycle_test! {
-        name: test_wal_many_small_records,
-        tid: 1,
-        oid: 1,
-        batches: [
-            { count: 500, undo_sizes: [8], redo_sizes: [16] },
-        ],
-    }
-
-    wal_lifecycle_test! {
-        name: test_wal_large_records,
-        tid: 99,
-        oid: 88,
-        batches: [
-            { count: 50, undo_sizes: [1024, 2048], redo_sizes: [2048, 4096] },
-        ],
-        read_ahead_multiplier: 2,
-    }
-
-    wal_lifecycle_test! {
-        name: test_wal_mixed_sizes,
-        tid: 7,
-        oid: 14,
-        batches: [
-            { count: 20, undo_sizes: [8, 16, 32], redo_sizes: [16, 32, 64] },
-            { count: 30, undo_sizes: [256, 512], redo_sizes: [512, 1024] },
-            { count: 25, undo_sizes: [64], redo_sizes: [128] },
-        ],
-    }
-
-    wal_lifecycle_test! {
-        name: test_wal_stress,
-        tid: 1000,
-        oid: 2000,
-        batches: [
-            { count: 100, undo_sizes: [32, 64, 128], redo_sizes: [64, 128, 256] },
-            { count: 150, undo_sizes: [16, 32], redo_sizes: [32, 64] },
-            { count: 200, undo_sizes: [64, 128, 256, 512], redo_sizes: [128, 256, 512, 1024] },
-        ],
-    }
-
-    wal_lifecycle_test! {
-        name: test_wal_empty_payloads,
-        tid: 1,
-        oid: 1,
-        batches: [
-            { count: 20, undo_sizes: [0], redo_sizes: [0] },
-        ],
-    }
-
-    wal_lifecycle_test! {
-        name: test_wal_asymmetric_payloads,
-        tid: 5,
-        oid: 10,
-        batches: [
-            { count: 30, undo_sizes: [0, 8, 16], redo_sizes: [128, 256, 512] },
-            { count: 30, undo_sizes: [256, 512], redo_sizes: [0, 8] },
-        ],
+impl Drop for WriteAheadLog {
+    fn drop(&mut self) {
+        self.flush().unwrap(); // Force panic if we fail to flush
     }
 }

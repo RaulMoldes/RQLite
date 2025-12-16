@@ -1172,12 +1172,7 @@ impl ForeignKey {
     }
 }
 
-repr_enum!(
-    pub enum ObjectType: u8 {
-        Table = 0,
-        Index = 1,
-    }
-);
+
 
 #[macro_export]
 macro_rules! schema {
