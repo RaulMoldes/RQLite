@@ -8,7 +8,7 @@ use crate::types::{
     core::AxmosCastable,
     sized_types::{Float32, Float64, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64},
 };
-use crate::{direct_axmos_cast, scalar, unsigned_integer};
+use crate::{direct_axmos_cast, unsigned_integer};
 use std::cmp::{Ord, PartialOrd};
 use std::fmt::{self, Display};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
@@ -20,9 +20,7 @@ unsigned_integer! {
 }
 
 // Duration in seconds
-scalar! {
-    pub struct Seconds(u64);
-}
+pub struct Seconds(u64);
 
 impl Seconds {
     pub const fn new(seconds: u64) -> Self {

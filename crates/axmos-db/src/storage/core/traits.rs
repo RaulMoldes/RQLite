@@ -1,5 +1,5 @@
 use crate::{
-    BlockId, CELL_ALIGNMENT, LogId,
+    BlockId, CELL_ALIGNMENT, Lsn,
     storage::{
         cell::{CELL_HEADER_SIZE, CellHeader, CellMut, CellRef, OwnedCell, Slot},
         wal::{OwnedRecord, RecordHeader, RecordRef},
@@ -16,9 +16,11 @@ use std::{
 };
 
 pub(crate) trait Identifiable {
-    type IdType;
+    type IdType: Copy;
 
     fn id(&self) -> Self::IdType;
+
+    fn alloc(id: Self::IdType, size: u32) -> Self;
 }
 
 /// Trait for defining frames that are allocatable by the pager.
@@ -53,7 +55,7 @@ pub(crate) trait Buffer {
     fn capacity(&self) -> usize;
 
     /// Compute the total usable space in the buffer
-    fn usable_space(&self, size: usize) -> usize;
+    fn usable_space(size: usize) -> usize;
 }
 
 pub(crate) trait BufferOps: Buffer {
@@ -61,7 +63,7 @@ pub(crate) trait BufferOps: Buffer {
     fn available_space(&self) -> usize;
 
     /// Allocate the buffer.
-    fn alloc(size: u32) -> Self;
+    fn alloc(id: <Self::Header as Identifiable>::IdType, size: u32) -> Self;
 }
 
 pub(crate) trait BtreeMetadata:
@@ -117,27 +119,30 @@ pub(crate) trait BtreeMetadata:
     fn next_sibling(&self) -> Option<PageId>;
 
     /// Set the next sibling value
-    fn set_next_sibling(&mut self, next: PageId);
+    fn set_next_sibling(&mut self, next: Option<PageId>);
 
     /// Get the page's next sibling (useful when reverse iterating over the btree during scans.)
     fn prev_sibling(&self) -> Option<PageId>;
 
     /// Set the prev sibling value
-    fn set_prev_sibling(&mut self, prev: PageId);
+    fn set_prev_sibling(&mut self, prev: Option<PageId>);
+
+    /// Setter for the right child value.
+    fn set_right_child(&mut self, new_right: Option<PageId>);
 }
 
 pub(crate) trait WalMetadata:
     ComposedMetadata<ItemHeader = RecordHeader> + Identifiable<IdType = BlockId>
 {
     /// Setters for start and last lsn
-    fn set_last_lsn(&mut self, lsn: LogId);
+    fn set_last_lsn(&mut self, lsn: Lsn);
 
-    fn set_start_lsn(&mut self, lsn: LogId);
+    fn set_start_lsn(&mut self, lsn: Lsn);
 
     /// Getter for last and start lsn
-    fn last_lsn(&self) -> Option<LogId>;
+    fn last_lsn(&self) -> Option<Lsn>;
 
-    fn start_lsn(&self) -> Option<LogId>;
+    fn start_lsn(&self) -> Option<Lsn>;
     /// Increments the write offset of this block.
     fn increment_write_offset(&mut self, added_bytes: usize);
 
@@ -198,9 +203,9 @@ pub(crate) trait WalBuffer:
     // If the record does not fit, returns an error.
     fn try_push<R: Writable<Header = RecordHeader>>(
         &mut self,
-        lsn: LogId,
+        lsn: Lsn,
         record: R,
-    ) -> io::Result<LogId> {
+    ) -> io::Result<Lsn> {
         let record_size = record.total_size();
 
         if self.available_space() < record_size {
@@ -323,7 +328,7 @@ pub(crate) trait BtreeBuffer:
     }
 
     /// Set the next sibling value
-    fn set_next_sibling(&mut self, next: PageId) {
+    fn set_next_sibling(&mut self, next: Option<PageId>) {
         self.header_mut().set_next_sibling(next);
     }
 
@@ -333,14 +338,19 @@ pub(crate) trait BtreeBuffer:
     }
 
     /// Set the prev sibling value
-    fn set_prev_sibling(&mut self, prev: PageId) {
+    fn set_prev_sibling(&mut self, prev: Option<PageId>) {
         self.header_mut().set_prev_sibling(prev);
+    }
+
+    /// Set the prev sibling value
+    fn set_right_child(&mut self, new_right: Option<PageId>) {
+        self.header_mut().set_right_child(new_right);
     }
 
     /// Compute the maximum payload size that can fit in a single page (given the usable space on that page).
     /// Must account for the header size and the slot size (total storage size in the page), and align down the value.
     fn max_payload_size_in(usable_space: usize) -> usize {
-        (usable_space - CELL_HEADER_SIZE - Slot::SIZE) & !(CELL_ALIGNMENT as usize - 1)
+        (usable_space - CELL_HEADER_SIZE - mem::size_of::<Slot>()) & !(CELL_ALIGNMENT as usize - 1)
     }
 
     /// Max allowed payload size for a cell to be inserted on this [Page]
@@ -351,7 +361,7 @@ pub(crate) trait BtreeBuffer:
     /// Returns a pointer to the [OwnedCell] located at the given [Slot].
     fn get_cell_at(&self, index: Slot) -> NonNull<CellHeader> {
         debug_assert!(
-            index.0 <= self.num_slots(),
+            index <= self.num_slots(),
             "slot index {index} out of bounds for slot array of length {}",
             self.num_slots()
         );
@@ -361,26 +371,26 @@ pub(crate) trait BtreeBuffer:
 
     /// Threshold in the page to consider it as overflow state (see [Bplustree::balance] for details).
     /// The threshold is set to three quarters of the total size in page for cells.
-    fn overflow_threshold(&self, page_size: usize) -> usize {
-        self.usable_space(page_size).saturating_mul(3).div_ceil(4)
+    fn overflow_threshold(page_size: usize) -> usize {
+        Self::usable_space(page_size).saturating_mul(3).div_ceil(4)
     }
 
     /// Threshold in the page to consider it as underflow state (see [Bplustree::balance] for details).
     /// The threshold is set to three quarters of the total size in page for cells.
-    fn underflow_threshold(&self, page_size: usize) -> usize {
-        self.usable_space(page_size).div_ceil(4)
+    fn underflow_threshold(page_size: usize) -> usize {
+        Self::usable_space(page_size).div_ceil(4)
     }
 
     /// Ideal payload size for this page.
     /// Useful when allocating an overflow chain and we have to decide how much data we will store on the first page.
-    fn ideal_max_payload_size(&self, page_size: usize, min_cells: usize) -> usize {
+    fn ideal_max_payload_size(page_size: usize, min_cells: usize) -> usize {
         debug_assert!(
             min_cells > 0,
             "if you're not gonna store any cells then why are you even calling this function?"
         );
 
         let ideal_size =
-            Self::max_payload_size_in(self.usable_space(page_size) as usize / min_cells);
+            Self::max_payload_size_in(Self::usable_space(page_size) as usize / min_cells);
 
         debug_assert!(
             ideal_size > 0,
@@ -390,19 +400,15 @@ pub(crate) trait BtreeBuffer:
         ideal_size
     }
 
-    /// Returns the highest slot number in this page.
-    fn max_slot_index(&self) -> Slot {
-        Slot(self.num_slots())
-    }
-
     /// Number of used bytes in this page.
     fn used_bytes(&self) -> usize {
-        self.capacity() - self.free_space() as usize
+        self.capacity().saturating_sub(self.free_space() as usize)
     }
 
     /// Number of free bytes in this page.
     fn effective_free_space(&self) -> u32 {
-        self.free_space_pointer() - self.content_start_ptr() as u32
+        self.free_space_pointer()
+            .saturating_sub(self.content_start_ptr() as u32)
     }
 
     /// Returns the child at the given [Slot].
@@ -426,13 +432,13 @@ pub(crate) trait BtreeBuffer:
 
     /// Returns `true` if this page is underflow
     fn has_underflown(&self) -> bool {
-        !self.can_release_space(Slot::SIZE)
+        !self.can_release_space(mem::size_of::<Slot>())
     }
 
     /// Returns `true` if this page has overflown.
     /// We need at least 2 bytes for the last cell slot and 4 extra bytes to store the pointer to an overflow page
     fn has_overflown(&self) -> bool {
-        !self.has_space_for(Slot::SIZE + CELL_HEADER_SIZE + mem::size_of::<PageId>())
+        !self.has_space_for(mem::size_of::<Slot>() + CELL_HEADER_SIZE + mem::size_of::<PageId>())
     }
 
     /// Read-only reference to a cell.
@@ -461,25 +467,25 @@ pub(crate) trait BtreeBuffer:
         } else {
             self.num_slots() + 1
         };
-        (0..len).filter_map(move |i| self.child(Slot(i)))
+        (0..len).filter_map(move |i| self.child(i))
     }
     /// Iterates over all the cells in this page.
     fn iter_cells(&self) -> impl DoubleEndedIterator<Item = CellRef<'_>> + '_ {
         let len = self.num_slots();
-        (0..len).map(|i| self.cell(Slot(i)))
+        (0..len).map(|i| self.cell(i))
     }
 
     /// Check whether the page will overflow if we append the additional requested size.
     fn has_space_for(&self, additional_space: usize) -> bool {
         let occupied_space = self.used_bytes() + additional_space;
-        let max_allowed = self.overflow_threshold(self.capacity());
+        let max_allowed = Self::overflow_threshold(self.capacity());
         occupied_space <= max_allowed
     }
 
     /// Check whether the page will underflow if we remove the requested size.
     fn can_release_space(&self, removable_space: usize) -> bool {
-        let occupied_space = self.used_bytes() - removable_space;
-        let min_allowed = self.underflow_threshold(self.capacity());
+        let occupied_space = self.used_bytes().saturating_sub(removable_space);
+        let min_allowed = Self::underflow_threshold(self.capacity());
         occupied_space >= min_allowed
     }
 
@@ -495,7 +501,7 @@ pub(crate) trait BtreeBuffer:
 
     /// Adds [OwnedCell] to the end of this page.
     fn push(&mut self, cell: OwnedCell) -> io::Result<()> {
-        self.insert(Slot(self.num_slots()), cell)?;
+        self.insert(self.num_slots(), cell)?;
         Ok(())
     }
 
@@ -515,7 +521,7 @@ pub(crate) trait BtreeBuffer:
             ));
         };
 
-        if index > Slot(self.num_slots()) {
+        if index > self.num_slots() {
             return Err(IoError::new(
                 ErrorKind::InvalidInput,
                 format!(
@@ -565,7 +571,7 @@ pub(crate) trait BtreeBuffer:
         self.add_slots(1);
 
         // If the index is not the last one, shift slots to the right.
-        if index < self.max_slot_index() {
+        if index < self.num_slots() {
             let end = self.num_slots() as usize - 1;
             self.slot_array_mut()
                 .copy_within(usize::from(index)..end, usize::from(index) + 1);
@@ -625,7 +631,7 @@ pub(crate) trait BtreeBuffer:
     fn remove(&mut self, index: Slot) -> io::Result<OwnedCell> {
         let len = self.num_slots();
 
-        if index > Slot(self.num_slots()) {
+        if index > self.num_slots() {
             return Err(IoError::new(
                 ErrorKind::InvalidInput,
                 format!(
@@ -703,7 +709,7 @@ pub(crate) trait BtreeBuffer:
         iter::from_fn(move || {
             // Copy cells until we reach the end.
             if drain_index < end {
-                let cell = self.owned_cell(Slot(slot_index as _));
+                let cell = self.owned_cell(slot_index as _);
                 slot_index += 1;
                 drain_index += 1;
                 Some(cell)
@@ -711,7 +717,13 @@ pub(crate) trait BtreeBuffer:
                 // Now compute gained space and shift slots towards the left.
                 self.add_free_space(
                     (start..slot_index)
-                        .map(|slot| self.cell(Slot(slot as u16)).storage_size())
+                        .map(|slot| self.cell(slot as u16).storage_size())
+                        .sum::<usize>() as u32,
+                );
+
+                self.free_space_pointer_down(
+                    (start..slot_index)
+                        .map(|slot| self.cell(slot as u16).total_size())
                         .sum::<usize>() as u32,
                 );
 

@@ -4,9 +4,8 @@
 //! It implements AxmosValueType as a dynamic-size type.
 
 use crate::{
-    from_blob,
-    impl_axmos_hashable,
-    structures::comparators::{Comparator, VarlenComparator},
+    from_blob, impl_axmos_hashable,
+    tree::comparators::{Comparator, VarlenComparator},
     types::{
         Date, DateTime, Float32, Float64, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
         VarInt,

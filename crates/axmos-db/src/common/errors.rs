@@ -5,7 +5,7 @@ use std::{
     num::{ParseFloatError, ParseIntError},
 };
 
-use crate::types::{DataTypeKind, TransactionId, LogicalId, ObjectType, ObjectId};
+use crate::types::{DataTypeKind, LogicalId, ObjectId, ObjectType, TransactionId};
 
 /// Thread pool errors
 #[derive(Debug)]

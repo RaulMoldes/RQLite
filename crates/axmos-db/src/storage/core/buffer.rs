@@ -51,7 +51,7 @@ impl<M> MemBlock<M> {
 
     /// Returns how many bytes can still be written without reallocating.
     pub fn capacity(&self) -> usize {
-        Self::usable_space(self.size as usize) as usize
+        Self::usable_space_without_header(self.size as usize) as usize
     }
 
     pub fn metadata_size(&self) -> usize {
@@ -94,7 +94,7 @@ impl<M> MemBlock<M> {
 
         let data = NonNull::slice_from_raw_parts(
             unsafe { pointer.byte_add(mem::size_of::<M>()).cast::<u8>() },
-            Self::usable_space(pointer.len()) as usize,
+            Self::usable_space_without_header(pointer.len()) as usize,
         );
 
         Self {
@@ -130,7 +130,7 @@ impl<M> MemBlock<M> {
         let data = unsafe {
             NonNull::slice_from_raw_parts(
                 metadata.byte_add(mem::size_of::<T>()).cast::<u8>(),
-                MemBlock::<T>::usable_space(size as usize) as usize,
+                MemBlock::<T>::usable_space_without_header(size as usize) as usize,
             )
         };
 
@@ -142,7 +142,7 @@ impl<M> MemBlock<M> {
     }
 
     /// Number of bytes that can be used to store data.
-    pub fn usable_space(size: usize) -> usize {
+    fn usable_space_without_header(size: usize) -> usize {
         size - mem::size_of::<M>()
     }
 
@@ -323,8 +323,8 @@ where
         Self::usable_space(self.size as usize) as usize
     }
 
-    fn usable_space(&self, size: usize) -> usize {
-        Self::usable_space(size)
+    fn usable_space(size: usize) -> usize {
+        Self::usable_space_without_header(size)
     }
 }
 

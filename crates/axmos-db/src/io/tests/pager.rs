@@ -105,12 +105,12 @@ fn test_allocate_single_page() -> io::Result<()> {
     Ok(())
 }
 
-fn test_allocate_multiple_pages(num_pages: usize) -> io::Result<()> {
-    let (mut pager, _dir) = create_default_pager()?;
+fn test_allocate_multiple_pages(num_pages: usize) {
+    let (mut pager, _dir) = create_default_pager().unwrap();
 
     let mut page_ids = Vec::with_capacity(num_pages);
     for _ in 0..num_pages {
-        let id = pager.allocate_page::<BtreePage>()?;
+        let id = pager.allocate_page::<BtreePage>().unwrap();
         page_ids.push(id);
     }
 
@@ -122,11 +122,9 @@ fn test_allocate_multiple_pages(num_pages: usize) -> io::Result<()> {
 
     // All pages should be readable
     for id in &page_ids {
-        let frame = pager.read_page::<BtreePage>(*id)?;
+        let frame = pager.read_page::<BtreePage>(*id).unwrap();
         assert_eq!(frame.page_number(), *id);
     }
-
-    Ok(())
 }
 
 #[test]
@@ -141,24 +139,24 @@ fn test_deallocate_page() -> io::Result<()> {
     Ok(())
 }
 
-fn test_page_reuse_after_dealloc(num_pages: usize) -> io::Result<()> {
-    let (mut pager, _dir) = create_default_pager()?;
+fn test_page_reuse_after_dealloc(num_pages: usize) {
+    let (mut pager, _dir) = create_default_pager().unwrap();
 
     // Allocate pages
     let mut original_ids = Vec::new();
     for _ in 0..num_pages {
-        original_ids.push(pager.allocate_page::<BtreePage>()?);
+        original_ids.push(pager.allocate_page::<BtreePage>().unwrap());
     }
 
     // Deallocate all
     for &id in &original_ids {
-        pager.dealloc_page::<BtreePage>(id)?;
+        pager.dealloc_page::<BtreePage>(id).unwrap();
     }
 
     // Allocate again - should reuse
     let mut new_ids = Vec::new();
     for _ in 0..num_pages {
-        new_ids.push(pager.allocate_page::<BtreePage>()?);
+        new_ids.push(pager.allocate_page::<BtreePage>().unwrap());
     }
 
     // Check reuse
@@ -170,8 +168,6 @@ fn test_page_reuse_after_dealloc(num_pages: usize) -> io::Result<()> {
             original_ids
         );
     }
-
-    Ok(())
 }
 
 #[test]
@@ -197,12 +193,12 @@ fn test_write_and_read_page_data() -> io::Result<()> {
 
     // Write data
     pager.with_page_mut::<BtreePage, _, _>(page_id, |page| {
-        page.as_mut()[..test_data.len()].copy_from_slice(test_data);
+        page.data_mut()[..test_data.len()].copy_from_slice(test_data);
     })?;
 
     // Read back
     pager.with_page::<BtreePage, _, _>(page_id, |page| {
-        assert_eq!(&page.as_ref()[..test_data.len()], test_data);
+        assert_eq!(&page.data()[..test_data.len()], test_data);
     })?;
 
     Ok(())
@@ -215,67 +211,70 @@ fn test_page_persistence_after_reopen() -> io::Result<()> {
     let dir = tempdir()?;
     let path = dir.path().join("persist_test.db");
     let test_data = b"Persistent data!";
-    let mut page_id = PageId::default();
 
     // Create, write, and close
-    {
+    let page_id = {
         let config = create_test_config(DEFAULT_PAGE_SIZE, 10);
         let mut pager = Pager::from_config(config, &path)?;
 
-        page_id = pager.allocate_page::<BtreePage>()?;
+        let page_id = pager.allocate_page::<BtreePage>()?;
 
         pager.with_page_mut::<BtreePage, _, _>(page_id, |page| {
-            page.as_mut()[..test_data.len()].copy_from_slice(test_data);
+            page.data_mut()[..test_data.len()].copy_from_slice(test_data);
         })?;
 
         pager.sync_all()?;
-    }
+
+        page_id
+    };
 
     // Reopen and verify
     {
         let mut pager = Pager::open(&path)?;
 
         pager.with_page::<BtreePage, _, _>(page_id, |page| {
-            assert_eq!(&page.as_ref()[..test_data.len()], test_data);
+            assert_eq!(&page.data()[..test_data.len()], test_data);
         })?;
     }
 
     Ok(())
 }
 
-fn test_cache_eviction(num_pages: usize, cache_size: usize) -> io::Result<()> {
-    let (mut pager, _dir) = create_test_pager(DEFAULT_PAGE_SIZE, cache_size as u16)?;
+fn test_cache_eviction(num_pages: usize, cache_size: usize) {
+    let (mut pager, _dir) =
+        create_test_pager(DEFAULT_PAGE_SIZE, cache_size as u16).expect("Failed to create_pager");
 
     // Allocate more pages than cache size
     let pages_to_alloc = num_pages.max(cache_size + 5);
     let mut page_ids = Vec::new();
 
     for i in 0..pages_to_alloc {
-        let page_id = pager.allocate_page::<BtreePage>()?;
+        let page_id = pager
+            .allocate_page::<BtreePage>()
+            .expect("Failed to allocate");
 
         // Write unique data to each page
         let data = format!("Page data {}", i);
-        pager.with_page_mut::<BtreePage, _, _>(page_id, |page| {
-            page.as_mut()[..data.len()].copy_from_slice(data.as_bytes());
-        })?;
+        pager
+            .with_page_mut::<BtreePage, _, _>(page_id, |page| {
+                page.data_mut()[..data.len()].copy_from_slice(data.as_bytes());
+            })
+            .expect("Failed to write page");
 
         page_ids.push((page_id, data));
     }
 
-    // Sync to ensure evicted pages are written
-    pager.sync_all()?;
-
     // Verify all pages (some will need to be read from disk)
     for (page_id, expected_data) in &page_ids {
-        pager.with_page::<BtreePage, _, _>(*page_id, |page| {
-            assert_eq!(
-                &page.as_ref()[..expected_data.len()],
-                expected_data.as_bytes()
-            );
-        })?;
+        pager
+            .with_page::<BtreePage, _, _>(*page_id, |page| {
+                assert_eq!(
+                    &page.data()[..expected_data.len()],
+                    expected_data.as_bytes()
+                );
+            })
+            .expect("Failed to read page");
     }
-
-    Ok(())
 }
 
 #[test]
@@ -326,43 +325,45 @@ fn test_page_cell_insert() -> io::Result<()> {
 
     // Verify cell is readable
     pager.with_page::<BtreePage, _, _>(page_id, |page| {
-        let cell = page.cell(crate::storage::cell::Slot(0));
+        let cell = page.cell(0);
         assert_eq!(cell.payload(), cell_data);
     })?;
 
     Ok(())
 }
 
-fn test_page_multiple_cells(num_cells: usize) -> io::Result<()> {
-    let (mut pager, _dir) = create_default_pager()?;
+fn test_page_multiple_cells(num_cells: usize) {
+    let (mut pager, _dir) = create_default_pager().unwrap();
 
-    let page_id = pager.allocate_page::<BtreePage>()?;
+    let page_id = pager.allocate_page::<BtreePage>().unwrap();
 
-    pager.try_with_page_mut::<BtreePage, _, _>(page_id, |page| {
-        for i in 0..num_cells {
-            let data = format!("Cell {}", i);
-            let cell = OwnedCell::new(data.as_bytes());
+    pager
+        .try_with_page_mut::<BtreePage, _, _>(page_id, |page| {
+            for i in 0..num_cells {
+                let data = format!("Cell {}", i);
+                let cell = OwnedCell::new(data.as_bytes());
 
-            if page.has_space_for(cell.storage_size()) {
-                page.push(cell)?;
-            } else {
-                break;
+                if page.has_space_for(cell.storage_size()) {
+                    page.push(cell)?;
+                } else {
+                    break;
+                }
             }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        })
+        .unwrap();
 
     // Verify cells
-    pager.with_page::<BtreePage, _, _>(page_id, |page| {
-        let actual_cells = page.num_slots() as usize;
-        for i in 0..actual_cells {
-            let expected = format!("Cell {}", i);
-            let cell = page.cell(crate::storage::cell::Slot(i as u16));
-            assert_eq!(cell.payload(), expected.as_bytes());
-        }
-    })?;
-
-    Ok(())
+    pager
+        .with_page::<BtreePage, _, _>(page_id, |page| {
+            let actual_cells = page.num_slots() as usize;
+            for i in 0..actual_cells {
+                let expected = format!("Cell {}", i);
+                let cell = page.cell(i as u16);
+                assert_eq!(cell.payload(), expected.as_bytes());
+            }
+        })
+        .unwrap();
 }
 
 #[test]
@@ -384,7 +385,7 @@ fn test_page_cell_remove() -> io::Result<()> {
 
     // Remove middle cell
     pager.try_with_page_mut::<BtreePage, _, _>(page_id, |page| {
-        page.remove(crate::storage::cell::Slot(2))?;
+        page.remove(2)?;
         assert_eq!(page.num_slots(), 4);
         Ok(())
     })?;
@@ -392,32 +393,40 @@ fn test_page_cell_remove() -> io::Result<()> {
     Ok(())
 }
 
-fn test_stress_allocate_deallocate(iterations: usize, pages_per_iter: usize) -> io::Result<()> {
-    let (mut pager, _dir) = create_default_pager()?;
+fn test_stress_allocate_deallocate(iterations: usize, pages_per_iter: usize) {
+    let (mut pager, _dir) = create_default_pager().expect("Failed to create pager");
 
     for _ in 0..iterations {
         // Allocate
         let mut ids = Vec::new();
         for _ in 0..pages_per_iter {
-            ids.push(pager.allocate_page::<BtreePage>()?);
+            ids.push(
+                pager
+                    .allocate_page::<BtreePage>()
+                    .expect("Failed to allocate"),
+            );
         }
 
         // Deallocate half
         for id in ids.iter().take(pages_per_iter / 2) {
-            pager.dealloc_page::<BtreePage>(*id)?;
+            pager
+                .dealloc_page::<BtreePage>(*id)
+                .expect("Failed to deallocate");
         }
     }
-
-    Ok(())
 }
 
-fn test_stress_random_access(num_pages: usize, accesses: usize) -> io::Result<()> {
-    let (mut pager, _dir) = create_default_pager()?;
+fn test_stress_random_access(num_pages: usize, accesses: usize) {
+    let (mut pager, _dir) = create_default_pager().expect("Failed to create pager");
 
     // Allocate pages
     let mut page_ids = Vec::new();
     for _ in 0..num_pages {
-        page_ids.push(pager.allocate_page::<BtreePage>()?);
+        page_ids.push(
+            pager
+                .allocate_page::<BtreePage>()
+                .expect("Failed to allocate"),
+        );
     }
 
     // Random access pattern (using simple deterministic "random")
@@ -425,39 +434,37 @@ fn test_stress_random_access(num_pages: usize, accesses: usize) -> io::Result<()
         let idx = (i * 7 + 3) % num_pages;
         let page_id = page_ids[idx];
 
-        let _frame = pager.read_page::<BtreePage>(page_id)?;
+        let _frame = pager
+            .read_page::<BtreePage>(page_id)
+            .expect("Failed to read page");
     }
-
-    Ok(())
 }
 
-fn test_different_page_sizes(page_size: usize) -> io::Result<()> {
-    let (mut pager, _dir) = create_test_pager(page_size as u32, 10)?;
+fn test_different_page_sizes(page_size: usize) {
+    let (mut pager, _dir) = create_test_pager(page_size as u32, 10).unwrap();
 
-    let page_id = pager.allocate_page::<BtreePage>()?;
+    let page_id = pager.allocate_page::<BtreePage>().unwrap();
 
-    pager.with_page::<BtreePage, _, _>(page_id, |page| {
-        assert!(page.capacity() >= page_size - 128); // Account for header
-    })?;
-
-    Ok(())
+    pager
+        .with_page::<BtreePage, _, _>(page_id, |page| {
+            assert!(page.capacity() >= page_size - 128); // Account for header
+        })
+        .unwrap();
 }
 
-fn test_different_cache_sizes(cache_size: usize) -> io::Result<()> {
-    let (mut pager, _dir) = create_test_pager(DEFAULT_PAGE_SIZE, cache_size as u16)?;
+fn test_different_cache_sizes(cache_size: usize) {
+    let (mut pager, _dir) = create_test_pager(DEFAULT_PAGE_SIZE, cache_size as u16).unwrap();
 
     // Allocate and access pages
     let mut page_ids = Vec::new();
     for _ in 0..cache_size * 2 {
-        page_ids.push(pager.allocate_page::<BtreePage>()?);
+        page_ids.push(pager.allocate_page::<BtreePage>().unwrap());
     }
 
     // All should still be accessible
     for id in &page_ids {
-        let _frame = pager.read_page::<BtreePage>(*id)?;
+        let _frame = pager.read_page::<BtreePage>(*id).unwrap();
     }
-
-    Ok(())
 }
 
 // Parameterized allocation tests

@@ -5,46 +5,24 @@ use std::{
 };
 
 use crate::{
-    database::{
-        SharedCatalog,
-        errors::{BoxError, TaskError, TaskResult},
-    },
+    common::errors::{BoxError, TaskError, TaskResult},
     io::pager::SharedPager,
-    transactions::{TransactionCoordinator, accessor::RcPageAccessor, threadpool::ThreadPool},
+    multithreading::{TransactionCoordinator, threadpool::ThreadPool},
 };
 
 /// Context provided to each task, containing thread-local resources.
 pub(crate) struct TaskContext {
-    accessor: RcPageAccessor,
     pager: SharedPager,
     coordinator: TransactionCoordinator,
-    catalog: SharedCatalog,
 }
 
 impl TaskContext {
-    fn new(
-        pager: SharedPager,
-        coordinator: TransactionCoordinator,
-        catalog: SharedCatalog,
-    ) -> Self {
-        Self {
-            accessor: RcPageAccessor::new(pager.clone()),
-            coordinator,
-            pager,
-            catalog,
-        }
-    }
-
-    pub fn accessor(&self) -> RcPageAccessor {
-        self.accessor.clone()
+    fn new(pager: SharedPager, coordinator: TransactionCoordinator) -> Self {
+        Self { coordinator, pager }
     }
 
     pub fn coordinator(&self) -> TransactionCoordinator {
         self.coordinator.clone()
-    }
-
-    pub fn catalog(&self) -> SharedCatalog {
-        self.catalog.clone()
     }
 
     pub fn pager(&self) -> SharedPager {
@@ -56,54 +34,47 @@ impl TaskContext {
 pub struct TaskRunner {
     pool: ThreadPool,
     pager: SharedPager,
-    catalog: SharedCatalog,
     coordinator: TransactionCoordinator,
 }
 
 impl TaskRunner {
-    pub fn new(
-        pool_size: usize,
-        pager: SharedPager,
-        catalog: SharedCatalog,
-        coordinator: TransactionCoordinator,
-    ) -> Self {
+    pub fn new(pool_size: usize, pager: SharedPager, coordinator: TransactionCoordinator) -> Self {
         Self {
             pool: ThreadPool::new(pool_size),
             pager,
-            catalog,
+
             coordinator,
         }
     }
 
-    /// Spawns a task on the thread pool (fire and forget).
+    /// Spawns a task on the thread pool
     pub fn spawn<F>(&self, task: F) -> TaskResult<()>
     where
         F: FnOnce(&TaskContext) -> Result<(), Box<dyn Error>> + Send + 'static,
     {
         let pager = self.pager.clone();
-        let catalog = self.catalog.clone();
         let coordinator = self.coordinator.clone();
 
         self.pool.execute(move || {
-            let ctx = TaskContext::new(pager, coordinator, catalog);
+            let ctx = TaskContext::new(pager, coordinator);
             task(&ctx)
         })?;
 
         Ok(())
     }
 
-    /// Runs a task and waits for completion (no return value).
+    /// Runs a task and waits for completion
     pub fn run<F>(&self, task: F) -> TaskResult<()>
     where
         F: FnOnce(&TaskContext) -> Result<(), BoxError> + Send + Sync + 'static,
     {
         let (tx, rx) = mpsc::channel();
         let pager = self.pager.clone();
-        let catalog = self.catalog.clone();
+
         let coordinator = self.coordinator.clone();
 
         self.pool.execute(move || {
-            let ctx = TaskContext::new(pager, coordinator, catalog);
+            let ctx = TaskContext::new(pager, coordinator);
             let result = task(&ctx);
             let _ = tx.send(result);
             Ok(())
@@ -120,7 +91,6 @@ impl TaskRunner {
     }
 
     /// Runs a task and returns the result.
-    /// Runs a task and returns the result.
     pub fn run_with_result<F, T>(&self, task: F) -> Result<T, TaskError>
     where
         F: FnOnce(&TaskContext) -> Result<T, BoxError> + Send + 'static,
@@ -128,11 +98,11 @@ impl TaskRunner {
     {
         let (tx, rx) = mpsc::channel::<Result<T, BoxError>>();
         let pager = self.pager.clone();
-        let catalog = self.catalog.clone();
+
         let coordinator = self.coordinator.clone();
 
         self.pool.execute(move || {
-            let ctx = TaskContext::new(pager, coordinator, catalog);
+            let ctx = TaskContext::new(pager, coordinator);
             let result = task(&ctx);
             let _ = tx.send(result);
             Ok(())
@@ -159,11 +129,11 @@ impl TaskRunner {
         for task in tasks {
             let tx = tx.clone();
             let pager = self.pager.clone();
-            let catalog = self.catalog.clone();
+
             let coordinator = self.coordinator.clone();
 
             self.pool.execute(move || {
-                let ctx = TaskContext::new(pager, coordinator, catalog);
+                let ctx = TaskContext::new(pager, coordinator);
                 let result = task(&ctx);
                 let _ = tx.send(result);
                 Ok(())
@@ -198,11 +168,10 @@ impl TaskRunner {
         for (idx, task) in tasks.into_iter().enumerate() {
             let tx = tx.clone();
             let pager = self.pager.clone();
-            let catalog = self.catalog.clone();
             let coordinator = self.coordinator.clone();
 
             self.pool.execute(move || {
-                let ctx = TaskContext::new(pager, coordinator, catalog);
+                let ctx = TaskContext::new(pager, coordinator);
                 let result = task(&ctx);
                 let _ = tx.send((idx, result));
                 Ok(())

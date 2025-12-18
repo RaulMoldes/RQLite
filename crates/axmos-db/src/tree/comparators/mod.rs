@@ -19,13 +19,11 @@ use std::{
     usize,
 };
 
-pub(crate) mod varlen;
 pub(crate) mod fixed;
 pub(crate) mod numeric;
-
+pub(crate) mod varlen;
 
 pub(crate) use varlen::VarlenComparator;
-
 
 /// Detects if the platform is little-endian at compile time.
 #[cfg(target_endian = "little")]

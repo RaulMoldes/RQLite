@@ -1,4 +1,3 @@
-
 /// Parameterized tests with single value
 #[macro_export]
 macro_rules! param_tests {
@@ -6,8 +5,9 @@ macro_rules! param_tests {
         paste::paste! {
             $(
                 #[test]
+                #[serial_test::serial]
                 #[cfg_attr(miri, ignore)]
-                fn [<$fn _ $param _ $val>]() -> std::io::Result<()> {
+                fn [<$fn _ $param _ $val>]()  {
                     $fn($val)
                 }
             )+
@@ -18,6 +18,7 @@ macro_rules! param_tests {
         paste::paste! {
             $(
                 #[test]
+                #[serial_test::serial]
                 fn [<$fn _ $param _ $val>]()  {
                     $fn($val)
                 }
@@ -26,7 +27,6 @@ macro_rules! param_tests {
     };
 }
 
-
 /// Parameterized tests for types
 #[macro_export]
 macro_rules! param_type_tests {
@@ -34,8 +34,9 @@ macro_rules! param_type_tests {
         paste::paste! {
             $(
                 #[test]
+                #[serial_test::serial]
                 #[cfg_attr(miri, ignore)]
-                fn [<$fn _ $param _ $ty:snake>]() -> std::io::Result<()> {
+                fn [<$fn _ $param _ $ty:snake>]() {
                     $fn::<$ty>()
                 }
             )+
@@ -47,6 +48,7 @@ macro_rules! param_type_tests {
         paste::paste! {
             $(
                 #[test]
+                #[serial_test::serial]
                 fn [<$fn _ $param _ $ty:snake>]() {
                     $fn::<$ty>()
                 }
@@ -55,15 +57,15 @@ macro_rules! param_type_tests {
     };
 }
 
-
 #[macro_export]
 macro_rules! param2_tests {
     ($fn:ident, $p1:ident, $p2:ident => [$(($v1:expr, $v2:expr)),+ $(,)?]) => {
         paste::paste! {
             $(
                 #[test]
+                #[serial_test::serial]
                 #[cfg_attr(miri, ignore)]
-                fn [<$fn _ $p1 _ $v1 _ $p2 _ $v2>]() -> std::io::Result<()> {
+                fn [<$fn _ $p1 _ $v1 _ $p2 _ $v2>]() {
                     $fn($v1, $v2)
                 }
             )+
@@ -74,6 +76,7 @@ macro_rules! param2_tests {
         paste::paste! {
             $(
                 #[test]
+                #[serial_test::serial]
                 fn [<$fn _ $p1 _ $v1 _ $p2 _ $v2>]() {
                     $fn($v1, $v2)
                 }
@@ -81,8 +84,6 @@ macro_rules! param2_tests {
         }
     };
 }
-
-
 
 /// Parameterized tests for two type parameters
 #[macro_export]
@@ -98,6 +99,7 @@ macro_rules! param2_type_tests {
         paste::paste! {
             $(
                 #[test]
+                #[serial_test::serial]
                 #[cfg_attr(miri, ignore)]
                 fn [<$fn _ $p1 _ $t1:snake _ $p2 _ $t2:snake>]()  {
                     $fn::<$t1, $t2>()
@@ -117,6 +119,7 @@ macro_rules! param2_type_tests {
         paste::paste! {
             $(
                 #[test]
+                #[serial_test::serial]
                 fn [<$fn _ $p1 _ $t1:snake _ $p2 _ $t2:snake>]() {
                     $fn::<$t1, $t2>()
                 }
@@ -124,9 +127,6 @@ macro_rules! param2_type_tests {
         }
     };
 }
-
-
-
 
 #[macro_export]
 macro_rules! param3_tests {
@@ -136,8 +136,9 @@ macro_rules! param3_tests {
         paste::paste! {
             $(
                 #[test]
+                #[serial_test::serial]
                 #[cfg_attr(miri, ignore)]
-                fn [<$fn _ $p1 _ $v1 _ $p2 _ $v2 _ $p3 _ $v3>]() -> std::io::Result<()> {
+                fn [<$fn _ $p1 _ $v1 _ $p2 _ $v2 _ $p3 _ $v3>]()  {
                     $fn($v1, $v2, $v3)
                 }
             )+
@@ -151,6 +152,7 @@ macro_rules! param3_tests {
         paste::paste! {
             $(
                 #[test]
+                #[serial_test::serial]
                 fn [<$fn _ $p1 _ $v1 _ $p2 _ $v2 _ $p3 _ $v3>]() {
                     $fn($v1, $v2, $v3)
                 }
@@ -158,7 +160,6 @@ macro_rules! param3_tests {
         }
     };
 }
-
 
 /// Matrix tests (generates a test for all combinations of two parameter sets)
 ///
@@ -236,8 +237,9 @@ macro_rules! matrix_tests {
                 $($acc)*
                 $(
                     #[test]
+                    #[serial_test::serial]
                     #[cfg_attr(miri, ignore)]
-                    fn [<$fn _ $p1 _ $v1_head _ $p2 _ $v2>]() -> std::io::Result<()> {
+                    fn [<$fn _ $p1 _ $v1_head _ $p2 _ $v2>]()  {
                         $fn($v1_head, $v2)
                     }
                 )+
@@ -261,6 +263,7 @@ macro_rules! matrix_tests {
                 $($acc)*
                 $(
                     #[test]
+                    #[serial_test::serial]
                     fn [<$fn _ $p1 _ $v1_head _ $p2 _ $v2>]() {
                         $fn($v1_head, $v2)
                     }
@@ -269,7 +272,6 @@ macro_rules! matrix_tests {
         );
     };
 }
-
 
 #[macro_export]
 macro_rules! matrix_type_tests {

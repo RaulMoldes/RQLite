@@ -1,13 +1,7 @@
-
-use crate::{types::VarInt};
-
-use std::{
-    cmp::Ordering,
-    io,
-    usize,
-};
+use std::{cmp::Ordering, io, usize};
 
 use super::{Comparator, Ranger, subtract_bytes};
+use crate::types::VarInt;
 
 /// Comparator for variable-length data with VarInt length prefix.
 ///

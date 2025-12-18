@@ -6,8 +6,8 @@ use crate::{
     types::PageId,
 };
 
-fn insert_page(cache: &mut PageCache, should_evict: bool) -> (PageId, Option<PageId>) {
-    let frame = MemFrame::from(BtreePage::alloc(DEFAULT_PAGE_SIZE));
+fn insert_page(id: PageId, cache: &mut PageCache, should_evict: bool) -> (PageId, Option<PageId>) {
+    let frame = MemFrame::from(BtreePage::alloc(id, DEFAULT_PAGE_SIZE));
     let id = frame.page_number();
     let result = cache.insert(frame);
     assert!(result.is_ok(), "Cache insertion failed");
@@ -32,7 +32,7 @@ fn insert_pages_no_evict(cache: &mut PageCache) -> Vec<PageId> {
     let num_pages = cache.get_capacity();
     let mut inserted = Vec::new();
     for i in 0..num_pages {
-        let (id, _) = insert_page(cache, false);
+        let (id, _) = insert_page(i as PageId, cache, false);
         inserted.push(id);
     }
     inserted
@@ -62,7 +62,9 @@ fn test_cache_eviction(capacity: usize) {
         cache.num_frames() == inserted.len(),
         "Invalid number of frames found on the page cache"
     );
-    let (id, evicted) = insert_page(&mut cache, true);
+
+    let next_id = inserted.len();
+    let (id, evicted) = insert_page(next_id as PageId, &mut cache, true);
     assert!(evicted.is_some());
     let id = evicted.unwrap();
     assert!(id == inserted[0], "Should have evicted the first page.");

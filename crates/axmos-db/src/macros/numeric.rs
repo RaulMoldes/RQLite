@@ -1078,23 +1078,6 @@ macro_rules! recast {
     };
 }
 
-#[macro_export]
-macro_rules! scalar {
-    (
-        $(#[$meta:meta])*
-        pub struct $name:ident($inner:ty);
-    ) => {
-        $(#[$meta])*
-        #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-        #[repr(transparent)]
-        pub struct $name(pub $inner);
-
-        $crate::numeric!($name, $inner);
-        $crate::arith!($name, $inner);
-        $crate::as_slice!($name);
-    };
-}
-
 /// Defines a float wrapper type with full trait implementations.
 /// Generates: owned type, Ref type, RefMut type, and AxmosValueType impl.
 #[macro_export]

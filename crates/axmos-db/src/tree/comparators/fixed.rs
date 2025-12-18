@@ -1,13 +1,6 @@
-use std::{
-    cmp::Ordering,
-    io,
-    usize
-};
+use std::{cmp::Ordering, io, usize};
 
 use super::{Comparator, Ranger};
-
-
-
 
 /// Comparator for fixed-size byte arrays using lexicographic ordering.
 ///

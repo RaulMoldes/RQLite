@@ -1,7 +1,6 @@
 #[macro_export]
 macro_rules! make_shared {
     ($shared_ty:ident, $inner_ty:ty) => {
-        #[derive(Debug)]
         #[repr(transparent)]
         pub struct $shared_ty(std::sync::Arc<parking_lot::RwLock<$inner_ty>>);
 

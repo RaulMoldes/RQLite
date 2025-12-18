@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{database::errors::ThreadPoolError, types::WorkerId};
+use crate::{common::errors::ThreadPoolError, types::WorkerId};
 use parking_lot::{Condvar, Mutex};
 
 // Simplistic thread safe queue implementation.
@@ -203,116 +203,5 @@ impl Drop for ThreadPool {
         if !self.workers.is_empty() && self.running.load(Ordering::Acquire) {
             let _ = self.shutdown(Duration::from_secs(2));
         }
-    }
-}
-
-#[cfg(test)]
-mod threadpool_tests {
-    use super::*;
-    use std::{
-        sync::{Arc, atomic::AtomicUsize},
-        time::Duration,
-    };
-
-    #[test]
-    fn test_task_execution() {
-        let pool = ThreadPool::new(4);
-        let counter = Arc::new(AtomicUsize::new(0));
-
-        let num_tasks = 100;
-        for _ in 0..num_tasks {
-            let counter = Arc::clone(&counter);
-            pool.execute(move || {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            })
-            .unwrap();
-        }
-
-        // Give tasks time to complete
-        thread::sleep(Duration::from_millis(500));
-
-        assert_eq!(counter.load(Ordering::SeqCst), num_tasks);
-    }
-
-    #[test]
-    fn test_graceful_shutdown() {
-        let mut pool = ThreadPool::new(4);
-        let counter = Arc::new(AtomicUsize::new(0));
-
-        for _ in 0..50 {
-            let counter = Arc::clone(&counter);
-            pool.execute(move || {
-                thread::sleep(Duration::from_millis(10));
-                counter.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            })
-            .unwrap();
-        }
-
-        let result = pool.shutdown(Duration::from_secs(5));
-        assert!(result.is_ok());
-
-        // All tasks should have completed before shutdown finished
-        assert_eq!(counter.load(Ordering::SeqCst), 50);
-    }
-
-    #[test]
-    fn test_failure_after_shutdown() {
-        let mut pool = ThreadPool::new(2);
-
-        pool.shutdown(Duration::from_secs(1)).unwrap();
-
-        let result = pool.execute(|| Ok(()));
-        assert!(matches!(result, Err(ThreadPoolError::PoolShutdown)));
-    }
-
-    #[test]
-    fn test_concurrency() {
-        let pool = ThreadPool::new(4);
-        let concurrent_count = Arc::new(AtomicUsize::new(0));
-        let max_concurrent = Arc::new(AtomicUsize::new(0));
-
-        let num_tasks = 8;
-        for _ in 0..num_tasks {
-            let concurrent = Arc::clone(&concurrent_count);
-            let max = Arc::clone(&max_concurrent);
-
-            pool.execute(move || {
-                // Increment concurrent counter
-                let current = concurrent.fetch_add(1, Ordering::SeqCst) + 1;
-
-                // Update max if this is the highest we've seen
-                let mut old_max = max.load(Ordering::SeqCst);
-                while current > old_max {
-                    match max.compare_exchange(old_max, current, Ordering::SeqCst, Ordering::SeqCst)
-                    {
-                        Ok(_) => break,
-                        Err(x) => old_max = x,
-                    }
-                }
-
-                // Simulate work
-                thread::sleep(Duration::from_millis(100));
-
-                // Decrement concurrent counter
-                concurrent.fetch_sub(1, Ordering::SeqCst);
-                Ok(())
-            })
-            .unwrap();
-        }
-
-        // Wait for all tasks to complete
-        thread::sleep(Duration::from_millis(500));
-
-        // If tasks run sequentially, `max_concurrent` would never exceed 1 because each task finishes before the next starts.
-        // But with true parallelism, multiple tasks overlap during their sleep, so we see [`max_concurrent > 1`].
-        // We should have seen multiple tasks running concurrently
-        let max_seen = max_concurrent.load(Ordering::SeqCst);
-        assert!(
-            max_seen > 1,
-            "Expected concurrent execution, but max concurrent was {}",
-            max_seen
-        );
     }
 }

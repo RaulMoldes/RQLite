@@ -1,10 +1,6 @@
-use std::{
-    cmp::Ordering,
-    io,
-    usize, mem
-};
+use std::{cmp::Ordering, io, mem, usize};
 
-use super::{Comparator, Ranger, IS_LITTLE_ENDIAN};
+use super::{Comparator, IS_LITTLE_ENDIAN, Ranger};
 /// Comparator for signed numeric types stored in platform-native byte order.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SignedNumericComparator(usize);
@@ -110,8 +106,6 @@ impl Ranger for SignedNumericComparator {
         Ok(diff_bytes.into_boxed_slice())
     }
 }
-
-
 
 /// Comparator for numeric types stored in platform-native byte order.
 ///

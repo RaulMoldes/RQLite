@@ -1,10 +1,10 @@
 use crate::{
     io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
     storage::{
-        BufferOps, WalBuffer, Writable,
+        Buffer, BufferOps, WalBuffer, WalMetadata, Writable,
         wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock},
     },
-    types::{LogId, ObjectId, initialize_block_count},
+    types::{BlockId, Lsn, ObjectId},
 };
 
 use std::{
@@ -185,9 +185,7 @@ impl FileOperations for WriteAheadLog {
         let file = DBFile::create(&path)?;
         let fs_block_size = FileSystem::block_size(&path)?;
         let block_size = WAL_BLOCK_SIZE.next_multiple_of(fs_block_size);
-        let header = BlockZero::alloc(block_size as u32);
-
-        initialize_block_count(1); // Initialize the in-memory block counter.
+        let header = BlockZero::alloc(0, block_size as u32);
 
         Ok(Self {
             header,
@@ -216,9 +214,6 @@ impl FileOperations for WriteAheadLog {
             block_size
         };
 
-        let block_count = header_buf.metadata().wal_header.total_blocks as u64;
-        initialize_block_count(block_count);
-
         Ok(Self {
             header: header_buf,
             current_block: None, // If needed, will be allocated on push.
@@ -238,7 +233,7 @@ impl FileOperations for WriteAheadLog {
 
     fn truncate(&mut self) -> io::Result<()> {
         self.file.truncate()?;
-        self.header = BlockZero::alloc(self.block_size as u32);
+        self.header = BlockZero::alloc(0, self.block_size as u32);
         self.current_block = None;
         self.flush_queue.clear();
         Ok(())
@@ -319,17 +314,40 @@ impl WriteAheadLog {
         Ok(())
     }
 
+    fn get_next_block(&mut self) -> BlockId {
+        let total_blocks = &mut self.header.metadata_mut().wal_header.total_blocks;
+        let current = *total_blocks;
+        *total_blocks += 1;
+        current
+    }
+
+    fn get_next_lsn(&mut self) -> Lsn {
+        let mut last = self.header.metadata_mut().last_lsn();
+
+        match last.as_mut() {
+            Some(lsn) => {
+                *lsn += 1;
+                *lsn
+            }
+            None => {
+                last = Some(0);
+                0
+            }
+        }
+    }
+
     fn rotate_block(&mut self) -> io::Result<()> {
         if let Some(full_block) = self.current_block.take() {
             self.flush_queue.push_back(full_block);
         }
-        self.current_block = Some(WalBlock::new(self.block_size));
+        let next_id = self.get_next_block();
+        self.current_block = Some(WalBlock::alloc(next_id, self.block_size as u32));
         Ok(())
     }
 
     pub fn perform_flush(&mut self) -> io::Result<()> {
         // Block 0 always exists, additional blocks start at index 1
-        let mut block_number: u32 = 1;
+        let mut block_number: u64 = 1;
         let mut write_offset = self.block_size as u64;
 
         // Flush queued blocks
@@ -397,10 +415,10 @@ impl WriteAheadLog {
 
 #[derive(Debug, Clone)]
 pub struct WalStats {
-    pub start_lsn: LogId,
-    pub last_lsn: LogId,
+    pub start_lsn: Lsn,
+    pub last_lsn: Lsn,
+    pub total_blocks: u64,
     pub total_entries: u32,
-    pub total_blocks: u32,
     pub pending_blocks: usize,
     pub block_size: usize,
 }
@@ -413,7 +431,7 @@ pub(crate) struct WalReader<'a> {
     current_block_offset: usize,
     current_block_index: Option<usize>, // None = reading from header, Some(i) = reading from block_queue[i]
     file_offset: u64,
-    total_blocks: u32,
+    total_blocks: u64,
     block_size: usize,
 }
 
@@ -422,7 +440,7 @@ impl<'a> WalReader<'a> {
         file: &'a mut DBFile,
         read_ahead_size: usize,
         block_size: usize,
-        total_blocks: u32,
+        total_blocks: u64,
     ) -> io::Result<Self> {
         // Read block zero (header)
         let mut header = BlockZero::new(block_size);
@@ -479,6 +497,8 @@ impl<'a> WalReader<'a> {
             if self.file_offset >= last_valid_offset {
                 break;
             }
+
+            // Allocates an uninitialized block, which will be read later, initializing its header and content.
             let mut block = WalBlock::new(self.block_size);
             self.file.seek(SeekFrom::Start(self.file_offset))?;
             self.file.read_exact(block.as_mut())?;

@@ -1,27 +1,9 @@
-use crate::{
-    CELL_ALIGNMENT, as_slice, scalar,
-    types::{PageId, UInt16},
-    writable_layout,
-};
+use crate::{CELL_ALIGNMENT, as_slice, types::PageId, writable_layout};
 
 use std::{fmt::Debug, mem, ptr::NonNull, slice};
 
 // Slot offset of a cell
-scalar! {
-    pub struct Slot(u16);
-}
-
-impl From<UInt16> for Slot {
-    fn from(value: UInt16) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<Slot> for UInt16 {
-    fn from(value: Slot) -> UInt16 {
-        UInt16(value.0)
-    }
-}
+pub(crate) type Slot = u16;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 #[repr(C, align(8))]
@@ -125,7 +107,7 @@ impl<'a> CellRef<'a> {
     /// Storage size (header + data + slot pointer).
     #[inline]
     pub fn storage_size(&self) -> usize {
-        mem::size_of::<CellHeader>() + self.data().len() + Slot::SIZE
+        mem::size_of::<CellHeader>() + self.data().len() + mem::size_of::<Slot>()
     }
 
     /// Optional left child if set
@@ -244,7 +226,7 @@ impl<'a> CellMut<'a> {
     #[inline]
     /// See [CellRef<'_>::storage_size]
     pub fn storage_size(&self) -> usize {
-        mem::size_of::<CellHeader>() + self.data().len() + Slot::SIZE
+        mem::size_of::<CellHeader>() + self.data().len() + mem::size_of::<Slot>()
     }
 
     #[inline]
@@ -267,8 +249,8 @@ impl<'a> CellMut<'a> {
 
     #[inline]
     /// Set the left child of the cell
-    pub fn set_left_child(&mut self, child: PageId) {
-        self.header.left_child = Some(child);
+    pub fn set_left_child(&mut self, child: Option<PageId>) {
+        self.header.left_child = child;
     }
 }
 
@@ -398,7 +380,7 @@ impl OwnedCell {
     #[inline]
     /// See [CellRef<'_>::storage_size]
     pub fn storage_size(&self) -> usize {
-        self.total_size() + Slot::SIZE
+        self.total_size() + mem::size_of::<Slot>()
     }
 
     #[inline]
@@ -409,8 +391,8 @@ impl OwnedCell {
 
     #[inline]
     /// Set the left child to a new value.
-    pub fn set_left_child(&mut self, child: PageId) {
-        self.header.left_child = Some(child);
+    pub fn set_left_child(&mut self, child: Option<PageId>) {
+        self.header.left_child = child;
     }
 
     #[inline]
@@ -482,3 +464,9 @@ impl<'a> From<&'a mut OwnedCell> for CellMut<'a> {
 writable_layout!(OwnedCell, CellHeader, header, payload);
 writable_layout!(CellRef<'_>, CellHeader, header, data, lifetime);
 writable_layout!(CellMut<'_>, CellHeader, header, data, lifetime);
+
+impl<T: AsRef<[u8]>> From<&T> for OwnedCell {
+    fn from(value: &T) -> Self {
+        Self::new(value.as_ref())
+    }
+}

@@ -62,13 +62,6 @@ impl OverflowPageHeader {
     }
 }
 
-impl Default for OverflowPageHeader {
-    fn default() -> Self {
-        let id = PageId::new();
-        Self::new(id, DEFAULT_PAGE_SIZE)
-    }
-}
-
 /// Page Zero must store a little bit more data about the database itself.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C, align(64))]
@@ -79,9 +72,9 @@ pub(crate) struct PageZeroHeader {
     pub(crate) previous_sibling: Option<PageId>,
     pub(crate) first_free_page: Option<PageId>,
     pub(crate) last_free_page: Option<PageId>,
+    pub(crate) total_pages: u64,
     pub(crate) axmo: u32,
     pub(crate) page_size: u32,
-    pub(crate) total_pages: u32,
     pub(crate) free_pages: u32,
     pub(crate) free_space_ptr: u32,
     pub(crate) free_space: u32,
@@ -99,6 +92,7 @@ as_slice!(PageZeroHeader);
 impl Default for PageZeroHeader {
     fn default() -> Self {
         Self::new(
+            PAGE_ZERO,
             DEFAULT_PAGE_SIZE,
             DEFAULT_BTREE_MIN_KEYS,
             DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE,
@@ -109,6 +103,7 @@ impl Default for PageZeroHeader {
 
 impl PageZeroHeader {
     pub(crate) fn new(
+        page_number: PageId,
         page_size: u32,
         min_keys: u8,
         num_siblings_per_side: u8,
@@ -116,7 +111,7 @@ impl PageZeroHeader {
     ) -> Self {
         let aligned_size = page_size.next_multiple_of(PAGE_ALIGNMENT);
         Self {
-            page_number: PAGE_ZERO,
+            page_number,
             num_slots: 0,
             page_size: aligned_size,
             free_space: aligned_size.saturating_sub(PAGE_ZERO_HEADER_SIZE as u32),
@@ -139,6 +134,7 @@ impl PageZeroHeader {
 
     pub(crate) fn from_config(config: AxmosDBConfig) -> Self {
         Self::new(
+            PAGE_ZERO,
             config.page_size,
             config.min_keys_per_page,
             config.num_siblings_per_side,
@@ -150,13 +146,6 @@ impl PageZeroHeader {
 impl From<AxmosDBConfig> for PageZeroHeader {
     fn from(value: AxmosDBConfig) -> Self {
         Self::from_config(value)
-    }
-}
-
-impl Default for BtreePageHeader {
-    fn default() -> Self {
-        let id = PageId::new();
-        Self::new(id, DEFAULT_PAGE_SIZE)
     }
 }
 
@@ -182,13 +171,31 @@ pub(crate) type BtreePage = MemBlock<BtreePageHeader>;
 pub(crate) type PageZero = MemBlock<PageZeroHeader>;
 pub(crate) type OverflowPage = MemBlock<OverflowPageHeader>;
 
+impl Identifiable for PageZeroHeader {
+    type IdType = PageId;
+
+    fn id(&self) -> Self::IdType {
+        self.page_number
+    }
+
+    fn alloc(id: Self::IdType, size: u32) -> Self {
+        Self::new(
+            id,
+            size,
+            DEFAULT_BTREE_MIN_KEYS,
+            DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE,
+            DEFAULT_POOL_SIZE,
+        )
+    }
+}
+
 /// All pages are [Buffer].
 impl BufferOps for PageZero {
     fn available_space(&self) -> usize {
         self.metadata().free_space as usize
     }
 
-    fn alloc(size: u32) -> Self {
+    fn alloc(id: <Self::Header as Identifiable>::IdType, size: u32) -> Self {
         assert!(
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
             "page size {} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}",
@@ -197,12 +204,7 @@ impl BufferOps for PageZero {
 
         // The buffer is internally aligned to [`PAGE_ALIGNMENT`]
         let mut buffer = MemBlock::<PageZeroHeader>::new(size as usize);
-        *buffer.metadata_mut() = PageZeroHeader::new(
-            size,
-            DEFAULT_BTREE_MIN_KEYS,
-            DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE,
-            DEFAULT_POOL_SIZE,
-        );
+        *buffer.metadata_mut() = PageZeroHeader::alloc(id, size);
 
         buffer
     }
@@ -213,15 +215,16 @@ impl BufferOps for BtreePage {
         self.metadata().free_space as usize
     }
 
-    /// Allocate a new [`BtreePage`] of the given size, initializing the header accordingly
-    fn alloc(page_size: u32) -> Self {
+    fn alloc(id: <Self::Header as Identifiable>::IdType, size: u32) -> Self {
         assert!(
-            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&page_size),
-            "page size {page_size} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}"
+            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
+            "page size {} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}",
+            size
         );
-        let id = PageId::new();
-        let mut buffer = MemBlock::<BtreePageHeader>::new(page_size as usize);
-        *buffer.metadata_mut() = BtreePageHeader::new(id, page_size);
+
+        // The buffer is internally aligned to [`PAGE_ALIGNMENT`]
+        let mut buffer = MemBlock::<BtreePageHeader>::new(size as usize);
+        *buffer.metadata_mut() = BtreePageHeader::alloc(id, size);
 
         buffer
     }
@@ -232,6 +235,10 @@ impl Identifiable for OverflowPageHeader {
     fn id(&self) -> Self::IdType {
         self.page_number
     }
+
+    fn alloc(id: Self::IdType, size: u32) -> Self {
+        Self::new(id, size)
+    }
 }
 
 impl Identifiable for BtreePageHeader {
@@ -239,32 +246,30 @@ impl Identifiable for BtreePageHeader {
     fn id(&self) -> Self::IdType {
         self.page_number
     }
-}
 
-impl Identifiable for PageZeroHeader {
-    type IdType = PageId;
-    fn id(&self) -> Self::IdType {
-        self.page_number
+    fn alloc(id: Self::IdType, size: u32) -> Self {
+        Self::new(id, size)
     }
 }
 
 impl BufferOps for OverflowPage {
     /// Alocate a new [OverflowPage] of the given [page_size]
-    fn alloc(page_size: u32) -> Self {
+    fn alloc(id: <Self::Header as Identifiable>::IdType, size: u32) -> Self {
         assert!(
-            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&page_size),
-            "page size {page_size} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}"
+            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
+            "page size {} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}",
+            size
         );
 
-        let mut buf = MemBlock::<OverflowPageHeader>::new(page_size as usize);
-        let id = PageId::new();
-        *buf.metadata_mut() = OverflowPageHeader::new(id, page_size);
+        // The buffer is internally aligned to [`PAGE_ALIGNMENT`]
+        let mut buffer = MemBlock::<OverflowPageHeader>::new(size as usize);
+        *buffer.metadata_mut() = OverflowPageHeader::alloc(id, size);
 
-        buf
+        buffer
     }
 
     fn available_space(&self) -> usize {
-        self.usable_space(self.capacity()) - self.metadata().num_bytes as usize
+        Self::usable_space(self.capacity()) - self.metadata().num_bytes as usize
     }
 }
 
@@ -280,7 +285,7 @@ impl ComposedMetadata for PageZeroHeader {
 impl BtreeMetadata for BtreePageHeader {
     /// Obtain the offset at which the content data starts (after the slot array)
     fn content_start_ptr(&self) -> u16 {
-        (self.num_slots() as usize * Slot::SIZE + mem::size_of::<Self>()) as u16
+        (self.num_slots() as usize * mem::size_of::<Slot>() + mem::size_of::<Self>()) as u16
     }
 
     /// Obtain the number of slots in the page.
@@ -356,8 +361,8 @@ impl BtreeMetadata for BtreePageHeader {
         self.next_sibling
     }
     /// Set the next sibling value
-    fn set_next_sibling(&mut self, next: PageId) {
-        self.next_sibling = Some(next);
+    fn set_next_sibling(&mut self, next: Option<PageId>) {
+        self.next_sibling = next;
     }
 
     /// Get the page's next sibling (useful when reverse iterating over the btree during scans.)
@@ -366,15 +371,19 @@ impl BtreeMetadata for BtreePageHeader {
     }
 
     /// Set the prev sibling value
-    fn set_prev_sibling(&mut self, prev: PageId) {
-        self.previous_sibling = Some(prev);
+    fn set_prev_sibling(&mut self, prev: Option<PageId>) {
+        self.previous_sibling = prev;
+    }
+
+    fn set_right_child(&mut self, new_right: Option<PageId>) {
+        self.right_child = new_right;
     }
 }
 
 impl BtreeMetadata for PageZeroHeader {
     /// Obtain the offset at which the content data starts (after the slot array)
     fn content_start_ptr(&self) -> u16 {
-        (self.num_slots() as usize * Slot::SIZE + mem::size_of::<Self>()) as u16
+        (self.num_slots() as usize * mem::size_of::<Slot>() + mem::size_of::<Self>()) as u16
     }
 
     /// Obtain the number of slots in the page.
@@ -450,8 +459,8 @@ impl BtreeMetadata for PageZeroHeader {
         self.next_sibling
     }
     /// Set the next sibling value
-    fn set_next_sibling(&mut self, next: PageId) {
-        self.next_sibling = Some(next);
+    fn set_next_sibling(&mut self, next: Option<PageId>) {
+        self.next_sibling = next;
     }
 
     /// Get the page's next sibling (useful when reverse iterating over the btree during scans.)
@@ -460,8 +469,12 @@ impl BtreeMetadata for PageZeroHeader {
     }
 
     /// Set the prev sibling value
-    fn set_prev_sibling(&mut self, prev: PageId) {
-        self.previous_sibling = Some(prev);
+    fn set_prev_sibling(&mut self, prev: Option<PageId>) {
+        self.previous_sibling = prev;
+    }
+
+    fn set_right_child(&mut self, new_right: Option<PageId>) {
+        self.right_child = new_right;
     }
 }
 
@@ -533,7 +546,11 @@ impl From<BtreePage> for OverflowPage {
 
 impl From<OverflowPage> for BtreePage {
     fn from(page: OverflowPage) -> BtreePage {
-        page.cast::<BtreePageHeader>()
+        let page_number = page.id();
+        let page_size = page.size();
+        let mut new_page = page.cast::<BtreePageHeader>();
+        *new_page.metadata_mut() = BtreePageHeader::new(page_number, page_size as u32);
+        new_page
     }
 }
 

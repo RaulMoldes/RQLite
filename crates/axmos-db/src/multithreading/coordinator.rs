@@ -1,13 +1,8 @@
 //! MVCC Transaction System for AxmosDB
 use crate::{
-    ObjectId, TRANSACTION_ZERO, UInt64,
-    database::{
-        SharedCatalog,
-        errors::{TransactionError, TransactionResult},
-    },
+    common::errors::{TransactionError, TransactionResult},
     io::pager::SharedPager,
-    transactions::logger::Logger,
-    types::TransactionId,
+    types::{LogicalId, TransactionId},
 };
 use parking_lot::RwLock;
 use std::{
@@ -18,16 +13,10 @@ use std::{
     },
 };
 
-pub mod accessor;
-pub mod logger;
-pub mod threadpool;
-
 pub type Version = u16;
-pub type RowId = UInt64;
 
 /// Last commit timestamp per tuple
 type TupleCommitLog = Arc<RwLock<HashMap<LogicalId, u64>>>;
-
 
 // Macro for creating snapshots with low boilerplate.
 #[macro_export]
@@ -61,8 +50,8 @@ pub struct Snapshot {
     xid: TransactionId,
     /// Lowest active transaction ID when snapshot was taken
     xmin: TransactionId,
-    /// Next transaction ID to be assigned when snapshot was taken
-    xmax: TransactionId,
+    /// Last committed transaction when snapshot was taken (Set to None for the first transaction in the system)
+    xmax: Option<TransactionId>,
     /// Set of transaction IDs that were active (uncommitted) at snapshot time
     active_txs: HashSet<TransactionId>,
 }
@@ -71,7 +60,7 @@ impl Snapshot {
     pub fn new(
         xid: TransactionId,
         xmin: TransactionId,
-        xmax: TransactionId,
+        xmax: Option<TransactionId>,
         active: HashSet<TransactionId>,
     ) -> Self {
         Self {
@@ -87,7 +76,7 @@ impl Snapshot {
     }
 
     #[inline]
-    pub fn xmax(&self) -> TransactionId {
+    pub fn xmax(&self) -> Option<TransactionId> {
         self.xmax
     }
 
@@ -98,11 +87,17 @@ impl Snapshot {
     }
 
     /// Check if a tuple with given xmin/xmax is visible to this snapshot.
-    pub fn is_tuple_visible(&self, tuple_xmin: TransactionId, tuple_xmax: TransactionId) -> bool {
+    pub fn is_tuple_visible(
+        &self,
+        tuple_xmin: TransactionId,
+        tuple_xmax: Option<TransactionId>,
+    ) -> bool {
         // Case 1: The tuple was created by our own transaction, then it should be visible to us unless we also deleted it.
-        if tuple_xmin == self.xid {
+        if tuple_xmin == self.xid
+            && let Some(xmax) = tuple_xmax
+        {
             // Visible unless we also deleted it
-            return tuple_xmax != self.xid;
+            return xmax != self.xid;
         }
 
         // Case 2: If the creating transaction had not committed before our snapshot, we should not be able to see the tuple.
@@ -111,24 +106,31 @@ impl Snapshot {
         }
 
         // Check if the tuple has been deleted
-        if tuple_xmax == TRANSACTION_ZERO {
-            // Not deleted
-            return true;
-        }
+        if let Some(deleted_tx) = tuple_xmax {
+            // if there is a deleting transaction check if the deletion is visible to us.
+            // Deletion is visible only if deleter committed before our snapshot
+            // So tuple is visible if deleter has NOT committed before our snapshot
+            return !self.is_committed_before_snapshot(deleted_tx);
+        };
 
-        // Deletion is visible only if deleter committed before our snapshot
-        // So tuple is visible if deleter has NOT committed before our snapshot
-        !self.is_committed_before_snapshot(tuple_xmax)
+        true
     }
 
     /// Check if a transaction was committed before this snapshot was taken
     pub fn is_committed_before_snapshot(&self, txid: TransactionId) -> bool {
         // Transaction started after our snapshot,
         // Then it is impossible it committed before the snapshot was taken
-        // Transaction was active when we took snapshot (had not commited)
-        if (txid >= self.xmax && self.xmax != TRANSACTION_ZERO) || self.active_txs.contains(&txid) {
+        if let Some(max_tx) = self.xmax
+            && max_tx <= txid
+        {
             return false;
-        }
+        };
+
+        // Transaction was active when we took snapshot (had not commited)
+        if self.active_txs.contains(&txid) {
+            return false;
+        };
+
         // Transaction ID is below our snapshot's xmax and wasn't active
         // This means it must have committed before our snapshot
         true
@@ -214,7 +216,6 @@ impl Clone for TransactionCoordinator {
         Self {
             transactions: Arc::clone(&self.transactions),
             pager: self.pager.clone(),
-            catalog: self.catalog.clone(),
             last_committed: self.last_committed,
             commit_counter: Arc::clone(&self.commit_counter),
             tuple_commits: Arc::clone(&self.tuple_commits),
@@ -224,16 +225,13 @@ impl Clone for TransactionCoordinator {
 /// Central coordinator for all transactions in the system.
 ///
 ///  Creates transactions, snapshots, tracks active transactions, validates commits and maintains commit order.
-#[derive(Debug)]
 pub struct TransactionCoordinator {
     /// All active and recently committed transactions
     transactions: SharedTransactionTable,
     /// Shared pager for I/O operations
     pager: SharedPager,
-    /// Shared catalog for schema access
-    catalog: SharedCatalog,
     /// Last committed transaction to create snapshots
-    last_committed: TransactionId,
+    last_committed: Option<TransactionId>,
     /// Global commit timestamp counter
     commit_counter: Arc<AtomicU64>,
     /// Last commit timestamp per tuple - tracks when each tuple was last modified
@@ -246,12 +244,11 @@ enum ValidationResult {
 }
 
 impl TransactionCoordinator {
-    pub fn new(pager: SharedPager, catalog: SharedCatalog) -> Self {
+    pub fn new(pager: SharedPager) -> Self {
         Self {
             transactions: Arc::new(RwLock::new(HashMap::new())),
             pager,
-            catalog,
-            last_committed: TRANSACTION_ZERO,
+            last_committed: None,
             commit_counter: Arc::new(AtomicU64::new(1)),
             tuple_commits: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -294,13 +291,9 @@ impl TransactionCoordinator {
             txs.insert(txid, entry);
         }
 
-        let logger = Logger::new(txid, self.pager());
-        logger.begin()?;
-
         Ok(TransactionHandle {
             id: txid,
             snapshot,
-            logger,
             coordinator: self.clone(),
         })
     }
@@ -467,19 +460,13 @@ impl TransactionCoordinator {
     pub fn pager(&self) -> SharedPager {
         self.pager.clone()
     }
-
-    pub fn catalog(&self) -> SharedCatalog {
-        self.catalog.clone()
-    }
 }
 
 /// Handle to an active transaction
 /// Provides a safe interface for transaction operations
-#[derive(Debug)]
 pub struct TransactionHandle {
     id: TransactionId,
     snapshot: Snapshot,
-    logger: Logger,
     coordinator: TransactionCoordinator,
 }
 
@@ -492,10 +479,6 @@ impl TransactionHandle {
         self.snapshot.clone()
     }
 
-    pub fn logger(&self) -> Logger {
-        self.logger.clone()
-    }
-
     /// Commit this transaction
     pub fn commit(self) -> TransactionResult<()> {
         self.coordinator.commit(self.id)
@@ -504,316 +487,5 @@ impl TransactionHandle {
     /// Abort this transaction
     pub fn abort(self) -> TransactionResult<()> {
         self.coordinator.abort(self.id)
-    }
-}
-
-#[cfg(test)]
-mod coordinator_tests {
-    use super::*;
-    use crate::test_utils::test_database;
-    use std::{collections::HashSet, io};
-
-    /// Test: A transaction can see tuples it created itself.
-    ///
-    /// Scenario:
-    /// - Transaction 10 creates a tuple (xmin=10, xmax=0)
-    /// - Transaction 10's snapshot should see this tuple as visible
-    #[test]
-    fn test_coordinator_1() {
-        let xid = TransactionId::from(10u64);
-        let snapshot = Snapshot::new(xid, xid, TransactionId::from(11u64), HashSet::new());
-
-        // Tuple created by our transaction, not deleted
-        let tuple_xmin = xid;
-        let tuple_xmax = TRANSACTION_ZERO;
-
-        assert!(
-            snapshot.is_tuple_visible(tuple_xmin, tuple_xmax),
-            "Transaction should see its own uncommitted writes"
-        );
-    }
-
-    /// Test: A transaction cannot see tuples created by active (uncommitted) transactions.
-    ///
-    /// Scenario:
-    /// - Transaction 7 is active (uncommitted) when transaction 10 takes its snapshot
-    /// - Transaction 7 creates a tuple (xmin=7, xmax=0)
-    /// - Transaction 10 should NOT see this tuple
-    #[test]
-    fn test_coordinator_2() {
-        let xid_10 = TransactionId::from(10u64);
-        let xid_7 = TransactionId::from(7u64);
-
-        let mut active = HashSet::new();
-        active.insert(xid_7);
-
-        let snapshot = Snapshot::new(
-            xid_10,
-            TransactionId::from(5u64),
-            TransactionId::from(11u64),
-            active,
-        );
-
-        // Tuple created by active transaction 7
-        let tuple_xmin = xid_7;
-        let tuple_xmax = TRANSACTION_ZERO;
-
-        assert!(
-            !snapshot.is_tuple_visible(tuple_xmin, tuple_xmax),
-            "Transaction should NOT see writes from active (uncommitted) transactions"
-        );
-    }
-
-    /// Test: A transaction can see tuples from transactions that committed before the snapshot.
-    ///
-    /// Scenario:
-    /// - Transaction 5 committed before transaction 10 started
-    /// - Transaction 5 created a tuple (xmin=5, xmax=0)
-    /// - Transaction 10 should see this tuple
-    #[test]
-    fn test_coordinator_3() {
-        let xid_10 = TransactionId::from(10u64);
-        let xid_5 = TransactionId::from(5u64);
-
-        let snapshot = Snapshot::new(
-            xid_10,
-            xid_5,
-            TransactionId::from(11u64),
-            HashSet::new(), // No active transactions - xid_5 already committed
-        );
-
-        // Tuple created by committed transaction 5
-        let tuple_xmin = xid_5;
-        let tuple_xmax = TRANSACTION_ZERO;
-
-        assert!(
-            snapshot.is_tuple_visible(tuple_xmin, tuple_xmax),
-            "Transaction should see writes from committed transactions"
-        );
-    }
-
-    /// Test: A deleted tuple is not visible if the deletion was committed before the snapshot.
-    ///
-    /// Scenario:
-    /// - Transaction 3 created a tuple
-    /// - Transaction 5 deleted the tuple (both committed before snapshot)
-    /// - Transaction 10 should NOT see the tuple
-    #[test]
-    fn test_coordinator_4() {
-        let xid_10 = TransactionId::from(10u64);
-        let xid_3 = TransactionId::from(3u64);
-        let xid_5 = TransactionId::from(5u64);
-
-        let snapshot = Snapshot::new(xid_10, xid_3, TransactionId::from(11u64), HashSet::new());
-
-        // Tuple created by tx3, deleted by tx5 (both committed)
-        let tuple_xmin = xid_3;
-        let tuple_xmax = xid_5;
-
-        assert!(
-            !snapshot.is_tuple_visible(tuple_xmin, tuple_xmax),
-            "Transaction should NOT see tuples deleted before its snapshot"
-        );
-    }
-
-    /// Test: A deleted tuple IS visible if the deleting transaction is still active.
-    ///
-    /// Scenario:
-    /// - Transaction 3 created a tuple (committed)
-    /// - Transaction 7 deleted the tuple but hasn't committed yet
-    /// - Transaction 10 should still see the tuple
-    #[test]
-    fn test_coordinator_5() {
-        let xid_10 = TransactionId::from(10u64);
-        let xid_3 = TransactionId::from(3u64);
-        let xid_7 = TransactionId::from(7u64);
-
-        let mut active = HashSet::new();
-        active.insert(xid_7);
-
-        let snapshot = Snapshot::new(xid_10, xid_3, TransactionId::from(11u64), active);
-
-        // Tuple created by tx3 (committed), deleted by tx7 (active)
-        let tuple_xmin = xid_3;
-        let tuple_xmax = xid_7;
-
-        assert!(
-            snapshot.is_tuple_visible(tuple_xmin, tuple_xmax),
-            "Transaction should see tuples with uncommitted deletes"
-        );
-    }
-
-    /// Test: First-committer-wins - concurrent transactions writing to the same tuple.
-    ///
-    /// Scenario:
-    /// 1. Transaction A starts (start_ts=1)
-    /// 2. Transaction B starts (start_ts=1)
-    /// 3. Both write to tuple X
-    /// 4. Transaction A commits first -> succeeds, records commit_ts=2 for tuple X
-    /// 5. Transaction B tries to commit -> fails because tuple X was modified after B started
-    #[test]
-    fn test_coordinator_6() -> io::Result<()> {
-        let (db, f) = test_database()?;
-        let pager = db.pager();
-        let catalog = db.catalog();
-        let coordinator = TransactionCoordinator::new(pager, catalog);
-
-        let tuple_id = LogicalId::new(ObjectId::from(1u64), UInt64::from(1u64));
-
-        // Step 1 & 2: Both transactions start
-        let handle_a = coordinator.begin().expect("Failed to begin transaction A");
-        let txid_a = handle_a.id();
-
-        let handle_b = coordinator.begin().expect("Failed to begin transaction B");
-        let txid_b = handle_b.id();
-
-        // Step 3: Both write to the same tuple
-        coordinator
-            .record_write(txid_a, tuple_id, 0)
-            .expect("Failed to record write for A");
-        coordinator
-            .record_write(txid_b, tuple_id, 0)
-            .expect("Failed to record write for B");
-
-        // Step 4: Transaction A commits first - should succeed
-        let result_a = handle_a.commit();
-        assert!(
-            result_a.is_ok(),
-            "First committer should succeed, got: {:?}",
-            result_a
-        );
-
-        // Step 5: Transaction B tries to commit - should fail with conflict
-        let result_b = handle_b.commit();
-        assert!(
-            matches!(result_b, Err(TransactionError::WriteWriteConflict(_, _))),
-            "Second committer should fail with WriteWriteConflict, got: {:?}",
-            result_b
-        );
-        Ok(())
-    }
-
-    /// Test: No conflict when transactions write to different tuples.
-    ///
-    /// Scenario:
-    /// 1. Transaction A writes to tuple X
-    /// 2. Transaction B writes to tuple Y
-    /// 3. Both commit successfully (no conflict)
-    #[test]
-    fn test_coordinator_7() -> io::Result<()> {
-        let (db, f) = test_database()?;
-        let pager = db.pager();
-        let catalog = db.catalog();
-
-        let coordinator = TransactionCoordinator::new(pager, catalog);
-
-        let tuple_x = LogicalId::new(ObjectId::from(1u64), UInt64::from(1u64));
-        let tuple_y = LogicalId::new(ObjectId::from(1u64), UInt64::from(2u64));
-
-        let handle_a = coordinator.begin().expect("Failed to begin transaction A");
-        let txid_a = handle_a.id();
-
-        let handle_b = coordinator.begin().expect("Failed to begin transaction B");
-        let txid_b = handle_b.id();
-
-        // Write to different tuples
-        coordinator
-            .record_write(txid_a, tuple_x, 0)
-            .expect("Failed to record write for A");
-        coordinator
-            .record_write(txid_b, tuple_y, 0)
-            .expect("Failed to record write for B");
-
-        // Both should commit successfully
-        assert!(
-            handle_a.commit().is_ok(),
-            "Transaction A should commit successfully"
-        );
-        assert!(
-            handle_b.commit().is_ok(),
-            "Transaction B should commit successfully"
-        );
-        Ok(())
-    }
-
-    /// Test: Serial transactions don't conflict even on the same tuple.
-    ///
-    /// Scenario:
-    /// 1. Transaction A writes to tuple X and commits
-    /// 2. Transaction B starts AFTER A committed
-    /// 3. Transaction B writes to tuple X and commits successfully
-    ///
-    /// This works because B's start_ts is after A's commit_ts.
-    #[test]
-    fn test_coordinator_8() -> io::Result<()> {
-        let (db, f) = test_database()?;
-        let pager = db.pager();
-        let catalog = db.catalog();
-        let coordinator = TransactionCoordinator::new(pager, catalog);
-
-        let tuple_x = LogicalId::new(ObjectId::from(1u64), UInt64::from(1u64));
-
-        // Transaction A: write and commit
-        let handle_a = coordinator.begin().expect("Failed to begin transaction A");
-        let txid_a = handle_a.id();
-        coordinator
-            .record_write(txid_a, tuple_x, 0)
-            .expect("Failed to record write for A");
-        handle_a.commit().expect("Transaction A should commit");
-
-        // Transaction B: starts after A committed
-        let handle_b = coordinator.begin().expect("Failed to begin transaction B");
-        let txid_b = handle_b.id();
-        coordinator
-            .record_write(txid_b, tuple_x, 1)
-            .expect("Failed to record write for B");
-
-        // B should succeed - A's commit happened before B started
-        assert!(
-            handle_b.commit().is_ok(),
-            "Transaction B should commit successfully after A finished"
-        );
-
-        Ok(())
-    }
-
-    /// Test: Aborted transactions release their resources properly.
-    ///
-    /// Scenario:
-    /// 1. Transaction A writes to tuple X and aborts
-    /// 2. Transaction B writes to tuple X and commits successfully
-    ///
-    /// Aborted transactions should not cause conflicts.
-    #[test]
-    fn test_coordinator_9() -> io::Result<()> {
-        let (db, f) = test_database()?;
-        let pager = db.pager();
-        let catalog = db.catalog();
-        let coordinator = TransactionCoordinator::new(pager, catalog);
-
-        let tuple_x = LogicalId::new(ObjectId::from(1u64), UInt64::from(1u64));
-
-        // Transaction A: write and abort
-        let handle_a = coordinator.begin().expect("Failed to begin transaction A");
-        let txid_a = handle_a.id();
-        coordinator
-            .record_write(txid_a, tuple_x, 0)
-            .expect("Failed to record write for A");
-        handle_a.abort().expect("Transaction A should abort");
-
-        // Transaction B: write to same tuple
-        let handle_b = coordinator.begin().expect("Failed to begin transaction B");
-        let txid_b = handle_b.id();
-        coordinator
-            .record_write(txid_b, tuple_x, 0)
-            .expect("Failed to record write for B");
-
-        // B should succeed - A was aborted, not committed
-        assert!(
-            handle_b.commit().is_ok(),
-            "Transaction B should commit after A aborted"
-        );
-
-        Ok(())
     }
 }

@@ -8,7 +8,7 @@ use crate::{
             traits::{Buffer, BufferOps, ComposedMetadata, Identifiable, WalBuffer},
         },
     },
-    types::{BlockId, LogId, ObjectId, TransactionId},
+    types::{BlockId, Lsn, ObjectId, TransactionId},
     writable_layout,
 };
 
@@ -38,11 +38,11 @@ repr_enum!(pub enum RecordType: u8 {
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C, align(64))]
 pub(crate) struct WalHeader {
-    pub(crate) global_start_lsn: Option<LogId>,
-    pub(crate) global_last_lsn: Option<LogId>,
+    pub(crate) global_start_lsn: Option<Lsn>,
+    pub(crate) global_last_lsn: Option<Lsn>,
     pub(crate) last_checkpoint_offset: u64,
+    pub(crate) total_blocks: u64,
     pub(crate) block_size: u32,
-    pub(crate) total_blocks: u32,
     pub(crate) total_entries: u32,
     pub(crate) last_block_used: u32,
 }
@@ -52,8 +52,8 @@ pub(crate) struct WalHeader {
 #[repr(C, align(64))]
 pub struct BlockHeader {
     pub(crate) block_number: BlockId,
-    pub(crate) block_first_lsn: Option<LogId>,
-    pub(crate) block_last_lsn: Option<LogId>,
+    pub(crate) block_first_lsn: Option<Lsn>,
+    pub(crate) block_last_lsn: Option<Lsn>,
     pub(crate) used_bytes: u64,
 }
 
@@ -69,12 +69,39 @@ as_slice!(BlockZeroHeader);
 
 impl BlockHeader {
     // As wal blocks are never deallocated (there is no concept of free block in memory as happens with pages, when we need a new block we simply allocate it), there is no issue in always creating block ids in the header initialization. Blocks are also never modified once they are flushed to disk, which makes sequential access easiar. As we do with pages, we can access the offset of a specific block in the file by computing: [BlockId] *  [block_size].
-    fn new() -> Self {
+    fn new(id: BlockId) -> Self {
         Self {
-            block_number: BlockId::new(),
+            block_number: id,
             block_first_lsn: None,
             block_last_lsn: None,
             used_bytes: 0,
+        }
+    }
+}
+
+impl Identifiable for BlockHeader {
+    type IdType = BlockId;
+
+    fn id(&self) -> Self::IdType {
+        self.block_number
+    }
+
+    fn alloc(id: Self::IdType, _size: u32) -> Self {
+        Self::new(id)
+    }
+}
+
+impl Identifiable for BlockZeroHeader {
+    type IdType = BlockId;
+
+    fn id(&self) -> Self::IdType {
+        self.block_header.block_number
+    }
+
+    fn alloc(id: Self::IdType, size: u32) -> Self {
+        Self {
+            wal_header: WalHeader::new(size),
+            block_header: BlockHeader::alloc(id, size),
         }
     }
 }
@@ -105,9 +132,9 @@ as_slice!(BlockHeader);
 #[derive(Debug, Clone, Copy)]
 #[repr(C, align(8))]
 pub struct RecordHeader {
-    pub(crate) lsn: LogId,
+    pub(crate) lsn: Lsn,
     pub(crate) tid: TransactionId,
-    pub(crate) prev_lsn: Option<LogId>,
+    pub(crate) prev_lsn: Option<Lsn>,
     pub(crate) object_id: ObjectId,
     pub(crate) total_size: u32,
     pub(crate) undo_len: u16,
@@ -120,16 +147,17 @@ as_slice!(RecordHeader);
 
 impl RecordHeader {
     fn new(
+        lsn: Lsn,
         tid: TransactionId,
         object_id: ObjectId,
-        prev_lsn: Option<LogId>,
+        prev_lsn: Option<Lsn>,
         total_size: u32,
         undo_len: u16,
         redo_len: u16,
         log_type: RecordType,
     ) -> Self {
         Self {
-            lsn: LogId::new(),
+            lsn,
             tid,
             prev_lsn,
             object_id,
@@ -160,8 +188,9 @@ impl OwnedRecord {
     }
 
     pub(crate) fn new(
+        lsn: Lsn,
         tid: TransactionId,
-        prev_lsn: Option<LogId>,
+        prev_lsn: Option<Lsn>,
         object_id: ObjectId,
         log_type: RecordType,
         undo_payload: &[u8],
@@ -174,6 +203,7 @@ impl OwnedRecord {
             .copy_from_slice(redo_payload);
 
         let header = RecordHeader::new(
+            lsn,
             tid,
             object_id,
             prev_lsn,
@@ -188,7 +218,7 @@ impl OwnedRecord {
 
     #[inline]
     /// Return the record id.
-    pub fn lsn(&self) -> LogId {
+    pub fn lsn(&self) -> Lsn {
         self.header.lsn
     }
 
@@ -278,7 +308,7 @@ impl<'a> RecordRef<'a> {
 
     #[inline]
     /// See [OwnedRecord::lsn]
-    pub fn lsn(&self) -> LogId {
+    pub fn lsn(&self) -> Lsn {
         self.header.lsn
     }
 
@@ -317,6 +347,7 @@ impl<'a> RecordRef<'a> {
     /// Copies the record ref into an owned buffer.
     pub fn to_owned(&self) -> OwnedRecord {
         OwnedRecord::new(
+            self.header.lsn,
             self.header.tid,
             self.header.prev_lsn,
             self.header.object_id,
@@ -334,24 +365,27 @@ pub(crate) type BlockZero = MemBlock<BlockZeroHeader>;
 pub(crate) type WalBlock = MemBlock<BlockHeader>;
 
 impl BufferOps for BlockZero {
-    fn alloc(size: u32) -> Self {
-        Self::new(size as usize)
+    fn alloc(id: <Self::Header as Identifiable>::IdType, size: u32) -> Self {
+        let mut buf = Self::new(size as usize);
+        *buf.metadata_mut() = BlockZeroHeader::alloc(id, size);
+        buf
     }
 
     fn available_space(&self) -> usize {
-        self.usable_space(self.capacity())
+        Self::usable_space(self.capacity())
             .saturating_sub(self.metadata().block_header.used_bytes as usize)
     }
 }
 
 impl BufferOps for WalBlock {
-    fn alloc(size: u32) -> Self {
-        Self::new(size as usize)
+    fn alloc(id: <Self::Header as Identifiable>::IdType, size: u32) -> Self {
+        let mut buf = Self::new(size as usize);
+        *buf.metadata_mut() = BlockHeader::alloc(id, size);
+        buf
     }
 
     fn available_space(&self) -> usize {
-        self.usable_space(self.capacity())
-            .saturating_sub(self.metadata().used_bytes as usize)
+        Self::usable_space(self.capacity()).saturating_sub(self.metadata().used_bytes as usize)
     }
 }
 
@@ -364,19 +398,19 @@ impl ComposedMetadata for BlockZeroHeader {
 }
 
 impl WalMetadata for BlockHeader {
-    fn last_lsn(&self) -> Option<LogId> {
+    fn last_lsn(&self) -> Option<Lsn> {
         self.block_last_lsn
     }
 
-    fn start_lsn(&self) -> Option<LogId> {
+    fn start_lsn(&self) -> Option<Lsn> {
         self.block_first_lsn
     }
 
-    fn set_last_lsn(&mut self, lsn: LogId) {
+    fn set_last_lsn(&mut self, lsn: Lsn) {
         self.block_last_lsn = Some(lsn);
     }
 
-    fn set_start_lsn(&mut self, lsn: LogId) {
+    fn set_start_lsn(&mut self, lsn: Lsn) {
         self.block_first_lsn = Some(lsn);
     }
 
@@ -390,19 +424,19 @@ impl WalMetadata for BlockHeader {
 }
 
 impl WalMetadata for BlockZeroHeader {
-    fn last_lsn(&self) -> Option<LogId> {
+    fn last_lsn(&self) -> Option<Lsn> {
         self.block_header.block_last_lsn
     }
 
-    fn start_lsn(&self) -> Option<LogId> {
+    fn start_lsn(&self) -> Option<Lsn> {
         self.block_header.block_first_lsn
     }
 
-    fn set_last_lsn(&mut self, lsn: LogId) {
+    fn set_last_lsn(&mut self, lsn: Lsn) {
         self.block_header.block_last_lsn = Some(lsn);
     }
 
-    fn set_start_lsn(&mut self, lsn: LogId) {
+    fn set_start_lsn(&mut self, lsn: Lsn) {
         self.block_header.block_first_lsn = Some(lsn);
     }
 
@@ -417,20 +451,6 @@ impl WalMetadata for BlockZeroHeader {
 
 impl WalBuffer for BlockZero {}
 impl WalBuffer for WalBlock {}
-
-impl Identifiable for BlockHeader {
-    type IdType = BlockId;
-    fn id(&self) -> Self::IdType {
-        self.block_number
-    }
-}
-
-impl Identifiable for BlockZeroHeader {
-    type IdType = BlockId;
-    fn id(&self) -> Self::IdType {
-        self.block_header.block_number
-    }
-}
 
 /// Macro to create WAL (Write-Ahead Logging) records inline.
 ///
@@ -480,8 +500,9 @@ impl Identifiable for BlockZeroHeader {
 #[macro_export]
 macro_rules! record {
     // Begin records.
-    (begin $tid:expr) => {{
+    (begin $lsn:expr, $tid:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
             $crate::types::ObjectId::default(),
@@ -491,8 +512,9 @@ macro_rules! record {
         )
     }};
 
-    (begin_tid $tid:expr) => {{
+    (begin_tid $lsn:expr, $tid:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $tid,
             None,
             $crate::types::ObjectId::default(),
@@ -503,8 +525,9 @@ macro_rules! record {
     }};
 
     // Commit records
-    (commit $tid:expr) => {{
+    (commit $lsn:expr, $tid:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
             $crate::types::ObjectId::default(),
@@ -514,8 +537,9 @@ macro_rules! record {
         )
     }};
 
-    (commit $tid:expr, prev: $prev_lsn:expr) => {{
+    (commit $lsn:expr, $tid:expr, prev: $prev_lsn:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
             $crate::types::ObjectId::default(),
@@ -525,8 +549,9 @@ macro_rules! record {
         )
     }};
 
-    (commit_tid $tid:expr) => {{
+    (commit_tid $lsn:expr, $tid:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $tid,
             None,
             $crate::types::ObjectId::default(),
@@ -536,8 +561,9 @@ macro_rules! record {
         )
     }};
 
-    (commit_tid $tid:expr, prev: $prev_lsn:expr) => {{
+    (commit_tid $lsn:expr, $tid:expr, prev: $prev_lsn:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $tid,
             $prev_lsn,
             $crate::types::ObjectId::default(),
@@ -548,8 +574,9 @@ macro_rules! record {
     }};
 
     // Abort records
-    (abort $tid:expr) => {{
+    (abort $lsn:expr, $tid:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
             $crate::types::ObjectId::default(),
@@ -559,8 +586,9 @@ macro_rules! record {
         )
     }};
 
-    (abort $tid:expr, prev: $prev_lsn:expr) => {{
+    (abort $lsn:expr, $tid:expr, prev: $prev_lsn:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
             $crate::types::ObjectId::default(),
@@ -571,8 +599,9 @@ macro_rules! record {
     }};
 
     // End records
-    (end $tid:expr) => {{
+    (end $lsn:expr, $tid:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
             $crate::types::ObjectId::default(),
@@ -582,8 +611,9 @@ macro_rules! record {
         )
     }};
 
-    (end $tid:expr, prev: $prev_lsn:expr) => {{
+    (end $lsn:expr, $tid:expr, prev: $prev_lsn:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
             $crate::types::ObjectId::default(),
@@ -594,8 +624,9 @@ macro_rules! record {
     }};
 
     // Update records
-    (update $tid:expr, $oid:expr, $old:expr, $new:expr) => {{
+    (update $lsn:expr, $tid:expr, $oid:expr, $old:expr, $new:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
             $crate::types::ObjectId::from($oid as u64),
@@ -605,8 +636,9 @@ macro_rules! record {
         )
     }};
 
-    (update $tid:expr, $oid:expr, prev: $prev_lsn:expr, $old:expr, $new:expr) => {{
+    (update $lsn:expr, $tid:expr, $oid:expr, prev: $prev_lsn:expr, $old:expr, $new:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
             $crate::types::ObjectId::from($oid as u64),
@@ -616,8 +648,9 @@ macro_rules! record {
         )
     }};
 
-    (update_tid $tid:expr, $oid:expr, $old:expr, $new:expr) => {{
+    (update_tid $lsn:expr, $tid:expr, $oid:expr, $old:expr, $new:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $tid,
             None,
             $oid,
@@ -627,8 +660,9 @@ macro_rules! record {
         )
     }};
 
-    (update_tid $tid:expr, $oid:expr, prev: $prev_lsn:expr, $old:expr, $new:expr) => {{
+    (update_tid $lsn:expr, $tid:expr, $oid:expr, prev: $prev_lsn:expr, $old:expr, $new:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $tid,
             $prev_lsn,
             $oid,
@@ -639,8 +673,9 @@ macro_rules! record {
     }};
 
     // Insert records
-    (insert $tid:expr, $oid:expr, $data:expr) => {{
+    (insert $lsn:expr, $tid:expr, $oid:expr, $data:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
             $crate::types::ObjectId::from($oid as u64),
@@ -650,8 +685,9 @@ macro_rules! record {
         )
     }};
 
-    (insert $tid:expr, $oid:expr, prev: $prev_lsn:expr, $data:expr) => {{
+    (insert $lsn:expr, $tid:expr, $oid:expr, prev: $prev_lsn:expr, $data:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
             $crate::types::ObjectId::from($oid as u64),
@@ -661,8 +697,9 @@ macro_rules! record {
         )
     }};
 
-    (insert_tid $tid:expr, $oid:expr, $data:expr) => {{
+    (insert_tid $lsn:expr, $tid:expr, $oid:expr, $data:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $tid,
             None,
             $oid,
@@ -672,8 +709,9 @@ macro_rules! record {
         )
     }};
 
-    (insert_tid $tid:expr, $oid:expr, prev: $prev_lsn:expr, $data:expr) => {{
+    (insert_tid $lsn:expr, $tid:expr, $oid:expr, prev: $prev_lsn:expr, $data:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $tid,
             $prev_lsn,
             $oid,
@@ -684,8 +722,9 @@ macro_rules! record {
     }};
 
     // Delete records
-    (delete $tid:expr, $oid:expr, $old_data:expr) => {{
+    (delete $lsn:expr, $tid:expr, $oid:expr, $old_data:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
             $crate::types::ObjectId::from($oid as u64),
@@ -695,8 +734,9 @@ macro_rules! record {
         )
     }};
 
-    (delete $tid:expr, $oid:expr, prev: $prev_lsn:expr, $old_data:expr) => {{
+    (delete $lsn:expr, $tid:expr, $oid:expr, prev: $prev_lsn:expr, $old_data:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
             $crate::types::ObjectId::from($oid as u64),
@@ -706,8 +746,9 @@ macro_rules! record {
         )
     }};
 
-    (delete_tid $tid:expr, $oid:expr, $old_data:expr) => {{
+    (delete_tid $lsn:expr, $tid:expr, $oid:expr, $old_data:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $tid,
             None,
             $oid,
@@ -717,8 +758,9 @@ macro_rules! record {
         )
     }};
 
-    (delete_tid $tid:expr, $oid:expr, prev: $prev_lsn:expr, $old_data:expr) => {{
+    (delete_tid $lsn:expr, $tid:expr, $oid:expr, prev: $prev_lsn:expr, $old_data:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $tid,
             $prev_lsn,
             $oid,
@@ -729,8 +771,9 @@ macro_rules! record {
     }};
 
     // Basic dynamic type with data slices
-    (rec_type: $rec_type:expr, tid: $tid:expr, oid: $oid:expr, undo: $undo:expr, redo: $redo:expr) => {{
+    (rec_type: $rec_type:expr, tid: $tid:expr, lsn: $lsn:expr, oid: $oid:expr, undo: $undo:expr, redo: $redo:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
             $crate::types::ObjectId::from($oid as u64),
@@ -741,8 +784,9 @@ macro_rules! record {
     }};
 
     // Dynamic type with prev_lsn and data slices
-    (rec_type: $rec_type:expr, tid: $tid:expr, oid: $oid:expr, prev: $prev_lsn:expr, undo: $undo:expr, redo: $redo:expr) => {{
+    (rec_type: $rec_type:expr, lsn: $lsn:expr, tid: $tid:expr, oid: $oid:expr, prev: $prev_lsn:expr, undo: $undo:expr, redo: $redo:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
             $crate::types::ObjectId::from($oid as u64),
@@ -753,10 +797,11 @@ macro_rules! record {
     }};
 
     // Dynamic type with sized payloads (generates zero-filled vecs)
-    (rec_type: $rec_type:expr, tid: $tid:expr, oid: $oid:expr, undo_size: $undo_size:expr, redo_size: $redo_size:expr) => {{
+    (rec_type: $rec_type:expr,  lsn: $lsn:expr, tid: $tid:expr, oid: $oid:expr, undo_size: $undo_size:expr, redo_size: $redo_size:expr) => {{
         let undo_data = vec![0u8; $undo_size];
         let redo_data = vec![0u8; $redo_size];
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
             $crate::types::ObjectId::from($oid as u64),
@@ -767,10 +812,11 @@ macro_rules! record {
     }};
 
     // Dynamic type with prev_lsn and sized payloads
-    (rec_type: $rec_type:expr, tid: $tid:expr, oid: $oid:expr, prev: $prev_lsn:expr, undo_size: $undo_size:expr, redo_size: $redo_size:expr) => {{
+    (rec_type: $rec_type:expr,  lsn: $lsn:expr, tid: $tid:expr, oid: $oid:expr, prev: $prev_lsn:expr, undo_size: $undo_size:expr, redo_size: $redo_size:expr) => {{
         let undo_data = vec![0u8; $undo_size];
         let redo_data = vec![0u8; $redo_size];
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
             $crate::types::ObjectId::from($oid as u64),
@@ -781,13 +827,34 @@ macro_rules! record {
     }};
 
     // Dynamic type with TransactionId and ObjectId directly
-    (rec_type: $rec_type:expr, tid_raw: $tid:expr, oid_raw: $oid:expr, undo: $undo:expr, redo: $redo:expr) => {{ $crate::storage::wal::OwnedRecord::new($tid, None, $oid, $rec_type, $undo, $redo) }};
+    (rec_type: $rec_type:expr,  lsn: $lsn:expr, tid_raw: $tid:expr, oid_raw: $oid:expr, undo: $undo:expr, redo: $redo:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
+            $tid,
+            None,
+            $oid,
+            $rec_type,
+            $undo,
+            $redo,
+        )
+    }};
 
-    (rec_type: $rec_type:expr, tid_raw: $tid:expr, oid_raw: $oid:expr, prev: $prev_lsn:expr, undo: $undo:expr, redo: $redo:expr) => {{ $crate::storage::wal::OwnedRecord::new($tid, $prev_lsn, $oid, $rec_type, $undo, $redo) }};
+    (rec_type: $rec_type:expr,  lsn: $lsn:expr, tid_raw: $tid:expr, oid_raw: $oid:expr, prev: $prev_lsn:expr, undo: $undo:expr, redo: $redo:expr) => {{
+        $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
+            $tid,
+            $prev_lsn,
+            $oid,
+            $rec_type,
+            $undo,
+            $redo,
+        )
+    }};
 
     // Static type identifier pattern (e.g., record!(Update 1, 2, b"old", b"new"))
-    ($type:ident $tid:expr, $oid:expr, $undo:expr, $redo:expr) => {{
+    ($type:ident,  lsn: $lsn:expr, $tid:expr, $oid:expr, $undo:expr, $redo:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
             $crate::types::ObjectId::from($oid as u64),
@@ -797,8 +864,9 @@ macro_rules! record {
         )
     }};
 
-    ($type:ident $tid:expr, $oid:expr, prev: $prev_lsn:expr, $undo:expr, $redo:expr) => {{
+    ($type:ident,  lsn: $lsn:expr, $tid:expr, $oid:expr, prev: $prev_lsn:expr, $undo:expr, $redo:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
+            $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
             $crate::types::ObjectId::from($oid as u64),

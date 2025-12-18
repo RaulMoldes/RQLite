@@ -67,26 +67,25 @@ fn test_file_truncate() -> io::Result<()> {
     Ok(())
 }
 
-fn test_write_read_aligned(block_size: usize) -> io::Result<()> {
-    let dir = tempdir()?;
+fn test_write_read_aligned(block_size: usize) {
+    let dir = tempdir().expect("Failed to create file");
     let path = dir.path().join("aligned_rw.db");
-    let mut file = DBFile::create(&path)?;
+    let mut file = DBFile::create(&path).expect("Failed to create file");
 
-    let fs_block_size = FileSystem::block_size(&path)?;
+    let fs_block_size = FileSystem::block_size(&path).unwrap();
     let write_size = block_size.next_multiple_of(fs_block_size);
 
     // Write aligned data
     let write_data = aligned_buf!(write_size, 0x42);
-    file.write_all(write_data.as_ref())?;
-    file.sync_all()?;
+    file.write_all(write_data.as_ref()).unwrap();
+    file.sync_all().unwrap();
 
     // Read back
-    file.seek(SeekFrom::Start(0))?;
+    file.seek(SeekFrom::Start(0)).unwrap();
     let mut read_data = aligned_buf!(write_size);
-    file.read_exact(read_data.as_mut())?;
+    file.read_exact(read_data.as_mut()).unwrap();
 
     assert_eq!(write_data, read_data);
-    Ok(())
 }
 
 #[test]
@@ -167,28 +166,26 @@ fn test_block_size_detection() -> io::Result<()> {
     Ok(())
 }
 
-fn test_large_ops(num_blocks: usize) -> io::Result<()> {
-    let dir = tempdir()?;
+fn test_large_ops(num_blocks: usize) {
+    let dir = tempdir().expect("Failed to create temp file");
     let path = dir.path().join("large_file.db");
-    let mut file = DBFile::create(&path)?;
-    let block_size = FileSystem::block_size(&path)?;
+    let mut file = DBFile::create(&path).expect("Failed to create temp file");
+    let block_size = FileSystem::block_size(&path).unwrap();
 
     // Write many blocks
     for i in 0..num_blocks {
         let data = aligned_buf!(block_size, (i % 256) as u8);
-        file.write_all(data.as_ref())?;
+        file.write_all(data.as_ref()).unwrap();
     }
-    file.sync_all()?;
+    file.sync_all().unwrap();
 
     // Random access reads
     for i in (0..num_blocks).rev() {
-        file.seek(SeekFrom::Start((i * block_size) as u64))?;
+        file.seek(SeekFrom::Start((i * block_size) as u64)).unwrap();
         let mut buf = vec![0u8; block_size];
-        file.read_exact(&mut buf)?;
+        file.read_exact(&mut buf).unwrap();
         assert!(buf.iter().all(|&b| b == (i % 256) as u8));
     }
-
-    Ok(())
 }
 
 // Parameterized write/read tests with different sizes

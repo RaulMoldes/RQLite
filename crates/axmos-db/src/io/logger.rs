@@ -4,7 +4,7 @@ use crate::{
         wal::{Abort, Begin, Commit, Delete, End, Insert, Operation, Update},
     },
     storage::wal::{OwnedRecord, RecordType},
-    types::{LogId, ObjectId, TransactionId},
+    types::{Lsn, ObjectId, TransactionId},
 };
 
 use std::{cell::Cell, io};
@@ -12,7 +12,7 @@ use std::{cell::Cell, io};
 #[derive(Clone, Debug)]
 pub(crate) struct Logger {
     transaction_id: TransactionId,
-    last_lsn: Cell<Option<LogId>>,
+    last_lsn: Cell<Option<Lsn>>,
     pager: SharedPager,
 }
 

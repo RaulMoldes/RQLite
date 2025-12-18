@@ -10,7 +10,7 @@ use crate::{
         sized_types::{Float32, Float64, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64},
     },
 };
-use crate::{direct_axmos_cast, scalar, unsigned_integer};
+use crate::{direct_axmos_cast, unsigned_integer};
 use std::cmp::{Ord, PartialOrd};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -46,9 +46,7 @@ unsigned_integer! {
 }
 
 // Duration in days
-scalar! {
-    pub struct Days(u32);
-}
+pub struct Days(u32);
 
 impl Days {
     pub const fn new(days: u32) -> Self {

@@ -2,29 +2,44 @@ use crate::{io::frames::MemFrame, types::PageId};
 
 use indexmap::IndexMap;
 use std::{
+    cell::Cell,
     clone::Clone,
+    fmt::{Display, Formatter, Result as FmtResult},
     io::{self, Error as IoError, ErrorKind},
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct MemoryStats {
-    pub cache_hits: u64,
-    pub cache_misses: u64,
-    pub frames_evicted: u64,
-    pub frames_written: u64,
+    pub cache_hits: Cell<u32>,
+    pub cache_misses: Cell<u32>,
+    pub frames_evicted: Cell<u16>,
 }
 
-impl std::fmt::Display for MemoryStats {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, " Cache hits: {}", self.cache_hits)?;
-        writeln!(f, " Cache misses: {}", self.cache_misses)?;
-        writeln!(f, " frames evicted: {}", self.frames_evicted)?;
-        writeln!(f, " frames written: {}", self.frames_written)?;
+impl MemoryStats {
+    fn cache_hit(&self) {
+        let current = self.cache_hits.get();
+        self.cache_hits.set(current + 1);
+    }
+
+    fn cache_miss(&self) {
+        let current = self.cache_misses.get();
+        self.cache_misses.set(current + 1);
+    }
+
+    fn eviction(&self) {
+        let current = self.frames_evicted.get();
+        self.frames_evicted.set(current + 1);
+    }
+}
+impl Display for MemoryStats {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        writeln!(f, " Cache hits: {}", self.cache_hits.get())?;
+        writeln!(f, " Cache misses: {}", self.cache_misses.get())?;
+        writeln!(f, " frames evicted: {}", self.frames_evicted.get())?;
         Ok(())
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct PageCache {
     capacity: usize,
     frames: IndexMap<PageId, MemFrame>,
@@ -78,11 +93,11 @@ impl PageCache {
     /// Add a list of frames to the buffer pool.
     pub fn insert(&mut self, frame: MemFrame) -> io::Result<Option<MemFrame>> {
         let id = frame.page_number();
+
         // If the frame already exists, update it
         if self.frames.contains_key(&id) {
             if let Some(old_frame) = self.frames.get_mut(&id) {
-                self.stats.frames_written += 1;
-                self.stats.cache_hits += 1;
+                self.stats.cache_hit();
                 *old_frame = frame
             }
             return Ok(None);
@@ -98,6 +113,11 @@ impl PageCache {
         Ok(evicted)
     }
 
+    /// Removes a frame from the cache for deallocation.
+    pub(crate) fn remove(&mut self, id: PageId) -> Option<MemFrame> {
+        self.frames.swap_remove(&id).filter(|frame| frame.is_free())
+    }
+
     pub fn evict(&mut self) -> io::Result<Option<MemFrame>> {
         if self.frames.is_empty() {
             return Ok(None);
@@ -108,11 +128,12 @@ impl PageCache {
         while self.cursor <= self.frames.len() && found_victim.is_none() {
             if let Some((pid, frame)) = self.frames.get_index(self.cursor) {
                 if frame.is_free() {
-                    self.stats.frames_evicted += 1;
+                    self.stats.eviction();
 
                     let (_, victim) = self.frames.swap_remove_index(self.cursor).unwrap();
 
                     found_victim = Some(victim);
+                    break;
                 }
             };
 
@@ -130,15 +151,24 @@ impl PageCache {
         ))
     }
 
-    pub fn get(&mut self, id: &PageId) -> Option<MemFrame> {
+    pub fn get(&self, id: &PageId) -> Option<MemFrame> {
         if let Some(frame) = self.frames.get(id) {
-            self.stats.cache_hits += 1;
+            self.stats.cache_hit();
             return Some((*frame).clone());
         }
 
-        self.stats.cache_misses += 1;
+        self.stats.cache_miss();
 
         None
+    }
+
+    /// Drains all frames from the cache, returning an iterator over the frames.
+    ///
+    /// Unlike `clear`, this does not allocate a `Vec` and allows the caller
+    /// to consume frames lazily.
+    pub fn drain(&mut self) -> impl Iterator<Item = MemFrame> + '_ {
+        self.cursor = 0;
+        self.frames.drain(..).map(|(_, frame)| frame)
     }
 
     pub fn clear(&mut self) -> Vec<MemFrame> {

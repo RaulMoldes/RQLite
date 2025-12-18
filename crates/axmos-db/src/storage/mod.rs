@@ -1,11 +1,9 @@
 pub mod cell;
 pub mod core;
-pub mod latches;
 pub mod page;
 pub(crate) use core::traits::*;
 //pub mod tuple;
 pub mod wal;
-
 
 #[cfg(miri)]
 mod tests;
