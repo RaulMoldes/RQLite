@@ -1,7 +1,5 @@
 use crate::{
-    database::meta_table_schema,
-    io::{AsBytes, read_string_unchecked, read_type_from_buf, write_string_unchecked},
-    repr_enum,
+
     sql::planner::stats::{IndexStatistics, TableStatistics},
     storage::tuple::TupleRef,
     structures::comparator::{
@@ -50,13 +48,6 @@ pub(crate) fn deserialize_optional<T: AsBytes, R: Read + Seek>(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct Schema {
-    pub(crate) columns: Vec<Column>,
-    pub(crate) num_keys: u8,
-    pub(crate) constraints: HashMap<String, TableConstraint>,
-    column_index: HashMap<String, usize>,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum TableConstraint {

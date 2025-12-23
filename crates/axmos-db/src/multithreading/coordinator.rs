@@ -219,6 +219,9 @@ impl Clone for TransactionCoordinator {
             last_committed: self.last_committed,
             commit_counter: Arc::clone(&self.commit_counter),
             tuple_commits: Arc::clone(&self.tuple_commits),
+            last_created_transaction: AtomicU64::new(
+                self.last_created_transaction.load(Ordering::Relaxed),
+            ),
         }
     }
 }
@@ -236,6 +239,8 @@ pub struct TransactionCoordinator {
     commit_counter: Arc<AtomicU64>,
     /// Last commit timestamp per tuple - tracks when each tuple was last modified
     tuple_commits: TupleCommitLog,
+    /// Last created transaction id:
+    last_created_transaction: AtomicU64,
 }
 
 enum ValidationResult {
@@ -251,7 +256,14 @@ impl TransactionCoordinator {
             last_committed: None,
             commit_counter: Arc::new(AtomicU64::new(1)),
             tuple_commits: Arc::new(RwLock::new(HashMap::new())),
+            last_created_transaction: AtomicU64::new(0),
         }
+    }
+
+    pub fn with_last_created_transaction(self, last_id: TransactionId) -> Self {
+        self.last_created_transaction
+            .store(last_id, Ordering::Relaxed);
+        self
     }
 
     /// Create a snapshot of the database state for a given transaction id.
@@ -277,7 +289,7 @@ impl TransactionCoordinator {
     /// Begin a new transaction.
     /// Returns a [TransactionHandle] to the thread that requested the begin operation.
     pub fn begin(&self) -> TransactionResult<TransactionHandle> {
-        let txid = TransactionId::new();
+        let txid = 0; // TODO , GENERATE TRANSACTION IDS.
 
         // Create snapshot under read lock
         let snapshot = self.snapshot(txid)?;

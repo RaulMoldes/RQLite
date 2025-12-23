@@ -1,6 +1,6 @@
-use std::{cmp::Ordering, io, mem, usize};
-
 use super::{Comparator, IS_LITTLE_ENDIAN, Ranger};
+use crate::schema::stats::Selectivity;
+use std::{cmp::Ordering, io, mem, usize};
 /// Comparator for signed numeric types stored in platform-native byte order.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SignedNumericComparator(usize);
@@ -84,6 +84,7 @@ impl Comparator for SignedNumericComparator {
 }
 
 impl Ranger for SignedNumericComparator {
+    /// Computes the range between two byte slices representing signed integers.
     fn range_bytes(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Box<[u8]>> {
         let a = self.read_native_i64(lhs);
         let b = self.read_native_i64(rhs);
@@ -104,6 +105,28 @@ impl Ranger for SignedNumericComparator {
         }
 
         Ok(diff_bytes.into_boxed_slice())
+    }
+
+    /// Computes the selectivity of a range-
+    fn selectivity_range(&self, min: &[u8], max: &[u8]) -> io::Result<Selectivity> {
+        let min_val = self.read_native_i64(min);
+        let max_val = self.read_native_i64(max);
+
+        // Full range for signed type: from min_signed to max_signed
+        let max_possible: u64 = if self.0 >= 8 {
+            u64::MAX // i64::MAX - i64::MIN as unsigned
+        } else {
+            (1u64 << (self.0 * 8)) - 1
+        };
+
+        if max_possible == 0 {
+            return Ok(Selectivity::Uncomputable);
+        }
+
+        let range = (max_val as i128 - min_val as i128).unsigned_abs() as u64;
+        let selectivity = range as f64 / max_possible as f64;
+
+        Ok(Selectivity::from(selectivity))
     }
 }
 
@@ -186,5 +209,26 @@ impl Ranger for NumericComparator {
         self.write_native_u64(diff, &mut diff_bytes);
 
         Ok(diff_bytes.into_boxed_slice())
+    }
+
+    fn selectivity_range(&self, min: &[u8], max: &[u8]) -> io::Result<Selectivity> {
+        let min_val = self.read_native_u64(min);
+        let max_val = self.read_native_u64(max);
+
+        // Compute the maximum possible range for this type size
+        let max_possible: u64 = if self.0 >= 8 {
+            u64::MAX
+        } else {
+            (1u64 << (self.0 * 8)) - 1
+        };
+
+        if max_possible == 0 {
+            return Ok(Selectivity::Uncomputable);
+        }
+
+        let range = max_val.saturating_sub(min_val);
+        let selectivity = range as f64 / max_possible as f64;
+
+        Ok(Selectivity::from(selectivity))
     }
 }

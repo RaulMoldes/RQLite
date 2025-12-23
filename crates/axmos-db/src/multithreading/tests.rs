@@ -1,8 +1,7 @@
 // Threadpool tests.
 use crate::{
-    param2_tests, param_tests,
-    common::errors::ThreadPoolError,
-    multithreading::threadpool::ThreadPool
+    common::errors::ThreadPoolError, multithreading::threadpool::ThreadPool, param_tests,
+    param2_tests,
 };
 
 use std::{
@@ -14,11 +13,9 @@ use std::{
     time::Duration,
 };
 
-
 fn test_task_execution(pool_size: usize, num_tasks: usize) {
     let pool = ThreadPool::new(pool_size);
     let counter = Arc::new(AtomicUsize::new(0));
-
 
     for _ in 0..num_tasks {
         let counter = Arc::clone(&counter);
@@ -34,7 +31,6 @@ fn test_task_execution(pool_size: usize, num_tasks: usize) {
 
     assert_eq!(counter.load(Ordering::SeqCst), num_tasks);
 }
-
 
 fn test_graceful_shutdown(pool_size: usize, num_iters: usize) {
     let mut pool = ThreadPool::new(pool_size);
@@ -57,7 +53,6 @@ fn test_graceful_shutdown(pool_size: usize, num_iters: usize) {
     assert_eq!(counter.load(Ordering::SeqCst), num_iters);
 }
 
-
 fn test_failure_after_shutdown(pool_size: usize) {
     let mut pool = ThreadPool::new(pool_size);
 
@@ -67,12 +62,10 @@ fn test_failure_after_shutdown(pool_size: usize) {
     assert!(matches!(result, Err(ThreadPoolError::PoolShutdown)));
 }
 
-
-fn test_concurrency(num_threads:  usize, num_tasks: usize) {
+fn test_concurrency(num_threads: usize, num_tasks: usize) {
     let pool = ThreadPool::new(num_threads);
     let concurrent_count = Arc::new(AtomicUsize::new(0));
     let max_concurrent = Arc::new(AtomicUsize::new(0));
-
 
     for _ in 0..num_tasks {
         let concurrent = Arc::clone(&concurrent_count);
@@ -115,7 +108,6 @@ fn test_concurrency(num_threads:  usize, num_tasks: usize) {
     );
 }
 
-
 param2_tests!(test_concurrency, num_threads, num_tasks => [
     (4, 64),
     (8, 256),
@@ -123,7 +115,6 @@ param2_tests!(test_concurrency, num_threads, num_tasks => [
     (20, 256),
     (2, 100)
 ]);
-
 
 param2_tests!(test_task_execution, num_threads, num_tasks => [
     (4, 64),
@@ -133,8 +124,6 @@ param2_tests!(test_task_execution, num_threads, num_tasks => [
     (2, 100)
 ]);
 
-
-
 param2_tests!(test_graceful_shutdown, pool_size, num_iters => [
     (4, 64),
     (8, 256),
@@ -142,8 +131,6 @@ param2_tests!(test_graceful_shutdown, pool_size, num_iters => [
     (20, 256),
     (2, 100)
 ]);
-
-
 
 param_tests!(test_failure_after_shutdown, pool_size => [
     4, 8, 10, 12, 16, 32, 64

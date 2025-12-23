@@ -1,7 +1,7 @@
 use crate::{
     io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
     storage::{
-        Buffer, BufferOps, WalBuffer, WalMetadata, Writable,
+        Allocatable, AvailableSpace, WalMetadata, WalOps, Writable,
         wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock},
     },
     types::{BlockId, Lsn, ObjectId},
@@ -185,7 +185,7 @@ impl FileOperations for WriteAheadLog {
         let file = DBFile::create(&path)?;
         let fs_block_size = FileSystem::block_size(&path)?;
         let block_size = WAL_BLOCK_SIZE.next_multiple_of(fs_block_size);
-        let header = BlockZero::alloc(0, block_size as u32);
+        let header = BlockZero::alloc(0, block_size);
 
         Ok(Self {
             header,
@@ -233,7 +233,7 @@ impl FileOperations for WriteAheadLog {
 
     fn truncate(&mut self) -> io::Result<()> {
         self.file.truncate()?;
-        self.header = BlockZero::alloc(0, self.block_size as u32);
+        self.header = BlockZero::alloc(0, self.block_size);
         self.current_block = None;
         self.flush_queue.clear();
         Ok(())
@@ -341,7 +341,7 @@ impl WriteAheadLog {
             self.flush_queue.push_back(full_block);
         }
         let next_id = self.get_next_block();
-        self.current_block = Some(WalBlock::alloc(next_id, self.block_size as u32));
+        self.current_block = Some(WalBlock::alloc(next_id, self.block_size));
         Ok(())
     }
 

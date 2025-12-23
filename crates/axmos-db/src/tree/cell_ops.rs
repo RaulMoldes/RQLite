@@ -3,11 +3,14 @@ use crate::{
     io::pager::SharedPager,
     storage::{
         cell::{CELL_HEADER_SIZE, CellRef, OwnedCell, Slot},
-        core::traits::{BtreeBuffer, Buffer},
+        core::traits::BtreeOps,
         page::{BtreePage, OverflowPage},
     },
     tree::comparators::Comparator,
-    types::PageId,
+    types::{
+        PageId,
+        core::TypeClass
+    }
 };
 
 use std::{cmp::min, io, mem, usize};
@@ -359,4 +362,12 @@ impl<'a> AsRef<[u8]> for KeyBytes<'a> {
 // Type to obtain the key bytes for the implementor type
 pub(crate) trait AsKeyBytes<'a> {
     fn as_key_bytes(&'a self) -> KeyBytes<'a>;
+}
+
+
+impl <'a, T> AsKeyBytes<'a> for T
+where  T: AsRef<[u8]> + TypeClass {
+    fn as_key_bytes(&'a self) -> KeyBytes<'a> {
+        KeyBytes(self.as_ref())
+    }
 }

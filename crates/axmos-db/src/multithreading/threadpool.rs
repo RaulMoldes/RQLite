@@ -5,11 +5,11 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    thread::{self, JoinHandle},
+    thread::{self, JoinHandle, ThreadId},
     time::{Duration, Instant},
 };
 
-use crate::{common::errors::ThreadPoolError, types::WorkerId};
+use crate::common::errors::ThreadPoolError;
 use parking_lot::{Condvar, Mutex};
 
 // Simplistic thread safe queue implementation.
@@ -95,12 +95,12 @@ pub(crate) enum Job {
 }
 
 struct Worker {
-    id: WorkerId,
+    id: ThreadId,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Worker {
-    fn new(id: WorkerId, job_queue: Arc<JobQueue<Job>>, running: Arc<AtomicBool>) -> Worker {
+    fn new(job_queue: Arc<JobQueue<Job>>, running: Arc<AtomicBool>) -> Worker {
         let thread = thread::spawn(move || {
             while let Some(job) = job_queue.pop_interruptible(Duration::from_millis(100), &running)
             {
@@ -114,7 +114,7 @@ impl Worker {
         });
 
         Worker {
-            id,
+            id: thread::current_id(),
             thread: Some(thread),
         }
     }
@@ -135,11 +135,7 @@ impl ThreadPool {
         let mut workers = Vec::with_capacity(size);
 
         for _ in 0..size {
-            workers.push(Worker::new(
-                WorkerId::new(),
-                Arc::clone(&job_queue),
-                Arc::clone(&running),
-            ));
+            workers.push(Worker::new(Arc::clone(&job_queue), Arc::clone(&running)));
         }
 
         ThreadPool {
@@ -183,7 +179,7 @@ impl ThreadPool {
 
                 if thread.join().is_err() {
                     return Err(ThreadPoolError::ThreadJoinError(format!(
-                        "Worker {} failed to join",
+                        "Worker {:?} failed to join",
                         worker.id
                     )));
                 }

@@ -1,18 +1,15 @@
 use std::{fmt::Debug, mem};
 
 use crate::{
-    DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, DEFAULT_POOL_SIZE, as_slice,
+    DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, DEFAULT_POOL_SIZE, bytemuck_slice,
     common::{
-        AXMO, AxmosDBConfig, DEFAULT_CACHE_SIZE, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MIN_PAGE_SIZE,
+        AXMO, DBConfig, DEFAULT_CACHE_SIZE, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MIN_PAGE_SIZE,
         PAGE_ALIGNMENT,
     },
     storage::{
-        BtreeMetadata, Identifiable,
+        Allocatable, AvailableSpace, BtreeMetadata, Identifiable,
         cell::{CellHeader, Slot},
-        core::{
-            buffer::MemBlock,
-            traits::{BtreeBuffer, Buffer, BufferOps, ComposedMetadata},
-        },
+        core::{buffer::MemBlock, traits::ComposedMetadata},
     },
     types::{PAGE_ZERO, PageId},
 };
@@ -36,7 +33,7 @@ pub(crate) struct BtreePageHeader {
 }
 pub(crate) const BTREE_PAGE_HEADER_SIZE: usize = mem::size_of::<BtreePageHeader>();
 
-as_slice!(BtreePageHeader);
+bytemuck_slice!(BtreePageHeader);
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 #[repr(C, align(64))]
@@ -48,11 +45,11 @@ pub(crate) struct OverflowPageHeader {
 }
 pub(crate) const OVERFLOW_HEADER_SIZE: usize = mem::size_of::<OverflowPageHeader>();
 
-as_slice!(OverflowPageHeader);
+bytemuck_slice!(OverflowPageHeader);
 
 impl OverflowPageHeader {
     pub(crate) fn new(page_number: PageId, size: u32) -> Self {
-        let effective_size = size.next_multiple_of(PAGE_ALIGNMENT);
+        let effective_size = size.next_multiple_of(PAGE_ALIGNMENT as u32);
         Self {
             page_number,
             next: None,
@@ -87,15 +84,15 @@ pub(crate) struct PageZeroHeader {
 }
 pub(crate) const PAGE_ZERO_HEADER_SIZE: usize = mem::size_of::<PageZeroHeader>();
 
-as_slice!(PageZeroHeader);
+bytemuck_slice!(PageZeroHeader);
 
 impl Default for PageZeroHeader {
     fn default() -> Self {
         Self::new(
             PAGE_ZERO,
-            DEFAULT_PAGE_SIZE,
-            DEFAULT_BTREE_MIN_KEYS,
-            DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE,
+            DEFAULT_PAGE_SIZE as u32,
+            DEFAULT_BTREE_MIN_KEYS as u8,
+            DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE as u8,
             DEFAULT_CACHE_SIZE as u16,
         )
     }
@@ -109,7 +106,7 @@ impl PageZeroHeader {
         num_siblings_per_side: u8,
         cache_size: u16,
     ) -> Self {
-        let aligned_size = page_size.next_multiple_of(PAGE_ALIGNMENT);
+        let aligned_size = page_size.next_multiple_of(PAGE_ALIGNMENT as u32);
         Self {
             page_number,
             num_slots: 0,
@@ -132,26 +129,26 @@ impl PageZeroHeader {
         }
     }
 
-    pub(crate) fn from_config(config: AxmosDBConfig) -> Self {
+    pub(crate) fn from_config(config: DBConfig) -> Self {
         Self::new(
             PAGE_ZERO,
-            config.page_size,
-            config.min_keys_per_page,
-            config.num_siblings_per_side,
-            config.cache_size,
+            config.page_size as u32,
+            config.min_keys_per_page as u8,
+            config.num_siblings_per_side as u8,
+            config.cache_size as u16,
         )
     }
 }
 
-impl From<AxmosDBConfig> for PageZeroHeader {
-    fn from(value: AxmosDBConfig) -> Self {
+impl From<DBConfig> for PageZeroHeader {
+    fn from(value: DBConfig) -> Self {
         Self::from_config(value)
     }
 }
 
 impl BtreePageHeader {
     fn new(page_number: PageId, page_size: u32) -> Self {
-        let aligned_size = page_size.next_multiple_of(PAGE_ALIGNMENT);
+        let aligned_size = page_size.next_multiple_of(PAGE_ALIGNMENT as u32);
 
         Self {
             page_number,
@@ -177,56 +174,33 @@ impl Identifiable for PageZeroHeader {
     fn id(&self) -> Self::IdType {
         self.page_number
     }
+}
 
-    fn alloc(id: Self::IdType, size: u32) -> Self {
+impl Allocatable for PageZeroHeader {
+    const MAX_SIZE: usize = MAX_PAGE_SIZE;
+    const MIN_SIZE: usize = MIN_PAGE_SIZE;
+
+    fn alloc(id: Self::IdType, size: usize) -> Self {
         Self::new(
             id,
-            size,
-            DEFAULT_BTREE_MIN_KEYS,
-            DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE,
-            DEFAULT_POOL_SIZE,
+            size as u32,
+            DEFAULT_BTREE_MIN_KEYS as u8,
+            DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE as u8,
+            DEFAULT_POOL_SIZE as u16,
         )
     }
 }
 
 /// All pages are [Buffer].
-impl BufferOps for PageZero {
+impl AvailableSpace for PageZero {
     fn available_space(&self) -> usize {
         self.metadata().free_space as usize
-    }
-
-    fn alloc(id: <Self::Header as Identifiable>::IdType, size: u32) -> Self {
-        assert!(
-            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
-            "page size {} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}",
-            size
-        );
-
-        // The buffer is internally aligned to [`PAGE_ALIGNMENT`]
-        let mut buffer = MemBlock::<PageZeroHeader>::new(size as usize);
-        *buffer.metadata_mut() = PageZeroHeader::alloc(id, size);
-
-        buffer
     }
 }
 
-impl BufferOps for BtreePage {
+impl AvailableSpace for BtreePage {
     fn available_space(&self) -> usize {
         self.metadata().free_space as usize
-    }
-
-    fn alloc(id: <Self::Header as Identifiable>::IdType, size: u32) -> Self {
-        assert!(
-            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
-            "page size {} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}",
-            size
-        );
-
-        // The buffer is internally aligned to [`PAGE_ALIGNMENT`]
-        let mut buffer = MemBlock::<BtreePageHeader>::new(size as usize);
-        *buffer.metadata_mut() = BtreePageHeader::alloc(id, size);
-
-        buffer
     }
 }
 
@@ -235,9 +209,14 @@ impl Identifiable for OverflowPageHeader {
     fn id(&self) -> Self::IdType {
         self.page_number
     }
+}
 
-    fn alloc(id: Self::IdType, size: u32) -> Self {
-        Self::new(id, size)
+impl Allocatable for OverflowPageHeader {
+    const MAX_SIZE: usize = MAX_PAGE_SIZE;
+    const MIN_SIZE: usize = MIN_PAGE_SIZE;
+
+    fn alloc(id: Self::IdType, size: usize) -> Self {
+        Self::new(id, size as u32)
     }
 }
 
@@ -246,28 +225,18 @@ impl Identifiable for BtreePageHeader {
     fn id(&self) -> Self::IdType {
         self.page_number
     }
+}
 
-    fn alloc(id: Self::IdType, size: u32) -> Self {
-        Self::new(id, size)
+impl Allocatable for BtreePageHeader {
+    const MAX_SIZE: usize = MAX_PAGE_SIZE;
+    const MIN_SIZE: usize = MIN_PAGE_SIZE;
+
+    fn alloc(id: Self::IdType, size: usize) -> Self {
+        Self::new(id, size as u32)
     }
 }
 
-impl BufferOps for OverflowPage {
-    /// Alocate a new [OverflowPage] of the given [page_size]
-    fn alloc(id: <Self::Header as Identifiable>::IdType, size: u32) -> Self {
-        assert!(
-            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
-            "page size {} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}",
-            size
-        );
-
-        // The buffer is internally aligned to [`PAGE_ALIGNMENT`]
-        let mut buffer = MemBlock::<OverflowPageHeader>::new(size as usize);
-        *buffer.metadata_mut() = OverflowPageHeader::alloc(id, size);
-
-        buffer
-    }
-
+impl AvailableSpace for OverflowPage {
     fn available_space(&self) -> usize {
         Self::usable_space(self.capacity()) - self.metadata().num_bytes as usize
     }
@@ -289,8 +258,8 @@ impl BtreeMetadata for BtreePageHeader {
     }
 
     /// Obtain the number of slots in the page.
-    fn num_slots(&self) -> u16 {
-        self.num_slots
+    fn num_slots(&self) -> usize {
+        self.num_slots as usize
     }
 
     /// Get the free space in the page.
@@ -342,18 +311,18 @@ impl BtreeMetadata for BtreePageHeader {
         self.free_space = bytes;
     }
     /// Reset the num slots to a new value
-    fn reset_num_slots(&mut self, num: u16) {
-        self.num_slots = num;
+    fn reset_num_slots(&mut self, num: usize) {
+        self.num_slots = num as u16;
     }
 
     /// Add slots to the page
-    fn add_slots(&mut self, num: u16) {
-        self.num_slots += num;
+    fn add_slots(&mut self, num: usize) {
+        self.num_slots += num as u16;
     }
 
     /// Remove slots from the page
-    fn remove_slots(&mut self, num: u16) {
-        self.num_slots -= num;
+    fn remove_slots(&mut self, num: usize) {
+        self.num_slots -= num as u16;
     }
 
     /// Get the page's next sibling (useful when iterating over the btree during scans.)
@@ -387,8 +356,8 @@ impl BtreeMetadata for PageZeroHeader {
     }
 
     /// Obtain the number of slots in the page.
-    fn num_slots(&self) -> u16 {
-        self.num_slots
+    fn num_slots(&self) -> usize {
+        self.num_slots as usize
     }
 
     /// Get the free space in the page.
@@ -440,18 +409,18 @@ impl BtreeMetadata for PageZeroHeader {
         self.free_space = bytes;
     }
     /// Reset the num slots to a new value
-    fn reset_num_slots(&mut self, num: u16) {
-        self.num_slots = num;
+    fn reset_num_slots(&mut self, num: usize) {
+        self.num_slots = num as u16;
     }
 
     /// Add slots to the page
-    fn add_slots(&mut self, num: u16) {
-        self.num_slots += num;
+    fn add_slots(&mut self, num: usize) {
+        self.num_slots += num as u16;
     }
 
     /// Remove slots from the page
-    fn remove_slots(&mut self, num: u16) {
-        self.num_slots -= num;
+    fn remove_slots(&mut self, num: usize) {
+        self.num_slots -= num as u16;
     }
 
     /// Get the page's next sibling (useful when iterating over the btree during scans.)
@@ -478,12 +447,9 @@ impl BtreeMetadata for PageZeroHeader {
     }
 }
 
-impl BtreeBuffer for PageZero {}
-impl BtreeBuffer for BtreePage {}
-
 impl PageZero {
     /// Allocate a new [`PageZero`] with the given configuration, initializing the header accordingly.
-    pub(crate) fn from_config(config: AxmosDBConfig) -> Self {
+    pub(crate) fn from_config(config: DBConfig) -> Self {
         assert!(
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&config.page_size),
             "page size {} is not a value between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}",

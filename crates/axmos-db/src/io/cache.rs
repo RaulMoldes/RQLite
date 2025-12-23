@@ -1,4 +1,4 @@
-use crate::{io::frames::MemFrame, types::PageId};
+use crate::{multithreading::frames::MemFrame, types::PageId};
 
 use indexmap::IndexMap;
 use std::{

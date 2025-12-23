@@ -1,4 +1,4 @@
-use crate::{CELL_ALIGNMENT, as_slice, types::PageId, writable_layout};
+use crate::{CELL_ALIGNMENT, bytemuck_slice, types::PageId, writable_layout};
 
 use std::{fmt::Debug, mem, ptr::NonNull, slice};
 
@@ -15,7 +15,7 @@ pub struct CellHeader {
     is_overflow: bool,
 }
 
-as_slice!(CellHeader);
+bytemuck_slice!(CellHeader);
 pub const CELL_HEADER_SIZE: usize = mem::size_of::<CellHeader>();
 
 impl CellHeader {

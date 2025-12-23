@@ -6,11 +6,11 @@
 
 #[allow(unused_imports)]
 mod test_helpers {
-
     pub(crate) use crate::storage::cell::{CELL_HEADER_SIZE, OwnedCell, Slot};
     pub(crate) use crate::storage::core::buffer::MemBlock;
     pub(crate) use crate::storage::core::traits::{
-        BtreeBuffer, Buffer, BufferOps, WalBuffer, Writable,
+        Allocatable, AvailableSpace, BtreeMetadata, BtreeOps, Buffer, Identifiable, WalOps,
+        Writable,
     };
     pub(crate) use crate::storage::page::{
         BtreePage, BtreePageHeader, OverflowPage, OverflowPageHeader, PageZeroHeader,
@@ -26,8 +26,6 @@ mod test_helpers {
 }
 
 use test_helpers::*;
-
-use crate::record;
 
 #[macro_export]
 macro_rules! test_suite {
@@ -292,37 +290,37 @@ test_suite!(cell_misc {
 });
 
 fn test_page_alloc(size: usize) {
-    let p = BtreePage::alloc(1, size as u32);
+    let p = BtreePage::alloc(1, size);
     assert!(p.is_empty());
     assert!(p.is_leaf());
 }
 
 fn test_page_multi(size: usize) {
-    let mut p = BtreePage::alloc(1, size as u32);
+    let mut p = BtreePage::alloc(1, size);
     for i in 0..10u8 {
         p.push(OwnedCell::new(&[i; 50])).unwrap();
     }
     for i in 0..10u8 {
-        assert_eq!(p.cell(Slot(i as u16)).payload()[0], i);
+        assert_eq!(p.cell(i as usize).payload()[0], i);
     }
 }
 
 fn test_page_insert_at(size: usize) {
-    let mut p = BtreePage::alloc(1, size as u32);
+    let mut p = BtreePage::alloc(1, size);
     for i in 0..3u8 {
         p.push(OwnedCell::new(&[i; 32])).unwrap();
     }
-    p.insert(Slot(1), OwnedCell::new(&[0xFF; 32])).unwrap();
-    assert_eq!(p.cell(Slot(1)).payload()[0], 0xFF);
+    p.insert(1, OwnedCell::new(&[0xFF; 32])).unwrap();
+    assert_eq!(p.cell(1).payload()[0], 0xFF);
 }
 
 fn test_page_remove(size: usize) {
-    let mut p = BtreePage::alloc(1, size as u32);
+    let mut p = BtreePage::alloc(1, size);
     for i in 0..5u8 {
         p.push(OwnedCell::new(&[i; 32])).unwrap();
     }
-    assert_eq!(p.remove(Slot(2)).unwrap().payload()[0], 2);
-    assert_eq!(p.cell(Slot(2)).payload()[0], 3);
+    assert_eq!(p.remove(2).unwrap().payload()[0], 2);
+    assert_eq!(p.cell(2).payload()[0], 3);
 }
 
 param_tests!(test_page_alloc, size => [4096, 8192, 16384], miri_safe);
@@ -335,18 +333,18 @@ test_suite!(pg_stress {
         use super::test_helpers::*;
         let mut p = BtreePage::alloc(1, 8192);
         for i in 0u32..50 {
-            if p.has_space_for(64 + CELL_HEADER_SIZE + Slot::SIZE) {
+            if p.has_space_for(64 + CELL_HEADER_SIZE + 2) {
                 p.push(OwnedCell::new(&[(i % 256) as u8; 64])).unwrap();
             }
         }
         let n = p.num_slots();
         let mut rm = 0u32;
         while p.num_slots() > n / 2 {
-            p.remove(Slot(0)).unwrap();
+            p.remove(0).unwrap();
             rm += 1;
         }
         for i in 0..rm {
-            if p.has_space_for(64 + CELL_HEADER_SIZE + Slot::SIZE) {
+            if p.has_space_for(64 + CELL_HEADER_SIZE + 2) {
                 p.push(OwnedCell::new(&[((0xF0u32 + i) % 256) as u8; 64])).unwrap();
             }
         }
@@ -354,14 +352,14 @@ test_suite!(pg_stress {
     fill_refill => {
         use super::test_helpers::*;
         let mut p = BtreePage::alloc(1, 4096);
-        while p.has_space_for(32 + CELL_HEADER_SIZE + Slot::SIZE) {
+        while p.has_space_for(32 + CELL_HEADER_SIZE + 2) {
             p.push(OwnedCell::new(&[0xAA; 32])).unwrap();
         }
         let n = p.num_slots();
         while p.num_slots() > 0 {
-            p.remove(Slot(0)).unwrap();
+            p.remove(0).unwrap();
         }
-        while p.has_space_for(32 + CELL_HEADER_SIZE + Slot::SIZE) {
+        while p.has_space_for(32 + CELL_HEADER_SIZE + 2) {
             p.push(OwnedCell::new(&[0xBB; 32])).unwrap();
         }
         assert!(p.num_slots() >= n - 1);
@@ -391,13 +389,13 @@ test_suite!(overflow_pg {
 
 #[test]
 fn test_wal_alloc_drop() {
-    let alloc = WalBlock::alloc(1, WAL_BLOCK_SIZE as u32);
+    let alloc = WalBlock::alloc(1, WAL_BLOCK_SIZE as usize);
     drop(alloc);
 }
 
 #[test]
 fn test_wal_push_read() {
-    let alloc = WalBlock::alloc(1, WAL_BLOCK_SIZE as u32);
+    let alloc = WalBlock::alloc(1, WAL_BLOCK_SIZE as usize);
     let mut b = alloc;
     let (undo, redo) = ([0xAA; 64], [0xBB; 64]);
 
@@ -412,7 +410,7 @@ fn test_wal_push_read() {
 test_suite!(wal_misc {
     fill_read => {
         use super::test_helpers::*;
-        let mut b = WalBlock::alloc(1, WAL_BLOCK_SIZE as u32);
+        let mut b = WalBlock::alloc(1, WAL_BLOCK_SIZE as usize);
         let mut off = 0usize;
         let mut offs = Vec::new();
         for i in 0u32..20 {

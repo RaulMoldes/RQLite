@@ -1,6 +1,6 @@
-use std::{cmp::Ordering, io, usize};
-
 use super::{Comparator, Ranger};
+use crate::schema::stats::Selectivity;
+use std::{cmp::Ordering, io, usize};
 
 /// Comparator for fixed-size byte arrays using lexicographic ordering.
 ///
@@ -66,5 +66,30 @@ impl Ranger for FixedSizeBytesComparator {
         }
 
         Ok(result.into_boxed_slice())
+    }
+
+    fn selectivity_range(&self, min: &[u8], max: &[u8]) -> io::Result<Selectivity> {
+        // Interpret as big-endian unsigned integers for range calculation
+        let range_bytes = self.range_bytes(min, max)?;
+
+        // Convert range to u128 for calculation (supports up to 16 bytes)
+        let mut range_val: u128 = 0;
+        for &byte in range_bytes.iter() {
+            range_val = (range_val << 8) | byte as u128;
+        }
+
+        // Max possible range: 2^(size*8) - 1
+        let max_possible: u128 = if self.0 >= 16 {
+            u128::MAX
+        } else {
+            (1u128 << (self.0 * 8)) - 1
+        };
+
+        if max_possible == 0 {
+            return Ok(Selectivity::Uncomputable);
+        }
+
+        let selectivity = range_val as f64 / max_possible as f64;
+        Ok(Selectivity::from(selectivity))
     }
 }

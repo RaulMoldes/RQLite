@@ -1,19 +1,15 @@
 use crate::{
-    AxmosDBConfig, DEFAULT_CACHE_SIZE, PAGE_ALIGNMENT,
+    DBConfig, DEFAULT_CACHE_SIZE, PAGE_ALIGNMENT,
     io::{
         cache::PageCache,
         disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
-        frames::{AsReadLatch, AsWriteLatch, MemFrame},
         wal::WriteAheadLog,
     },
     make_shared,
+    multithreading::frames::{AsReadLatch, AsWriteLatch, Frame, MemFrame, WriteLatch},
     storage::{
-        Identifiable,
-        core::{
-            buffer::MemBlock,
-            traits::{Buffer, BufferOps},
-        },
-        page::{BtreePage, OverflowPage, PageZero, PageZeroHeader},
+        core::{buffer::MemBlock, traits::Buffer},
+        page::{OverflowPage, PageZero, PageZeroHeader},
         wal::OwnedRecord,
     },
     types::{PAGE_ZERO, PageId},
@@ -77,7 +73,7 @@ impl<'a> FileOperations for Pager {
             page_zero = pager.load_page_zero(actual_block_size as usize)?;
         };
 
-        pager.page_zero = Some(MemFrame::from(page_zero));
+        pager.page_zero = Some(MemFrame::from(Frame::new(page_zero)));
 
         // TODO. MUST WRITE THE RECOVER FUNCTION TO REPLAY THE WAL HERE.
         Ok(pager)
@@ -119,26 +115,25 @@ impl Pager {
     /// [PAGE 3             ] Offset 3 * Page size
     /// [....               ]
     fn page_offset(page_id: PageId, page_size: u64) -> u64 {
-        println!("{page_id}");
         u64::from(page_id) * page_size
     }
 
-    pub(crate) fn from_config(config: AxmosDBConfig, path: impl AsRef<Path>) -> io::Result<Self> {
+    pub(crate) fn from_config(config: DBConfig, path: impl AsRef<Path>) -> io::Result<Self> {
         let mut pager = Pager::create(path)?;
         let page_zero = pager.alloc_page_zero(config)?;
-        pager.page_zero = Some(MemFrame::from(page_zero));
+        pager.page_zero = Some(MemFrame::from(Frame::new(page_zero)));
         Ok(pager)
     }
 
     /// Allocates page zero from the provided configuration
-    fn alloc_page_zero(&mut self, config: AxmosDBConfig) -> io::Result<PageZero> {
+    fn alloc_page_zero(&mut self, config: DBConfig) -> io::Result<PageZero> {
         self.cache.set_capacity(config.cache_size as usize);
 
         let mut page_zero: PageZero = PageZero::from_config(config);
-        page_zero.metadata_mut().page_size = config.page_size;
-        page_zero.metadata_mut().min_keys = config.min_keys_per_page;
-        page_zero.metadata_mut().cache_size = config.cache_size;
-        page_zero.metadata_mut().num_siblings_per_side = config.num_siblings_per_side;
+        page_zero.metadata_mut().page_size = config.page_size as u32;
+        page_zero.metadata_mut().min_keys = config.min_keys_per_page as u8;
+        page_zero.metadata_mut().cache_size = config.cache_size as u16;
+        page_zero.metadata_mut().num_siblings_per_side = config.num_siblings_per_side as u8;
 
         self.write_block(PAGE_ZERO, page_zero.as_ref(), config.page_size as usize)?;
 
@@ -166,11 +161,11 @@ impl Pager {
     pub(crate) fn with_page<P, F, R>(&mut self, id: PageId, f: F) -> io::Result<R>
     where
         P: Buffer,
-        MemFrame: From<MemBlock<P::Header>> + From<P> + AsReadLatch<P>,
+        MemFrame: From<Frame<P>> + From<Frame<MemBlock<P::Header>>> + AsReadLatch<P>,
         F: FnOnce(&P) -> R,
     {
         let frame = self.read_page::<P>(id)?;
-        let latch = frame.try_read::<P>()?;
+        let latch = frame.read()?;
         Ok(f(&latch))
     }
 
@@ -178,11 +173,11 @@ impl Pager {
     pub(crate) fn with_page_mut<P, F, R>(&mut self, id: PageId, f: F) -> io::Result<R>
     where
         P: Buffer,
-        MemFrame: From<MemBlock<P::Header>> + From<P> + AsWriteLatch<P>,
+        MemFrame: From<Frame<P>> + From<Frame<MemBlock<P::Header>>> + AsWriteLatch<P>,
         F: FnOnce(&mut P) -> R,
     {
-        let mut frame = self.read_page::<P>(id)?;
-        let mut latch = frame.try_write::<P>()?;
+        let frame = self.read_page::<P>(id)?;
+        let mut latch = frame.write()?;
         Ok(f(&mut latch))
     }
 
@@ -190,11 +185,11 @@ impl Pager {
     pub(crate) fn try_with_page<P, F, R>(&mut self, id: PageId, f: F) -> io::Result<R>
     where
         P: Buffer,
-        MemFrame: From<MemBlock<P::Header>> + From<P> + AsReadLatch<P>,
+        MemFrame: From<Frame<MemBlock<P::Header>>> + From<Frame<P>> + AsReadLatch<P>,
         F: FnOnce(&P) -> io::Result<R>,
     {
         let frame = self.read_page::<P>(id)?;
-        let latch = frame.try_read::<P>()?;
+        let latch = frame.read()?;
         f(&latch)
     }
 
@@ -202,12 +197,12 @@ impl Pager {
     pub(crate) fn try_with_page_mut<P, F, R>(&mut self, id: PageId, f: F) -> io::Result<R>
     where
         P: Buffer,
-        MemFrame: From<MemBlock<P::Header>> + From<P> + AsWriteLatch<P>,
+        MemFrame: From<Frame<MemBlock<P::Header>>> + From<Frame<P>> + AsWriteLatch<P>,
         F: FnOnce(&mut P) -> io::Result<R>,
     {
-        let mut frame = self.read_page::<P>(id)?;
+        let frame = self.read_page::<P>(id)?;
         frame.mark_dirty();
-        let mut latch = frame.try_write::<P>()?;
+        let mut latch = frame.write()?;
         f(&mut latch)
     }
 
@@ -236,7 +231,7 @@ impl Pager {
         F: FnOnce(&PageZero) -> R,
     {
         let frame = self.page_zero_frame()?;
-        let latch = frame.try_read::<PageZero>()?;
+        let latch = frame.read()?;
         Ok(f(&latch))
     }
 
@@ -247,7 +242,7 @@ impl Pager {
     {
         let frame = self.page_zero_frame_mut()?;
         frame.mark_dirty();
-        let mut latch = frame.try_write::<PageZero>()?;
+        let mut latch = frame.write()?;
         Ok(f(&mut latch))
     }
 
@@ -340,12 +335,10 @@ impl Pager {
     /// Allocate a new page with the given <H> header.
     pub(crate) fn allocate_page<P>(&mut self) -> io::Result<PageId>
     where
-        MemBlock<P::Header>: From<BtreePage> + From<OverflowPage>,
-        P::Header: Identifiable<IdType = PageId>,
-        MemFrame: From<P> + From<MemBlock<P::Header>>,
-        P: BufferOps,
+        P: Buffer<IdType = PageId>,
+        MemFrame: From<Frame<P>> + From<Frame<MemBlock<P::Header>>>,
     {
-        let mut mem_page = if let Some(page_id) = self.first_free_page()? {
+        let mem_page = if let Some(page_id) = self.first_free_page()? {
             let next = self.with_page::<OverflowPage, _, _>(page_id, |overflow| overflow.next())?;
 
             self.try_set_first_free_page(next)?;
@@ -368,9 +361,9 @@ impl Pager {
             page.reinit_as::<P::Header>()
         } else {
             let id = self.get_next_page()?;
-            let page = P::alloc(id, self.page_size()? as u32);
+            let page = P::alloc(id, self.page_size()? as usize);
 
-            let frame = MemFrame::from(page);
+            let frame = MemFrame::from(Frame::new(page));
             frame
         };
         mem_page.mark_dirty();
@@ -408,7 +401,7 @@ impl Pager {
     pub(crate) fn read_page<P>(&mut self, id: PageId) -> io::Result<MemFrame>
     where
         P: Buffer,
-        MemFrame: From<MemBlock<P::Header>> + From<P>,
+        MemFrame: From<Frame<P>> + From<Frame<MemBlock<P::Header>>>,
     {
         // Someone asked for page zero, which we have on our local private cache so we return it.
         if id == PAGE_ZERO {
@@ -430,11 +423,9 @@ impl Pager {
         // That was a cache miss.
         // we need to go to the disk to find the page.
         let mut buffer: MemBlock<P::Header> = MemBlock::new(page_size);
-
         self.read_block(id, buffer.as_mut(), page_size)?;
-        let page = buffer.cast::<P::Header>();
 
-        let mem_page = MemFrame::from(page);
+        let mem_page = MemFrame::from(Frame::new(buffer));
         self.cache_frame(mem_page)?;
 
         Ok(self.cache.get(&id).unwrap())
@@ -445,7 +436,7 @@ impl Pager {
     fn ensure_cached<P>(&mut self, id: PageId) -> io::Result<()>
     where
         P: Buffer,
-        MemFrame: From<MemBlock<P::Header>> + From<P>,
+        MemFrame: From<Frame<P>> + From<Frame<MemBlock<P::Header>>>,
     {
         let _ = self.read_page::<P>(id)?;
         Ok(())
@@ -455,7 +446,7 @@ impl Pager {
     pub(crate) fn dealloc_page<P>(&mut self, id: PageId) -> io::Result<()>
     where
         P: Buffer + AsMut<[u8]>,
-        MemFrame: From<MemBlock<<P as Buffer>::Header>> + From<P> + AsWriteLatch<P>,
+        MemFrame: From<Frame<MemBlock<P::Header>>> + From<Frame<P>> + AsWriteLatch<P>,
     {
         // Someone asked for page zero, which we have on our local private cache so we return it.
         if id == PAGE_ZERO {
@@ -489,11 +480,11 @@ impl Pager {
             let page_size = self.page_size()?;
 
             // [MemPage::dealloc] consumes itself and creates a new MemPage with an overflow header.
-            let mut mem_page = mem_page.dealloc();
-            let mut latch = mem_page.try_write::<P>()?;
-            // Probably not necessary
-            self.write_block(id, &mut latch.as_mut(), page_size)?;
-            self.cache_frame(mem_page)?;
+            let deallocated_page = mem_page.dealloc();
+
+            // Here the write needs to write as an overflow page , regardless of the value of [P]
+            deallocated_page.with_bytes(|bytes| self.write_block(id, bytes, page_size))?;
+            self.cache_frame(deallocated_page)?;
         };
 
         Ok(())

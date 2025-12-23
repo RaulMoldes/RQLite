@@ -1,255 +1,351 @@
-//! Core trait for Axmos value types.
-//!
-//! This trait defines the interface that all inner types must implement
-//! to participate in the DataType system. The derive macro uses trait
-//! dispatch exclusively
+use bytemuck::{Pod, Zeroable};
+use std::{
+    cmp::Ordering,
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
+    io, mem,
+    ops::{Add, Deref, Div, Mul, Rem, Sub},
+};
 
-use crate::impl_number_op;
+use crate::{SerializationError, types::SerializationResult};
+
 use murmur3::murmur3_x64_128;
-use std::io::{Cursor, Result};
-/// Core trait for all Axmos value types.
+use std::io::Cursor;
+
+/// Trait to define the [TypeClass] of all types in the type system.
+/// For a type to be used in the type system it must implement this trait, which forces to also implement [PartialOrd], [PartialEq], [Debug], and [Display].
 ///
-/// The derive macro dispatches all operations through this trait,
-/// enabling fully generic handling of any conforming type.
-pub trait AxmosValueType: Sized {
-    /// The immutable reference type for this value
-    type Ref<'a>: AxmosValueTypeRef<'a, Owned = Self>
-    where
-        Self: 'a;
-
-    /// The mutable reference type for this value
-    type RefMut<'a>: AxmosValueTypeRefMut<'a, Owned = Self>
-    where
-        Self: 'a;
-
-    /// Fixed size in bytes, if this is a fixed-size type.
-    /// Returns `None` for dynamic-size types (e.g., Blob, Text).
-    const FIXED_SIZE: Option<usize>;
-
-    /// Whether this type is considered numeric for coercion purposes.
-    const IS_NUMERIC: bool = false;
-
-    /// Wether this type is signed or not
-    const NUM_CLASS: NumClass = NumClass::Unknown;
-
-    /// Reinterpret a byte buffer as this type's reference.
-    /// Returns the reference and the number of bytes consumed.
-    fn reinterpret(buffer: &[u8]) -> Result<(Self::Ref<'_>, usize)>;
-
-    /// Reinterpret a mutable byte buffer as this type's mutable reference.
-    /// Returns the mutable reference and the number of bytes consumed.
-    fn reinterpret_mut(buffer: &mut [u8]) -> Result<(Self::RefMut<'_>, usize)>;
-
-    /// Get the size of a specific value instance.
-    /// For fixed types, this equals FIXED_SIZE.
-    /// For dynamic types, this returns the actual encoded length.
-    fn value_size(&self) -> usize;
+/// Type Classes are [NullTypeClass], [VarlenTypeClass], and [NumericTypeClass].
+///
+/// The only special one is the numeric type, which has set of extra trait bounds in order to support arithmetic operations.
+pub trait TypeClass: Sized + Debug + Display + PartialEq + PartialOrd {
+    const SIZE: Option<usize> = None; // Size is unknown by default.
+    const ALIGN: usize = 1;
 }
 
-/// Trait for immutable reference types.
-pub trait AxmosValueTypeRef<'a>: Sized {
-    /// The owned type this reference corresponds to
-    type Owned: AxmosValueType;
+/// Varlen Type's size stays unknown.
+pub trait VarlenType: TypeClass {}
 
-    /// Convert to owned value
-    fn to_owned(&self) -> Self::Owned;
+/// TypeClass representing all fixed size types.
+pub trait FixedSizeType: TypeClass + Copy {
 
-    /// Get the underlying bytes
-    fn as_bytes(&self) -> &[u8];
 
-    /// Get the size in bytes
-    fn size(&self) -> usize {
-        self.as_bytes().len()
+    #[inline]
+    fn mem_size() -> usize {
+        Self::SIZE.unwrap_or(0)
+    }
+
+    #[inline]
+    fn aligned_offset(offset: usize) -> usize {
+        (offset + Self::ALIGN - 1) & !(Self::ALIGN - 1)
+    }
+
+}
+
+/// All fixed sizes are known at compile time.
+impl<T: FixedSizeType> TypeClass for T {
+    const SIZE: Option<usize> = Some(mem::size_of::<T>());
+    const ALIGN: usize = mem::align_of::<T>();
+
+}
+
+/// Trait for Boolean types
+pub trait BooleanType: FixedSizeType {}
+
+/// Numeric types do have a fixed size, and also some extra constraints.
+pub trait NumericType: FixedSizeType {
+    /// Every numeric type has an associated [Primitive] type to which it can promote to.
+    type Primitive: Copy
+        + Add<Output = Self::Primitive>
+        + Sub<Output = Self::Primitive>
+        + Mul<Output = Self::Primitive>
+        + Div<Output = Self::Primitive>
+        + Rem<Output = Self::Primitive>;
+
+    /// Convert from the target type to the primitive type.
+    fn to_primitive(self) -> Self::Primitive;
+
+    /// Convert back from the primitive type to the target type.
+    fn from_primitive(value: Self::Primitive) -> Self;
+}
+
+/// Numeric types specializations.
+pub trait SignedIntType: NumericType<Primitive = i64> {}
+pub trait UnsignedIntType: NumericType<Primitive = u64> {}
+pub trait FloatType: NumericType<Primitive = f64> {}
+
+/// Trait to generate promotion tables for numeric types.
+pub trait Promote<Rhs>: NumericType {
+    type Output: Add<Output = Self::Output>
+        + Sub<Output = Self::Output>
+        + Mul<Output = Self::Output>
+        + Div<Output = Self::Output>
+        + Rem<Output = Self::Output>
+        + Copy;
+
+    fn promote_lhs(self) -> Self::Output;
+    fn promote_rhs(rhs: Rhs) -> Self::Output;
+}
+
+/// Arithmetic operations over the promoted types.
+pub trait PromotedAdd<Rhs = Self> {
+    type Output;
+    fn promoted_add(self, rhs: Rhs) -> Self::Output;
+}
+
+pub trait PromotedSub<Rhs = Self> {
+    type Output;
+    fn promoted_sub(self, rhs: Rhs) -> Self::Output;
+}
+
+pub trait PromotedMul<Rhs = Self> {
+    type Output;
+    fn promoted_mul(self, rhs: Rhs) -> Self::Output;
+}
+
+pub trait PromotedDiv<Rhs = Self> {
+    type Output;
+    fn promoted_div(self, rhs: Rhs) -> Self::Output;
+}
+
+pub trait PromotedRem<Rhs = Self> {
+    type Output;
+    fn promoted_rem(self, rhs: Rhs) -> Self::Output;
+}
+
+// Blanket impls for promoted operations.
+impl<L, R> PromotedAdd<R> for L
+where
+    L: Promote<R>,
+{
+    type Output = L::Output;
+    fn promoted_add(self, rhs: R) -> Self::Output {
+        L::promote_lhs(self) + L::promote_rhs(rhs)
     }
 }
 
-/// Trait for mutable reference types.
-pub trait AxmosValueTypeRefMut<'a>: Sized {
-    /// The owned type this reference corresponds to
-    type Owned: AxmosValueType;
-
-    /// Convert to owned value
-    fn to_owned(&self) -> Self::Owned;
-
-    /// Get the underlying bytes immutably
-    fn as_bytes(&self) -> &[u8];
-
-    /// Get the underlying bytes mutably
-    fn as_bytes_mut(&mut self) -> &mut [u8];
-
-    /// Get the size in bytes
-    fn size(&self) -> usize {
-        self.as_bytes().len()
+impl<L, R> PromotedSub<R> for L
+where
+    L: Promote<R>,
+{
+    type Output = L::Output;
+    fn promoted_sub(self, rhs: R) -> Self::Output {
+        L::promote_lhs(self) - L::promote_rhs(rhs)
     }
 }
 
-/// Marker trait for fixed-size types.
-/// This is automatically implemented when FIXED_SIZE is Some.
-pub trait FixedSizeType: AxmosValueType {
-    /// The fixed size in bytes
-    const SIZE: usize;
+impl<L, R> PromotedMul<R> for L
+where
+    L: Promote<R>,
+{
+    type Output = L::Output;
+    fn promoted_mul(self, rhs: R) -> Self::Output {
+        L::promote_lhs(self) * L::promote_rhs(rhs)
+    }
 }
 
-/// Marker trait for dynamic-size types.
-pub trait DynamicSizeType: AxmosValueType {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NumClass {
-    Signed,
-    Unsigned,
-    Float,
-    Unknown,
+impl<L, R> PromotedDiv<R> for L
+where
+    L: Promote<R>,
+{
+    type Output = L::Output;
+    fn promoted_div(self, rhs: R) -> Self::Output {
+        L::promote_lhs(self) / L::promote_rhs(rhs)
+    }
 }
 
-impl NumClass {
-    /// Promote two classes to a common class
-    pub(crate) fn promote(self, other: Self) -> Self {
-        match (self, other) {
-            (NumClass::Float, _) | (_, NumClass::Float) => NumClass::Float,
-            (NumClass::Signed, NumClass::Unsigned) | (NumClass::Unsigned, NumClass::Signed) => {
-                NumClass::Signed
-            }
-            (NumClass::Signed, NumClass::Signed) => NumClass::Signed,
-            (NumClass::Unsigned, NumClass::Unsigned) => NumClass::Unsigned,
-            (_, _) => panic!("Unknown numeric class. Cannot promote"),
+impl<L, R> PromotedRem<R> for L
+where
+    L: Promote<R>,
+{
+    type Output = L::Output;
+    fn promoted_rem(self, rhs: R) -> Self::Output {
+        L::promote_lhs(self) % L::promote_rhs(rhs)
+    }
+}
+
+pub trait BytemuckDeserializable: Pod + Zeroable + FixedSizeType {}
+
+/// Automatically generates a [RefType] for all types that implement [bytemuck's] [Pod] and [Zeroable] traits.
+///
+/// The list of primitive types that implement this are found here: https://docs.rs/bytemuck/latest/bytemuck/trait.Pod.html
+///
+/// Bool and char do not implement [Pod] because its implementation smay be illegal, which is why this implementation is separated from the [FixedSizeType].
+///
+/// The target [T] type must be both [Pod] and [Zeroable]
+#[repr(transparent)]
+#[derive(Copy, Clone)]
+pub struct BytemuckRef<'a, T: BytemuckDeserializable>(&'a T);
+
+impl<'a, T: BytemuckDeserializable> BytemuckRef<'a, T> {
+    #[inline]
+    pub fn get(&self) -> &T {
+        self.0
+    }
+
+    #[inline]
+    pub fn to_owned(&self) -> T {
+        *self.0
+    }
+}
+
+impl<'a, T: BytemuckDeserializable> Deref for BytemuckRef<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl<'a, T: BytemuckDeserializable> AsRef<[u8]> for BytemuckRef<'a, T> {
+    fn as_ref(&self) -> &[u8] {
+        bytemuck::bytes_of(self.0)
+    }
+}
+
+impl<'a, T: BytemuckDeserializable> TryFrom<&'a [u8]> for BytemuckRef<'a, T> {
+    type Error = SerializationError;
+    // We use
+    fn try_from(value: &'a [u8]) -> Result<Self, Self::Error> {
+        if value.len() < T::mem_size() {
+            return Err(SerializationError::UnexpectedEof);
         }
+
+        let bytes = bytemuck::try_from_bytes::<T>(value)?;
+        Ok(Self(bytes))
     }
 }
 
-pub trait AxmosOps: AxmosValueType {
-    fn abs(&self) -> Self;
-    fn ceil(&self) -> Self;
-    fn floor(&self) -> Self;
-    fn sqrt(&self) -> Self;
-    fn round(&self) -> Self;
-    fn pow(&self, other: Self) -> Self;
+/// The types are equal if their byte patterns are the same.
+impl<'a, T: BytemuckDeserializable> PartialEq for BytemuckRef<'a, T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
 }
 
-/// Trait for numeric types.
-pub trait NumericType: AxmosValueType + Copy {
-    /// Classification for type promotion
-    const NUM_CLASS: NumClass;
+impl<'a, T: BytemuckDeserializable> Eq for BytemuckRef<'a, T> {}
 
-    /// Extract as i64 (for signed types)
-    fn as_i64(&self) -> Option<i64>;
-
-    /// Extract as u64 (for unsigned types)
-    fn as_u64(&self) -> Option<u64>;
-
-    /// Extract as f64 (for all numeric types)
-    fn as_f64(&self) -> f64;
-
-    /// Create from i64
-    fn from_i64(v: i64) -> Self
-    where
-        Self: Sized;
-
-    /// Create from u64
-    fn from_u64(v: u64) -> Self
-    where
-        Self: Sized;
-
-    /// Create from f64
-    fn from_f64(v: f64) -> Self
-    where
-        Self: Sized;
+impl<'a, T: BytemuckDeserializable> PartialOrd for BytemuckRef<'a, T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.0.partial_cmp(other.0)
+    }
 }
 
-/// Trait for type casting between Axmos value types.
-///
-/// This trait defines how one type can be converted to another.
-/// The derive macro uses this for `try_cast` implementation.
-///
-/// Implementations should be provided externally (not in the macro)
-/// to allow flexible casting rules.
-pub trait AxmosCastable<Target>: Sized {
-    /// Try to cast this value to the target type.
-    /// Returns `None` if the cast is not possible or would lose precision.
-    fn try_cast(&self) -> Option<Target>;
+impl<'a, T: BytemuckDeserializable + Ord> Ord for BytemuckRef<'a, T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.cmp(other.0)
+    }
+}
 
-    /// Check if this value can be cast to the target type.
+impl<'a, T: BytemuckDeserializable> Debug for BytemuckRef<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "Ref({:?})", self.0)
+    }
+}
+
+impl<'a, T: BytemuckDeserializable> Display for BytemuckRef<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        Display::fmt(self.0, f)
+    }
+}
+
+/// Trait to indicate which is the Ref::type of each inner type in the system
+pub trait RefTrait: TypeClass {
+    type Ref<'a>: TypeRef<'a, Owned = Self>
+    where
+        Self: 'a;
+}
+/// Trait for making types deserializable.
+pub trait DeserializableType: RefTrait {
+    /// Reinterprets a buffer slice into a  its [Ref] type.
+    ///
+    /// For fixed size numeric types we are leveraging [bytemuck] to do this, while [Blob]
+    ///
+    /// handles its deserialization separately.
+    fn reinterpret_cast(buffer: &[u8]) -> SerializationResult<(Self::Ref<'_>, usize)>;
+}
+
+/// Trait for making types deserializable.
+///
+/// If the type implements AsRef this is automatically derived. If not (like for booleans), it has to be manually implemented.
+pub trait SerializableType: TypeClass {
+    /// Serializes the data type to a byte slice.
+    fn write_to(&self, writer: &mut [u8], cursor: usize) -> SerializationResult<usize>;
+}
+
+impl<T: TypeClass + BytemuckDeserializable + AsRef<[u8]>> SerializableType for T {
+    fn write_to(&self, writer: &mut [u8], cursor: usize) -> SerializationResult<usize> {
+        let aligned = Self::aligned_offset(cursor);
+        let data_bytes = self.as_ref();
+        writer[aligned..aligned + Self::mem_size()].copy_from_slice(data_bytes);
+
+        Ok(aligned + data_bytes.len())
+    }
+}
+
+impl<T: BytemuckDeserializable> RefTrait for T {
+    type Ref<'a>
+        = BytemuckRef<'a, T>
+    where
+        T: 'a;
+}
+
+/// All bytemuck serializable types will implement [DeserialiableType]
+impl<T: BytemuckDeserializable> DeserializableType for T {
+    fn reinterpret_cast(buffer: &[u8]) -> SerializationResult<(Self::Ref<'_>, usize)> {
+        Ok((
+            BytemuckRef::try_from(&buffer[..Self::SIZE.unwrap_or(0)])?,
+            Self::SIZE.unwrap_or(0),
+        ))
+    }
+}
+
+pub trait TypeRef<'a>: Sized + AsRef<[u8]> {
+    type Owned: DeserializableType;
+    fn to_owned(&self) -> Self::Owned;
+}
+
+impl<'a, T: BytemuckDeserializable + DeserializableType> TypeRef<'a> for BytemuckRef<'a, T> {
+    type Owned = T;
+    fn to_owned(&self) -> Self::Owned {
+        BytemuckRef::to_owned(self)
+    }
+}
+
+pub trait RuntimeSized: TypeClass {
+    fn runtime_size(&self) -> usize {
+        Self::SIZE.unwrap_or(0)
+    }
+}
+
+pub trait TypeCast<T: TypeClass> {
+    fn try_cast(&self) -> Option<T>;
     fn can_cast(&self) -> bool {
         self.try_cast().is_some()
     }
 }
 
-/// Blanket implementation: any type can cast to itself.
-impl<T: Clone> AxmosCastable<T> for T {
-    #[inline]
+impl<T: TypeClass + Copy> TypeCast<T> for T {
     fn try_cast(&self) -> Option<T> {
-        Some(self.clone())
-    }
-
-    #[inline]
-    fn can_cast(&self) -> bool {
-        true
+        Some(*self)
     }
 }
 
-/// Trait for types that support comparison operations.
-/// This is used by the derive macro to determine if a variant supports ordering.
-pub trait AxmosComparable: PartialOrd {}
-
-// Blanket implementation for all PartialOrd types
-impl<T: PartialOrd> AxmosComparable for T {}
-
-pub trait AxmosHashable {
+pub trait Hashable {
     fn hash128(&self) -> u128;
-}
 
-/// MurmurHash3 (128-bit x64 variant).
-pub(crate) fn murmur_hash(bytes: &[u8]) -> u128 {
-    let mut cursor = Cursor::new(bytes);
-    let buf = [0u8; 16];
-    let hash128 = murmur3_x64_128(&mut cursor, 0).unwrap();
-    hash128
-}
-
-pub(crate) enum Number {
-    Signed(i64),
-    Unsigned(u64),
-    Float(f64),
-}
-
-impl_number_op!(number_add, +);
-impl_number_op!(number_sub, -);
-impl_number_op!(number_mul, *);
-impl_number_op!(number_div, /);
-impl_number_op!(number_mod, %);
-
-use std::ops::{Add, Div, Mul, Rem, Sub};
-
-impl Add for Number {
-    type Output = Number;
-    fn add(self, rhs: Number) -> Number {
-        number_add(self, rhs)
+    fn hash64(&self) -> u64 {
+        self.hash128() as u64
     }
 }
 
-impl Sub for Number {
-    type Output = Number;
-    fn sub(self, rhs: Number) -> Number {
-        number_sub(self, rhs)
+impl<T: AsRef<[u8]>> Hashable for T {
+    fn hash128(&self) -> u128 {
+        let mut cursor = Cursor::new(self.as_ref());
+        murmur3_x64_128(&mut cursor, 0).unwrap()
     }
 }
 
-impl Mul for Number {
-    type Output = Number;
-    fn mul(self, rhs: Number) -> Number {
-        number_mul(self, rhs)
-    }
-}
-
-impl Div for Number {
-    type Output = Number;
-    fn div(self, rhs: Number) -> Number {
-        number_div(self, rhs)
-    }
-}
-
-impl Rem for Number {
-    type Output = Number;
-    fn rem(self, rhs: Number) -> Number {
-        number_mod(self, rhs)
+impl<T: FixedSizeType> RuntimeSized for T {
+    fn runtime_size(&self) -> usize {
+        T::SIZE.unwrap_or(0)
     }
 }

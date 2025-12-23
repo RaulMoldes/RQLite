@@ -17,52 +17,52 @@ pub(crate) fn default_num_workers() -> usize {
 pub(crate) const AXMO: u32 = 0x41584D4F;
 
 /// Maximum page size is 64 KiB.
-pub(crate) const MIN_PAGE_SIZE: u32 = 4096;
-pub(crate) const MAX_PAGE_SIZE: u32 = 65536;
+pub(crate) const MIN_PAGE_SIZE: usize = 4096;
+pub(crate) const MAX_PAGE_SIZE: usize = 65536;
 
 /// Cache size goes in units of number of pages.
 pub(crate) const DEFAULT_CACHE_SIZE: usize = 10000;
-pub(crate) const DEFAULT_PAGE_SIZE: u32 = MIN_PAGE_SIZE; // 4KB
-pub(crate) const DEFAULT_POOL_SIZE: u16 = 10; // Ten workers by default.
-pub(crate) const DEFAULT_BTREE_MIN_KEYS: u8 = 3;
-pub(crate) const DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE: u8 = 3;
+pub(crate) const DEFAULT_PAGE_SIZE: usize = MIN_PAGE_SIZE; // 4KB
+pub(crate) const DEFAULT_POOL_SIZE: usize = 10; // Ten workers by default.
+pub(crate) const DEFAULT_BTREE_MIN_KEYS: usize = 3;
+pub(crate) const DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE: usize = 3;
 
 /// Cells are aligned to 64 bits.
-pub(crate) const CELL_ALIGNMENT: u8 = 64;
+pub(crate) const CELL_ALIGNMENT: usize = 64;
 
 /// [`O_DIRECT`] flag in Linux systems requires that buffers are aligned to at least the logical block size of the block device which is typically 4096 bytes.
 /// TODO: There should be a way to query this value to the system dynamically.
 /// Must read: https://stackoverflow.com/questions/53902811/why-direct-i-o-requires-alignments
-pub(crate) const PAGE_ALIGNMENT: u32 = MIN_PAGE_SIZE;
+pub(crate) const PAGE_ALIGNMENT: usize = MIN_PAGE_SIZE;
 
 #[derive(Debug, Clone, Copy)]
-pub struct AxmosDBConfig {
-    pub(crate) page_size: u32,
-    pub(crate) cache_size: u16,
-    pub(crate) pool_size: u8,
-    pub(crate) num_siblings_per_side: u8,
-    pub(crate) min_keys_per_page: u8,
+pub struct DBConfig {
+    pub(crate) page_size: usize,
+    pub(crate) cache_size: usize,
+    pub(crate) pool_size: usize,
+    pub(crate) num_siblings_per_side: usize,
+    pub(crate) min_keys_per_page: usize,
 }
 
-impl Default for AxmosDBConfig {
+impl Default for DBConfig {
     fn default() -> Self {
         Self {
-            pool_size: default_num_workers() as u8,
+            pool_size: default_num_workers(),
             num_siblings_per_side: 2,
             min_keys_per_page: 3,
-            cache_size: DEFAULT_CACHE_SIZE as u16,
+            cache_size: DEFAULT_CACHE_SIZE,
             page_size: DEFAULT_PAGE_SIZE,
         }
     }
 }
 
-impl AxmosDBConfig {
+impl DBConfig {
     pub(crate) fn new(
-        page_size: u32,
-        cache_size: u16,
-        pool_size: u8,
-        min_keys_per_page: u8,
-        num_siblings_per_side: u8,
+        page_size: usize,
+        cache_size: usize,
+        pool_size: usize,
+        min_keys_per_page: usize,
+        num_siblings_per_side: usize,
     ) -> Self {
         let page_size = page_size
             .next_power_of_two()

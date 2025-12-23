@@ -10,10 +10,11 @@
 #![feature(concat_bytes)]
 #![feature(str_from_raw_parts)]
 #![feature(negative_impls)]
+#![feature(current_thread_id)]
 pub mod common;
-//pub mod database;
 pub mod io;
 mod macros;
+pub mod schema;
 //mod sql;
 mod multithreading;
 mod storage;

@@ -24,7 +24,7 @@ ctrlc = "3.4"
 murmur3 = "0.5"
 bytemuck = "1.24"
 indexmap = "2"
-
+rkyv = { version = "0.8", features = ["alloc"] }
 
 [dev-dependencies]
 uuid = { version = "1", features = ["v4"] }

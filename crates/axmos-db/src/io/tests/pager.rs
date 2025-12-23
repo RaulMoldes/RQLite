@@ -1,10 +1,10 @@
 use crate::{
-    AxmosDBConfig, DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, DEFAULT_CACHE_SIZE,
+    DBConfig, DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, DEFAULT_CACHE_SIZE,
     DEFAULT_PAGE_SIZE, default_num_workers,
     io::{disk::FileOperations, pager::Pager},
     matrix_tests, param_tests,
     storage::{
-        BtreeBuffer,
+        BtreeMetadata, BtreeOps,
         cell::OwnedCell,
         page::{BtreePage, PageZero},
     },
@@ -13,17 +13,20 @@ use crate::{
 use std::io;
 use tempfile::tempdir;
 
-fn create_test_config(page_size: u32, cache_size: u16) -> AxmosDBConfig {
-    AxmosDBConfig::new(
+fn create_test_config(page_size: usize, cache_size: usize) -> DBConfig {
+    DBConfig::new(
         page_size,
         cache_size,
-        default_num_workers() as u8,
+        default_num_workers(),
         DEFAULT_BTREE_MIN_KEYS,
         DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE,
     )
 }
 
-fn create_test_pager(page_size: u32, cache_size: u16) -> io::Result<(Pager, tempfile::TempDir)> {
+fn create_test_pager(
+    page_size: usize,
+    cache_size: usize,
+) -> io::Result<(Pager, tempfile::TempDir)> {
     let dir = tempdir()?;
     let path = dir.path().join("test.db");
     let config = create_test_config(page_size, cache_size);
@@ -32,7 +35,7 @@ fn create_test_pager(page_size: u32, cache_size: u16) -> io::Result<(Pager, temp
 }
 
 fn create_default_pager() -> io::Result<(Pager, tempfile::TempDir)> {
-    create_test_pager(DEFAULT_PAGE_SIZE, DEFAULT_CACHE_SIZE as u16)
+    create_test_pager(DEFAULT_PAGE_SIZE, DEFAULT_CACHE_SIZE)
 }
 
 #[test]
@@ -242,7 +245,7 @@ fn test_page_persistence_after_reopen() -> io::Result<()> {
 
 fn test_cache_eviction(num_pages: usize, cache_size: usize) {
     let (mut pager, _dir) =
-        create_test_pager(DEFAULT_PAGE_SIZE, cache_size as u16).expect("Failed to create_pager");
+        create_test_pager(DEFAULT_PAGE_SIZE, cache_size).expect("Failed to create_pager");
 
     // Allocate more pages than cache size
     let pages_to_alloc = num_pages.max(cache_size + 5);
@@ -359,7 +362,7 @@ fn test_page_multiple_cells(num_cells: usize) {
             let actual_cells = page.num_slots() as usize;
             for i in 0..actual_cells {
                 let expected = format!("Cell {}", i);
-                let cell = page.cell(i as u16);
+                let cell = page.cell(i);
                 assert_eq!(cell.payload(), expected.as_bytes());
             }
         })
@@ -441,7 +444,7 @@ fn test_stress_random_access(num_pages: usize, accesses: usize) {
 }
 
 fn test_different_page_sizes(page_size: usize) {
-    let (mut pager, _dir) = create_test_pager(page_size as u32, 10).unwrap();
+    let (mut pager, _dir) = create_test_pager(page_size, 10).unwrap();
 
     let page_id = pager.allocate_page::<BtreePage>().unwrap();
 
@@ -453,7 +456,7 @@ fn test_different_page_sizes(page_size: usize) {
 }
 
 fn test_different_cache_sizes(cache_size: usize) {
-    let (mut pager, _dir) = create_test_pager(DEFAULT_PAGE_SIZE, cache_size as u16).unwrap();
+    let (mut pager, _dir) = create_test_pager(DEFAULT_PAGE_SIZE, cache_size).unwrap();
 
     // Allocate and access pages
     let mut page_ids = Vec::new();

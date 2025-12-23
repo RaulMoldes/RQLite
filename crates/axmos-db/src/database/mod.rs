@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    AxmosDBConfig, TRANSACTION_ZERO,
+    DBConfig, TRANSACTION_ZERO,
     database::{
         errors::{BoxError, IntoBoxError, TaskResult, TransactionResult},
         runner::{TaskContext, TaskRunner},
@@ -78,7 +78,7 @@ pub struct Database {
 
 impl Database {
     pub fn with_defaults(path: impl AsRef<Path>) -> io::Result<Self> {
-        let config = AxmosDBConfig::default();
+        let config = DBConfig::default();
 
         Database::new(config, path)
     }
@@ -471,7 +471,7 @@ impl Catalog {
 }
 
 impl Database {
-    pub(crate) fn new(config: AxmosDBConfig, path: impl AsRef<Path>) -> io::Result<Self> {
+    pub(crate) fn new(config: DBConfig, path: impl AsRef<Path>) -> io::Result<Self> {
         initialize_atomics();
         let pager: SharedPager = SharedPager::from(Pager::from_config(config, path)?);
 

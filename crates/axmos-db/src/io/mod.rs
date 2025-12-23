@@ -4,7 +4,6 @@
 //! from disk, as well as caching frequently accessed data in memory to improve performance.
 pub mod cache;
 pub mod disk;
-pub mod frames;
 //pub mod logger;
 
 //pub mod journal;
@@ -26,16 +25,15 @@ pub(crate) trait AsBytes {
         Self: Sized;
 }
 
-pub fn read_string_unchecked<R: Read>(reader: &mut R) -> std::io::Result<String> {
-    let varint = VarInt::read_buf(reader)?;
-    let (len, offset) = VarInt::from_encoded_bytes(&varint)?;
-    let len_usize: usize = len.try_into()?;
+pub fn read_string_unchecked<R: Read>(reader: &mut R) -> String {
+    let varint = VarInt::read_buf(reader).unwrap();
+    let (len, offset) = VarInt::from_encoded_bytes_unchecked(&varint);
+    let len_usize: usize = len.into();
     let mut str_buf = vec![0u8; len_usize];
-    reader.read_exact(&mut str_buf)?;
-    Ok(unsafe { String::from_utf8_unchecked(str_buf) })
+    reader.read_exact(&mut str_buf).unwrap();
+    unsafe { String::from_utf8_unchecked(str_buf) }
 }
-
-pub fn write_string_unchecked<W: Write>(writer: &mut W, s: &str) -> std::io::Result<()> {
+pub fn write_string<W: Write>(writer: &mut W, s: &str) -> std::io::Result<()> {
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut vbuf = [0u8; MAX_VARINT_LEN];
@@ -46,13 +44,13 @@ pub fn write_string_unchecked<W: Write>(writer: &mut W, s: &str) -> std::io::Res
     Ok(())
 }
 
-pub fn read_variable_length<R: Read + Seek>(buf: &mut R) -> std::io::Result<Box<[u8]>> {
-    let varint = VarInt::read_buf(buf)?;
-    let (len, offset) = VarInt::from_encoded_bytes(varint.as_ref())?;
-    let len_usize: usize = len.try_into().unwrap();
+pub fn read_variable_length_unchecked<R: Read + Seek>(buf: &mut R) -> Box<[u8]> {
+    let varint = VarInt::read_buf(buf).unwrap();
+    let (len, offset) = VarInt::from_encoded_bytes_unchecked(varint.as_ref());
+    let len_usize: usize = len.into();
     let mut val_buffer = vec![0u8; len_usize];
-    buf.read_exact(&mut val_buffer)?;
-    Ok(val_buffer.into_boxed_slice())
+    buf.read_exact(&mut val_buffer).unwrap();
+    val_buffer.into_boxed_slice()
 }
 
 pub fn write_variable_length<W: Write>(buf: &mut W, s: &[u8]) -> std::io::Result<()> {

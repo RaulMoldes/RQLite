@@ -5,7 +5,7 @@ use std::{
     num::{ParseFloatError, ParseIntError},
 };
 
-use crate::types::{DataTypeKind, LogicalId, ObjectId, ObjectType, TransactionId};
+use crate::types::{LogicalId, ObjectId, TransactionId, core::TypeClass};
 
 /// Thread pool errors
 #[derive(Debug)]
@@ -96,83 +96,6 @@ impl From<ParseFloatError> for ParsingError {
     }
 }
 
-/// Type system errors
-#[derive(Debug)]
-pub enum TypeError {
-    UnexpectedDataType(DataTypeKind),
-    ParseError(ParsingError),
-    NullOperation,
-    TypeMismatch {
-        left: DataTypeKind,
-        right: DataTypeKind,
-    },
-    CastError {
-        from: DataTypeKind,
-        to: DataTypeKind,
-    },
-    NotComparable(DataTypeKind),
-    UnsupportedOperation {
-        kind: DataTypeKind,
-        operation: &'static str,
-    },
-    Other(String),
-}
-
-impl Display for TypeError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::NullOperation => write!(f, "Cannot perform operation on Null"),
-            Self::TypeMismatch { left, right } => write!(f, "Type mismatch: {} vs {}", left, right),
-            Self::CastError { from, to } => write!(f, "Cannot cast {} to {}", from, to),
-            Self::NotComparable(k) => write!(f, "Type {} is not comparable", k),
-            Self::UnsupportedOperation { kind, operation } => {
-                write!(f, "Type {} does not support {}", kind, operation)
-            }
-            Self::UnexpectedDataType(data) => write!(f, "Invalid data type: {}", data),
-            Self::ParseError(err) => write!(f, "Parse error: {}", err),
-            Self::Other(s) => write!(f, "Type error: {}", s),
-        }
-    }
-}
-
-impl Error for TypeError {}
-
-impl From<ParsingError> for TypeError {
-    fn from(value: ParsingError) -> Self {
-        Self::ParseError(value)
-    }
-}
-
-impl From<ParseFloatError> for TypeError {
-    fn from(value: ParseFloatError) -> Self {
-        Self::ParseError(ParsingError::Float(value))
-    }
-}
-
-impl From<ParseIntError> for TypeError {
-    fn from(value: ParseIntError) -> Self {
-        Self::ParseError(ParsingError::Int(value))
-    }
-}
-
-impl From<IoError> for TypeError {
-    fn from(value: IoError) -> Self {
-        Self::Other(value.to_string())
-    }
-}
-
-impl From<TaskError> for TypeError {
-    fn from(value: TaskError) -> Self {
-        Self::Other(value.to_string())
-    }
-}
-
-impl From<TypeError> for IoError {
-    fn from(value: TypeError) -> Self {
-        IoError::new(ErrorKind::InvalidData, value.to_string())
-    }
-}
-
 /// Object already exists errors
 #[derive(Debug, Clone, PartialEq)]
 pub enum AlreadyExists {
@@ -232,15 +155,15 @@ pub enum AnalyzerError {
     DuplicatedColumn(String),
     MultiplePrimaryKeys,
     AlreadyExists(AlreadyExists),
-    ArithmeticOverflow(f64, DataTypeKind),
+
     InvalidFormat(String, String),
     InvalidExpression,
     AlreadyStarted,
     NotStarted,
-    InvalidDataType(DataTypeKind),
+
     AliasNotProvided,
     DuplicatedConstraint(String),
-    InvalidValue(DataTypeKind),
+
     Other(String),
 }
 
@@ -261,17 +184,14 @@ impl Display for AnalyzerError {
             }
             Self::DuplicatedColumn(col) => write!(f, "Column '{}' specified more than once", col),
             Self::AlreadyExists(e) => write!(f, "{}", e),
-            Self::ArithmeticOverflow(num, dtype) => {
-                write!(f, "Value {} out of range for type {}", num, dtype)
-            }
+
             Self::ConstraintViolation(ct, col) => {
                 write!(f, "Constraint '{}' violated for column '{}'", ct, col)
             }
             Self::InvalidExpression => write!(f, "Invalid expression"),
             Self::AlreadyStarted => write!(f, "Transaction already started on this session"),
             Self::NotStarted => write!(f, "No active transaction"),
-            Self::InvalidDataType(dtype) => write!(f, "Invalid data type: {}", dtype),
-            Self::InvalidValue(dtype) => write!(f, "Invalid value for type: {}", dtype),
+
             Self::InvalidFormat(s, expected) => {
                 write!(f, "Invalid format '{}', expected: {}", s, expected)
             }
@@ -303,19 +223,12 @@ pub enum BinderError {
     TableNotFound(String),
     ColumnNotFound(String),
     AmbiguousColumn(String),
-    TypeMismatch {
-        expected: DataTypeKind,
-        found: DataTypeKind,
-        context: String,
-    },
+
     InvalidExpression(String),
     AliasRequired(String),
     DuplicateAlias(String),
     CteNotFound(String),
-    ColumnCountMismatch {
-        expected: usize,
-        found: usize,
-    },
+    ColumnCountMismatch { expected: usize, found: usize },
     Other(String),
 }
 
@@ -333,17 +246,7 @@ impl Display for BinderError {
                     expected, found
                 )
             }
-            Self::TypeMismatch {
-                expected,
-                found,
-                context,
-            } => {
-                write!(
-                    f,
-                    "Type mismatch in {}: expected {:?}, found {:?}",
-                    context, expected, found
-                )
-            }
+
             Self::InvalidExpression(msg) => write!(f, "Invalid expression: {}", msg),
             Self::AliasRequired(msg) => write!(f, "Alias required: {}", msg),
             Self::DuplicateAlias(alias) => write!(f, "Duplicate alias: {}", alias),
@@ -380,7 +283,7 @@ pub enum PlanError {
     TableNotFound(String),
     ColumnNotFound(String),
     AmbiguousColumn(String),
-    TypeMismatch(DataTypeKind, DataTypeKind),
+
     InvalidExpr(String),
     Unsupported(String),
     InvalidPlan(String),
@@ -395,7 +298,7 @@ impl Display for PlanError {
             Self::TableNotFound(t) => write!(f, "Table not found: {}", t),
             Self::ColumnNotFound(c) => write!(f, "Column not found: {}", c),
             Self::AmbiguousColumn(c) => write!(f, "Ambiguous column: {}", c),
-            Self::TypeMismatch(a, b) => write!(f, "Type mismatch: {:?} vs {:?}", a, b),
+
             Self::InvalidExpr(e) => write!(f, "Invalid expression: {}", e),
             Self::Unsupported(s) => write!(f, "Unsupported: {}", s),
             Self::InvalidPlan(s) => write!(f, "Invalid plan: {}", s),
@@ -448,7 +351,7 @@ impl From<TaskError> for PlanError {
 pub enum DdlError {
     AlreadyExists(AlreadyExists),
     NotFound(String),
-    InvalidObjectType(ObjectType),
+
     ConstraintViolation(String),
     CatalogError(String),
     Io(IoError),
@@ -460,7 +363,7 @@ impl Display for DdlError {
         match self {
             Self::AlreadyExists(e) => write!(f, "{}", e),
             Self::NotFound(name) => write!(f, "Object not found: {}", name),
-            Self::InvalidObjectType(t) => write!(f, "Invalid object type: {}", t),
+
             Self::ConstraintViolation(msg) => write!(f, "Constraint violation: {}", msg),
             Self::CatalogError(msg) => write!(f, "Catalog error: {}", msg),
             Self::Io(err) => write!(f, "IO error: {}", err),
@@ -598,7 +501,6 @@ impl From<TaskError> for BuilderError {
 /// Evaluation errors (expression evaluation)
 #[derive(Debug)]
 pub enum EvaluationError {
-    Type(TypeError),
     InvalidExpression(String),
     InvalidArgument(String),
     ColumnOutOfBounds(usize, usize),
@@ -608,7 +510,6 @@ pub enum EvaluationError {
 impl Display for EvaluationError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            Self::Type(e) => write!(f, "{}", e),
             Self::InvalidExpression(expr) => write!(f, "Invalid expression: {}", expr),
             Self::ColumnOutOfBounds(i, total) => {
                 write!(f, "Column {} out of bounds (row has {} columns)", i, total)
@@ -620,12 +521,6 @@ impl Display for EvaluationError {
 }
 
 impl Error for EvaluationError {}
-
-impl From<TypeError> for EvaluationError {
-    fn from(value: TypeError) -> Self {
-        Self::Type(value)
-    }
-}
 
 impl From<TaskError> for EvaluationError {
     fn from(value: TaskError) -> Self {
@@ -639,10 +534,10 @@ pub enum QueryExecutionError {
     Optimizer(OptimizerError),
     Builder(BuilderError),
     Eval(EvaluationError),
-    Type(TypeError),
+
     Io(IoError),
     AlreadyDeleted(LogicalId),
-    InvalidObjectType(ObjectType),
+
     ObjectNotFound(ObjectId),
     TupleNotFound(LogicalId),
     AlreadyExists(AlreadyExists),
@@ -655,12 +550,12 @@ impl Display for QueryExecutionError {
             Self::Optimizer(e) => write!(f, "{}", e),
             Self::Builder(e) => write!(f, "{}", e),
             Self::Eval(e) => write!(f, "{}", e),
-            Self::Type(e) => write!(f, "{}", e),
+
             Self::Io(e) => write!(f, "IO error: {}", e),
             Self::AlreadyDeleted(id) => write!(f, "Tuple {} already deleted", id),
             Self::TupleNotFound(id) => write!(f, "Tuple {} not found", id),
             Self::ObjectNotFound(id) => write!(f, "Object {} not found", id),
-            Self::InvalidObjectType(t) => write!(f, "Invalid object type: {}", t),
+
             Self::AlreadyExists(e) => write!(f, "{}", e),
             Self::Other(s) => write!(f, "{}", s),
         }
@@ -712,12 +607,6 @@ impl From<BuilderError> for QueryExecutionError {
 impl From<EvaluationError> for QueryExecutionError {
     fn from(value: EvaluationError) -> Self {
         Self::Eval(value)
-    }
-}
-
-impl From<TypeError> for QueryExecutionError {
-    fn from(value: TypeError) -> Self {
-        Self::Type(value)
     }
 }
 
@@ -839,7 +728,7 @@ pub(crate) type OptimizerResult<T> = Result<T, OptimizerError>;
 pub(crate) type DdlResult<T> = Result<T, DdlError>;
 pub(crate) type BuilderResult<T> = Result<T, BuilderError>;
 pub(crate) type EvalResult<T> = Result<T, EvaluationError>;
-pub(crate) type TypeResult<T> = Result<T, TypeError>;
+
 pub(crate) type ExecutionResult<T> = Result<T, QueryExecutionError>;
 pub(crate) type TransactionResult<T> = Result<T, TransactionError>;
 pub(crate) type ThreadPoolResult<T> = Result<T, ThreadPoolError>;

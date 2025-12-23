@@ -1,465 +1,123 @@
-//! Blob type for variable-length binary data.
-//!
-//! Blob stores binary data with a varint length prefix.
-//! It implements AxmosValueType as a dynamic-size type.
-
 use crate::{
-    from_blob, impl_axmos_hashable,
+    SerializationResult,
+    core::{DeserializableType, RefTrait, RuntimeSized, SerializableType},
     tree::comparators::{Comparator, VarlenComparator},
     types::{
-        Date, DateTime, Float32, Float64, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
-        VarInt,
-        core::{
-            AxmosCastable, AxmosValueType, AxmosValueTypeRef, AxmosValueTypeRefMut, DynamicSizeType,
-        },
+        SerializationError, TypeSystemResult, VarInt,
+        core::{NumericType, TypeCast, TypeClass, TypeRef, VarlenType},
         varint::MAX_VARINT_LEN,
     },
 };
 
 use std::{
     cmp::{Ordering, PartialEq},
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
     ops::{Deref, DerefMut},
 };
 
+// Blob is aligned to eight bytes.
+const BLOB_ALIGNMENT: usize = 8;
+
+/// Blob is a self-contained type.
+///
+/// Includes a VarInt prefix which encodes the length of the actual content in the blob, represented as bytes.
 #[derive(Debug, Clone)]
 pub struct Blob(Box<[u8]>);
 
-impl AsRef<[u8]> for Blob {
-    fn as_ref(&self) -> &[u8] {
-        self.data()
-    }
-}
+/// Blob is the only Varlen TypeClass in the type system.
+impl TypeClass for Blob {
 
-impl AsMut<[u8]> for Blob {
-    fn as_mut(&mut self) -> &mut [u8] {
-        self.data_mut()
-    }
+    const ALIGN: usize = BLOB_ALIGNMENT;
 }
+impl VarlenType for Blob {}
 
 impl Blob {
-    /// Create a new Blob from bytes that already include the length prefix
-    pub fn from_raw_bytes(bytes: &[u8]) -> Self {
-        Self(bytes.to_vec().into_boxed_slice())
+    /// Creates a [Blob] from an unencoded byte slice.
+    ///
+    /// Note that the From<&[u8]> implementation assumes that the alice you are passing to the from conversion already has a VarInt prefix. This constructor is intended to create Blobs from unencoded data.
+    pub fn from_unencoded_slice(data: &[u8]) -> Self {
+        let mut buffer = [0u8; MAX_VARINT_LEN];
+        let vlen = VarInt::encode(data.len() as i64, &mut buffer);
+        let mut blob_buffer = vlen.to_vec();
+        blob_buffer.extend_from_slice(data);
+        Blob(blob_buffer.into_boxed_slice())
     }
 
-    pub fn from_raw_vec(vec: Vec<u8>) -> Self {
-        Self(vec.into_boxed_slice())
+    /// Get the length of the full byte slice.
+    pub fn total_length(&self) -> usize {
+        self.0.len()
     }
 
-    /// Get just the data portion
-    pub fn data(&self) -> &[u8] {
+    /// Returns 0 if the blob holds no data at all.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Returns the offset where the data starts in the [Blob]
+    fn data_start(&self) -> TypeSystemResult<usize> {
+        let (_, offset) = VarInt::from_encoded_bytes(self.0.as_ref())?;
+        Ok(offset)
+    }
+
+    /// Gets the length of the data part
+    pub fn data_length(&self) -> TypeSystemResult<usize> {
+        let (length, _) = VarInt::from_encoded_bytes(self.0.as_ref())?;
+        Ok(length.into())
+    }
+
+    /// Get a reference to the data content in the [Blob]
+    pub fn data(&self) -> TypeSystemResult<&[u8]> {
+        let offset = self.data_start()?;
+        Ok(&self.0[offset..])
+    }
+
+    /// Get a mutable reference to the data content in the [Blob]
+    pub fn data_mut(&mut self) -> TypeSystemResult<&mut [u8]> {
+        let offset = self.data_start()?;
+        Ok(&mut self.0[offset..])
+    }
+
+    /// Cast the [Blob] to a [str]
+    pub fn as_str(&self) -> TypeSystemResult<&str> {
+        let str = str::from_utf8(self.data()?)?;
+        Ok(str)
+    }
+    /// Cast the [Blob] to an owned [String]
+    pub fn to_string_lossy(&self) -> TypeSystemResult<String> {
+        Ok(String::from_utf8_lossy(self.data()?).into_owned())
+    }
+
+    /// Cast the [Blob] to a [str] (unchecked)
+    pub fn as_str_unchecked(&self) -> &str {
+        str::from_utf8(self.data().unwrap()).unwrap()
+    }
+    /// Cast the [Blob] to an owned [String] (unchecked)
+    pub fn to_string_lossy_unchecked(&self) -> String {
+        String::from_utf8_lossy(self.data().unwrap()).into_owned()
+    }
+}
+
+impl Display for Blob {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "Blob ({})", self.to_string_lossy_unchecked())
+    }
+}
+
+/// [AsRef] returns the full Blob data, including the [VarInt] prefix
+impl AsRef<[u8]> for Blob {
+    fn as_ref(&self) -> &[u8] {
         self.0.as_ref()
     }
+}
 
-    pub fn data_mut(&mut self) -> &mut [u8] {
+/// [AsMut] returns the full Blob data, including the [VarInt] prefix
+impl AsMut<[u8]> for Blob {
+    fn as_mut(&mut self) -> &mut [u8] {
         self.0.as_mut()
     }
-
-    /// Get the length of the data
-    pub fn len(&self) -> usize {
-        self.data().len()
-    }
-
-    /// Get the length of the data
-    pub fn is_empty(&self) -> bool {
-        self.data().is_empty()
-    }
-
-    pub fn to_string(&self) -> String {
-        String::from_utf8(self.content().to_vec()).unwrap()
-    }
-
-    pub fn as_utf8(&self) -> &[u8] {
-        self.content()
-    }
-
-    pub fn as_str(&self) -> &str {
-        std::str::from_utf8(self.as_utf8()).unwrap()
-    }
-
-    pub fn content(&self) -> &[u8] {
-        let data = self.data();
-        let (_, offset) = VarInt::from_encoded_bytes(data).unwrap();
-        &self.data()[offset..]
-    }
-
-    pub fn content_mut(&mut self) -> &mut [u8] {
-        let data = self.data();
-        let (_, offset) = VarInt::from_encoded_bytes(data).unwrap();
-        &mut self.data_mut()[offset..]
-    }
 }
 
-#[derive(Debug)]
-pub struct BlobRef<'a>(&'a [u8]);
-
-impl<'a> AsRef<[u8]> for BlobRef<'a> {
-    fn as_ref(&self) -> &[u8] {
-        self.data()
-    }
-}
-
-impl<'a> BlobRef<'a> {
-    pub const SIZE: usize = 0; // Dynamic size marker
-
-    /// Create a new BlobRef from bytes that already include the length prefix
-    pub fn from_raw_bytes(bytes: &'a [u8]) -> Self {
-        Self(bytes)
-    }
-
-    /// Get just the data portion (excluding length prefix)
-    pub fn data(&self) -> &[u8] {
-        self.0
-    }
-
-    pub fn content(&self) -> &[u8] {
-        let data = self.data();
-        let (_, offset) = VarInt::from_encoded_bytes(data).unwrap();
-        &self.data()[offset..]
-    }
-
-    /// Get the length of the data (excluding prefix)
-    fn len(&self) -> usize {
-        self.data().len()
-    }
-
-    pub fn content_len(&self) -> usize {
-        self.content().len()
-    }
-
-    pub fn to_string(&self) -> String {
-        String::from_utf8(self.content().to_vec()).unwrap()
-    }
-
-    pub fn as_utf8(&self) -> &[u8] {
-        self.content()
-    }
-
-    pub fn as_str(&self) -> &str {
-        std::str::from_utf8(self.as_utf8()).unwrap()
-    }
-
-    pub fn to_blob(&self) -> Blob {
-        Blob(self.0.to_vec().into_boxed_slice())
-    }
-
-    pub fn to_owned(&self) -> Blob {
-        self.to_blob()
-    }
-}
-
-impl<'a> AxmosValueTypeRef<'a> for BlobRef<'a> {
-    type Owned = Blob;
-
-    fn to_owned(&self) -> Self::Owned {
-        BlobRef::to_owned(self)
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        self.0
-    }
-}
-
-impl<'a> AsRef<BlobRef<'a>> for Blob {
-    fn as_ref(&self) -> &BlobRef<'a> {
-        unsafe { &*(self.0.as_ref() as *const [u8] as *const BlobRef<'_>) }
-    }
-}
-
-impl<'a> AsMut<BlobRefMut<'a>> for Blob {
-    fn as_mut(&mut self) -> &mut BlobRefMut<'a> {
-        unsafe { &mut *(self.0.as_mut() as *mut [u8] as *mut BlobRefMut<'_>) }
-    }
-}
-
-/// Borrowed wrapper for variable-length data
-/// Holds a reference to the raw bytes (including length prefix)
-#[derive(Debug)]
-pub struct BlobRefMut<'a>(&'a mut [u8]);
-
-impl<'a> AsRef<[u8]> for BlobRefMut<'a> {
-    fn as_ref(&self) -> &[u8] {
-        self.data()
-    }
-}
-
-impl<'a> AsMut<[u8]> for BlobRefMut<'a> {
-    fn as_mut(&mut self) -> &mut [u8] {
-        self.data_mut()
-    }
-}
-
-impl<'a> BlobRefMut<'a> {
-    pub const SIZE: usize = 0; // Dynamic size marker
-
-    /// Create a new Blob from bytes that already include the length prefix
-    pub fn from_raw_bytes(bytes: &'a mut [u8]) -> Self {
-        Self(bytes)
-    }
-
-    /// Get just the data portion (excluding length prefix)
-    pub fn data_mut(&mut self) -> &mut [u8] {
-        self.0
-    }
-
-    /// Get just the data portion (excluding length prefix)
-    pub fn data(&self) -> &[u8] {
-        self.0
-    }
-
-    /// Get the length of the data (excluding prefix)
-    fn len(&self) -> usize {
-        self.data().len()
-    }
-
-    pub fn content_len(&self) -> usize {
-        self.content().len()
-    }
-
-    pub fn to_string(&self) -> String {
-        String::from_utf8(self.content().to_vec()).unwrap()
-    }
-
-    pub fn as_utf8(&self) -> &[u8] {
-        self.content()
-    }
-
-    pub fn as_str(&self) -> &str {
-        std::str::from_utf8(self.as_utf8()).unwrap()
-    }
-
-    pub fn to_blob(&self) -> Blob {
-        Blob(self.0.to_vec().into_boxed_slice())
-    }
-
-    pub fn to_owned(&self) -> Blob {
-        self.to_blob()
-    }
-
-    pub fn content(&self) -> &[u8] {
-        let data = self.data();
-        let (_, offset) = VarInt::from_encoded_bytes(data).unwrap();
-        &self.data()[offset..]
-    }
-
-    pub fn content_mut(&mut self) -> &mut [u8] {
-        let data = self.data();
-        let (_, offset) = VarInt::from_encoded_bytes(data).unwrap();
-        &mut self.data_mut()[offset..]
-    }
-}
-
-impl<'a> AxmosValueTypeRefMut<'a> for BlobRefMut<'a> {
-    type Owned = Blob;
-
-    fn to_owned(&self) -> Self::Owned {
-        BlobRefMut::to_owned(self)
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        self.0
-    }
-
-    fn as_bytes_mut(&mut self) -> &mut [u8] {
-        self.0
-    }
-}
-
-// Implement AxmosValueType for Blob
-impl AxmosValueType for Blob {
-    type Ref<'a> = BlobRef<'a>;
-    type RefMut<'a> = BlobRefMut<'a>;
-
-    const FIXED_SIZE: Option<usize> = None; // Dynamic size
-    const IS_NUMERIC: bool = false;
-
-    fn reinterpret(buffer: &[u8]) -> std::io::Result<(Self::Ref<'_>, usize)> {
-        let (len_varint, offset) = VarInt::from_encoded_bytes(buffer)?;
-        let len_usize: usize = len_varint.try_into()?;
-        let total_size = offset + len_usize;
-
-        if buffer.len() < total_size {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "not enough bytes for blob",
-            ));
-        }
-
-        let blob_ref = BlobRef::from_raw_bytes(&buffer[..total_size]);
-        Ok((blob_ref, total_size))
-    }
-
-    fn reinterpret_mut(buffer: &mut [u8]) -> std::io::Result<(Self::RefMut<'_>, usize)> {
-        let (len_varint, offset) = VarInt::from_encoded_bytes(buffer)?;
-        let len_usize: usize = len_varint.try_into()?;
-        let total_size = offset + len_usize;
-
-        if buffer.len() < total_size {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "not enough bytes for blob",
-            ));
-        }
-
-        let blob_ref = BlobRefMut::from_raw_bytes(&mut buffer[..total_size]);
-        Ok((blob_ref, total_size))
-    }
-
-    fn value_size(&self) -> usize {
-        self.len()
-    }
-}
-
-impl DynamicSizeType for Blob {}
-
-impl From<&str> for Blob {
-    fn from(value: &str) -> Self {
-        let bytes = value.as_bytes();
-        let mut buffer = [0u8; MAX_VARINT_LEN];
-        let vlen = VarInt::encode(bytes.len() as i64, &mut buffer);
-        let mut blob_buffer = vlen.to_vec();
-        blob_buffer.extend_from_slice(bytes);
-        Blob(blob_buffer.into_boxed_slice())
-    }
-}
-
-impl From<&[u8]> for Blob {
-    fn from(value: &[u8]) -> Self {
-        let mut buffer = [0u8; MAX_VARINT_LEN];
-        let vlen = VarInt::encode(value.len() as i64, &mut buffer);
-        let mut blob_buffer = vlen.to_vec();
-        blob_buffer.extend_from_slice(value);
-
-        Blob(blob_buffer.into_boxed_slice())
-    }
-}
-
-impl From<&[u8; 8]> for Blob {
-    fn from(value: &[u8; 8]) -> Self {
-        let mut buffer = [0u8; MAX_VARINT_LEN];
-        let vlen = VarInt::encode(value.len() as i64, &mut buffer);
-        let mut blob_buffer = vlen.to_vec();
-        blob_buffer.extend_from_slice(value);
-
-        Blob(blob_buffer.into_boxed_slice())
-    }
-}
-
-impl PartialOrd for Blob {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let comp = VarlenComparator;
-        comp.compare(self.as_ref(), other.as_ref()).ok()
-    }
-}
-
-impl<'a> PartialOrd for BlobRef<'a> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let comp = VarlenComparator;
-        comp.compare(self.as_ref(), other.as_ref()).ok()
-    }
-}
-
-impl<'a> PartialOrd for BlobRefMut<'a> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let comp = VarlenComparator;
-        comp.compare(self.as_ref(), other.as_ref()).ok()
-    }
-}
-
-impl PartialEq for Blob {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.as_ref() == other.0.as_ref()
-    }
-}
-
-impl<'a> PartialEq for BlobRef<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl<'a> PartialEq for BlobRefMut<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl<'a> PartialEq<BlobRef<'a>> for Blob {
-    fn eq(&self, other: &BlobRef<'a>) -> bool {
-        self.0.as_ref() == other.0
-    }
-}
-
-impl<'a> PartialEq<Blob> for BlobRef<'a> {
-    fn eq(&self, other: &Blob) -> bool {
-        self.0 == other.0.as_ref()
-    }
-}
-
-impl<'a> PartialEq<BlobRefMut<'a>> for Blob {
-    fn eq(&self, other: &BlobRefMut<'a>) -> bool {
-        self.0.as_ref() == other.0
-    }
-}
-
-impl<'a> PartialEq<Blob> for BlobRefMut<'a> {
-    fn eq(&self, other: &Blob) -> bool {
-        self.0 == other.0.as_ref()
-    }
-}
-
-impl<'a, 'b> PartialEq<BlobRefMut<'b>> for BlobRef<'a> {
-    fn eq(&self, other: &BlobRefMut<'b>) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl<'a, 'b> PartialEq<BlobRef<'b>> for BlobRefMut<'a> {
-    fn eq(&self, other: &BlobRef<'b>) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl PartialEq<&[u8]> for Blob {
-    fn eq(&self, other: &&[u8]) -> bool {
-        self.0.as_ref() == *other
-    }
-}
-
-impl<'a> PartialEq<&[u8]> for BlobRef<'a> {
-    fn eq(&self, other: &&[u8]) -> bool {
-        self.0 == *other
-    }
-}
-
-impl<'a> PartialEq<&[u8]> for BlobRefMut<'a> {
-    fn eq(&self, other: &&[u8]) -> bool {
-        self.0 == *other
-    }
-}
-
-impl PartialEq<Blob> for &[u8] {
-    fn eq(&self, other: &Blob) -> bool {
-        *self == other.0.as_ref()
-    }
-}
-
-impl<'a> PartialEq<BlobRef<'a>> for &[u8] {
-    fn eq(&self, other: &BlobRef<'a>) -> bool {
-        *self == other.0
-    }
-}
-
-impl<'a> PartialEq<BlobRefMut<'a>> for &[u8] {
-    fn eq(&self, other: &BlobRefMut<'a>) -> bool {
-        *self == other.0
-    }
-}
-
-impl Eq for Blob {}
-impl<'a> Eq for BlobRef<'a> {}
-impl<'a> Eq for BlobRefMut<'a> {}
-
+/// [Deref] and [DerefMut] implementations have the same behaviour as [AsRef] and [AsMut]
 impl Deref for Blob {
     type Target = [u8];
     fn deref(&self) -> &Self::Target {
@@ -473,48 +131,233 @@ impl DerefMut for Blob {
     }
 }
 
+/// Equality and Ordering are implementing considering the full [Blob], not the data content.
+///
+/// If Blobs are always well formed there should be no differences.
+impl PartialEq for Blob {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(self.partial_cmp(other), Some(Ordering::Equal))
+    }
+}
+
+impl Eq for Blob {}
+
+/// See [VarlenComparator] for details
+impl PartialOrd for Blob {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let comparator = VarlenComparator;
+        comparator.compare(self.as_ref(), other.as_ref()).ok()
+    }
+}
+
+impl Ord for Blob {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
+
+/// Non mutable reference to variable length data.
+#[derive(Debug, Clone, Copy)]
+pub struct BlobRef<'a>(&'a [u8]);
+
+impl<'a> TypeClass for BlobRef<'a> {}
+impl<'a> VarlenType for BlobRef<'a> {}
+
+impl<'a> BlobRef<'a> {
+    /// Get the length of the full byte slice.
+    pub fn total_length(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns 0 if the blob holds no data at all.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Returns the offset where the data starts in the [BlobRef]
+    fn data_start(&self) -> TypeSystemResult<usize> {
+        let (_, offset) = VarInt::from_encoded_bytes(self.0.as_ref())?;
+        Ok(offset)
+    }
+
+    /// Gets the length of the data part
+    pub fn data_length(&self) -> TypeSystemResult<usize> {
+        let (length, _) = VarInt::from_encoded_bytes(self.0.as_ref())?;
+        Ok(length.into())
+    }
+
+    /// Get a reference to the data content in the [BlobRef]
+    pub fn data(&self) -> TypeSystemResult<&[u8]> {
+        let offset = self.data_start()?;
+        Ok(&self.0[offset..])
+    }
+
+    /// Cast the [BlobRef] to a [str]
+    pub fn as_str(&self) -> TypeSystemResult<&str> {
+        let str = str::from_utf8(self.data()?)?;
+        Ok(str)
+    }
+    /// Cast the [BlobRef] to an owned [String]
+    pub fn to_string_lossy(&self) -> TypeSystemResult<String> {
+        Ok(String::from_utf8_lossy(self.data()?).into_owned())
+    }
+
+    /// Cast the [BlobRef] to a [str] (unchecked)
+    pub fn as_str_unchecked(&self) -> &str {
+        str::from_utf8(self.data().unwrap()).unwrap()
+    }
+    /// Cast the [BlobRef] to an owned [String] (unchecked)
+    pub fn to_string_lossy_unchecked(&self) -> String {
+        String::from_utf8_lossy(self.data().unwrap()).into_owned()
+    }
+
+    /// Cast to an owned [Blob]
+    pub fn to_blob(&self) -> Blob {
+        Blob(self.0.to_vec().into_boxed_slice())
+    }
+}
+
+impl<'a> Display for BlobRef<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "BlobRef ({})", self.to_string_lossy_unchecked())
+    }
+}
+
+impl<'a> AsRef<[u8]> for BlobRef<'a> {
+    fn as_ref(&self) -> &[u8] {
+        self.0
+    }
+}
+
 impl<'a> Deref for BlobRef<'a> {
     type Target = [u8];
     fn deref(&self) -> &Self::Target {
-        self.as_ref()
+        self.0
     }
 }
 
-impl<'a> Deref for BlobRefMut<'a> {
-    type Target = [u8];
-    fn deref(&self) -> &Self::Target {
-        self.as_ref()
+impl<'a> PartialEq for BlobRef<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(self.partial_cmp(other), Some(Ordering::Equal))
     }
 }
 
-impl<'a> DerefMut for BlobRefMut<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.as_mut()
+impl<'a> Eq for BlobRef<'a> {}
+
+/// See [VarlenComparator] for details
+impl<'a> PartialOrd for BlobRef<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let comparator = VarlenComparator;
+        comparator.compare(self.as_ref(), other.as_ref()).ok()
     }
 }
 
-impl AxmosCastable<Date> for Blob {
-    fn can_cast(&self) -> bool {
-        Date::parse_iso(&self.to_string()).is_ok()
-    }
-
-    fn try_cast(&self) -> Option<Date> {
-        Date::parse_iso(&self.to_string()).ok()
+impl<'a> Ord for BlobRef<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
     }
 }
 
-impl AxmosCastable<DateTime> for Blob {
-    fn can_cast(&self) -> bool {
-        DateTime::parse_iso(&self.to_string()).is_ok()
-    }
-
-    fn try_cast(&self) -> Option<DateTime> {
-        DateTime::parse_iso(&self.to_string()).ok()
+impl<'a> PartialEq<BlobRef<'a>> for Blob {
+    fn eq(&self, other: &BlobRef<'a>) -> bool {
+        self.0.as_ref() == other.0
     }
 }
 
-from_blob!(
-    UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64
-);
+/// Conversion from a raw byte slice to a [BlobRef<'a>]
+///
+/// To be consistent with [AsRef] implementations, the encoding is handled separately.
+impl<'a> From<&'a [u8]> for BlobRef<'a> {
+    fn from(value: &'a [u8]) -> Self {
+        Self(value)
+    }
+}
 
-impl_axmos_hashable!(Blob);
+impl<'a> TypeRef<'a> for BlobRef<'a> {
+    type Owned = Blob;
+
+    fn to_owned(&self) -> Self::Owned {
+        self.to_blob()
+    }
+}
+
+impl RefTrait for Blob {
+    type Ref<'a> = BlobRef<'a>;
+}
+
+impl DeserializableType for Blob {
+    fn reinterpret_cast(buffer: &[u8]) -> SerializationResult<(Self::Ref<'_>, usize)> {
+        let (len_varint, offset) = VarInt::from_encoded_bytes(buffer)?;
+        let len_usize: usize = len_varint.into();
+        let total_size = offset + len_usize;
+
+        if buffer.len() < total_size {
+            return Err(SerializationError::UnexpectedEof);
+        }
+
+        Ok((BlobRef::from(&buffer[..total_size]), total_size))
+    }
+}
+
+/// [Blob] size is only known at runtime.
+impl RuntimeSized for Blob {
+    fn runtime_size(&self) -> usize {
+        self.total_length()
+    }
+}
+
+/// [str] won't hold a length prefix by itself so we have to append it here.
+impl From<&str> for Blob {
+    fn from(value: &str) -> Self {
+        Self::from_unencoded_slice(value.as_bytes())
+    }
+}
+
+/// [String] won't hold a length prefix by itself so we have to append it here.
+impl From<String> for Blob {
+    fn from(value: String) -> Self {
+        Self::from_unencoded_slice(value.as_bytes())
+    }
+}
+
+/// For consistency with [AsRef] implementations, this conversion assumes that the slice is encoded before creating the [Blob]. Same for From<Vec<u8>> and From<Box<[u8]>> impls.
+impl From<&[u8]> for Blob {
+    fn from(value: &[u8]) -> Self {
+        Self(value.to_vec().into_boxed_slice())
+    }
+}
+
+impl From<Vec<u8>> for Blob {
+    fn from(value: Vec<u8>) -> Self {
+        Self(value.into_boxed_slice())
+    }
+}
+
+impl From<Box<[u8]>> for Blob {
+    fn from(value: Box<[u8]>) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> TypeCast<Blob> for T
+where
+    T: NumericType + AsRef<[u8]>,
+{
+    /// Automatic casting from any [NumericType] to a [Blob]
+    fn try_cast(&self) -> Option<Blob> {
+        Some(Blob::from_unencoded_slice(self.as_ref()))
+    }
+}
+
+
+impl SerializableType for Blob {
+
+
+    fn write_to(&self, writer: &mut [u8], cursor: usize) -> SerializationResult<usize> {
+        let aligned = (cursor + Self::ALIGN - 1) & !(Self::ALIGN - 1);
+        let data_bytes = self.as_ref();
+        writer[aligned..aligned + self.runtime_size()].copy_from_slice(data_bytes);
+        Ok(aligned + self.runtime_size())
+
+    }
+}

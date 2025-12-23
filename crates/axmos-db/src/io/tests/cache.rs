@@ -1,13 +1,14 @@
 use crate::{
     DEFAULT_PAGE_SIZE,
-    io::{cache::PageCache, frames::MemFrame},
+    io::cache::PageCache,
+    multithreading::frames::{Frame, MemFrame},
     param_tests,
-    storage::{core::traits::BufferOps, page::BtreePage},
+    storage::{core::traits::Allocatable, page::BtreePage},
     types::PageId,
 };
 
 fn insert_page(id: PageId, cache: &mut PageCache, should_evict: bool) -> (PageId, Option<PageId>) {
-    let frame = MemFrame::from(BtreePage::alloc(id, DEFAULT_PAGE_SIZE));
+    let frame = MemFrame::from(Frame::from(BtreePage::alloc(id, DEFAULT_PAGE_SIZE)));
     let id = frame.page_number();
     let result = cache.insert(frame);
     assert!(result.is_ok(), "Cache insertion failed");

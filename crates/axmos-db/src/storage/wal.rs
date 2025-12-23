@@ -1,16 +1,19 @@
 /// This module includes the main data structures that represent Write Ahead Log blocks and records.
 use crate::{
-    CELL_ALIGNMENT, as_slice, repr_enum,
+    CELL_ALIGNMENT, MAX_PAGE_SIZE, MIN_PAGE_SIZE, bytemuck_slice,
     storage::{
-        WalMetadata,
+        Allocatable, WalMetadata,
         core::{
             buffer::MemBlock,
-            traits::{Buffer, BufferOps, ComposedMetadata, Identifiable, WalBuffer},
+            traits::{AvailableSpace, ComposedMetadata, Identifiable},
         },
     },
     types::{BlockId, Lsn, ObjectId, TransactionId},
     writable_layout,
 };
+
+const MIN_WAL_BLOCK_SIZE: usize = MIN_PAGE_SIZE;
+const MAX_WAL_BLOCK_SIZE: usize = MAX_PAGE_SIZE * 10;
 
 use std::{mem, ptr::NonNull, slice};
 
@@ -21,7 +24,9 @@ pub(crate) const WAL_HEADER_SIZE: usize = mem::size_of::<WalHeader>();
 pub(crate) const BLOCK_HEADER_SIZE: usize = mem::size_of::<BlockHeader>();
 pub(crate) const RECORD_HEADER_SIZE: usize = mem::size_of::<RecordHeader>();
 
-repr_enum!(pub enum RecordType: u8 {
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub enum RecordType {
     Begin = 0x00,
     Commit = 0x01,
     Abort = 0x02,
@@ -32,7 +37,7 @@ repr_enum!(pub enum RecordType: u8 {
     Delete = 0x07,
     Insert = 0x08,
     CreateTable = 0x09,
-});
+}
 
 /// The write ahead log header stores metadata about the file.
 #[derive(Debug, Clone, Copy, Default)]
@@ -65,7 +70,7 @@ pub struct BlockZeroHeader {
     pub(crate) wal_header: WalHeader,
 }
 
-as_slice!(BlockZeroHeader);
+bytemuck_slice!(BlockZeroHeader);
 
 impl BlockHeader {
     // As wal blocks are never deallocated (there is no concept of free block in memory as happens with pages, when we need a new block we simply allocate it), there is no issue in always creating block ids in the header initialization. Blocks are also never modified once they are flushed to disk, which makes sequential access easiar. As we do with pages, we can access the offset of a specific block in the file by computing: [BlockId] *  [block_size].
@@ -85,8 +90,12 @@ impl Identifiable for BlockHeader {
     fn id(&self) -> Self::IdType {
         self.block_number
     }
+}
 
-    fn alloc(id: Self::IdType, _size: u32) -> Self {
+impl Allocatable for BlockHeader {
+    const MAX_SIZE: usize = MAX_WAL_BLOCK_SIZE;
+    const MIN_SIZE: usize = MIN_WAL_BLOCK_SIZE;
+    fn alloc(id: Self::IdType, _size: usize) -> Self {
         Self::new(id)
     }
 }
@@ -97,10 +106,15 @@ impl Identifiable for BlockZeroHeader {
     fn id(&self) -> Self::IdType {
         self.block_header.block_number
     }
+}
 
-    fn alloc(id: Self::IdType, size: u32) -> Self {
+impl Allocatable for BlockZeroHeader {
+    const MAX_SIZE: usize = MAX_WAL_BLOCK_SIZE;
+    const MIN_SIZE: usize = MIN_WAL_BLOCK_SIZE;
+
+    fn alloc(id: Self::IdType, size: usize) -> Self {
         Self {
-            wal_header: WalHeader::new(size),
+            wal_header: WalHeader::new(size as u32),
             block_header: BlockHeader::alloc(id, size),
         }
     }
@@ -120,8 +134,8 @@ impl WalHeader {
     }
 }
 
-as_slice!(WalHeader);
-as_slice!(BlockHeader);
+bytemuck_slice!(WalHeader);
+bytemuck_slice!(BlockHeader);
 
 /// Records are similar to cells in the sense that they are self-contained and have a reference version (RecordRef) here.
 /// I am doing physiological logging: https://medium.com/@moali314/database-logging-wal-redo-and-undo-mechanisms-58c076fbe36e.
@@ -143,7 +157,7 @@ pub struct RecordHeader {
     pub(crate) padding: [u8; 7],
 }
 
-as_slice!(RecordHeader);
+bytemuck_slice!(RecordHeader);
 
 impl RecordHeader {
     fn new(
@@ -364,26 +378,14 @@ writable_layout!(OwnedRecord, RecordHeader, header, payload);
 pub(crate) type BlockZero = MemBlock<BlockZeroHeader>;
 pub(crate) type WalBlock = MemBlock<BlockHeader>;
 
-impl BufferOps for BlockZero {
-    fn alloc(id: <Self::Header as Identifiable>::IdType, size: u32) -> Self {
-        let mut buf = Self::new(size as usize);
-        *buf.metadata_mut() = BlockZeroHeader::alloc(id, size);
-        buf
-    }
-
+impl AvailableSpace for BlockZero {
     fn available_space(&self) -> usize {
         Self::usable_space(self.capacity())
             .saturating_sub(self.metadata().block_header.used_bytes as usize)
     }
 }
 
-impl BufferOps for WalBlock {
-    fn alloc(id: <Self::Header as Identifiable>::IdType, size: u32) -> Self {
-        let mut buf = Self::new(size as usize);
-        *buf.metadata_mut() = BlockHeader::alloc(id, size);
-        buf
-    }
-
+impl AvailableSpace for WalBlock {
     fn available_space(&self) -> usize {
         Self::usable_space(self.capacity()).saturating_sub(self.metadata().used_bytes as usize)
     }
@@ -418,7 +420,7 @@ impl WalMetadata for BlockHeader {
         self.used_bytes += added_bytes as u64
     }
 
-    fn total_used_bytes(&self) -> usize {
+    fn used_bytes(&self) -> usize {
         self.used_bytes as usize
     }
 }
@@ -444,13 +446,10 @@ impl WalMetadata for BlockZeroHeader {
         self.block_header.used_bytes += added_bytes as u64
     }
 
-    fn total_used_bytes(&self) -> usize {
+    fn used_bytes(&self) -> usize {
         self.block_header.used_bytes as usize
     }
 }
-
-impl WalBuffer for BlockZero {}
-impl WalBuffer for WalBlock {}
 
 /// Macro to create WAL (Write-Ahead Logging) records inline.
 ///
