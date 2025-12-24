@@ -1,5 +1,5 @@
 use super::{Comparator, IS_LITTLE_ENDIAN, Ranger};
-use crate::schema::stats::Selectivity;
+use crate::{schema::stats::Selectivity, tree::cell_ops::KeyBytes};
 use std::{cmp::Ordering, io, mem, usize};
 /// Comparator for signed numeric types stored in platform-native byte order.
 #[derive(Debug, Clone, Copy)]
@@ -68,9 +68,9 @@ impl SignedNumericComparator {
 }
 
 impl Comparator for SignedNumericComparator {
-    fn compare(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Ordering> {
-        let a = self.read_native_i64(lhs);
-        let b = self.read_native_i64(rhs);
+    fn compare(&self, lhs: KeyBytes<'_>, rhs: KeyBytes<'_>) -> io::Result<Ordering> {
+        let a = self.read_native_i64(lhs.as_ref());
+        let b = self.read_native_i64(rhs.as_ref());
         Ok(a.cmp(&b))
     }
 
@@ -85,9 +85,9 @@ impl Comparator for SignedNumericComparator {
 
 impl Ranger for SignedNumericComparator {
     /// Computes the range between two byte slices representing signed integers.
-    fn range_bytes(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Box<[u8]>> {
-        let a = self.read_native_i64(lhs);
-        let b = self.read_native_i64(rhs);
+    fn range_bytes(&self, lhs: KeyBytes<'_>, rhs: KeyBytes<'_>) -> io::Result<Box<[u8]>> {
+        let a = self.read_native_i64(lhs.as_ref());
+        let b = self.read_native_i64(rhs.as_ref());
 
         // For signed types, compute absolute difference
         let diff = (a - b).unsigned_abs();
@@ -108,9 +108,9 @@ impl Ranger for SignedNumericComparator {
     }
 
     /// Computes the selectivity of a range-
-    fn selectivity_range(&self, min: &[u8], max: &[u8]) -> io::Result<Selectivity> {
-        let min_val = self.read_native_i64(min);
-        let max_val = self.read_native_i64(max);
+    fn selectivity_range(&self, min: KeyBytes<'_>, max: KeyBytes<'_>) -> io::Result<Selectivity> {
+        let min_val = self.read_native_i64(min.as_ref());
+        let max_val = self.read_native_i64(max.as_ref());
 
         // Full range for signed type: from min_signed to max_signed
         let max_possible: u64 = if self.0 >= 8 {
@@ -182,13 +182,13 @@ impl NumericComparator {
 }
 
 impl Comparator for NumericComparator {
-    fn compare(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Ordering> {
-        let a = self.read_native_u64(lhs);
-        let b = self.read_native_u64(rhs);
+    fn compare(&self, lhs: KeyBytes<'_>, rhs: KeyBytes<'_>) -> io::Result<Ordering> {
+        let a = self.read_native_u64(lhs.as_ref());
+        let b = self.read_native_u64(rhs.as_ref());
         Ok(a.cmp(&b))
     }
 
-    fn key_size(&self, _data: &[u8]) -> io::Result<usize> {
+    fn key_size(&self, _data:  &[u8]) -> io::Result<usize> {
         Ok(self.0)
     }
 
@@ -198,9 +198,9 @@ impl Comparator for NumericComparator {
 }
 
 impl Ranger for NumericComparator {
-    fn range_bytes(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Box<[u8]>> {
-        let a = self.read_native_u64(lhs);
-        let b = self.read_native_u64(rhs);
+    fn range_bytes(&self, lhs: KeyBytes<'_>, rhs: KeyBytes<'_>) -> io::Result<Box<[u8]>> {
+        let a = self.read_native_u64(lhs.as_ref());
+        let b = self.read_native_u64(rhs.as_ref());
 
         let (greater, lesser) = if a >= b { (a, b) } else { (b, a) };
         let diff = greater - lesser;
@@ -211,9 +211,9 @@ impl Ranger for NumericComparator {
         Ok(diff_bytes.into_boxed_slice())
     }
 
-    fn selectivity_range(&self, min: &[u8], max: &[u8]) -> io::Result<Selectivity> {
-        let min_val = self.read_native_u64(min);
-        let max_val = self.read_native_u64(max);
+    fn selectivity_range(&self, min: KeyBytes<'_>, max: KeyBytes<'_>) -> io::Result<Selectivity> {
+        let min_val = self.read_native_u64(min.as_ref());
+        let max_val = self.read_native_u64(max.as_ref());
 
         // Compute the maximum possible range for this type size
         let max_possible: u64 = if self.0 >= 8 {

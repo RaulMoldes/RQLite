@@ -1,11 +1,11 @@
 use crate::{
     DBConfig,
     io::pager::{Pager, SharedPager},
-    storage::{cell::OwnedCell, page::BtreePage},
+    storage::{cell::OwnedCell, page::BtreePage, core::buffer::AlignedPayload},
     tree::{
         accessor::{Accessor, BtreeWriteAccessor},
         bplustree::{Btree, BtreeError, BtreeResult, SearchResult},
-        cell_ops::{AsKeyBytes, KeyBytes, Serializable},
+        cell_ops::{AsKeyBytes, KeyBytes, Buildable},
         comparators::{
             Comparator, DynComparator,
             numeric::{NumericComparator, SignedNumericComparator},
@@ -34,7 +34,7 @@ use std::{
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub trait TestCopyKeyTrait:
-    From<usize> + Serializable + FmtDebug + Copy + for<'a> AsKeyBytes<'a>
+    From<usize> + Buildable + FmtDebug + Copy + for<'a> AsKeyBytes<'a>
 {
     fn get_comparator() -> DynComparator;
 }
@@ -102,15 +102,28 @@ macro_rules! fixed_size_test_key {
             }
         }
 
-        impl From<$name> for $crate::storage::cell::OwnedCell {
-            fn from(key: $name) -> $crate::storage::cell::OwnedCell {
-                $crate::storage::cell::OwnedCell::new(key.as_ref())
+        impl From<$name> for $crate::storage::core::buffer::AlignedPayload {
+            fn from(value: $name) -> Self {
+                let data = value.as_ref();
+                let mut payload = Self::alloc_aligned(data.len()).unwrap();
+                payload.data_mut().copy_from_slice(data);
+                payload
             }
         }
 
-        impl $crate::tree::cell_ops::Serializable for $name {
-            fn serialized_size(&self) -> usize {
+        impl From<$name> for $crate::storage::cell::OwnedCell {
+            fn from(key: $name) -> $crate::storage::cell::OwnedCell {
+                $crate::storage::cell::OwnedCell::new_with_keys(key.as_ref(), 0, std::mem::size_of::<$inner>())
+            }
+        }
+
+        impl $crate::tree::cell_ops::Buildable for $name {
+            fn built_size(&self) -> usize {
                 std::mem::size_of::<$inner>()
+            }
+
+            fn key_bounds(&self) -> (usize, usize) {
+                (0, self.built_size())
             }
         }
 
@@ -197,13 +210,26 @@ impl From<TestVarKey> for Box<[u8]> {
 
 impl From<TestVarKey> for OwnedCell {
     fn from(key: TestVarKey) -> OwnedCell {
-        OwnedCell::new(&key.encoded)
+        OwnedCell::new_with_keys(&key.encoded, 0, key.encoded.len())
     }
 }
 
-impl Serializable for TestVarKey {
-    fn serialized_size(&self) -> usize {
+impl Buildable for TestVarKey {
+    fn built_size(&self) -> usize {
         self.encoded.len()
+    }
+
+    fn key_bounds(&self) -> (usize, usize) {
+        (0, self.encoded.len())
+    }
+}
+
+impl From<TestVarKey> for AlignedPayload {
+    fn from(value: TestVarKey) -> Self {
+        let data = value.as_ref();
+        let mut payload = Self::alloc_aligned(data.len()).unwrap();
+        payload.data_mut().copy_from_slice(data);
+        payload
     }
 }
 

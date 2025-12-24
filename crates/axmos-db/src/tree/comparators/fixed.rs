@@ -1,5 +1,5 @@
 use super::{Comparator, Ranger};
-use crate::schema::stats::Selectivity;
+use crate::{schema::stats::Selectivity, tree::cell_ops::KeyBytes};
 use std::{cmp::Ordering, io, usize};
 
 /// Comparator for fixed-size byte arrays using lexicographic ordering.
@@ -23,11 +23,11 @@ impl FixedSizeBytesComparator {
 }
 
 impl Comparator for FixedSizeBytesComparator {
-    fn compare(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Ordering> {
+    fn compare(&self, lhs: KeyBytes<'_>, rhs: KeyBytes<'_>) -> io::Result<Ordering> {
         Ok(lhs[..self.0].cmp(&rhs[..self.0]))
     }
 
-    fn key_size(&self, _data: &[u8]) -> io::Result<usize> {
+    fn key_size(&self, _data:  &[u8]) -> io::Result<usize> {
         Ok(self.0)
     }
 
@@ -38,7 +38,7 @@ impl Comparator for FixedSizeBytesComparator {
 
 impl Ranger for FixedSizeBytesComparator {
     /// Computes arithmetic difference treating bytes as big-endian.
-    fn range_bytes(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Box<[u8]>> {
+    fn range_bytes(&self, lhs: KeyBytes<'_>, rhs: KeyBytes<'_>) -> io::Result<Box<[u8]>> {
         // Determine greater/lesser lexicographically
         let (greater, lesser) = if lhs[..self.0] >= rhs[..self.0] {
             (&lhs[..self.0], &rhs[..self.0])
@@ -68,7 +68,7 @@ impl Ranger for FixedSizeBytesComparator {
         Ok(result.into_boxed_slice())
     }
 
-    fn selectivity_range(&self, min: &[u8], max: &[u8]) -> io::Result<Selectivity> {
+    fn selectivity_range(&self, min: KeyBytes<'_>, max: KeyBytes<'_>) -> io::Result<Selectivity> {
         // Interpret as big-endian unsigned integers for range calculation
         let range_bytes = self.range_bytes(min, max)?;
 

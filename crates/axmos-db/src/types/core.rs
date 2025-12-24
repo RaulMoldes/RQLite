@@ -27,8 +27,6 @@ pub trait VarlenType: TypeClass {}
 
 /// TypeClass representing all fixed size types.
 pub trait FixedSizeType: TypeClass + Copy {
-
-
     #[inline]
     fn mem_size() -> usize {
         Self::SIZE.unwrap_or(0)
@@ -38,14 +36,12 @@ pub trait FixedSizeType: TypeClass + Copy {
     fn aligned_offset(offset: usize) -> usize {
         (offset + Self::ALIGN - 1) & !(Self::ALIGN - 1)
     }
-
 }
 
 /// All fixed sizes are known at compile time.
 impl<T: FixedSizeType> TypeClass for T {
     const SIZE: Option<usize> = Some(mem::size_of::<T>());
     const ALIGN: usize = mem::align_of::<T>();
-
 }
 
 /// Trait for Boolean types
@@ -261,6 +257,11 @@ pub trait DeserializableType: RefTrait {
     ///
     /// handles its deserialization separately.
     fn reinterpret_cast(buffer: &[u8]) -> SerializationResult<(Self::Ref<'_>, usize)>;
+
+    /// Deserializes a type from a buffer, taking into account alignment requirements
+    ///
+    /// Instead of returning the bytes read, returns the new cursor position
+    fn deserialize(buffer: &[u8], cursor: usize) -> SerializationResult<(Self::Ref<'_>, usize)>;
 }
 
 /// Trait for making types deserializable.
@@ -295,6 +296,12 @@ impl<T: BytemuckDeserializable> DeserializableType for T {
             BytemuckRef::try_from(&buffer[..Self::SIZE.unwrap_or(0)])?,
             Self::SIZE.unwrap_or(0),
         ))
+    }
+
+    fn deserialize(buffer: &[u8], cursor: usize) -> SerializationResult<(Self::Ref<'_>, usize)> {
+        let cursor = Self::aligned_offset(cursor);
+        let (data_ref, bytes_read) = Self::reinterpret_cast(&buffer[cursor..])?;
+        Ok((data_ref, cursor + bytes_read))
     }
 }
 

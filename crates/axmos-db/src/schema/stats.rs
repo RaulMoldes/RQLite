@@ -1,7 +1,7 @@
 use crate::{
     DEFAULT_BTREE_MIN_KEYS, DEFAULT_PAGE_SIZE,
     storage::{BtreeOps, page::BtreePage},
-    tree::comparators::{Comparator, Ranger},
+    tree::{cell_ops::KeyBytes, comparators::{Comparator, Ranger}},
     types::{Blob, SerializationError, SerializationResult},
 };
 use rkyv::{
@@ -120,8 +120,8 @@ impl ColumnStats {
     /// Estimated fraction of rows in the range (0.0 to 1.0)
     pub(crate) fn selectivity_range<R: Comparator + Ranger>(
         &self,
-        low: &[u8],
-        high: &[u8],
+        low: KeyBytes<'_>,
+        high: KeyBytes<'_>,
         ranger: &R,
     ) -> Selectivity {
         ranger
@@ -141,12 +141,12 @@ impl ColumnStats {
     /// Updates statistics with a new value.
     ///
     /// Used during statistics collection to incrementally track min/max/count.
-    pub(crate) fn update_with_value<C: Comparator>(&mut self, value: &[u8], comparator: &C) {
+    pub(crate) fn update_with_value<C: Comparator>(&mut self, value: KeyBytes<'_>, comparator: &C) {
         // Update min
         match &self.min_bytes {
             None => self.min_bytes = Some(value.to_vec().into_boxed_slice()),
             Some(current_min) => {
-                if matches!(comparator.compare(value, current_min), Ok(Ordering::Less)) {
+                if matches!(comparator.compare(value, KeyBytes::from(current_min.as_ref())), Ok(Ordering::Less)) {
                     self.min_bytes = Some(value.to_vec().into_boxed_slice());
                 }
             }
@@ -157,7 +157,7 @@ impl ColumnStats {
             None => self.max_bytes = Some(value.to_vec().into_boxed_slice()),
             Some(current_max) => {
                 if matches!(
-                    comparator.compare(value, current_max),
+                    comparator.compare(value, KeyBytes::from(current_max.as_ref())),
                     Ok(Ordering::Greater)
                 ) {
                     self.max_bytes = Some(value.to_vec().into_boxed_slice());

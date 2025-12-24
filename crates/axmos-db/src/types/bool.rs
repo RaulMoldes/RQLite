@@ -118,6 +118,11 @@ impl DeserializableType for Bool {
         }
         Ok((BoolRef(&buffer[0]), 1))
     }
+
+    fn deserialize(buffer: &[u8], cursor: usize) -> SerializationResult<(Self::Ref<'_>, usize)> {
+        let (data_ref, bytes_read) = Self::reinterpret_cast(&buffer[cursor..])?;
+        Ok((data_ref, cursor + bytes_read))
+    }
 }
 
 impl From<Bool> for bool {

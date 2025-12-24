@@ -164,6 +164,16 @@ pub type SerializationResult<T> = Result<T, SerializationError>;
     default = "Err(SerializationError::NotSupported)",
     wrap_result = "ref"
 )]
+#[delegate(
+    trait = "crate::types::core::DeserializableType",
+    method = "deserialize",
+    target = "kind",
+    args = "self, buffer: &[u8], cursor: usize",
+    call_args = "buffer, cursor",
+    return_type = "SerializationResult<(DataTypeRef<'_>, usize)>",
+    default = "Err(SerializationError::NotSupported)",
+    wrap_result = "ref"
+)]
 #[ref_trait(
     ref_trait = "crate::types::core::RefTrait",
     assoc_type = "Ref",

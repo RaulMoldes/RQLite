@@ -1,6 +1,7 @@
 use super::{Comparator, Ranger, subtract_bytes};
 use crate::schema::stats::Selectivity;
 use crate::types::VarInt;
+use crate:: tree::cell_ops::KeyBytes;
 use std::{cmp::Ordering, io, usize};
 
 /// Comparator for variable-length data with VarInt length prefix.
@@ -11,16 +12,16 @@ use std::{cmp::Ordering, io, usize};
 pub(crate) struct VarlenComparator;
 
 impl Comparator for VarlenComparator {
-    fn compare(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Ordering> {
+    fn compare(&self, lhs: KeyBytes<'_>, rhs: KeyBytes<'_>) -> io::Result<Ordering> {
         if lhs.as_ptr() == rhs.as_ptr() && lhs.len() == rhs.len() {
             return Ok(Ordering::Equal);
         }
 
-        let (left_length, left_offset) = VarInt::from_encoded_bytes_unchecked(lhs);
+        let (left_length, left_offset) = VarInt::from_encoded_bytes_unchecked(lhs.as_ref());
         let lhs_len: usize = left_length.into();
         let left_data = &lhs[left_offset..left_offset + lhs_len];
 
-        let (right_length, right_offset) = VarInt::from_encoded_bytes_unchecked(rhs);
+        let (right_length, right_offset) = VarInt::from_encoded_bytes_unchecked(rhs.as_ref());
         let rhs_len: usize = right_length.into();
         let right_data = &rhs[right_offset..right_offset + rhs_len];
 
@@ -64,8 +65,8 @@ impl Comparator for VarlenComparator {
         Ok(lhs_len.cmp(&rhs_len))
     }
 
-    fn key_size(&self, data: &[u8]) -> io::Result<usize> {
-        let (len, offset) = VarInt::from_encoded_bytes_unchecked(data);
+    fn key_size(&self, data:  &[u8]) -> io::Result<usize> {
+        let (len, offset) = VarInt::from_encoded_bytes_unchecked(data.as_ref());
         let len_usize: usize = len.into();
         Ok(offset + len_usize)
     }
@@ -75,12 +76,12 @@ impl Ranger for VarlenComparator {
     /// Computes the range (difference between two variable length keys).
     ///
     /// The keys must be encoded with a VarInt prefix which indicates key length followed by the actual data content (see [crate::types::Blob])
-    fn range_bytes(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Box<[u8]>> {
-        let (left_length, left_offset) = VarInt::from_encoded_bytes_unchecked(lhs);
+    fn range_bytes(&self, lhs: KeyBytes<'_>, rhs:KeyBytes<'_>) -> io::Result<Box<[u8]>> {
+        let (left_length, left_offset) = VarInt::from_encoded_bytes_unchecked(&lhs);
         let lhs_len: usize = left_length.into();
         let left_data = &lhs[left_offset..left_offset + lhs_len];
 
-        let (right_length, right_offset) = VarInt::from_encoded_bytes_unchecked(rhs);
+        let (right_length, right_offset) = VarInt::from_encoded_bytes_unchecked(&rhs);
         let rhs_len: usize = right_length.into();
         let right_data = &rhs[right_offset..right_offset + rhs_len];
 
@@ -94,7 +95,7 @@ impl Ranger for VarlenComparator {
     /// For variable length data, we use the difference bytes to estimate selectivity
     ///
     /// As it is not easy to operate with variable length data (how the fuck do you divide an string), we compare using first few bytes as approximation
-    fn selectivity_range(&self, min: &[u8], max: &[u8]) -> io::Result<Selectivity> {
+    fn selectivity_range(&self, min: KeyBytes<'_>, max: KeyBytes<'_>) -> io::Result<Selectivity> {
         let range_bytes = self.range_bytes(min, max)?;
 
         if range_bytes.is_empty() {

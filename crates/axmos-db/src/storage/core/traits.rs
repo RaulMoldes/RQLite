@@ -328,7 +328,7 @@ macro_rules! writable_layout {
                 &self.$header_field
             }
             fn data(&self) -> &[u8] {
-                &self.$data_field
+                &self.$data_field.as_ref()
             }
         }
     };

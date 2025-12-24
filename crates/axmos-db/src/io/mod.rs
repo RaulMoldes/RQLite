@@ -6,7 +6,7 @@ pub mod cache;
 pub mod disk;
 //pub mod logger;
 
-//pub mod journal;
+
 pub mod pager;
 pub mod wal;
 
@@ -17,71 +17,3 @@ use std::io::{Read, Seek, Write};
 
 #[cfg(test)]
 mod tests;
-
-pub(crate) trait AsBytes {
-    fn write_to<W: Write>(&self, buffer: &mut W) -> std::io::Result<()>;
-    fn read_from<R: Read + Seek>(bytes: &mut R) -> std::io::Result<Self>
-    where
-        Self: Sized;
-}
-
-pub fn read_string_unchecked<R: Read>(reader: &mut R) -> String {
-    let varint = VarInt::read_buf(reader).unwrap();
-    let (len, offset) = VarInt::from_encoded_bytes_unchecked(&varint);
-    let len_usize: usize = len.into();
-    let mut str_buf = vec![0u8; len_usize];
-    reader.read_exact(&mut str_buf).unwrap();
-    unsafe { String::from_utf8_unchecked(str_buf) }
-}
-pub fn write_string<W: Write>(writer: &mut W, s: &str) -> std::io::Result<()> {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut vbuf = [0u8; MAX_VARINT_LEN];
-    let len_varint = VarInt::encode(len as i64, &mut vbuf);
-    writer.write_all(len_varint)?;
-    writer.write_all(bytes)?;
-
-    Ok(())
-}
-
-pub fn read_variable_length_unchecked<R: Read + Seek>(buf: &mut R) -> Box<[u8]> {
-    let varint = VarInt::read_buf(buf).unwrap();
-    let (len, offset) = VarInt::from_encoded_bytes_unchecked(varint.as_ref());
-    let len_usize: usize = len.into();
-    let mut val_buffer = vec![0u8; len_usize];
-    buf.read_exact(&mut val_buffer).unwrap();
-    val_buffer.into_boxed_slice()
-}
-
-pub fn write_variable_length<W: Write>(buf: &mut W, s: &[u8]) -> std::io::Result<()> {
-    let mut vbuf = [0u8; MAX_VARINT_LEN];
-    let len = VarInt::encode(s.len() as i64, &mut vbuf);
-    buf.write_all(len)?;
-    buf.write_all(s)?;
-    Ok(())
-}
-
-/*
-pub fn read_type_from_buf<R: Read + Seek>(
-    dtype: DataTypeKind,
-    buf: &mut R,
-) -> std::io::Result<DataType> {
-    if dtype.is_fixed_size() {
-        let mut temp_buf = vec![0u8; dtype.size_of_val().unwrap()];
-        buf.read_exact(&mut temp_buf)?;
-        Ok(reinterpret_cast(dtype, &temp_buf)?.0.to_owned())
-    } else {
-        let varint = VarInt::read_buf(buf)?;
-        let (len, offset) = VarInt::from_encoded_bytes(&varint)?;
-        let len_usize: usize = len.try_into().unwrap();
-        let mut data_buf = vec![0u8; len_usize];
-        buf.read_exact(&mut data_buf)?;
-
-        let mut full_buf = Vec::with_capacity(offset + len_usize);
-        full_buf.extend_from_slice(&varint[..offset]);
-        full_buf.extend_from_slice(&data_buf);
-
-        Ok(reinterpret_cast(dtype, &full_buf)?.0.to_owned())
-    }
-}
-*/

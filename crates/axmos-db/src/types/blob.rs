@@ -1,7 +1,7 @@
 use crate::{
     SerializationResult,
     core::{DeserializableType, RefTrait, RuntimeSized, SerializableType},
-    tree::comparators::{Comparator, VarlenComparator},
+    tree::{cell_ops::AsKeyBytes, comparators::{Comparator, VarlenComparator}},
     types::{
         SerializationError, TypeSystemResult, VarInt,
         core::{NumericType, TypeCast, TypeClass, TypeRef, VarlenType},
@@ -15,8 +15,8 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-// Blob is aligned to eight bytes.
-const BLOB_ALIGNMENT: usize = 8;
+// Blob is aligned to 1 byte.
+const BLOB_ALIGNMENT: usize = 1;
 
 /// Blob is a self-contained type.
 ///
@@ -26,7 +26,6 @@ pub struct Blob(Box<[u8]>);
 
 /// Blob is the only Varlen TypeClass in the type system.
 impl TypeClass for Blob {
-
     const ALIGN: usize = BLOB_ALIGNMENT;
 }
 impl VarlenType for Blob {}
@@ -146,7 +145,7 @@ impl Eq for Blob {}
 impl PartialOrd for Blob {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let comparator = VarlenComparator;
-        comparator.compare(self.as_ref(), other.as_ref()).ok()
+        comparator.compare(self.as_key_bytes(), other.as_key_bytes()).ok()
     }
 }
 
@@ -248,7 +247,7 @@ impl<'a> Eq for BlobRef<'a> {}
 impl<'a> PartialOrd for BlobRef<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let comparator = VarlenComparator;
-        comparator.compare(self.as_ref(), other.as_ref()).ok()
+        comparator.compare(self.as_key_bytes(), other.as_key_bytes()).ok()
     }
 }
 
@@ -296,6 +295,11 @@ impl DeserializableType for Blob {
         }
 
         Ok((BlobRef::from(&buffer[..total_size]), total_size))
+    }
+
+    fn deserialize(buffer: &[u8], cursor: usize) -> SerializationResult<(Self::Ref<'_>, usize)> {
+        let (data_ref, bytes_read) = Self::reinterpret_cast(&buffer[cursor..])?;
+        Ok((data_ref, cursor + bytes_read))
     }
 }
 
@@ -349,15 +353,10 @@ where
     }
 }
 
-
 impl SerializableType for Blob {
-
-
     fn write_to(&self, writer: &mut [u8], cursor: usize) -> SerializationResult<usize> {
-        let aligned = (cursor + Self::ALIGN - 1) & !(Self::ALIGN - 1);
         let data_bytes = self.as_ref();
-        writer[aligned..aligned + self.runtime_size()].copy_from_slice(data_bytes);
-        Ok(aligned + self.runtime_size())
-
+        writer[cursor..cursor + self.runtime_size()].copy_from_slice(data_bytes);
+        Ok(cursor + self.runtime_size())
     }
 }

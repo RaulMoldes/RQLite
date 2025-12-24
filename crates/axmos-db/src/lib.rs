@@ -11,6 +11,7 @@
 #![feature(str_from_raw_parts)]
 #![feature(negative_impls)]
 #![feature(current_thread_id)]
+#![feature(box_vec_non_null)]
 pub mod common;
 pub mod io;
 mod macros;

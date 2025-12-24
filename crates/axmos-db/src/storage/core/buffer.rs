@@ -946,6 +946,103 @@ where
     }
 }
 
+/// Aligned payload allows to create cells directly without copying data.
+#[derive(Debug)]
+pub(crate) struct AlignedPayload {
+    ptr: NonNull<[u8]>,
+    effective_size: usize,
+}
+
+impl AlignedPayload {
+    pub(crate) fn alloc_aligned(total_size: usize) -> Result<Self, AllocError> {
+        let aligned_size = total_size.next_multiple_of(CELL_ALIGNMENT as usize);
+        let layout = Layout::from_size_align(aligned_size, CELL_ALIGNMENT as usize)
+            .map_err(|_| AllocError)?;
+        let ptr = Global.allocate_zeroed(layout)?;
+        Ok(Self {
+            ptr,
+            effective_size: total_size,
+        })
+    }
+
+    pub(crate) fn realloc(&mut self, new_size: usize) -> Result<(), AllocError> {
+        let current_capacity = self.ptr.len();
+
+        if new_size <= current_capacity {
+            self.effective_size = new_size;
+            return Ok(());
+        }
+
+        let mut new_payload = Self::alloc_aligned(new_size)?;
+        let copy_len = self.effective_size.min(new_size);
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.ptr.as_ptr() as *const u8,
+                new_payload.ptr.as_ptr() as *mut u8,
+                copy_len,
+            );
+        }
+
+        new_payload.effective_size = new_size;
+        *self = new_payload;
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn data(&self) -> &[u8] {
+        unsafe { &self.ptr.as_ref()[..self.effective_size] }
+    }
+
+    #[inline]
+    pub(crate) fn data_mut(&mut self) -> &mut [u8] {
+        unsafe { &mut self.ptr.as_mut()[..self.effective_size] }
+    }
+
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        unsafe { &self.ptr.as_ref() }
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.effective_size
+    }
+}
+
+impl Drop for AlignedPayload {
+    fn drop(&mut self) {
+        let layout = Layout::from_size_align(self.ptr.len(), CELL_ALIGNMENT as usize).unwrap();
+
+        unsafe {
+            Global.deallocate(self.ptr.cast(), layout);
+        }
+    }
+}
+
+impl AsRef<[u8]> for AlignedPayload {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl Clone for AlignedPayload {
+    fn clone(&self) -> Self {
+        let mut new = Self::alloc_aligned(self.effective_size).unwrap();
+        new.data_mut().copy_from_slice(self.data());
+        new
+    }
+}
+
+impl<T: AsRef<[u8]>> From<&T> for AlignedPayload {
+    fn from(value: &T) -> Self {
+        let data = value.as_ref();
+        let mut payload = Self::alloc_aligned(data.len()).unwrap();
+        payload.data_mut().copy_from_slice(data);
+        payload
+    }
+}
+
 // Macro to create aligned buffers inline.
 #[macro_export]
 macro_rules! aligned_buf {

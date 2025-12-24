@@ -1,7 +1,14 @@
 use super::stats::Stats;
-use crate::{tree::comparators::{CompositeComparator, DynComparator, FixedSizeBytesComparator, NumericComparator, SignedNumericComparator, VarlenComparator}, types::{
-    Blob, DataType, DataTypeKind, ObjectId, PageId, RowId, SerializationError, SerializationResult,
-}};
+use crate::{
+    tree::comparators::{
+        CompositeComparator, DynComparator, FixedSizeBytesComparator, NumericComparator,
+        SignedNumericComparator, VarlenComparator,
+    },
+    types::{
+        Blob, DataType, DataTypeKind, ObjectId, PageId, RowId, SerializationError,
+        SerializationResult,
+    },
+};
 use rkyv::{
     Archive, Deserialize, Serialize, from_bytes, rancor::Error as RkyvError, to_bytes,
     util::AlignedVec,
@@ -80,15 +87,21 @@ impl Schema {
     }
 
     /// Get a key comparator for this schema.
-     pub(crate) fn comparator(&self) -> DynComparator {
+    pub(crate) fn comparator(&self) -> DynComparator {
         if self.num_keys > 1 {
-            let comparators: Vec<DynComparator> =
-            self.iter_keys().map(|col| col.comparator().unwrap_or(DynComparator::Variable(VarlenComparator))).collect();
+            let comparators: Vec<DynComparator> = self
+                .iter_keys()
+                .map(|col| {
+                    col.comparator()
+                        .unwrap_or(DynComparator::Variable(VarlenComparator))
+                })
+                .collect();
             DynComparator::Composite(CompositeComparator::new(comparators))
         } else {
             self.columns
                 .first()
-                .map(|c| c.comparator()).flatten()
+                .map(|c| c.comparator())
+                .flatten()
                 .unwrap_or(DynComparator::Variable(VarlenComparator))
         }
     }
@@ -309,16 +322,23 @@ impl Column {
         &self.name
     }
 
-
     /// Build a comparator from this column.
     pub(crate) fn comparator(&self) -> Option<DynComparator> {
         match self.datatype() {
             DataTypeKind::Blob => Some(DynComparator::Variable(VarlenComparator)),
-            DataTypeKind::Int | DataTypeKind::BigInt | DataTypeKind::Double | DataTypeKind::Float  => Some(DynComparator::SignedNumeric(SignedNumericComparator::for_size(self.datatype().fixed_size().unwrap()))),
-            DataTypeKind::UInt | DataTypeKind::BigUInt => Some(DynComparator::StrictNumeric(NumericComparator::for_size(self.datatype().fixed_size().unwrap()))),
-            DataTypeKind::Bool => Some(DynComparator::FixedSizeBytes(FixedSizeBytesComparator::for_size(1))),
-            _ => None // Null type does not have a comparator
-
+            DataTypeKind::Int
+            | DataTypeKind::BigInt
+            | DataTypeKind::Double
+            | DataTypeKind::Float => Some(DynComparator::SignedNumeric(
+                SignedNumericComparator::for_size(self.datatype().fixed_size().unwrap()),
+            )),
+            DataTypeKind::UInt | DataTypeKind::BigUInt => Some(DynComparator::StrictNumeric(
+                NumericComparator::for_size(self.datatype().fixed_size().unwrap()),
+            )),
+            DataTypeKind::Bool => Some(DynComparator::FixedSizeBytes(
+                FixedSizeBytesComparator::for_size(1),
+            )),
+            _ => None, // Null type does not have a comparator
         }
     }
 

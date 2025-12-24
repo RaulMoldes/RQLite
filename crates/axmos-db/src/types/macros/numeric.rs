@@ -44,7 +44,7 @@ macro_rules! numeric {
 
 
         impl $crate::types::core::BytemuckDeserializable for $name {
-           
+
         }
             impl AsRef<[u8]> for $name {
             fn as_ref(&self) -> &[u8] {

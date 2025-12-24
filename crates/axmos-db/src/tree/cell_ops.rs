@@ -1,18 +1,17 @@
 use crate::{
     CELL_ALIGNMENT,
     io::pager::SharedPager,
+    multithreading::coordinator::Snapshot,
+    schema::Schema,
     storage::{
         cell::{CELL_HEADER_SIZE, CellRef, OwnedCell, Slot},
-        core::traits::BtreeOps,
+        core::{buffer::AlignedPayload, traits::BtreeOps},
         page::{BtreePage, OverflowPage},
     },
     tree::comparators::Comparator,
-    types::{
-        PageId,
-        core::TypeClass
-    }
+    types::{PageId, core::TypeClass},
 };
-
+use std::ops::Deref;
 use std::{cmp::min, io, mem, usize};
 
 /// The cell builder is a type of accessor that is only used to build cells.
@@ -45,20 +44,22 @@ where
 
     pub(crate) fn compare_cell_payload<'b>(
         &self,
-        target: &[u8],
+        target: KeyBytes<'_>,
         cell: CellRef<'b>,
     ) -> io::Result<std::cmp::Ordering> {
         let ordering = if cell.metadata().is_overflow() {
             // If the cell is overflow we need to reassemble.
-            let key_size = self.comparator.key_size(cell.payload())?;
+            let keys_start = cell.keys_start();
+            let key_size = self.comparator.key_size(&cell.payload()[keys_start..])?;
             let mut reassembler =
                 Reassembler::with_capacity_and_max_size(self.pager.clone(), key_size);
             reassembler.reassemble(cell)?;
-            let bytes = reassembler.into_boxed_slice();
-            self.comparator.compare(target, bytes.as_ref())?
+
+            self.comparator
+                .compare(target, reassembler.key_bytes())?
         } else {
             // Otherwise we can just compare the raw payload without copying or moving data.
-            self.comparator.compare(target, cell.payload())?
+            self.comparator.compare(target, cell.key_bytes())?
         };
 
         Ok(ordering)
@@ -70,6 +71,7 @@ where
 pub(crate) struct Reassembler {
     pager: SharedPager,
     max_size: usize,
+    key_size: usize,
     reassembled: Vec<u8>,
 }
 
@@ -77,6 +79,7 @@ impl Reassembler {
     pub(crate) fn new(pager: SharedPager) -> Self {
         Self {
             pager,
+            key_size: 0, // Unset at the beginning
             max_size: usize::MAX,
             reassembled: Vec::new(),
         }
@@ -86,6 +89,7 @@ impl Reassembler {
     pub(crate) fn with_capacity(pager: SharedPager, cap: usize) -> Self {
         Self {
             pager,
+            key_size: 0,
             max_size: usize::MAX,
             reassembled: Vec::with_capacity(cap),
         }
@@ -95,6 +99,7 @@ impl Reassembler {
     pub(crate) fn with_capacity_and_max_size(pager: SharedPager, cap: usize) -> Self {
         Self {
             pager,
+            key_size: 0,
             max_size: cap,
             reassembled: Vec::with_capacity(cap),
         }
@@ -104,6 +109,8 @@ impl Reassembler {
     pub(crate) fn reassemble<'b>(&mut self, cell: CellRef<'b>) -> io::Result<()> {
         // Clear the reassembled vec to be able to reuse the same reasssembler accross slots.
         self.reassembled.clear();
+
+        self.key_size = cell.key_bytes().len();
 
         if cell.metadata().is_overflow() {
             // First part is in the cell (minus the overflow page pointer)
@@ -134,36 +141,13 @@ impl Reassembler {
         Ok(())
     }
 
+    /// Returns the [KeyBytes] of the reassembled payload
+    pub(crate) fn key_bytes(&self) -> KeyBytes<'_> {
+        KeyBytes::from(&self.reassembled[..self.key_size])
+    }
+
     pub(crate) fn into_boxed_slice(self) -> Box<[u8]> {
         self.reassembled.into_boxed_slice()
-    }
-}
-
-/// The cell reader is a struct that can create items of any type T from any cell payload as long as the item T implements From<&[u8]> + From<Box<[u8]>>
-pub(crate) struct CellReader {
-    pager: SharedPager,
-}
-
-impl CellReader {
-    pub(crate) fn new(pager: SharedPager) -> Self {
-        Self { pager }
-    }
-
-    /// Attempts to get the T from the cell ref, if it can't do it creates a new [Reassembler] to reassemble the overflow chain.
-    pub(crate) fn get<T>(&self, cell: CellRef<'_>) -> io::Result<T>
-    where
-        T: Deserializable,
-    {
-        if !cell.is_overflow() {
-            // TODO: I do not understand why i need this copy. Must figure it out.
-            let payload = cell.payload();
-            let data = T::from_borrowed(payload);
-            Ok(data)
-        } else {
-            let mut reassembler = Reassembler::new(self.pager.clone());
-            reassembler.reassemble(cell)?;
-            Ok(T::from_owned(reassembler.into_boxed_slice()))
-        }
     }
 }
 
@@ -258,11 +242,11 @@ impl CellBuilder {
     /// Builds a cell from any type that implements From<Box<[u8]>> and From <&'a [u8]>>
     pub fn build_cell<'b, T>(&self, data: T) -> io::Result<OwnedCell>
     where
-        T: Serializable,
+        T: Buildable,
     {
         let page_size = self.pager.write().page_size()?;
         let max_payload_size: usize = self.compute_available_space_in_first_page(page_size);
-        let total_size = data.serialized_size();
+        let total_size = data.built_size();
 
         // If the cell fits in a single page simply return the built cell.
         if total_size <= max_payload_size {
@@ -270,11 +254,18 @@ impl CellBuilder {
         };
 
         // At this point we have to split the payload.
-        let payload: Box<[u8]> = data.into();
+        let (keys_start, keys_end) = data.key_bounds();
+        let payload_boxed: AlignedPayload = data.into();
+        let payload = payload_boxed.as_slice();
 
         let mut overflow_page_number = self.pager.write().allocate_page::<OverflowPage>()?;
 
-        let cell = OwnedCell::new_overflow(&payload[..max_payload_size], overflow_page_number);
+        let cell = OwnedCell::new_overflow(
+            &payload[..max_payload_size],
+            overflow_page_number,
+            keys_start,
+            keys_end,
+        );
 
         let mut stored_bytes = max_payload_size;
 
@@ -318,13 +309,9 @@ impl CellBuilder {
 }
 
 /// Custom trait to add information about the serialized size of the data before converting into a cell. Allows to know the size of the payload in advance.
-pub trait Serializable: Into<OwnedCell> + Into<Box<[u8]>> {
-    fn serialized_size(&self) -> usize;
-}
-
-pub(crate) trait Deserializable: Sized {
-    fn from_borrowed(bytes: &[u8]) -> Self;
-    fn from_owned(bytes: Box<[u8]>) -> Self;
+pub trait Buildable: Into<OwnedCell> + Into<AlignedPayload> {
+    fn built_size(&self) -> usize;
+    fn key_bounds(&self) -> (usize, usize);
 }
 
 /// On cells payload, keys are stored at the beginning always.
@@ -364,10 +351,23 @@ pub(crate) trait AsKeyBytes<'a> {
     fn as_key_bytes(&'a self) -> KeyBytes<'a>;
 }
 
-
-impl <'a, T> AsKeyBytes<'a> for T
-where  T: AsRef<[u8]> + TypeClass {
+/// All types in the typesystem implement [AsKeyBytes] (used in tests)
+impl<'a, T> AsKeyBytes<'a> for T
+where
+    T: AsRef<[u8]> + TypeClass,
+{
     fn as_key_bytes(&'a self) -> KeyBytes<'a> {
         KeyBytes(self.as_ref())
+    }
+}
+
+
+
+
+impl<'a> Deref for KeyBytes<'a> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0
     }
 }

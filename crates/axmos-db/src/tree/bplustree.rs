@@ -9,16 +9,14 @@ use crate::{
     },
     tree::{
         accessor::{Accessor, PositionStack, ReadAccessor, WriteAccessor},
-        cell_ops::{AsKeyBytes, Deserializable, Serializable},
+        cell_ops::{AsKeyBytes, Buildable},
     },
     types::{PAGE_ZERO, PageId},
 };
 
 use super::{
     accessor::Position,
-    cell_ops::{
-        CellBuilder, CellBytesComparator, CellDeallocator, CellReader, KeyBytes, Reassembler,
-    },
+    cell_ops::{CellBuilder, CellBytesComparator, CellDeallocator, KeyBytes, Reassembler},
     comparators::Comparator,
 };
 
@@ -180,9 +178,6 @@ where
         self.accessor.is_some()
     }
 
-    pub(crate) fn compare(&self, lhs: &[u8], rhs: &[u8]) -> io::Result<Ordering> {
-        self.comparator.compare(lhs, rhs)
-    }
 
     fn is_root(&self, id: PageId) -> bool {
         self.root == id
@@ -305,7 +300,7 @@ where
 
             let cell = page.cell(mid);
 
-            match comparator.compare_cell_payload(search_key.as_ref(), cell)? {
+            match comparator.compare_cell_payload(search_key, cell)? {
                 Ordering::Equal => {
                     return Ok(SearchResult::Found(Position::new(page.id(), mid)));
                 }
@@ -334,7 +329,7 @@ where
             let cell = page.cell(i);
             // Once we find a suitable child, stop the search.
             if matches!(
-                comparator.compare_cell_payload(search_key.as_ref(), cell)?,
+                comparator.compare_cell_payload(search_key, cell)?,
                 Ordering::Less
             ) {
                 // Note that left child must ever be None for interior pages, so as no one
@@ -390,7 +385,7 @@ where
         for i in 0..num_slots {
             let cell = page.cell(i);
 
-            match comparator.compare_cell_payload(search_key.as_ref(), cell)? {
+            match comparator.compare_cell_payload(search_key, cell)? {
                 Ordering::Less => {
                     result = SearchResult::Found(Position::new(page_id, i));
                     break;
@@ -446,17 +441,6 @@ where
                 return Ok(Position::new(current, 0));
             };
         }
-    }
-
-    // Returns the cell at the given position casted to type [T]
-    // T must implement [Deserializable]. See [crate::tree::cell_ops::Deserializable] for details.
-    pub(crate) fn read_cell_as<T: Deserializable>(&mut self, pos: Position<P>) -> BtreeResult<T> {
-        let page_id = pos.entry();
-        let slot = pos.slot();
-        let reader = CellReader::new(self.get_pager().clone());
-        let page = self.get_page(page_id)?;
-        let data: T = reader.get(page.cell(slot))?;
-        Ok(data)
     }
 
     /// Executes a callback on the cell at the given position.
@@ -608,7 +592,7 @@ where
 
     /// Inserts a key at the corresponding position in the Btree.
     /// Returns an [BtreeError] if the key already exists.
-    pub(crate) fn insert<T: Serializable + for<'a> AsKeyBytes<'a>>(
+    pub(crate) fn insert<T: Buildable + for<'a> AsKeyBytes<'a>>(
         &mut self,
         page_id: PageId,
         data: T,
@@ -640,7 +624,7 @@ where
     /// Uses the [find_slot] function in order to find the best fit slot for the cell given its key.
     /// Assumes the page is a leaf page.
     /// This method must not be called on interior nodes.
-    pub(crate) fn insert_cell<T: Serializable + for<'a> AsKeyBytes<'a>>(
+    pub(crate) fn insert_cell<T: Buildable + for<'a> AsKeyBytes<'a>>(
         &mut self,
         page_id: PageId,
         data: T,
@@ -678,7 +662,7 @@ where
 
     /// Updates the cell content on a given leaf page at the given [Position].
     /// Assumes the position pointer is valid and the page is a leaf page.
-    fn update_cell<T: Serializable + for<'a> AsKeyBytes<'a>>(
+    fn update_cell<T: Buildable + for<'a> AsKeyBytes<'a>>(
         &mut self,
         pos: Position<P>,
         data: T,
@@ -708,7 +692,7 @@ where
 
     /// Inserts a key at the corresponding position in the Btree.
     /// Updates its contents if it already exists.
-    pub(crate) fn upsert<T: Serializable + for<'a> AsKeyBytes<'a>>(
+    pub(crate) fn upsert<T: Buildable + for<'a> AsKeyBytes<'a>>(
         &mut self,
         page_id: PageId,
         data: T,
@@ -732,7 +716,7 @@ where
 
     /// Updates a key at the corresponding position in the Btree.
     /// Returns an [IoError] if the key is not found.
-    pub(crate) fn update<T: Serializable + for<'a> AsKeyBytes<'a>>(
+    pub(crate) fn update<T: Buildable + for<'a> AsKeyBytes<'a>>(
         &mut self,
         page_id: PageId,
         data: T,
