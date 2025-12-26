@@ -1,12 +1,13 @@
 use super::stats::Stats;
 use crate::{
+    storage::tuple::Row,
     tree::comparators::{
         CompositeComparator, DynComparator, FixedSizeBytesComparator, NumericComparator,
         SignedNumericComparator, VarlenComparator,
     },
     types::{
         Blob, DataType, DataTypeKind, ObjectId, PageId, RowId, SerializationError,
-        SerializationResult,
+        SerializationResult, UInt64,
     },
 };
 use rkyv::{
@@ -278,6 +279,25 @@ impl Schema {
 
         Ok(schema)
     }
+
+    /// COllects all the objects that depend from this one.
+    ///
+    /// Useful for DELETE ... CASCADE operations.
+    pub(crate) fn get_dependants(&self) -> Vec<ObjectId> {
+        let mut deps = Vec::new();
+        if self.is_index() {
+            return deps;
+        };
+
+        for ct in self.table_constraints.as_ref().unwrap() {
+            if let TableConstraint::ForeignKey { info, .. } = ct {
+                deps.push(info.ref_table);
+            };
+        }
+
+        deps.extend(self.table_indexes.as_ref().unwrap().keys());
+        deps
+    }
 }
 
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -433,6 +453,11 @@ impl Relation {
         }
     }
 
+    pub(crate) fn with_stats(mut self, stats: Stats) -> Self {
+        self.stats = Some(stats);
+        self
+    }
+
     /// Returns the relation's object id
     pub(crate) fn object_id(&self) -> ObjectId {
         self.object_id
@@ -458,5 +483,82 @@ impl Relation {
     /// Check whether this is an index.
     pub(crate) fn is_index(&self) -> bool {
         self.schema().is_index()
+    }
+
+    /// Create a meta index formatted row from a given relation.
+    pub(crate) fn to_meta_index_row(&self) -> Row {
+        Row::new(
+            vec![
+                DataType::Blob(Blob::from(self.name())),
+                DataType::BigUInt(UInt64::from(self.object_id)),
+            ]
+            .into_boxed_slice(),
+        )
+    }
+
+    /// Convert this relation to a row in order to store it on the meta table
+    pub(crate) fn to_meta_table_row(&self) -> Row {
+        Row::new(
+            vec![
+                DataType::BigUInt(UInt64::from(self.object_id)),
+                DataType::BigUInt(UInt64::from(self.root_page)),
+                self.next_row_id
+                    .map(|r| DataType::BigUInt(UInt64::from(r)))
+                    .unwrap_or(DataType::Null),
+                DataType::Blob(Blob::from(self.name())),
+                DataType::Blob(self.schema.to_blob().expect("Failed to serialize schema")),
+                self.stats
+                    .as_ref()
+                    .map(|s| DataType::Blob(s.to_blob().expect("Failed to serialize stats")))
+                    .unwrap_or(DataType::Null),
+            ]
+            .into_boxed_slice(),
+        )
+    }
+
+    /// BUilds a relation object from a row in the meta table.
+    pub fn from_meta_table_row(row: Row) -> Self {
+        let object_id = match &row[0] {
+            DataType::BigUInt(v) => v.value() as ObjectId,
+            _ => panic!("Invalid object_id type in meta table row"),
+        };
+
+        let root_page = match &row[1] {
+            DataType::BigUInt(v) => v.value() as PageId,
+            _ => panic!("Invalid root_page type in meta table row"),
+        };
+
+        let next_row_id = match &row[2] {
+            DataType::BigUInt(v) => Some(v.value() as RowId),
+            DataType::Null => None,
+            _ => panic!("Invalid next_row_id type in meta table row"),
+        };
+
+        let name = match &row[3] {
+            DataType::Blob(blob) => blob.as_str().expect("Invalid name encoding").to_string(),
+            _ => panic!("Invalid name type in meta table row"),
+        };
+
+        let schema = match &row[4] {
+            DataType::Blob(blob) => Schema::from_blob(blob).expect("Failed to deserialize schema"),
+            _ => panic!("Invalid schema type in meta table row"),
+        };
+
+        let stats = match &row[5] {
+            DataType::Blob(blob) => {
+                Some(Stats::from_blob(blob).expect("Failed to deserialize stats"))
+            }
+            DataType::Null => None,
+            _ => panic!("Invalid stats type in meta table row"),
+        };
+
+        Self {
+            object_id,
+            root_page,
+            name,
+            schema,
+            next_row_id,
+            stats,
+        }
     }
 }

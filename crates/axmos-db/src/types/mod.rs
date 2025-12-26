@@ -110,6 +110,13 @@ pub type SerializationResult<T> = Result<T, SerializationError>;
 )]
 #[delegate(
     trait = "crate::types::core::Hashable",
+    method = "hash128",
+    target = "ref",
+    return_type = "u128",
+    default = "0"
+)]
+#[delegate(
+    trait = "crate::types::core::Hashable",
     method = "hash64",
     return_type = "u64",
     default = "0"
@@ -177,7 +184,8 @@ pub type SerializationResult<T> = Result<T, SerializationError>;
 #[ref_trait(
     ref_trait = "crate::types::core::RefTrait",
     assoc_type = "Ref",
-    owned_trait = "crate::types::core::TypeRef<'a>"
+    owned_trait = "crate::types::core::TypeRef<'a>",
+    as_bytes_conversor = "as_slice"
 )]
 
 pub enum DataType {

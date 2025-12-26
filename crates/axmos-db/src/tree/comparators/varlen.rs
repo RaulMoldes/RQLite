@@ -1,7 +1,7 @@
 use super::{Comparator, Ranger, subtract_bytes};
 use crate::schema::stats::Selectivity;
+use crate::tree::cell_ops::KeyBytes;
 use crate::types::VarInt;
-use crate:: tree::cell_ops::KeyBytes;
 use std::{cmp::Ordering, io, usize};
 
 /// Comparator for variable-length data with VarInt length prefix.
@@ -65,7 +65,7 @@ impl Comparator for VarlenComparator {
         Ok(lhs_len.cmp(&rhs_len))
     }
 
-    fn key_size(&self, data:  &[u8]) -> io::Result<usize> {
+    fn key_size(&self, data: &[u8]) -> io::Result<usize> {
         let (len, offset) = VarInt::from_encoded_bytes_unchecked(data.as_ref());
         let len_usize: usize = len.into();
         Ok(offset + len_usize)
@@ -76,7 +76,7 @@ impl Ranger for VarlenComparator {
     /// Computes the range (difference between two variable length keys).
     ///
     /// The keys must be encoded with a VarInt prefix which indicates key length followed by the actual data content (see [crate::types::Blob])
-    fn range_bytes(&self, lhs: KeyBytes<'_>, rhs:KeyBytes<'_>) -> io::Result<Box<[u8]>> {
+    fn range_bytes(&self, lhs: KeyBytes<'_>, rhs: KeyBytes<'_>) -> io::Result<Box<[u8]>> {
         let (left_length, left_offset) = VarInt::from_encoded_bytes_unchecked(&lhs);
         let lhs_len: usize = left_length.into();
         let left_data = &lhs[left_offset..left_offset + lhs_len];

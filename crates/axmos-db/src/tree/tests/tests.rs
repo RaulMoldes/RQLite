@@ -155,7 +155,7 @@ fn test_delete<T: TestCopyKeyTrait>(count: usize, delete_count: usize) {
     let to_delete: Vec<_> = keys.iter().take(delete_count).cloned().collect();
 
     for key in &to_delete {
-        tree.remove(root, key.as_key_bytes())
+        tree.remove(root, key.key_bytes())
             .expect(&format!("Delete failed for key {:?}", key));
     }
 
@@ -188,8 +188,7 @@ fn test_random_delete<T: TestCopyKeyTrait>(count: usize, seed: u64) {
     // Delete in random order
     let shuffled = shuffle(&keys, seed);
     for key in &shuffled {
-        tree.remove(root, key.as_key_bytes())
-            .expect("Delete failed");
+        tree.remove(root, key.key_bytes()).expect("Delete failed");
     }
 
     // Tree should be empty
@@ -233,13 +232,10 @@ pub fn test_insert_delete_reinsert<T: TestCopyKeyTrait>(count: usize) {
         tree.insert(root, *key).expect("Insert failed");
     }
 
-    //  tree.export_to("after_first_insert.json").unwrap();
-
     // Delete half
     let half = count / 2;
     for key in keys.iter().take(half) {
-        tree.remove(root, key.as_key_bytes())
-            .expect("Delete failed");
+        tree.remove(root, key.key_bytes()).expect("Delete failed");
     }
 
     // tree.export_to("after_first_delete.json").unwrap();

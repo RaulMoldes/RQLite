@@ -296,7 +296,7 @@ pub(crate) trait WritableLayout {
     type Header: AsRef<[u8]> + Copy;
 
     fn header(&self) -> &Self::Header;
-    fn data(&self) -> &[u8];
+    fn content(&self) -> &[u8];
 }
 
 /// Automates the implementation of writable types, for all types that implement Writable Layout.
@@ -307,40 +307,13 @@ impl<T: WritableLayout> Writable for T {
     type Header = T::Header;
 
     fn total_size(&self) -> usize {
-        mem::size_of::<Self::Header>() + self.data().len()
+        mem::size_of::<Self::Header>() + self.content().len()
     }
 
     fn write_to(&self, buffer: &mut [u8]) -> usize {
         let header_size = mem::size_of::<Self::Header>();
         buffer[..header_size].copy_from_slice(self.header().as_ref());
-        buffer[header_size..self.total_size()].copy_from_slice(self.data());
+        buffer[header_size..self.total_size()].copy_from_slice(self.content());
         self.total_size()
     }
-}
-
-/// Macro to automate the implementation of writable layout types.
-#[macro_export]
-macro_rules! writable_layout {
-    ($ty:ty, $header:ty, $header_field:ident, $data_field:ident) => {
-        impl $crate::storage::core::traits::WritableLayout for $ty {
-            type Header = $header;
-            fn header(&self) -> &Self::Header {
-                &self.$header_field
-            }
-            fn data(&self) -> &[u8] {
-                &self.$data_field.as_ref()
-            }
-        }
-    };
-    ($ty:ty, $header:ty, $header_field:ident, $data_field:ident, lifetime) => {
-        impl $crate::storage::core::traits::WritableLayout for $ty {
-            type Header = $header;
-            fn header(&self) -> &Self::Header {
-                self.$header_field
-            }
-            fn data(&self) -> &[u8] {
-                self.$data_field
-            }
-        }
-    };
 }

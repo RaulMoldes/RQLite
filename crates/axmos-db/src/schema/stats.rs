@@ -1,15 +1,21 @@
+use super::base::Column;
 use crate::{
-    DEFAULT_BTREE_MIN_KEYS, DEFAULT_PAGE_SIZE,
+    DEFAULT_BTREE_MIN_KEYS, DEFAULT_PAGE_SIZE, DataType,
     storage::{BtreeOps, page::BtreePage},
-    tree::{cell_ops::KeyBytes, comparators::{Comparator, Ranger}},
-    types::{Blob, SerializationError, SerializationResult},
+    tree::{
+        cell_ops::KeyBytes,
+        comparators::{Comparator, DynComparator, Ranger, VarlenComparator},
+    },
+    types::{Blob, DataTypeKind, DataTypeRef, SerializationError, SerializationResult},
 };
 use rkyv::{
     Archive, Deserialize, Serialize, from_bytes, rancor::Error as RkyvError, to_bytes,
     util::AlignedVec,
 };
-use std::{cmp::Ordering, collections::HashMap};
-
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+};
 /// Discrete selectivity values for easier estimation.
 #[derive(Default, Copy, Clone, PartialEq)]
 pub enum Selectivity {
@@ -40,6 +46,125 @@ impl From<f64> for Selectivity {
         } else {
             Selectivity::Uncomputable
         }
+    }
+}
+
+/// Statistics collector that accumulates values during a scan.
+pub(crate) struct StatsCollector {
+    column_idx: usize,
+    dtype: DataTypeKind,
+    comparator: DynComparator,
+
+    // Accumulated statistics
+    null_count: u64,
+    total_count: u64,
+    total_len: u64,
+    min_bytes: Option<Box<[u8]>>,
+    max_bytes: Option<Box<[u8]>>,
+
+    // For NDV estimation using HyperLogLog-like approach (simplified)
+    distinct_hashes: HashSet<u128>,
+
+    // For histogram building
+    sample_values: Vec<f64>,
+}
+
+impl StatsCollector {
+    pub fn new(column_idx: usize, column: &Column) -> Self {
+        Self {
+            column_idx,
+            dtype: column.datatype(),
+            comparator: column
+                .comparator()
+                .unwrap_or(DynComparator::Variable(VarlenComparator)),
+            null_count: 0,
+            total_count: 0,
+            total_len: 0,
+            min_bytes: None,
+            max_bytes: None,
+            distinct_hashes: HashSet::new(),
+            sample_values: Vec::new(),
+        }
+    }
+
+    pub fn column_index(&self) -> usize {
+        self.column_idx
+    }
+
+    /// Records a value observation.
+    pub fn observe(&mut self, value: DataTypeRef<'_>) {
+        self.total_count += 1;
+
+        if matches!(value, DataTypeRef::Null) {
+            self.null_count += 1;
+            return;
+        }
+
+        // Booleans are not tracked since it is not safe to use them in comparisons
+        if matches!(self.dtype, DataTypeKind::Bool) {
+            return;
+        }
+
+        // Get the raw bytes for comparison
+        let bytes: &[u8] = value.as_bytes();
+
+        // Update length tracking for variable-length types
+        self.total_len += bytes.len() as u64;
+
+        // Update min
+        match &self.min_bytes {
+            None => self.min_bytes = Some(Box::from(bytes)),
+            Some(current_min) => {
+                if matches!(
+                    self.comparator
+                        .compare(KeyBytes::from(bytes), KeyBytes::from(current_min.as_ref())),
+                    Ok(Ordering::Less)
+                ) {
+                    self.min_bytes = Some(Box::from(bytes));
+                }
+            }
+        }
+
+        // Update max
+        match &self.max_bytes {
+            None => self.max_bytes = Some(Box::from(bytes)),
+            Some(current_max) => {
+                if matches!(
+                    self.comparator
+                        .compare(KeyBytes::from(bytes), KeyBytes::from(current_max.as_ref())),
+                    Ok(Ordering::Greater)
+                ) {
+                    self.max_bytes = Some(Box::from(bytes));
+                }
+            }
+        }
+
+        // Track distinct values via hash
+        let hash = value.hash128();
+        self.distinct_hashes.insert(hash);
+    }
+
+    /// Finalizes collection and produces ColumnStatistics.
+    pub fn finalize(self) -> ColumnStats {
+        let ndv = self.distinct_hashes.len() as u64;
+
+        let avg_len = if self.total_count > self.null_count {
+            Some(self.total_len / (self.total_count - self.null_count))
+        } else {
+            None
+        };
+
+        let mut stats = ColumnStats::new(ndv, self.null_count);
+
+        if let (Some(min), Some(max)) = (self.min_bytes, self.max_bytes) {
+            stats = stats.with_range_bytes(min, max);
+        }
+
+        if let Some(avg) = avg_len {
+            stats = stats.with_avg_len(avg);
+        }
+
+        stats
     }
 }
 
@@ -87,6 +212,12 @@ impl ColumnStats {
     pub fn with_range_bytes(mut self, min: Box<[u8]>, max: Box<[u8]>) -> Self {
         self.min_bytes = Some(min);
         self.max_bytes = Some(max);
+        self
+    }
+
+    /// Sets the avg len of a column
+    pub fn with_avg_len(mut self, avg_len: u64) -> Self {
+        self.avg_len = avg_len;
         self
     }
 
@@ -146,7 +277,10 @@ impl ColumnStats {
         match &self.min_bytes {
             None => self.min_bytes = Some(value.to_vec().into_boxed_slice()),
             Some(current_min) => {
-                if matches!(comparator.compare(value, KeyBytes::from(current_min.as_ref())), Ok(Ordering::Less)) {
+                if matches!(
+                    comparator.compare(value, KeyBytes::from(current_min.as_ref())),
+                    Ok(Ordering::Less)
+                ) {
                     self.min_bytes = Some(value.to_vec().into_boxed_slice());
                 }
             }

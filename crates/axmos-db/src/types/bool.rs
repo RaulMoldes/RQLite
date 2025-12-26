@@ -1,6 +1,5 @@
 use std::{
     fmt::{Display, Formatter, Result as FmtResult},
-    io::Write,
     ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not},
 };
 
@@ -104,6 +103,10 @@ impl<'a> TypeRef<'a> for BoolRef<'a> {
     type Owned = Bool;
     fn to_owned(&self) -> Bool {
         BoolRef::to_owned(self)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &[]
     }
 }
 

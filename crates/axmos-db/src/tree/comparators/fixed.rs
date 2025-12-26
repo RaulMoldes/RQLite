@@ -27,7 +27,7 @@ impl Comparator for FixedSizeBytesComparator {
         Ok(lhs[..self.0].cmp(&rhs[..self.0]))
     }
 
-    fn key_size(&self, _data:  &[u8]) -> io::Result<usize> {
+    fn key_size(&self, _data: &[u8]) -> io::Result<usize> {
         Ok(self.0)
     }
 

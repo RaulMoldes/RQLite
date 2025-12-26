@@ -2,7 +2,7 @@ use crate::{
     CELL_ALIGNMENT, SerializationError, SerializationResult, bytemuck_struct,
     multithreading::coordinator::Snapshot,
     schema::{Schema, base::SchemaError},
-    storage::core::buffer::AlignedPayload,
+    storage::core::buffer::{Payload, PayloadRef},
     tree::cell_ops::{AsKeyBytes, Buildable, KeyBytes},
     types::{DataType, DataTypeKind, DataTypeRef, TransactionId},
 };
@@ -255,7 +255,7 @@ impl DeltaHeader {
 /// Delta layout: [DeltaHeader][num_changes: u8][bitmap][changes...]
 /// Each change: [field_idx: u8][value (aligned)]
 #[derive(Debug, Clone)]
-struct TupleLayout {
+pub(crate) struct TupleLayout {
     /// Metadata about the tuple status in the database
     version_xmin: TransactionId,
     /// Set to None if the current version is not deleted
@@ -279,11 +279,312 @@ struct TupleLayout {
     version: u8,
 }
 
-impl TupleLayout {
+// Tuple builder and tuple reader structs allow to avoid storing the schema reference inside the tuple which is annoying
+pub struct TupleReader<'a> {
+    schema: &'a Schema,
+}
+
+pub struct TupleBuilder<'a> {
+    schema: &'a Schema,
+}
+
+/// The tuple reader parses byte arraays and builds tuple layouts.
+impl<'a> TupleBuilder<'a> {
+    pub fn from_schema(schema: &'a Schema) -> Self {
+        Self { schema }
+    }
+
+    #[inline]
+    fn set_null_bit(bitmap: &mut [u8], val_idx: usize, is_null: bool) {
+        let byte_idx = val_idx / 8;
+        let bit_idx = val_idx % 8;
+        if is_null {
+            bitmap[byte_idx] |= 1 << bit_idx;
+        } else {
+            bitmap[byte_idx] &= !(1 << bit_idx);
+        }
+    }
+
+    /// Write the initial content of the tuple to a buffer.
+    fn write_initial(
+        &self,
+        row: &Row,
+        xmin: TransactionId,
+        buffer: &mut [u8],
+    ) -> SerializationResult<usize> {
+        let num_values = self.schema.num_values();
+        let bitmap_size = null_bitmap_size(num_values);
+
+        let header = TupleHeader::new(0, xmin, None);
+        let mut cursor = header.write_to(buffer, 0);
+
+        let bitmap_start = cursor;
+        buffer[cursor..cursor + bitmap_size].fill(0);
+        for (i, _) in self.schema.iter_values().enumerate() {
+            if let Some(val) = row.value(i, self.schema) {
+                if val.is_null() {
+                    Self::set_null_bit(
+                        &mut buffer[bitmap_start..bitmap_start + bitmap_size],
+                        i,
+                        true,
+                    );
+                }
+            }
+        }
+        cursor += bitmap_size;
+
+        for (i, _key_col) in self.schema.iter_keys().enumerate() {
+            if let Some(key) = row.key(i, self.schema) {
+                cursor = key.write_to(buffer, cursor)?;
+            }
+        }
+
+        for (i, _val_col) in self.schema.iter_values().enumerate() {
+            if let Some(val) = row.value(i, self.schema) {
+                if !val.is_null() {
+                    cursor = val.write_to(buffer, cursor)?;
+                }
+            }
+        }
+
+        Ok(cursor)
+    }
+
+    /// Computes the required initial bytes for a tuple to b stored.
+    fn compute_initial_size(&self, row: &Row) -> usize {
+        let num_values = self.schema.num_values();
+        let bitmap_size = null_bitmap_size(num_values);
+
+        let mut cursor = TupleHeader::SIZE + bitmap_size;
+
+        for (i, key_col) in self.schema.iter_keys().enumerate() {
+            let dtype = key_col.datatype();
+            cursor = aligned_offset(cursor, dtype.align());
+            if let Some(key) = row.key(i, self.schema) {
+                cursor += key.runtime_size();
+            }
+        }
+
+        for (i, val_col) in self.schema.iter_values().enumerate() {
+            if let Some(val) = row.value(i, self.schema) {
+                if !val.is_null() {
+                    let dtype = val_col.datatype();
+                    cursor = aligned_offset(cursor, dtype.align());
+                    cursor += val.runtime_size();
+                }
+            }
+        }
+
+        cursor
+    }
+
+    /// Build a tuple from a given row.
+    pub(crate) fn build(&self, row: Row, xmin: TransactionId) -> TupleResult<Tuple> {
+        row.validate(self.schema)?;
+
+        let size = self.compute_initial_size(&row);
+        let mut data = Payload::alloc_aligned(size)?;
+
+        self.write_initial(&row, xmin, data.effective_data_mut())?;
+
+        Ok(Tuple { data })
+    }
+}
+
+/// Inmutable tuple accessor to get access to a single tuple ref.
+pub struct RefTupleAccessor<'a, 'b> {
+    schema: &'a Schema,
+    tuple: TupleRef<'b>,
+}
+
+impl<'a, 'b> RefTupleAccessor<'a, 'b> {
+    pub(crate) fn new(tuple: TupleRef<'b>, schema: &'a Schema) -> Self {
+        Self { schema, tuple }
+    }
+
+    pub(crate) fn key(&self, index: usize) -> TupleResult<DataTypeRef<'_>> {
+        self.tuple.key_with_schema(index, &self.schema)
+    }
+
+    pub(crate) fn value(&self, index: usize) -> TupleResult<DataTypeRef<'_>> {
+        self.tuple.value_with_schema(index, &self.schema)
+    }
+
+    pub(crate) fn is_null(&self, index: usize) -> bool {
+        self.tuple.is_null_with_schema(index, self.schema)
+    }
+
+    pub(crate) fn null_bitmap(&self) -> &[u8] {
+        self.tuple.null_bitmap_with_schema(&self.schema)
+    }
+
+    pub(crate) fn to_row(&self) -> TupleResult<Row> {
+        self.tuple.to_row_with_schema(&self.schema)
+    }
+
+    pub(crate) fn reader(&self) -> TupleReader<'a> {
+        TupleReader {
+            schema: self.schema,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn key_bytes_of(&self) -> KeyBytes<'_> {
+        let layout = self.reader().parse_last_version(self.tuple.data).unwrap();
+        let keys_start = layout.key_offsets[0];
+        let keys_end = layout.value_offsets[0];
+        KeyBytes::from(&self.tuple.data[keys_start..keys_end])
+    }
+
+    #[inline]
+    pub(crate) fn key_bytes_len(&self) -> usize {
+        self.key_bytes_of().len()
+    }
+}
+
+/// Tuple modifier with an owned version of the tuple
+pub struct OwnedTupleAccessor<'a> {
+    tuple: Tuple,
+    schema: &'a Schema,
+}
+
+impl<'a> OwnedTupleAccessor<'a> {
+    fn new(tuple: Tuple, schema: &'a Schema) -> Self {
+        Self { tuple, schema }
+    }
+
+    fn add_version(
+        &mut self,
+        modified: &[(usize, DataType)],
+        new_xmin: TransactionId,
+    ) -> TupleResult<()> {
+        self.tuple
+            .add_version_with_schema(modified, new_xmin, self.schema)
+    }
+
+    fn vaccum_for_snapshot(&mut self, snapshot: &Snapshot) -> TupleResult<usize> {
+        self.tuple.vacuum_with_schema(snapshot.xmin(), self.schema)
+    }
+
+    fn has_history(&self) -> bool {
+        self.tuple.has_history_with_schema(&self.schema)
+    }
+
+    fn num_versions(&self) -> TupleResult<usize> {
+        self.tuple.num_versions_with_schema(self.schema)
+    }
+
+    pub fn reader(&self) -> TupleReader<'a> {
+        TupleReader {
+            schema: self.schema,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn key_bytes_of(&self) -> KeyBytes<'_> {
+        let layout = self
+            .reader()
+            .parse_last_version(self.tuple.data.effective_data())
+            .unwrap();
+        let keys_start = layout.key_offsets[0];
+        let keys_end = layout.value_offsets[0];
+        KeyBytes::from(&self.tuple.data.effective_data()[keys_start..keys_end])
+    }
+
+    #[inline]
+    pub(crate) fn key_bytes_len(&self) -> usize {
+        self.key_bytes_of().len()
+    }
+
+    pub(crate) fn into_data(self) -> Payload {
+        self.tuple.into_data()
+    }
+
+    pub(crate) fn version(&self) -> u8 {
+        self.tuple.version()
+    }
+
+    pub(crate) fn payload_ref(&self) -> PayloadRef<'_> {
+        self.tuple.payload_ref()
+    }
+
+    pub(crate) fn delete(&mut self, transaction_id: TransactionId) -> TupleResult<()> {
+        self.tuple.delete(transaction_id)
+    }
+
+    pub(crate) fn xmin(&self) -> TransactionId {
+        self.tuple.xmin()
+    }
+
+    pub(crate) fn xmax(&self) -> Option<TransactionId> {
+        self.tuple.xmax()
+    }
+
+    pub(crate) fn is_visible(&self, xid: TransactionId) -> bool {
+        self.tuple.is_visible(xid)
+    }
+
+    pub(crate) fn is_deleted(&self) -> bool {
+        self.tuple.is_deleted()
+    }
+}
+
+impl<'a> Buildable for OwnedTupleAccessor<'a> {
+    fn built_size(&self) -> usize {
+        self.tuple.serialized_size()
+    }
+}
+
+impl<'a> AsKeyBytes<'_> for OwnedTupleAccessor<'a> {
+    fn key_bytes(&self) -> KeyBytes<'_> {
+        self.key_bytes_of()
+    }
+
+    fn key_start(&self) -> usize {
+        let reader = self.reader();
+        let layout = reader
+            .parse_last_version(self.tuple.data.effective_data())
+            .unwrap();
+        layout.key_offsets[0]
+    }
+
+    fn key_size(&self) -> usize {
+        self.key_bytes_len()
+    }
+}
+
+impl<'a, 'schema> AsKeyBytes<'a> for RefTupleAccessor<'a, 'schema> {
+    fn key_bytes(&self) -> KeyBytes<'_> {
+        self.key_bytes_of()
+    }
+
+    fn key_start(&self) -> usize {
+        let reader = self.reader();
+        let layout = reader.parse_last_version(self.tuple.data).unwrap();
+        layout.key_offsets[0]
+    }
+
+    fn key_size(&self) -> usize {
+        self.key_bytes_len()
+    }
+}
+
+impl<'schema> From<OwnedTupleAccessor<'schema>> for Payload {
+    fn from(value: OwnedTupleAccessor<'schema>) -> Self {
+        value.tuple.into_data()
+    }
+}
+
+/// The tuple reader parses byte arraays and builds tuple layouts.
+impl<'a> TupleReader<'a> {
+    pub fn from_schema(schema: &'a Schema) -> Self {
+        Self { schema }
+    }
+
     /// Parses the last version of the tuple.
-    fn parse_last_version(data: &[u8], schema: &Schema) -> TupleResult<Self> {
-        let num_values = schema.num_values();
-        let num_keys = schema.num_keys();
+    pub(crate) fn parse_last_version(&self, data: &[u8]) -> TupleResult<TupleLayout> {
+        let num_values = self.schema.num_values();
+        let num_keys = self.schema.num_keys();
         let bitmap_size = null_bitmap_size(num_values);
 
         let (header, header_end) = TupleHeader::read_from(data, 0);
@@ -295,7 +596,7 @@ impl TupleLayout {
         let mut cursor = null_bitmap_start + bitmap_size;
 
         // Parse keys
-        for key_col in schema.iter_keys() {
+        for key_col in self.schema.iter_keys() {
             let dtype = key_col.datatype();
             key_offsets.push(cursor);
             let (_, new_cursor) = dtype.deserialize(data, cursor)?;
@@ -304,7 +605,7 @@ impl TupleLayout {
 
         // Parse values
         let mut value_offsets = Vec::with_capacity(num_values);
-        for (i, val_col) in schema.iter_values().enumerate() {
+        for (i, val_col) in self.schema.iter_values().enumerate() {
             if Self::check_null(null_bitmap, i) {
                 value_offsets.push(cursor); // Placeholder for null
             } else {
@@ -326,29 +627,9 @@ impl TupleLayout {
         })
     }
 
-    #[inline]
-    fn current_version(&self) -> u8 {
-        self.version
-    }
-
-    #[inline]
-    fn delta_start(&self) -> usize {
-        self.data_end
-    }
-
-    #[inline]
-    fn version_xmax(&self) -> Option<TransactionId> {
-        self.version_xmax
-    }
-
-    #[inline]
-    fn version_xmin(&self) -> TransactionId {
-        self.version_xmin
-    }
-
     /// Parses a specific version by traversing deltas.
-    fn parse_version(data: &[u8], schema: &Schema, target_version: u8) -> TupleResult<Self> {
-        let mut layout = Self::parse_last_version(data, schema)?;
+    fn parse_version(&self, data: &[u8], target_version: u8) -> TupleResult<TupleLayout> {
+        let mut layout = self.parse_last_version(data)?;
 
         if target_version > layout.current_version() {
             return Err(TupleError::InvalidVersion(target_version as usize));
@@ -358,7 +639,7 @@ impl TupleLayout {
             return Ok(layout);
         }
 
-        let num_values = schema.num_values();
+        let num_values = self.schema.num_values();
         let bitmap_size = null_bitmap_size(num_values);
         let mut cursor = layout.delta_start();
 
@@ -384,7 +665,8 @@ impl TupleLayout {
                 let field_idx = data[cursor] as usize;
                 cursor += 1;
 
-                let dtype = schema
+                let dtype = self
+                    .schema
                     .value(field_idx)
                     .ok_or(TupleError::ValueError(field_idx))?
                     .datatype();
@@ -402,20 +684,15 @@ impl TupleLayout {
         Ok(layout)
     }
 
-    fn is_valid_for_snapshot(&self, snapshot: &Snapshot) -> bool {
-        let created_before = snapshot.is_committed_before_snapshot(self.version_xmin);
-        if let Some(xmax) = self.version_xmax {
-            return created_before && !snapshot.is_committed_before_snapshot(xmax);
-        }
-        created_before
-    }
-
-    fn parse_for_snapshot(
+    /// Parses a byte array for a specific snapshot.
+    ///
+    /// See [crate::multithreading::Snapshot]
+    pub fn parse_for_snapshot(
+        &self,
         data: &[u8],
-        schema: &Schema,
         snapshot: &Snapshot,
-    ) -> TupleResult<Option<Self>> {
-        let mut layout = Self::parse_last_version(data, schema)?;
+    ) -> TupleResult<Option<TupleLayout>> {
+        let mut layout = self.parse_last_version(data)?;
 
         if let Some(xmax) = layout.version_xmax {
             if snapshot.is_committed_before_snapshot(xmax) {
@@ -427,7 +704,7 @@ impl TupleLayout {
             return Ok(Some(layout));
         }
 
-        let num_values = schema.num_values();
+        let num_values = self.schema.num_values();
         let bitmap_size = null_bitmap_size(num_values);
         let mut cursor = layout.delta_start();
 
@@ -449,11 +726,11 @@ impl TupleLayout {
                 let field_idx = data[cursor] as usize;
                 cursor += 1;
 
-                let dtype = schema
+                let dtype = self
+                    .schema
                     .value(field_idx)
                     .ok_or(TupleError::ValueError(field_idx))?
                     .datatype();
-
 
                 layout.value_offsets[field_idx] = cursor;
                 let (_, new_cursor) = dtype.deserialize(data, cursor)?;
@@ -474,65 +751,54 @@ impl TupleLayout {
         let bit_idx = val_idx % 8;
         (bitmap[byte_idx] & (1 << bit_idx)) != 0
     }
+}
+
+impl TupleLayout {
+    #[inline]
+    fn current_version(&self) -> u8 {
+        self.version
+    }
 
     #[inline]
-    fn set_null_bit(bitmap: &mut [u8], val_idx: usize, is_null: bool) {
-        let byte_idx = val_idx / 8;
-        let bit_idx = val_idx % 8;
-        if is_null {
-            bitmap[byte_idx] |= 1 << bit_idx;
-        } else {
-            bitmap[byte_idx] &= !(1 << bit_idx);
+    fn delta_start(&self) -> usize {
+        self.data_end
+    }
+
+    #[inline]
+    fn version_xmax(&self) -> Option<TransactionId> {
+        self.version_xmax
+    }
+
+    #[inline]
+    fn version_xmin(&self) -> TransactionId {
+        self.version_xmin
+    }
+
+    fn is_valid_for_snapshot(&self, snapshot: &Snapshot) -> bool {
+        let created_before = snapshot.is_committed_before_snapshot(self.version_xmin);
+        if let Some(xmax) = self.version_xmax {
+            return created_before && !snapshot.is_committed_before_snapshot(xmax);
         }
+        created_before
+    }
+
+    pub fn key_start(&self) -> usize {
+        self.key_offsets[0]
+    }
+
+    pub fn key_size(&self) -> usize {
+        self.value_offsets[0].saturating_sub(self.key_start())
     }
 }
 
-pub(crate) struct TupleRef<'a, 'b> {
+pub(crate) struct TupleRef<'a> {
     data: &'a [u8],
-    schema: &'b Schema,
     layout: TupleLayout,
 }
 
-impl<'a, 'b> TupleRef<'a, 'b> {
-    pub(crate) fn read_last_version(buffer: &'a [u8], schema: &'b Schema) -> TupleResult<Self> {
-        let layout = TupleLayout::parse_last_version(buffer, schema)?;
-        Ok(Self {
-            data: buffer,
-            schema,
-            layout,
-        })
-    }
-
-    pub(crate) fn read_version(
-        buffer: &'a [u8],
-        schema: &'b Schema,
-        version: u8,
-    ) -> TupleResult<Self> {
-        let layout = TupleLayout::parse_version(buffer, schema, version)?;
-        Ok(Self {
-            data: buffer,
-            schema,
-            layout,
-        })
-    }
-
-    pub(crate) fn read_for_snapshot(
-        buffer: &'a [u8],
-        schema: &'b Schema,
-        snapshot: &Snapshot,
-    ) -> TupleResult<Option<Self>> {
-        Ok(
-            TupleLayout::parse_for_snapshot(buffer, schema, snapshot)?.map(|layout| Self {
-                data: buffer,
-                schema,
-                layout,
-            }),
-        )
-    }
-
-    #[inline]
-    pub(crate) fn schema(&self) -> &'b Schema {
-        self.schema
+impl<'a> TupleRef<'a> {
+    pub fn new(data: &'a [u8], layout: TupleLayout) -> Self {
+        Self { data, layout }
     }
 
     #[inline]
@@ -545,11 +811,6 @@ impl<'a, 'b> TupleRef<'a, 'b> {
     #[inline]
     pub(crate) fn key_bytes_len(&self) -> usize {
         self.key_bytes().len()
-    }
-
-    #[inline]
-    pub(crate) fn num_fields(&self) -> usize {
-        self.schema.num_columns()
     }
 
     #[inline]
@@ -595,18 +856,23 @@ impl<'a, 'b> TupleRef<'a, 'b> {
         self.version_xmin() <= xid
     }
 
-    fn null_bitmap(&self) -> &[u8] {
+    fn null_bitmap_with_schema(&self, schema: &Schema) -> &[u8] {
         let start = self.layout.null_bitmap_start;
-        let len = null_bitmap_size(self.schema.num_values());
+        let len = null_bitmap_size(schema.num_values());
         &self.data[start..start + len]
     }
 
-    fn is_null(&self, val_idx: usize) -> bool {
-        TupleLayout::check_null(self.null_bitmap(), val_idx)
+    fn is_null_with_schema(&self, val_idx: usize, schema: &Schema) -> bool {
+        TupleReader::check_null(self.null_bitmap_with_schema(schema), val_idx)
     }
 
-    pub(crate) fn key(&self, index: usize) -> TupleResult<DataTypeRef<'_>> {
-        if index >= self.schema.num_keys() {
+    /// Returns the key found at a specific index
+    pub(crate) fn key_with_schema(
+        &self,
+        index: usize,
+        schema: &Schema,
+    ) -> TupleResult<DataTypeRef<'_>> {
+        if index >= schema.num_keys() {
             return Err(TupleError::KeyError(index));
         }
 
@@ -615,18 +881,22 @@ impl<'a, 'b> TupleRef<'a, 'b> {
             .key_offsets
             .get(index)
             .ok_or(TupleError::KeyError(index))?;
-        let key_col = self.schema.key(index).ok_or(TupleError::KeyError(index))?;
+        let key_col = schema.key(index).ok_or(TupleError::KeyError(index))?;
         let dtype = key_col.datatype();
         let (value, _) = dtype.deserialize(self.data, *cursor)?;
         Ok(value)
     }
 
-    pub(crate) fn value(&self, index: usize) -> TupleResult<DataTypeRef<'_>> {
-        if index >= self.schema.num_values() {
+    pub(crate) fn value_with_schema(
+        &self,
+        index: usize,
+        schema: &Schema,
+    ) -> TupleResult<DataTypeRef<'_>> {
+        if index >= schema.num_values() {
             return Err(TupleError::ValueError(index));
         }
 
-        if self.is_null(index) {
+        if self.is_null_with_schema(index, schema) {
             return Ok(DataTypeRef::Null);
         }
 
@@ -635,8 +905,7 @@ impl<'a, 'b> TupleRef<'a, 'b> {
             .value_offsets
             .get(index)
             .ok_or(TupleError::ValueError(index))?;
-        let dtype = self
-            .schema
+        let dtype = schema
             .value(index)
             .ok_or(TupleError::ValueError(index))?
             .datatype();
@@ -645,16 +914,16 @@ impl<'a, 'b> TupleRef<'a, 'b> {
         Ok(value)
     }
 
-    pub(crate) fn to_row(&self) -> TupleResult<Row> {
-        let mut data = Vec::with_capacity(self.num_fields());
+    pub(crate) fn to_row_with_schema(&self, schema: &Schema) -> TupleResult<Row> {
+        let mut data = Vec::with_capacity(schema.num_columns());
 
-        for i in 0..self.schema.num_keys() {
-            let key_ref = self.key(i)?;
+        for i in 0..schema.num_keys() {
+            let key_ref = self.key_with_schema(i, schema)?;
             data.push(key_ref.to_owned().unwrap_or(DataType::Null));
         }
 
-        for i in 0..self.schema.num_values() {
-            let val_ref = self.value(i)?;
+        for i in 0..schema.num_values() {
+            let val_ref = self.value_with_schema(i, schema)?;
             data.push(val_ref.to_owned().unwrap_or(DataType::Null));
         }
 
@@ -666,202 +935,43 @@ impl<'a, 'b> TupleRef<'a, 'b> {
 /// Delta: [DeltaHeader][num_changes: u8][bitmap][changes...]
 /// Change: [field_idx: u8][value (aligned)]
 #[derive(Clone)]
-pub(crate) struct Tuple<'schema> {
-    data: AlignedPayload,
-    schema: &'schema Schema,
+pub(crate) struct Tuple {
+    data: Payload,
 }
 
-impl<'schema> Tuple<'schema> {
-    pub(crate) fn new(row: Row, schema: &'schema Schema, xmin: TransactionId) -> TupleResult<Self> {
-        row.validate(schema)?;
-
-        let size = Self::calculate_initial_size(&row, schema);
-        let mut data = AlignedPayload::alloc_aligned(size)?;
-
-        Self::write_initial(&row, schema, xmin, data.data_mut())?;
-
-        Ok(Self { data, schema })
-    }
-
+impl Tuple {
     /// Consumes the tuple and returns the aligned payload behind
-    pub(crate) fn into_data(self) -> AlignedPayload {
+    pub(crate) fn into_data(self) -> Payload {
         self.data
     }
 
-    fn calculate_initial_size(row: &Row, schema: &Schema) -> usize {
-        let num_values = schema.num_values();
-        let bitmap_size = null_bitmap_size(num_values);
-
-        let mut cursor = TupleHeader::SIZE + bitmap_size;
-
-        for (i, key_col) in schema.iter_keys().enumerate() {
-            let dtype = key_col.datatype();
-            cursor = aligned_offset(cursor, dtype.align());
-            if let Some(key) = row.key(i, schema) {
-                cursor += key.runtime_size();
-            }
-        }
-
-        for (i, val_col) in schema.iter_values().enumerate() {
-            if let Some(val) = row.value(i, schema) {
-                if !val.is_null() {
-                    let dtype = val_col.datatype();
-                    cursor = aligned_offset(cursor, dtype.align());
-                    cursor += val.runtime_size();
-                }
-            }
-        }
-
-        cursor
-    }
-
-    fn write_initial(
-        row: &Row,
-        schema: &Schema,
-        xmin: TransactionId,
-        buffer: &mut [u8],
-    ) -> SerializationResult<usize> {
-        let num_values = schema.num_values();
-        let bitmap_size = null_bitmap_size(num_values);
-
-        let header = TupleHeader::new(0, xmin, None);
-        let mut cursor = header.write_to(buffer, 0);
-
-        let bitmap_start = cursor;
-        buffer[cursor..cursor + bitmap_size].fill(0);
-        for (i, _) in schema.iter_values().enumerate() {
-            if let Some(val) = row.value(i, schema) {
-                if val.is_null() {
-                    TupleLayout::set_null_bit(
-                        &mut buffer[bitmap_start..bitmap_start + bitmap_size],
-                        i,
-                        true,
-                    );
-                }
-            }
-        }
-        cursor += bitmap_size;
-
-        for (i, _key_col) in schema.iter_keys().enumerate() {
-            if let Some(key) = row.key(i, schema) {
-                cursor = key.write_to(buffer, cursor)?;
-            }
-        }
-
-        for (i, _val_col) in schema.iter_values().enumerate() {
-            if let Some(val) = row.value(i, schema) {
-                if !val.is_null() {
-                    cursor = val.write_to(buffer, cursor)?;
-                }
-            }
-        }
-
-        Ok(cursor)
-    }
-
-    pub(crate) fn as_ref(&self) -> TupleRef<'_, 'schema> {
-        let layout = TupleLayout::parse_last_version(self.data.data(), self.schema).unwrap();
-        TupleRef {
-            data: self.data.data(),
-            schema: self.schema,
-            layout,
-        }
-    }
-
     #[inline]
-    pub(crate) fn key_bytes(&self) -> KeyBytes<'_> {
-        let layout = TupleLayout::parse_last_version(self.data.data(), self.schema).unwrap();
-        let keys_start = layout.key_offsets[0];
-        let keys_end = layout.value_offsets[0];
-        KeyBytes::from(&self.data.as_ref()[keys_start..keys_end])
+    pub(crate) fn payload_ref(&self) -> PayloadRef<'_> {
+        self.data.as_payload_ref()
     }
 
     #[inline]
     pub(crate) fn data(&self) -> &[u8] {
-        self.data.data()
+        self.data.effective_data()
     }
 
     #[inline]
     pub(crate) fn data_mut(&mut self) -> &mut [u8] {
-        self.data.data_mut()
-    }
-
-    #[inline]
-    pub(crate) fn key_bytes_len(&self) -> usize {
-        self.as_ref().key_bytes_len()
-    }
-
-    pub(crate) fn key(&self, index: usize) -> TupleResult<DataTypeRef<'_>> {
-        if index >= self.schema.num_keys() {
-            return Err(TupleError::KeyError(index));
-        }
-
-        let layout = TupleLayout::parse_last_version(self.data.data(), self.schema)?;
-        let cursor = layout
-            .key_offsets
-            .get(index)
-            .ok_or(TupleError::KeyError(index))?;
-        let key_col = self.schema.key(index).ok_or(TupleError::KeyError(index))?;
-        let dtype = key_col.datatype();
-        let (value, _) = dtype.deserialize(self.data.as_ref(), *cursor)?;
-        Ok(value)
-    }
-
-    pub(crate) fn value(&self, index: usize) -> TupleResult<DataTypeRef<'_>> {
-        if index >= self.schema.num_values() {
-            return Err(TupleError::ValueError(index));
-        }
-
-        let layout = TupleLayout::parse_last_version(self.data.data(), self.schema)?;
-        let bitmap_size = null_bitmap_size(self.schema.num_values());
-        let null_bitmap =
-            &self.data.data()[layout.null_bitmap_start..layout.null_bitmap_start + bitmap_size];
-
-        if TupleLayout::check_null(null_bitmap, index) {
-            return Ok(DataTypeRef::Null);
-        }
-
-        let offset = layout
-            .value_offsets
-            .get(index)
-            .ok_or(TupleError::ValueError(index))?;
-        let dtype = self
-            .schema
-            .value(index)
-            .ok_or(TupleError::ValueError(index))?
-            .datatype();
-
-        let (value, _) = dtype.deserialize(self.data.as_ref(), *offset)?;
-        Ok(value)
-    }
-
-    #[inline]
-    pub(crate) fn num_keys(&self) -> usize {
-        self.schema.num_keys()
-    }
-
-    #[inline]
-    pub(crate) fn num_values(&self) -> usize {
-        self.schema.num_values()
-    }
-
-    #[inline]
-    pub(crate) fn num_fields(&self) -> usize {
-        self.schema.num_columns()
+        self.data.effective_data_mut()
     }
 
     pub(crate) fn version(&self) -> u8 {
-        let (header, _) = TupleHeader::read_from(self.data.data(), 0);
+        let (header, _) = TupleHeader::read_from(self.data.effective_data(), 0);
         header.version()
     }
 
     pub(crate) fn xmin(&self) -> TransactionId {
-        let (header, _) = TupleHeader::read_from(self.data.data(), 0);
+        let (header, _) = TupleHeader::read_from(self.data.effective_data(), 0);
         header.xmin()
     }
 
     pub(crate) fn xmax(&self) -> Option<TransactionId> {
-        let (header, _) = TupleHeader::read_from(self.data.data(), 0);
+        let (header, _) = TupleHeader::read_from(self.data.effective_data(), 0);
         header.xmax()
     }
 
@@ -882,30 +992,35 @@ impl<'schema> Tuple<'schema> {
     ///
     /// Delta layout: [DeltaHeader][num_changes: u8][bitmap][changes...]
     /// Each change: [field_idx: u8][value (aligned)]
-    pub(crate) fn add_version(
+    pub(crate) fn add_version_with_schema(
         &mut self,
         modified: &[(usize, DataType)],
         new_xmin: TransactionId,
+        schema: &Schema,
     ) -> TupleResult<()> {
         // Validate modifications
         for (i, value) in modified {
-            let col = self.schema.value(*i).ok_or(TupleError::ValueError(*i))?;
+            let col = schema.value(*i).ok_or(TupleError::ValueError(*i))?;
             if !value.is_null() && col.datatype() != value.kind() {
                 return Err(TupleError::DataTypeMismatch((*i, col.datatype())));
             }
         }
 
-        let layout = TupleLayout::parse_last_version(self.data.data(), self.schema)?;
-        let old_version = layout.version;
-        let old_xmin = layout.version_xmin;
+        let reader = TupleReader::from_schema(schema);
+        let layout = reader.parse_last_version(self.data.effective_data())?;
+        let tuple_reference = TupleRef::new(self.data.effective_data(), layout);
+        let layout = tuple_reference.layout.clone();
+
+        let old_version = tuple_reference.current_version();
+        let old_xmin = tuple_reference.version_xmin();
         let current_end = self.data.len();
-        let num_values = self.schema.num_values();
+        let num_values = schema.num_values();
         let bitmap_size = null_bitmap_size(num_values);
 
         // Collect old values for delta
         let mut old_values: Vec<(u8, DataType)> = Vec::with_capacity(modified.len());
         for (i, _) in modified {
-            let val_ref = self.value(*i)?;
+            let val_ref = tuple_reference.value_with_schema(*i, schema)?;
             old_values.push((*i as u8, val_ref.to_owned().unwrap_or(DataType::Null)));
         }
 
@@ -929,7 +1044,7 @@ impl<'schema> Tuple<'schema> {
 
         // Reallocate buffer
         self.data.realloc(new_size)?;
-        let buffer = self.data.data_mut();
+        let buffer = self.data.effective_data_mut();
 
         // Write delta header
         let delta_header = DeltaHeader::new(old_version, old_xmin);
@@ -950,7 +1065,7 @@ impl<'schema> Tuple<'schema> {
         for (idx, old_value) in &old_values {
             // Update delta bitmap for old null state
             if old_value.is_null() {
-                TupleLayout::set_null_bit(
+                TupleBuilder::set_null_bit(
                     &mut buffer[bitmap_start..bitmap_start + bitmap_size],
                     *idx as usize,
                     true,
@@ -969,7 +1084,7 @@ impl<'schema> Tuple<'schema> {
         for (i, new_value) in modified {
             let new_null = new_value.is_null();
 
-            TupleLayout::set_null_bit(
+            TupleBuilder::set_null_bit(
                 &mut buffer[current_bitmap_start..current_bitmap_start + bitmap_size],
                 *i,
                 new_null,
@@ -995,7 +1110,7 @@ impl<'schema> Tuple<'schema> {
             return Ok(());
         }
 
-        let buffer = self.data.data_mut();
+        let buffer = self.data.effective_data_mut();
         let (mut header, _) = TupleHeader::read_from(buffer, 0);
         header.xmax = xid as i64;
         header.write_to(buffer, 0);
@@ -1003,38 +1118,46 @@ impl<'schema> Tuple<'schema> {
         Ok(())
     }
 
-    pub(crate) fn vacuum(&mut self, oldest_active_xid: TransactionId) -> TupleResult<usize> {
-        let layout = TupleLayout::parse_last_version(self.data.data(), self.schema)?;
+    /// Vaccums the tuple by deleting all versions that are not visible by the oldest [TransactionId].
+    ///
+    /// Truncates the delta directory removing older versions.
+    pub(crate) fn vacuum_with_schema(
+        &mut self,
+        oldest_active_xid: TransactionId,
+        schema: &Schema,
+    ) -> TupleResult<usize> {
+        let reader = TupleReader::from_schema(schema);
+        let layout = reader.parse_last_version(self.data.effective_data())?;
 
         if layout.delta_start() >= self.data.len() {
             return Ok(0);
         }
 
-        let num_values = self.schema.num_values();
+        let num_values = schema.num_values();
         let bitmap_size = null_bitmap_size(num_values);
         let mut cursor = layout.delta_start();
         let mut last_needed_end = layout.delta_start();
 
         while cursor < self.data.len() {
-            let (delta_header, header_end) = DeltaHeader::read_from(self.data.data(), cursor);
+            let (delta_header, header_end) =
+                DeltaHeader::read_from(self.data.effective_data(), cursor);
 
             if delta_header.xmin() >= oldest_active_xid {
                 // Read num_changes and skip this delta
-                let num_changes = self.data.data()[header_end] as usize;
+                let num_changes = self.data.effective_data()[header_end] as usize;
                 let mut skip_cursor = header_end + 1 + bitmap_size;
 
                 for _ in 0..num_changes {
-                    let field_idx = self.data.data()[skip_cursor] as usize;
+                    let field_idx = self.data.effective_data()[skip_cursor] as usize;
                     skip_cursor += 1;
 
-                    let dtype = self
-                        .schema
+                    let dtype = schema
                         .value(field_idx)
                         .ok_or(TupleError::ValueError(field_idx))?
                         .datatype();
 
-
-                    let (_, new_cursor) = dtype.deserialize(self.data.data(), skip_cursor)?;
+                    let (_, new_cursor) =
+                        dtype.deserialize(self.data.effective_data(), skip_cursor)?;
                     skip_cursor = new_cursor;
                 }
 
@@ -1053,43 +1176,45 @@ impl<'schema> Tuple<'schema> {
         Ok(freed)
     }
 
-    pub(crate) fn vacuum_for_snapshot(&mut self, snapshot: &Snapshot) -> TupleResult<usize> {
-        self.vacuum(snapshot.xmin())
-    }
-
-    pub(crate) fn has_history(&self) -> bool {
-        let layout = TupleLayout::parse_last_version(self.data.data(), self.schema).unwrap();
+    pub(crate) fn has_history_with_schema(&self, schema: &Schema) -> bool {
+        let reader = TupleReader::from_schema(schema);
+        let layout = reader
+            .parse_last_version(self.data.effective_data())
+            .unwrap();
         layout.delta_start() < self.data.len()
     }
 
-    pub(crate) fn num_versions(&self) -> TupleResult<usize> {
-        let layout = TupleLayout::parse_last_version(self.data.data(), self.schema)?;
+    /// Parses the delta directory and counts the number of active versions in the tuple at this point in time.
+    pub(crate) fn num_versions_with_schema(&self, schema: &Schema) -> TupleResult<usize> {
+        let reader = TupleReader::from_schema(schema);
+        let layout = reader
+            .parse_last_version(self.data.effective_data())
+            .unwrap();
 
         if layout.delta_start() >= self.data.len() {
             return Ok(1);
         }
 
-        let num_values = self.schema.num_values();
+        let num_values = schema.num_values();
         let bitmap_size = null_bitmap_size(num_values);
         let mut cursor = layout.delta_start();
         let mut count = 1;
 
         while cursor < self.data.len() {
-            let (_, header_end) = DeltaHeader::read_from(self.data.data(), cursor);
-            let num_changes = self.data.data()[header_end] as usize;
+            let (_, header_end) = DeltaHeader::read_from(self.data.effective_data(), cursor);
+            let num_changes = self.data.effective_data()[header_end] as usize;
             cursor = header_end + 1 + bitmap_size;
 
             for _ in 0..num_changes {
-                let field_idx = self.data.data()[cursor] as usize;
+                let field_idx = self.data.effective_data()[cursor] as usize;
                 cursor += 1;
 
-                let dtype = self
-                    .schema
+                let dtype = schema
                     .value(field_idx)
                     .ok_or(TupleError::ValueError(field_idx))?
                     .datatype();
 
-                let (_, new_cursor) = dtype.deserialize(self.data.data(), cursor)?;
+                let (_, new_cursor) = dtype.deserialize(self.data.effective_data(), cursor)?;
                 cursor = new_cursor;
             }
 
@@ -1099,63 +1224,36 @@ impl<'schema> Tuple<'schema> {
         Ok(count)
     }
 
-    pub(crate) fn into_row(self) -> TupleResult<Row> {
-        self.as_ref().to_row()
-    }
-
     #[inline]
     pub(crate) fn len(&self) -> usize {
         self.data.len()
     }
 
-    pub(crate) fn read_from(buffer: &[u8], schema: &'schema Schema) -> TupleResult<Self> {
-        let _ = TupleLayout::parse_last_version(buffer, schema)?;
-
-        let mut data = AlignedPayload::alloc_aligned(buffer.len())?;
-        data.data_mut().copy_from_slice(buffer);
-
-        Ok(Self { data, schema })
+    /// Read the tuple from an unaligned buffer (allocates memory)
+    pub(crate) fn from_slice_unchecked(buffer: &[u8]) -> TupleResult<Self> {
+        let mut data = Payload::alloc_aligned(buffer.len())?;
+        data.effective_data_mut().copy_from_slice(buffer);
+        Ok(Self { data })
     }
 
+    /// Writes the contents of the tuple to a buffer.
     pub(crate) fn write_to(&self, buffer: &mut [u8]) -> SerializationResult<usize> {
-        let len = self.data.len();
-        buffer[..len].copy_from_slice(self.data.data());
+        let len = self.data.full_data().len();
+        buffer[..len].copy_from_slice(self.data.full_data());
         Ok(len)
     }
 
+    /// Returns the total serialized size of the tuple.
     pub(crate) fn serialized_size(&self) -> usize {
-        self.data.len()
-    }
-}
-
-impl<'schema> Buildable for Tuple<'schema> {
-    fn built_size(&self) -> usize {
-        self.data.len().next_multiple_of(CELL_ALIGNMENT as usize)
+        self.data.full_data().len()
     }
 
-    fn key_bounds(&self) -> (usize, usize) {
-        let layout = TupleLayout::parse_last_version(self.data.data(), self.schema).unwrap();
-        let keys_start = layout.key_offsets[0];
-        let keys_end = layout.value_offsets[0];
-        (keys_start, keys_end)
-    }
-}
-
-impl<'schema> AsKeyBytes<'_> for Tuple<'schema> {
-    fn as_key_bytes(&self) -> KeyBytes<'_> {
-        self.key_bytes()
-    }
-}
-
-impl<'a, 'schema> AsKeyBytes<'a> for TupleRef<'a, 'schema> {
-    fn as_key_bytes(&self) -> KeyBytes<'_> {
-        self.key_bytes()
-    }
-}
-
-impl<'schema> From<Tuple<'schema>> for AlignedPayload {
-    fn from(value: Tuple<'schema>) -> Self {
-        value.into_data()
+    /// Consumes the tuple and creates a tuple accessor that can be used to create cells.
+    pub(crate) fn into_buildable_with_schema(self, schema: &Schema) -> OwnedTupleAccessor {
+        OwnedTupleAccessor {
+            tuple: self,
+            schema,
+        }
     }
 }
 
@@ -1197,23 +1295,32 @@ mod tuple_tests {
     fn test_tuple_new() {
         let schema = test_schema();
         let row = test_row();
-        let tuple = Tuple::new(row, &schema, 1).unwrap();
+
+        let builder = TupleBuilder::from_schema(&schema);
+        let tuple = builder.build(row, 1).unwrap();
 
         assert_eq!(tuple.version(), 0);
         assert_eq!(tuple.xmin(), 1);
         assert_eq!(tuple.xmax(), None);
         assert!(!tuple.is_deleted());
-        assert_eq!(tuple.num_keys(), 1);
-        assert_eq!(tuple.num_values(), 3);
     }
 
     #[test]
     fn test_tuple_key_access() {
         let schema = test_schema();
         let row = test_row();
-        let tuple = Tuple::new(row, &schema, 1).unwrap();
+        let builder = TupleBuilder::from_schema(&schema);
+        let tuple = builder.build(row, 1).unwrap();
 
-        match tuple.key(0).unwrap() {
+        let reader = TupleReader::from_schema(&schema);
+        let layout = reader
+            .parse_last_version(tuple.data.effective_data())
+            .unwrap();
+        let reference = TupleRef::new(tuple.data.effective_data(), layout);
+
+        let accessor = RefTupleAccessor::new(reference, &schema);
+
+        match accessor.key(0).unwrap() {
             DataTypeRef::BigInt(v) => assert_eq!(v.value(), 1),
             _ => panic!("Expected BigInt"),
         }
@@ -1223,9 +1330,18 @@ mod tuple_tests {
     fn test_tuple_value_access() {
         let schema = test_schema();
         let row = test_row();
-        let tuple = Tuple::new(row, &schema, 1).unwrap();
+        let builder = TupleBuilder::from_schema(&schema);
+        let tuple = builder.build(row, 1).unwrap();
 
-        match tuple.value(1).unwrap() {
+        let reader = TupleReader::from_schema(&schema);
+        let layout = reader
+            .parse_last_version(tuple.data.effective_data())
+            .unwrap();
+        let reference = TupleRef::new(tuple.data.effective_data(), layout);
+
+        let accessor = RefTupleAccessor::new(reference, &schema);
+
+        match accessor.value(1).unwrap() {
             DataTypeRef::BigInt(v) => assert_eq!(v.value(), 30),
             _ => panic!("Expected BigInt"),
         }
@@ -1235,21 +1351,31 @@ mod tuple_tests {
     fn test_tuple_with_nulls() {
         let schema = test_schema();
         let row = test_row_with_nulls();
-        let tuple = Tuple::new(row, &schema, 1).unwrap();
+        let builder = TupleBuilder::from_schema(&schema);
+        let tuple = builder.build(row, 1).unwrap();
 
-        assert!(matches!(tuple.value(0).unwrap(), DataTypeRef::Null));
-        match tuple.value(1).unwrap() {
+        let reader = TupleReader::from_schema(&schema);
+        let layout = reader
+            .parse_last_version(tuple.data.effective_data())
+            .unwrap();
+        let reference = TupleRef::new(tuple.data.effective_data(), layout);
+
+        let accessor = RefTupleAccessor::new(reference, &schema);
+
+        assert!(matches!(accessor.value(0).unwrap(), DataTypeRef::Null));
+        match accessor.value(1).unwrap() {
             DataTypeRef::BigInt(v) => assert_eq!(v.value(), 30),
             _ => panic!("Expected BigInt"),
         }
-        assert!(matches!(tuple.value(2).unwrap(), DataTypeRef::Null));
+        assert!(matches!(accessor.value(2).unwrap(), DataTypeRef::Null));
     }
 
     #[test]
     fn test_tuple_delete() {
         let schema = test_schema();
         let row = test_row();
-        let mut tuple = Tuple::new(row, &schema, 1).unwrap();
+        let builder = TupleBuilder::from_schema(&schema);
+        let mut tuple = builder.build(row, 1).unwrap();
 
         assert!(!tuple.is_deleted());
         tuple.delete(10).unwrap();
@@ -1261,7 +1387,8 @@ mod tuple_tests {
     fn test_tuple_visibility() {
         let schema = test_schema();
         let row = test_row();
-        let tuple = Tuple::new(row, &schema, 5).unwrap();
+        let builder = TupleBuilder::from_schema(&schema);
+        let tuple = builder.build(row, 1).unwrap();
 
         assert!(!tuple.is_visible(4));
         assert!(tuple.is_visible(5));
@@ -1272,7 +1399,8 @@ mod tuple_tests {
     fn test_tuple_deleted_visibility() {
         let schema = test_schema();
         let row = test_row();
-        let mut tuple = Tuple::new(row, &schema, 5).unwrap();
+        let builder = TupleBuilder::from_schema(&schema);
+        let mut tuple = builder.build(row, 1).unwrap();
         tuple.delete(15).unwrap();
 
         assert!(!tuple.is_visible(4));
@@ -1287,35 +1415,35 @@ mod tuple_tests {
     fn test_tuple_serialization_roundtrip() {
         let schema = test_schema();
         let row = test_row();
-        let tuple = Tuple::new(row, &schema, 1).unwrap();
+        let builder = TupleBuilder::from_schema(&schema);
+        let tuple = builder.build(row, 1).unwrap();
 
         let size = tuple.serialized_size();
         let mut buffer = vec![0u8; size];
         let written = tuple.write_to(&mut buffer).unwrap();
         assert_eq!(written, size);
 
-        let loaded = Tuple::read_from(&buffer, &schema).unwrap();
+        let loaded = Tuple::from_slice_unchecked(&buffer).unwrap();
         assert_eq!(loaded.version(), tuple.version());
         assert_eq!(loaded.xmin(), tuple.xmin());
-    }
-
-    #[test]
-    fn test_tuple_into_row() {
-        let schema = test_schema();
-        let row = test_row();
-        let tuple = Tuple::new(row, &schema, 1).unwrap();
-
-        let recovered = tuple.into_row().unwrap();
-        assert_eq!(recovered.len(), 4);
     }
 
     #[test]
     fn test_tuple_ref_key_bytes() {
         let schema = test_schema();
         let row = test_row();
-        let tuple = Tuple::new(row, &schema, 1).unwrap();
+        let builder = TupleBuilder::from_schema(&schema);
+        let tuple = builder.build(row, 1).unwrap();
 
-        let key_bytes = tuple.key_bytes();
+        let reader = TupleReader::from_schema(&schema);
+        let layout = reader
+            .parse_last_version(tuple.data.effective_data())
+            .unwrap();
+        let reference = TupleRef::new(tuple.data.effective_data(), layout);
+
+        let accessor = RefTupleAccessor::new(reference, &schema);
+
+        let key_bytes = accessor.key_bytes();
         assert!(!key_bytes.is_empty());
     }
 
@@ -1323,20 +1451,30 @@ mod tuple_tests {
     fn test_tuple_add_version() {
         let schema = test_schema();
         let row = test_row();
-        let mut tuple = Tuple::new(row, &schema, 1).unwrap();
+        let builder = TupleBuilder::from_schema(&schema);
+        let tuple = builder.build(row, 1).unwrap();
 
-        assert_eq!(tuple.version(), 0);
-        assert!(!tuple.has_history());
+        let mut accessor = OwnedTupleAccessor::new(tuple, &schema);
+
+        assert_eq!(accessor.version(), 0);
+        assert!(!accessor.has_history());
 
         let modifications = vec![(1, DataType::BigInt(Int64(31)))];
-        tuple.add_version(&modifications, 10).unwrap();
+        accessor.add_version(&modifications, 10).unwrap();
 
-        assert_eq!(tuple.version(), 1);
-        assert!(tuple.has_history());
-        assert_eq!(tuple.num_versions().unwrap(), 2);
-        assert_eq!(tuple.xmin(), 10);
+        assert_eq!(accessor.version(), 1);
+        assert!(accessor.has_history());
+        assert_eq!(accessor.num_versions().unwrap(), 2);
+        assert_eq!(accessor.xmin(), 10);
 
-        match tuple.value(1).unwrap() {
+        let reader = TupleReader::from_schema(&schema);
+        let layout = reader
+            .parse_last_version(accessor.tuple.data.effective_data())
+            .unwrap();
+        let reference = TupleRef::new(accessor.tuple.data.effective_data(), layout);
+        let accessor = RefTupleAccessor::new(reference, &schema);
+
+        match accessor.value(1).unwrap() {
             DataTypeRef::BigInt(v) => assert_eq!(v.value(), 31),
             _ => panic!("Expected BigInt"),
         }
@@ -1346,22 +1484,32 @@ mod tuple_tests {
     fn test_tuple_version_history_read() {
         let schema = test_schema();
         let row = test_row();
-        let mut tuple = Tuple::new(row, &schema, 1).unwrap();
+        let builder = TupleBuilder::from_schema(&schema);
+        let tuple = builder.build(row, 1).unwrap();
+        let mut accessor = OwnedTupleAccessor::new(tuple, &schema);
 
-        tuple
+        accessor
             .add_version(&[(1, DataType::BigInt(Int64(31)))], 10)
             .unwrap();
 
-        let buffer = tuple.data();
-
-        let ref_v1 = TupleRef::read_version(buffer, &schema, 1).unwrap();
-        match ref_v1.value(1).unwrap() {
+        let reader = TupleReader::from_schema(&schema);
+        let layout = reader
+            .parse_last_version(accessor.tuple.data.effective_data())
+            .unwrap();
+        let ref_v1 = TupleRef::new(accessor.tuple.data.effective_data(), layout);
+        let ref_accessor = RefTupleAccessor::new(ref_v1, &schema);
+        match ref_accessor.value(1).unwrap() {
             DataTypeRef::BigInt(v) => assert_eq!(v.value(), 31),
             _ => panic!("Expected BigInt"),
         }
 
-        let ref_v0 = TupleRef::read_version(buffer, &schema, 0).unwrap();
-        match ref_v0.value(1).unwrap() {
+        let reader = TupleReader::from_schema(&schema);
+        let layout = reader
+            .parse_last_version(accessor.tuple.data.effective_data())
+            .unwrap();
+        let ref_v0 = TupleRef::new(accessor.tuple.data.effective_data(), layout);
+        let ref_accessor = RefTupleAccessor::new(ref_v0, &schema);
+        match ref_accessor.value(1).unwrap() {
             DataTypeRef::BigInt(v) => assert_eq!(v.value(), 30),
             _ => panic!("Expected BigInt"),
         }

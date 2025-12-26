@@ -29,6 +29,7 @@ pub struct RefTrait {
     pub ref_trait_path: TokenStream, // Path to the trait that has the [::Ref] implementation
     pub ref_assoc_type: Ident,       // Trait associated type
     pub to_owned_trait_path: TokenStream,
+    pub as_bytes_method: Ident, //
 }
 
 impl RefTrait {
@@ -44,6 +45,10 @@ impl RefTrait {
         &self.ref_assoc_type
     }
 
+    pub fn as_bytes_method(&self) -> &Ident {
+        &self.as_bytes_method
+    }
+
     fn parse(attrs: &[Attribute]) -> SynResult<Option<Self>> {
         let Some(attr) = attrs.iter().find(|a| a.path().is_ident("ref_trait")) else {
             return Ok(None);
@@ -52,6 +57,7 @@ impl RefTrait {
         let mut trait_path = None;
         let mut assoc_type = None;
         let mut owned_trait = None;
+        let mut as_bytes_method = None;
 
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("ref_trait") {
@@ -63,6 +69,9 @@ impl RefTrait {
             } else if meta.path.is_ident("assoc_type") {
                 let v: LitStr = meta.value()?.parse()?;
                 assoc_type = Some(format_ident!("{}", v.value()));
+            } else if meta.path.is_ident("as_bytes_conversor") {
+                let v: LitStr = meta.value()?.parse()?;
+                as_bytes_method = Some(format_ident!("{}", v.value()));
             }
             Ok(())
         })?;
@@ -74,6 +83,8 @@ impl RefTrait {
                 .ok_or_else(|| SynError::new_spanned(attr, "missing 'assoc_type'"))?,
             to_owned_trait_path: owned_trait
                 .ok_or_else(|| SynError::new_spanned(attr, "missing 'owned_trait'"))?,
+            as_bytes_method: as_bytes_method
+                .ok_or_else(|| SynError::new_spanned(attr, "missing 'as_bytes_conversor'"))?,
         }))
     }
 }
@@ -547,6 +558,7 @@ fn autogen_ref_enum(info: &EnumInfo) -> TokenStream {
     let trait_path = dr.trait_path();
     let owned_trait = dr.owned_trait_path();
     let assoc = dr.associated_type();
+    let as_bytes = dr.as_bytes_method();
 
     let variants: Vec<_> = info
         .iter_variants()
@@ -585,6 +597,18 @@ fn autogen_ref_enum(info: &EnumInfo) -> TokenStream {
         })
         .collect();
 
+    let as_bytes_arms: Vec<_> = info
+        .iter_variants()
+        .map(|v| {
+            let vn = v.name();
+            if let Some(ty) = v.inner_type() {
+                quote! { Self::#vn(inner) => <<#ty as #trait_path>::#assoc<'a> as #owned_trait>::#as_bytes(inner) }
+            } else {
+                quote! { Self::#vn => &[] }
+            }
+        })
+        .collect();
+
     quote! {
         #[derive(Debug, Clone, Copy)]
         pub enum #ref_name<'a> { #(#variants,)* }
@@ -593,6 +617,7 @@ fn autogen_ref_enum(info: &EnumInfo) -> TokenStream {
             #[inline] pub fn kind(&self) -> #kind_name { match self { #(#kind_arms,)* } }
             #[inline] pub fn is_null(&self) -> bool { self.kind().is_null() }
             #[inline] pub fn to_owned(&self) -> Option<#main_name> { match self {#(#to_owned_arms,)*}  }
+            #[inline] pub fn as_bytes(&self) -> &[u8] { match self {#(#as_bytes_arms,)*}  }
         }
     }
 }
@@ -714,6 +739,9 @@ fn autogen_delegates(info: &EnumInfo) -> TokenStream {
                         DelegateKind::Method => {
                             let call_expr = if let Some(ca) = d.call_args() {
                                 quote! { <#ty as #trait_path>::#original_name(#ca) }
+                            } else if target == DelegateTarget::Ref {
+                                // For ref target, call the trait method directly on inner (which is already the Ref type)
+                                quote! { #trait_path::#original_name(inner) }
                             } else if d.consumes_itself() {
                                 quote! { <#ty as #trait_path>::#original_name(inner) }
                             } else {

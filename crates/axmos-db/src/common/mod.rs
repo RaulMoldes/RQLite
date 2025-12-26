@@ -27,8 +27,8 @@ pub(crate) const DEFAULT_POOL_SIZE: usize = 10; // Ten workers by default.
 pub(crate) const DEFAULT_BTREE_MIN_KEYS: usize = 3;
 pub(crate) const DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE: usize = 3;
 
-/// Cells are aligned to 64 bits.
-pub(crate) const CELL_ALIGNMENT: usize = 64;
+/// Cells are aligned to 64 bits (8 bytes).
+pub(crate) const CELL_ALIGNMENT: usize = 8;
 
 /// [`O_DIRECT`] flag in Linux systems requires that buffers are aligned to at least the logical block size of the block device which is typically 4096 bytes.
 /// TODO: There should be a way to query this value to the system dynamically.

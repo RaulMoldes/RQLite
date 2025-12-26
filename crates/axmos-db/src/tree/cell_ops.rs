@@ -1,18 +1,22 @@
 use crate::{
     CELL_ALIGNMENT,
+    core::RuntimeSized,
     io::pager::SharedPager,
-    multithreading::coordinator::Snapshot,
-    schema::Schema,
     storage::{
         cell::{CELL_HEADER_SIZE, CellRef, OwnedCell, Slot},
-        core::{buffer::AlignedPayload, traits::BtreeOps},
+        core::{buffer::Payload, traits::BtreeOps},
         page::{BtreePage, OverflowPage},
     },
     tree::comparators::Comparator,
     types::{PageId, core::TypeClass},
 };
-use std::ops::Deref;
-use std::{cmp::min, io, mem, usize};
+
+use std::{
+    cmp::{Ordering, min},
+    io, mem,
+    ops::Deref,
+    usize,
+};
 
 /// The cell builder is a type of accessor that is only used to build cells.
 /// As such, it can bypass the accessor and use the pager methods directly.
@@ -46,17 +50,16 @@ where
         &self,
         target: KeyBytes<'_>,
         cell: CellRef<'b>,
-    ) -> io::Result<std::cmp::Ordering> {
+    ) -> io::Result<Ordering> {
         let ordering = if cell.metadata().is_overflow() {
             // If the cell is overflow we need to reassemble.
-            let keys_start = cell.keys_start();
-            let key_size = self.comparator.key_size(&cell.payload()[keys_start..])?;
+            let key_start = cell.key_start();
+            let key_size = cell.key_size();
             let mut reassembler =
                 Reassembler::with_capacity_and_max_size(self.pager.clone(), key_size);
             reassembler.reassemble(cell)?;
 
-            self.comparator
-                .compare(target, reassembler.key_bytes())?
+            self.comparator.compare(target, reassembler.key_bytes())?
         } else {
             // Otherwise we can just compare the raw payload without copying or moving data.
             self.comparator.compare(target, cell.key_bytes())?
@@ -71,6 +74,7 @@ where
 pub(crate) struct Reassembler {
     pager: SharedPager,
     max_size: usize,
+    key_start: usize,
     key_size: usize,
     reassembled: Vec<u8>,
 }
@@ -79,6 +83,7 @@ impl Reassembler {
     pub(crate) fn new(pager: SharedPager) -> Self {
         Self {
             pager,
+            key_start: 0,
             key_size: 0, // Unset at the beginning
             max_size: usize::MAX,
             reassembled: Vec::new(),
@@ -89,6 +94,7 @@ impl Reassembler {
     pub(crate) fn with_capacity(pager: SharedPager, cap: usize) -> Self {
         Self {
             pager,
+            key_start: 0,
             key_size: 0,
             max_size: usize::MAX,
             reassembled: Vec::with_capacity(cap),
@@ -99,6 +105,7 @@ impl Reassembler {
     pub(crate) fn with_capacity_and_max_size(pager: SharedPager, cap: usize) -> Self {
         Self {
             pager,
+            key_start: 0,
             key_size: 0,
             max_size: cap,
             reassembled: Vec::with_capacity(cap),
@@ -110,32 +117,30 @@ impl Reassembler {
         // Clear the reassembled vec to be able to reuse the same reasssembler accross slots.
         self.reassembled.clear();
 
-        self.key_size = cell.key_bytes().len();
+        self.key_start = cell.key_start();
+        self.key_size = cell.key_size();
 
         if cell.metadata().is_overflow() {
             // First part is in the cell (minus the overflow page pointer)
             let first_part_len = cell.len() - mem::size_of::<PageId>();
             self.reassembled
-                .extend_from_slice(&cell.payload()[..first_part_len]);
+                .extend_from_slice(&cell.effective_data()[..first_part_len]);
 
             // Rest is in overflow pages
             let mut current_page = cell.overflow_page();
             while let Some(page_id) = current_page
                 && self.max_size >= self.reassembled.len()
             {
-                let (next, data) = self
-                    .pager
+                self.pager
                     .write()
                     .with_page::<OverflowPage, _, _>(page_id, |overflow| {
-                        (overflow.metadata().next, overflow.payload().to_vec())
+                        current_page = overflow.metadata().next;
+                        self.reassembled
+                            .extend_from_slice(&overflow.effective_data());
                     })?;
-
-                self.reassembled.extend_from_slice(&data);
-
-                current_page = next;
             }
         } else {
-            self.reassembled.extend_from_slice(cell.payload());
+            self.reassembled.extend_from_slice(cell.effective_data());
         }
 
         Ok(())
@@ -143,7 +148,7 @@ impl Reassembler {
 
     /// Returns the [KeyBytes] of the reassembled payload
     pub(crate) fn key_bytes(&self) -> KeyBytes<'_> {
-        KeyBytes::from(&self.reassembled[..self.key_size])
+        KeyBytes::from(&self.reassembled[self.key_start..self.key_start + self.key_size])
     }
 
     pub(crate) fn into_boxed_slice(self) -> Box<[u8]> {
@@ -254,17 +259,18 @@ impl CellBuilder {
         };
 
         // At this point we have to split the payload.
-        let (keys_start, keys_end) = data.key_bounds();
-        let payload_boxed: AlignedPayload = data.into();
-        let payload = payload_boxed.as_slice();
+        let key_start = data.key_start();
+        let key_size = data.key_size();
+        let payload_boxed: Payload = data.into();
+        let payload = payload_boxed.effective_data();
 
         let mut overflow_page_number = self.pager.write().allocate_page::<OverflowPage>()?;
 
-        let cell = OwnedCell::new_overflow(
+        let cell = OwnedCell::new_overflow_with_key_bounds(
             &payload[..max_payload_size],
             overflow_page_number,
-            keys_start,
-            keys_end,
+            key_start,
+            key_size,
         );
 
         let mut stored_bytes = max_payload_size;
@@ -279,9 +285,7 @@ impl CellBuilder {
             self.pager.write().with_page_mut::<OverflowPage, _, _>(
                 overflow_page_number,
                 |overflow_page| {
-                    overflow_page.data_mut()[..overflow_bytes]
-                        .copy_from_slice(&payload[stored_bytes..stored_bytes + overflow_bytes]);
-                    overflow_page.metadata_mut().num_bytes = overflow_bytes as _;
+                    overflow_page.push_bytes(&payload[stored_bytes..stored_bytes + overflow_bytes]);
                     overflow_page.metadata_mut().next = None;
                     stored_bytes += overflow_bytes;
                 },
@@ -309,9 +313,8 @@ impl CellBuilder {
 }
 
 /// Custom trait to add information about the serialized size of the data before converting into a cell. Allows to know the size of the payload in advance.
-pub trait Buildable: Into<OwnedCell> + Into<AlignedPayload> {
+pub trait Buildable: Into<OwnedCell> + Into<Payload> + for<'a> AsKeyBytes<'a> {
     fn built_size(&self) -> usize;
-    fn key_bounds(&self) -> (usize, usize);
 }
 
 /// On cells payload, keys are stored at the beginning always.
@@ -348,21 +351,33 @@ impl<'a> AsRef<[u8]> for KeyBytes<'a> {
 
 // Type to obtain the key bytes for the implementor type
 pub(crate) trait AsKeyBytes<'a> {
-    fn as_key_bytes(&'a self) -> KeyBytes<'a>;
+    /// Reference to the keys of the target object
+    fn key_bytes(&'a self) -> KeyBytes<'a>;
+
+    /// Offset where the keys start in the payload
+    fn key_start(&self) -> usize;
+
+    /// Size of the keys section in bytes.
+    fn key_size(&self) -> usize;
 }
 
 /// All types in the typesystem implement [AsKeyBytes] (used in tests)
 impl<'a, T> AsKeyBytes<'a> for T
 where
-    T: AsRef<[u8]> + TypeClass,
+    T: AsRef<[u8]> + TypeClass + RuntimeSized,
 {
-    fn as_key_bytes(&'a self) -> KeyBytes<'a> {
+    fn key_bytes(&'a self) -> KeyBytes<'a> {
         KeyBytes(self.as_ref())
     }
+
+    fn key_start(&self) -> usize {
+        0
+    }
+
+    fn key_size(&self) -> usize {
+        self.runtime_size()
+    }
 }
-
-
-
 
 impl<'a> Deref for KeyBytes<'a> {
     type Target = [u8];

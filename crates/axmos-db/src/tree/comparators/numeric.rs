@@ -188,7 +188,7 @@ impl Comparator for NumericComparator {
         Ok(a.cmp(&b))
     }
 
-    fn key_size(&self, _data:  &[u8]) -> io::Result<usize> {
+    fn key_size(&self, _data: &[u8]) -> io::Result<usize> {
         Ok(self.0)
     }
 

@@ -6,7 +6,7 @@ use std::{
     io::{self, Error as IoError, ErrorKind},
     iter,
     mem::{self, ManuallyDrop},
-    ops::{Bound, RangeBounds},
+    ops::{Bound, Deref, DerefMut, RangeBounds},
     ptr::NonNull,
     slice,
 };
@@ -711,12 +711,12 @@ where
     /// Fails if the computed offset is not aligned to the required [CELL_ALIGNMENT]
     /// or if the cell does not fit in the page.
     fn insert(&mut self, index: usize, cell: OwnedCell) -> io::Result<usize> {
-        if cell.data().len() > self.max_allowed_payload_size() as usize {
+        if cell.full_data().len() > self.max_allowed_payload_size() as usize {
             return Err(IoError::new(
                 ErrorKind::InvalidInput,
                 format!(
                     "attempt to store payload of size {} when max allowed payload size is {}",
-                    cell.data().len(),
+                    cell.full_data().len(),
                     self.max_allowed_payload_size()
                 ),
             ));
@@ -760,12 +760,20 @@ where
 
         let offset = self.free_space_pointer() - cell.total_size() as u32;
 
+        println!(
+            "Inserting cell size: {}, at offset: {}",
+            cell_total_size, offset
+        );
+        // REVIEW
         if !(cell_total_size as usize).is_multiple_of(CELL_ALIGNMENT as usize)
             || !(offset as usize).is_multiple_of(CELL_ALIGNMENT as usize)
         {
             return Err(IoError::new(
                 ErrorKind::InvalidData,
-                "attempted to insert with an unaligned cell size.",
+                format!(
+                    "attempted to insert with an unaligned cell size: {}, at offset: {}",
+                    cell_total_size, offset
+                ),
             ));
         };
 
@@ -818,7 +826,8 @@ where
 
             // Overwrite the datas of the old cell.
             let mut old_cell = self.cell_mut(index);
-            old_cell.data_mut()[..new_cell.data().len()].copy_from_slice(new_cell.data());
+            old_cell.full_data_mut()[..new_cell.full_data().len()]
+                .copy_from_slice(&new_cell.full_data());
             *old_cell.metadata_mut() = *new_cell.metadata();
 
             self.free_space_pointer_down(free_bytes);
@@ -948,12 +957,12 @@ where
 
 /// Aligned payload allows to create cells directly without copying data.
 #[derive(Debug)]
-pub(crate) struct AlignedPayload {
+pub(crate) struct Payload {
     ptr: NonNull<[u8]>,
     effective_size: usize,
 }
 
-impl AlignedPayload {
+impl Payload {
     pub(crate) fn alloc_aligned(total_size: usize) -> Result<Self, AllocError> {
         let aligned_size = total_size.next_multiple_of(CELL_ALIGNMENT as usize);
         let layout = Layout::from_size_align(aligned_size, CELL_ALIGNMENT as usize)
@@ -990,56 +999,256 @@ impl AlignedPayload {
     }
 
     #[inline]
-    pub(crate) fn data(&self) -> &[u8] {
+    pub(crate) fn effective_data(&self) -> &[u8] {
         unsafe { &self.ptr.as_ref()[..self.effective_size] }
     }
 
     #[inline]
-    pub(crate) fn data_mut(&mut self) -> &mut [u8] {
+    pub(crate) fn effective_data_mut(&mut self) -> &mut [u8] {
         unsafe { &mut self.ptr.as_mut()[..self.effective_size] }
     }
 
+    /// Full allocated slice (including padding beyond effective_size)
     #[inline]
-    pub(crate) fn as_slice(&self) -> &[u8] {
-        unsafe { &self.ptr.as_ref() }
+    pub(crate) fn full_data(&self) -> &[u8] {
+        unsafe { self.ptr.as_ref() }
+    }
+
+    /// Full allocated slice (including padding beyond effective_size)
+    #[inline]
+    pub(crate) fn full_data_mut(&mut self) -> &mut [u8] {
+        unsafe { self.ptr.as_mut() }
     }
 
     #[inline]
     pub(crate) fn len(&self) -> usize {
         self.effective_size
     }
+
+    #[inline]
+    pub(crate) fn capacity(&self) -> usize {
+        self.ptr.len()
+    }
+
+    /// Get immutable reference wrapper
+    pub fn as_payload_ref(&self) -> PayloadRef<'_> {
+        PayloadRef::new(self.full_data(), self.effective_size)
+    }
+
+    /// Get mutable reference wrapper
+    pub fn as_payload_mut(&mut self) -> PayloadMut<'_> {
+        let cap = self.ptr.len();
+        let eff = self.effective_size;
+        PayloadMut::new(unsafe { self.ptr.as_mut() }, eff)
+    }
 }
 
-impl Drop for AlignedPayload {
+impl Drop for Payload {
     fn drop(&mut self) {
         let layout = Layout::from_size_align(self.ptr.len(), CELL_ALIGNMENT as usize).unwrap();
-
         unsafe {
             Global.deallocate(self.ptr.cast(), layout);
         }
     }
 }
 
-impl AsRef<[u8]> for AlignedPayload {
+impl AsRef<[u8]> for Payload {
     fn as_ref(&self) -> &[u8] {
-        self.as_slice()
+        self.full_data()
     }
 }
 
-impl Clone for AlignedPayload {
+impl Clone for Payload {
     fn clone(&self) -> Self {
         let mut new = Self::alloc_aligned(self.effective_size).unwrap();
-        new.data_mut().copy_from_slice(self.data());
+        new.full_data_mut().copy_from_slice(self.full_data());
         new
     }
 }
 
-impl<T: AsRef<[u8]>> From<&T> for AlignedPayload {
+impl<T: AsRef<[u8]>> From<&T> for Payload {
     fn from(value: &T) -> Self {
         let data = value.as_ref();
         let mut payload = Self::alloc_aligned(data.len()).unwrap();
-        payload.data_mut().copy_from_slice(data);
+        payload.effective_data_mut().copy_from_slice(data);
         payload
+    }
+}
+
+/// Immutable reference to payload data with effective size tracking
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PayloadRef<'a> {
+    data: &'a [u8],
+    effective_size: usize,
+}
+
+impl<'a> PayloadRef<'a> {
+    pub fn new(data: &'a [u8], effective_size: usize) -> Self {
+        Self {
+            data,
+            effective_size,
+        }
+    }
+
+    /// Effective length (without padding)
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.effective_size
+    }
+
+    /// Full capacity including padding
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.data.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.effective_size == 0
+    }
+
+    /// Effective data (without padding)
+    #[inline]
+    pub fn effective_data(&self) -> &[u8] {
+        &self.data[..self.effective_size]
+    }
+
+    /// Full data including padding
+    #[inline]
+    pub fn full_data(&self) -> &[u8] {
+        self.data
+    }
+
+    /// Convert to owned Payload by copying
+    pub fn to_owned(&self) -> Payload {
+        let mut payload = Payload::alloc_aligned(self.effective_size).unwrap();
+        payload
+            .effective_data_mut()
+            .copy_from_slice(self.effective_data());
+        payload
+    }
+}
+
+impl<'a> Deref for PayloadRef<'a> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.full_data()
+    }
+}
+
+impl<'a> AsRef<[u8]> for PayloadRef<'a> {
+    fn as_ref(&self) -> &[u8] {
+        self.full_data()
+    }
+}
+
+impl From<PayloadRef<'_>> for Payload {
+    fn from(r: PayloadRef<'_>) -> Self {
+        r.to_owned()
+    }
+}
+
+/// Mutable reference to payload data with effective size tracking
+#[derive(Debug)]
+pub(crate) struct PayloadMut<'a> {
+    data: &'a mut [u8],
+    effective_size: usize,
+}
+
+impl<'a> PayloadMut<'a> {
+    pub fn new(data: &'a mut [u8], effective_size: usize) -> Self {
+        Self {
+            data,
+            effective_size,
+        }
+    }
+
+    /// Effective length (without padding)
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.effective_size
+    }
+
+    /// Full capacity including padding
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.data.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.effective_size == 0
+    }
+
+    /// Effective data (without padding)
+    #[inline]
+    pub fn effective_data(&self) -> &[u8] {
+        &self.data[..self.effective_size]
+    }
+
+    /// Mutable effective data (without padding)
+    #[inline]
+    pub fn effective_data_mut(&mut self) -> &mut [u8] {
+        &mut self.data[..self.effective_size]
+    }
+
+    /// Full data including padding
+    #[inline]
+    pub fn full_data(&self) -> &[u8] {
+        self.data
+    }
+
+    /// Full mutable data including padding
+    #[inline]
+    pub fn full_data_mut(&mut self) -> &mut [u8] {
+        self.data
+    }
+
+    /// Downgrade to immutable reference
+    pub fn as_payload_ref(&self) -> PayloadRef<'_> {
+        PayloadRef::new(self.data, self.effective_size)
+    }
+
+    /// Convert to owned Payload by copying
+    pub fn to_owned(&self) -> Payload {
+        let mut payload = Payload::alloc_aligned(self.effective_size).unwrap();
+        payload
+            .effective_data_mut()
+            .copy_from_slice(self.effective_data());
+        payload
+    }
+}
+
+impl<'a> Deref for PayloadMut<'a> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.full_data()
+    }
+}
+
+impl<'a> DerefMut for PayloadMut<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.full_data_mut()
+    }
+}
+
+impl<'a> AsRef<[u8]> for PayloadMut<'a> {
+    fn as_ref(&self) -> &[u8] {
+        self.full_data()
+    }
+}
+
+impl<'a> AsMut<[u8]> for PayloadMut<'a> {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.full_data_mut()
+    }
+}
+
+impl From<PayloadMut<'_>> for Payload {
+    fn from(m: PayloadMut<'_>) -> Self {
+        m.to_owned()
     }
 }
 

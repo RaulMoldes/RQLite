@@ -2,14 +2,13 @@
 use crate::{
     CELL_ALIGNMENT, MAX_PAGE_SIZE, MIN_PAGE_SIZE, bytemuck_slice,
     storage::{
-        Allocatable, WalMetadata,
+        Allocatable, WalMetadata, WritableLayout,
         core::{
             buffer::MemBlock,
             traits::{AvailableSpace, ComposedMetadata, Identifiable},
         },
     },
     types::{BlockId, Lsn, ObjectId, TransactionId},
-    writable_layout,
 };
 
 const MIN_WAL_BLOCK_SIZE: usize = MIN_PAGE_SIZE;
@@ -372,8 +371,29 @@ impl<'a> RecordRef<'a> {
     }
 }
 
-writable_layout!(RecordRef<'_>, RecordHeader, header, data, lifetime);
-writable_layout!(OwnedRecord, RecordHeader, header, payload);
+impl WritableLayout for OwnedRecord {
+    type Header = RecordHeader;
+
+    fn header(&self) -> &Self::Header {
+        &self.header
+    }
+
+    fn content(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+impl<'a> WritableLayout for RecordRef<'a> {
+    type Header = RecordHeader;
+
+    fn header(&self) -> &Self::Header {
+        &self.header
+    }
+
+    fn content(&self) -> &[u8] {
+        &self.data
+    }
+}
 
 pub(crate) type BlockZero = MemBlock<BlockZeroHeader>;
 pub(crate) type WalBlock = MemBlock<BlockHeader>;

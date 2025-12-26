@@ -1,11 +1,11 @@
 use crate::{
     DBConfig,
     io::pager::{Pager, SharedPager},
-    storage::{cell::OwnedCell, page::BtreePage, core::buffer::AlignedPayload},
+    storage::{cell::OwnedCell, core::buffer::Payload, page::BtreePage},
     tree::{
         accessor::{Accessor, BtreeWriteAccessor},
         bplustree::{Btree, BtreeError, BtreeResult, SearchResult},
-        cell_ops::{AsKeyBytes, KeyBytes, Buildable},
+        cell_ops::{AsKeyBytes, Buildable, KeyBytes},
         comparators::{
             Comparator, DynComparator,
             numeric::{NumericComparator, SignedNumericComparator},
@@ -102,18 +102,22 @@ macro_rules! fixed_size_test_key {
             }
         }
 
-        impl From<$name> for $crate::storage::core::buffer::AlignedPayload {
+        impl From<$name> for $crate::storage::core::buffer::Payload {
             fn from(value: $name) -> Self {
                 let data = value.as_ref();
                 let mut payload = Self::alloc_aligned(data.len()).unwrap();
-                payload.data_mut().copy_from_slice(data);
+                payload.effective_data_mut().copy_from_slice(data);
                 payload
             }
         }
 
         impl From<$name> for $crate::storage::cell::OwnedCell {
             fn from(key: $name) -> $crate::storage::cell::OwnedCell {
-                $crate::storage::cell::OwnedCell::new_with_keys(key.as_ref(), 0, std::mem::size_of::<$inner>())
+                $crate::storage::cell::OwnedCell::new_with_key_bounds(
+                    key.as_ref(),
+                    0,
+                    std::mem::size_of::<$inner>(),
+                )
             }
         }
 
@@ -121,15 +125,19 @@ macro_rules! fixed_size_test_key {
             fn built_size(&self) -> usize {
                 std::mem::size_of::<$inner>()
             }
-
-            fn key_bounds(&self) -> (usize, usize) {
-                (0, self.built_size())
-            }
         }
 
         impl<'a> $crate::tree::cell_ops::AsKeyBytes<'a> for $name {
-            fn as_key_bytes(&'a self) -> $crate::tree::cell_ops::KeyBytes<'a> {
+            fn key_bytes(&'a self) -> $crate::tree::cell_ops::KeyBytes<'a> {
                 $crate::tree::cell_ops::KeyBytes::from(self.as_ref())
+            }
+
+            fn key_start(&self) -> usize {
+                0
+            }
+
+            fn key_size(&self) -> usize {
+                self.built_size()
             }
         }
     };
@@ -210,7 +218,7 @@ impl From<TestVarKey> for Box<[u8]> {
 
 impl From<TestVarKey> for OwnedCell {
     fn from(key: TestVarKey) -> OwnedCell {
-        OwnedCell::new_with_keys(&key.encoded, 0, key.encoded.len())
+        OwnedCell::new_with_key_bounds(&key.encoded, 0, key.encoded.len())
     }
 }
 
@@ -218,24 +226,28 @@ impl Buildable for TestVarKey {
     fn built_size(&self) -> usize {
         self.encoded.len()
     }
-
-    fn key_bounds(&self) -> (usize, usize) {
-        (0, self.encoded.len())
-    }
 }
 
-impl From<TestVarKey> for AlignedPayload {
+impl From<TestVarKey> for Payload {
     fn from(value: TestVarKey) -> Self {
         let data = value.as_ref();
         let mut payload = Self::alloc_aligned(data.len()).unwrap();
-        payload.data_mut().copy_from_slice(data);
+        payload.effective_data_mut().copy_from_slice(data);
         payload
     }
 }
 
 impl<'a> AsKeyBytes<'a> for TestVarKey {
-    fn as_key_bytes(&'a self) -> KeyBytes<'a> {
+    fn key_bytes(&'a self) -> KeyBytes<'a> {
         KeyBytes::from(self.encoded.as_slice())
+    }
+
+    fn key_start(&self) -> usize {
+        0
+    }
+
+    fn key_size(&self) -> usize {
+        self.encoded.len()
     }
 }
 
@@ -452,7 +464,7 @@ pub fn assert_key_exists<K, Cmp: Comparator + Clone>(
 where
     K: for<'a> AsKeyBytes<'a>,
 {
-    let key_bytes = key.as_key_bytes();
+    let key_bytes = key.key_bytes();
     match tree.search(key_bytes)? {
         SearchResult::Found(_) => {
             tree.accessor_mut()?.clear();
@@ -473,7 +485,7 @@ pub fn assert_key_missing<K, Cmp: Comparator + Clone>(
 where
     K: for<'a> AsKeyBytes<'a>,
 {
-    let key_bytes = key.as_key_bytes();
+    let key_bytes = key.key_bytes();
     match tree.search(key_bytes)? {
         SearchResult::Found(_) => {
             tree.accessor_mut()?.clear();

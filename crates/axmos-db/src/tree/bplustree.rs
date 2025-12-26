@@ -1,15 +1,18 @@
 use crate::{
     io::pager::SharedPager,
+    multithreading::coordinator::Snapshot,
     multithreading::frames::{Frame, MemFrame},
+    schema::base::Schema,
     storage::{
         BtreeOps,
         cell::OwnedCell,
-        core::buffer::MemBlock,
+        core::buffer::{MemBlock, PayloadRef},
         page::{BtreePage, OverflowPage},
+        tuple::{RefTupleAccessor, Row, TupleError, TupleReader, TupleRef},
     },
     tree::{
         accessor::{Accessor, PositionStack, ReadAccessor, WriteAccessor},
-        cell_ops::{AsKeyBytes, Buildable},
+        cell_ops::Buildable,
     },
     types::{PAGE_ZERO, PageId},
 };
@@ -58,6 +61,7 @@ pub enum BtreeError {
     InvalidPointer(String),
     DuplicatedKey(String),
     NonExistentKey(String),
+    TupleReadError(TupleError),
     Other(String),
 }
 
@@ -71,6 +75,7 @@ impl Display for BtreeError {
             Self::BtreeUnintialized => f.write_str("btree not initialized"),
             Self::NonExistentKey(str) => write!(f, "key {str} does not exist"),
             Self::DuplicatedKey(str) => write!(f, "key {str} is duplicated"),
+            Self::TupleReadError(err) => write!(f, "Tuple read error {err}"),
             Self::InvalidIterator(pos) => write!(
                 f,
                 "Btree iterator received an invalid position to iterate over: ({}, {})",
@@ -89,6 +94,12 @@ impl Error for BtreeError {}
 impl From<IoError> for BtreeError {
     fn from(value: IoError) -> Self {
         Self::Io(value)
+    }
+}
+
+impl From<TupleError> for BtreeError {
+    fn from(value: TupleError) -> Self {
+        Self::TupleReadError(value)
     }
 }
 
@@ -177,7 +188,6 @@ where
     pub(crate) fn is_initialized(&self) -> bool {
         self.accessor.is_some()
     }
-
 
     fn is_root(&self, id: PageId) -> bool {
         self.root == id
@@ -443,6 +453,28 @@ where
         }
     }
 
+    /// Utility to get a row at a specific position in the tree.
+    ///
+    /// TODO: Decouple this function from [Schema] and [Snapshot] by using a [BtreeReader] or some data additional data structure.
+    pub(crate) fn get_row_at(
+        &mut self,
+        pos: Position<P>,
+        schema: &Schema,
+        snapshot: &Snapshot,
+    ) -> BtreeResult<Option<Row>> {
+        self.with_cell_at(pos, |bytes| {
+            let reader = TupleReader::from_schema(&schema);
+            if let Some(layout) = reader.parse_for_snapshot(bytes, &snapshot)? {
+                let tuple = TupleRef::new(bytes, layout);
+                let accessor = RefTupleAccessor::new(tuple, &schema);
+                let row = accessor.to_row()?;
+                Ok(Some(row))
+            } else {
+                Ok(None)
+            }
+        })?
+    }
+
     /// Executes a callback on the cell at the given position.
     /// For overflow cells, reassembles the full payload first.
     /// For normal cells, passes the payload directly to avoid copying.
@@ -460,7 +492,7 @@ where
             reassembler.reassemble(cell)?;
             f(reassembler.into_boxed_slice().as_ref())
         } else {
-            f(cell.payload())
+            f(cell.effective_data())
         };
 
         Ok(result)
@@ -498,7 +530,7 @@ where
                     reassembler.reassemble(cell)?;
                     f(pos, reassembler.clone().into_boxed_slice().as_ref())
                 } else {
-                    f(pos, cell.payload())
+                    f(pos, cell.effective_data())
                 };
 
                 indexed_results.push((original_idx, result));
@@ -592,12 +624,8 @@ where
 
     /// Inserts a key at the corresponding position in the Btree.
     /// Returns an [BtreeError] if the key already exists.
-    pub(crate) fn insert<T: Buildable + for<'a> AsKeyBytes<'a>>(
-        &mut self,
-        page_id: PageId,
-        data: T,
-    ) -> BtreeResult<()> {
-        let key = data.as_key_bytes();
+    pub(crate) fn insert<T: Buildable>(&mut self, page_id: PageId, data: T) -> BtreeResult<()> {
+        let key = data.key_bytes();
 
         let search_result = self.search(key)?;
 
@@ -624,12 +652,12 @@ where
     /// Uses the [find_slot] function in order to find the best fit slot for the cell given its key.
     /// Assumes the page is a leaf page.
     /// This method must not be called on interior nodes.
-    pub(crate) fn insert_cell<T: Buildable + for<'a> AsKeyBytes<'a>>(
+    pub(crate) fn insert_cell<T: Buildable>(
         &mut self,
         page_id: PageId,
         data: T,
     ) -> BtreeResult<()> {
-        let key = data.as_key_bytes();
+        let key = data.key_bytes();
 
         let max_cell_storage_size = {
             let page = self.get_page(page_id)?;
@@ -662,14 +690,10 @@ where
 
     /// Updates the cell content on a given leaf page at the given [Position].
     /// Assumes the position pointer is valid and the page is a leaf page.
-    fn update_cell<T: Buildable + for<'a> AsKeyBytes<'a>>(
-        &mut self,
-        pos: Position<P>,
-        data: T,
-    ) -> BtreeResult<()> {
+    fn update_cell<T: Buildable>(&mut self, pos: Position<P>, data: T) -> BtreeResult<()> {
         let page_id = pos.entry();
         let slot = pos.slot();
-        let key = data.as_key_bytes();
+        let key = data.key_bytes();
 
         let max_cell_storage_size = {
             let page = self.get_page_mut(page_id)?;
@@ -692,12 +716,8 @@ where
 
     /// Inserts a key at the corresponding position in the Btree.
     /// Updates its contents if it already exists.
-    pub(crate) fn upsert<T: Buildable + for<'a> AsKeyBytes<'a>>(
-        &mut self,
-        page_id: PageId,
-        data: T,
-    ) -> BtreeResult<()> {
-        let key = data.as_key_bytes();
+    pub(crate) fn upsert<T: Buildable>(&mut self, page_id: PageId, data: T) -> BtreeResult<()> {
+        let key = data.key_bytes();
         let start_pos: Position<P> = Position::start_pos(page_id);
         let search_result = self.search(key)?;
 
@@ -716,13 +736,9 @@ where
 
     /// Updates a key at the corresponding position in the Btree.
     /// Returns an [IoError] if the key is not found.
-    pub(crate) fn update<T: Buildable + for<'a> AsKeyBytes<'a>>(
-        &mut self,
-        page_id: PageId,
-        data: T,
-    ) -> BtreeResult<()> {
+    pub(crate) fn update<T: Buildable>(&mut self, page_id: PageId, data: T) -> BtreeResult<()> {
         let start_pos: Position<P> = Position::start_pos(page_id);
-        let key = data.as_key_bytes();
+        let key = data.key_bytes();
         let search_result = self.search(key)?;
 
         match search_result {
@@ -1765,12 +1781,12 @@ where
 
         if !page.is_empty() {
             let cell = page.cell(0);
-            let key = cell.payload();
+            let key = cell.key_bytes();
             string.push_str(&format!("{key:?}"));
 
             for i in 1..page.num_slots() {
                 string.push(',');
-                string.push_str(&format!("{:?}", &page.cell(i).payload()));
+                string.push_str(&format!("{:?}", &page.cell(i).effective_data()));
             }
         }
 

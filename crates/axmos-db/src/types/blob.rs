@@ -1,7 +1,10 @@
 use crate::{
     SerializationResult,
-    core::{DeserializableType, RefTrait, RuntimeSized, SerializableType},
-    tree::{cell_ops::AsKeyBytes, comparators::{Comparator, VarlenComparator}},
+    core::{DeserializableType, Hashable, RefTrait, RuntimeSized, SerializableType},
+    tree::{
+        cell_ops::{AsKeyBytes, KeyBytes},
+        comparators::{Comparator, VarlenComparator},
+    },
     types::{
         SerializationError, TypeSystemResult, VarInt,
         core::{NumericType, TypeCast, TypeClass, TypeRef, VarlenType},
@@ -145,7 +148,7 @@ impl Eq for Blob {}
 impl PartialOrd for Blob {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let comparator = VarlenComparator;
-        comparator.compare(self.as_key_bytes(), other.as_key_bytes()).ok()
+        comparator.compare(self.key_bytes(), other.key_bytes()).ok()
     }
 }
 
@@ -247,7 +250,21 @@ impl<'a> Eq for BlobRef<'a> {}
 impl<'a> PartialOrd for BlobRef<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let comparator = VarlenComparator;
-        comparator.compare(self.as_key_bytes(), other.as_key_bytes()).ok()
+        comparator.compare(self.key_bytes(), other.key_bytes()).ok()
+    }
+}
+
+impl<'a> AsKeyBytes<'a> for BlobRef<'a> {
+    fn key_bytes(&'a self) -> KeyBytes<'a> {
+        KeyBytes::from(self.as_ref())
+    }
+
+    fn key_size(&self) -> usize {
+        self.total_length()
+    }
+
+    fn key_start(&self) -> usize {
+        0
     }
 }
 
@@ -277,6 +294,10 @@ impl<'a> TypeRef<'a> for BlobRef<'a> {
 
     fn to_owned(&self) -> Self::Owned {
         self.to_blob()
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.as_ref()
     }
 }
 

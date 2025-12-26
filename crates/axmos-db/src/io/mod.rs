@@ -6,7 +6,6 @@ pub mod cache;
 pub mod disk;
 //pub mod logger;
 
-
 pub mod pager;
 pub mod wal;
 

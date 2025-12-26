@@ -11,7 +11,9 @@
 //! - [`FixedSizeBytesComparator`]: Lexicographic comparison (byte-by-byte)
 //! - [`VarlenComparator`]: Variable-length with VarInt prefix, lexicographic data
 
-use crate::{schema::stats::Selectivity, tree::cell_ops::KeyBytes, types::VarInt, varint::MAX_VARINT_LEN};
+use crate::{
+    schema::stats::Selectivity, tree::cell_ops::KeyBytes, types::VarInt, varint::MAX_VARINT_LEN,
+};
 
 use std::{
     cmp::Ordering,
@@ -121,7 +123,7 @@ pub(crate) trait Ranger: Comparator {
     /// Selectivity range
     ///
     /// From a value range, represented by two byte values, return the estimated selectivity
-    fn selectivity_range(&self, min: KeyBytes<'_>, max:  KeyBytes<'_>) -> io::Result<Selectivity> {
+    fn selectivity_range(&self, min: KeyBytes<'_>, max: KeyBytes<'_>) -> io::Result<Selectivity> {
         return Ok(Selectivity::Uncomputable);
     }
 }
@@ -131,7 +133,7 @@ pub(crate) trait Comparator {
     fn compare(&self, lhs: KeyBytes<'_>, rhs: KeyBytes<'_>) -> io::Result<Ordering>;
 
     /// Returns the size of a key from its byte representation.
-    fn key_size(&self, data:  &[u8]) -> io::Result<usize>;
+    fn key_size(&self, data: &[u8]) -> io::Result<usize>;
 
     /// Returns true if keys have a fixed size.
     fn is_fixed_size(&self) -> bool {
@@ -169,7 +171,7 @@ impl Comparator for DynComparator {
         }
     }
 
-    fn key_size(&self, data:  &[u8]) -> io::Result<usize> {
+    fn key_size(&self, data: &[u8]) -> io::Result<usize> {
         match self {
             Self::FixedSizeBytes(c) => c.key_size(data),
             Self::Variable(c) => c.key_size(data),

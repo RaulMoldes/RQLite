@@ -2,7 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use std::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
-    io, mem,
+    mem,
     ops::{Add, Deref, Div, Mul, Rem, Sub},
 };
 
@@ -308,12 +308,17 @@ impl<T: BytemuckDeserializable> DeserializableType for T {
 pub trait TypeRef<'a>: Sized + AsRef<[u8]> {
     type Owned: DeserializableType;
     fn to_owned(&self) -> Self::Owned;
+    fn as_slice(&self) -> &[u8];
 }
 
 impl<'a, T: BytemuckDeserializable + DeserializableType> TypeRef<'a> for BytemuckRef<'a, T> {
     type Owned = T;
     fn to_owned(&self) -> Self::Owned {
         BytemuckRef::to_owned(self)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.as_ref()
     }
 }
 

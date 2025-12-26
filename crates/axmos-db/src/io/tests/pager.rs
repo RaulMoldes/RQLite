@@ -319,7 +319,7 @@ fn test_page_cell_insert() -> io::Result<()> {
     let cell_data = b"Test cell payload";
 
     pager.try_with_page_mut::<BtreePage, _, _>(page_id, |page| {
-        let cell = OwnedCell::new_with_keys(cell_data, 0,0);
+        let cell = OwnedCell::new_with_key_bounds(cell_data, 0, 0);
         page.push(cell)?;
 
         assert_eq!(page.num_slots(), 1);
@@ -329,7 +329,7 @@ fn test_page_cell_insert() -> io::Result<()> {
     // Verify cell is readable
     pager.with_page::<BtreePage, _, _>(page_id, |page| {
         let cell = page.cell(0);
-        assert_eq!(cell.payload(), cell_data);
+        assert_eq!(cell.effective_data(), cell_data);
     })?;
 
     Ok(())
@@ -344,7 +344,7 @@ fn test_page_multiple_cells(num_cells: usize) {
         .try_with_page_mut::<BtreePage, _, _>(page_id, |page| {
             for i in 0..num_cells {
                 let data = format!("Cell {}", i);
-                let cell = OwnedCell::new_with_keys(data.as_bytes(), 0, 0);
+                let cell = OwnedCell::new_with_key_bounds(data.as_bytes(), 0, 0);
 
                 if page.has_space_for(cell.storage_size()) {
                     page.push(cell)?;
@@ -363,7 +363,7 @@ fn test_page_multiple_cells(num_cells: usize) {
             for i in 0..actual_cells {
                 let expected = format!("Cell {}", i);
                 let cell = page.cell(i);
-                assert_eq!(cell.payload(), expected.as_bytes());
+                assert_eq!(cell.effective_data(), expected.as_bytes());
             }
         })
         .unwrap();
@@ -380,7 +380,7 @@ fn test_page_cell_remove() -> io::Result<()> {
     // Insert cells
     pager.try_with_page_mut::<BtreePage, _, _>(page_id, |page| {
         for i in 0..5 {
-            let cell = OwnedCell::new_with_keys(format!("Cell {}", i).as_bytes(), 0, 0);
+            let cell = OwnedCell::new_with_key_bounds(format!("Cell {}", i).as_bytes(), 0, 0);
             page.push(cell)?;
         }
         Ok(())
