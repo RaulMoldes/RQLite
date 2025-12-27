@@ -859,7 +859,7 @@ where
     /// The cell in the middle gets propagated upwards.
     /// We also need to fix the pointers in the frontiers between the two new nodes to maintain the leaf node's linked list.
     fn balance_deeper(&mut self) -> BtreeResult<()> {
-        let page_size = self.pager.write().page_size()?;
+        let page_size = self.pager.write().page_size();
         // Allocate new left and right childs
         let new_left = self.pager.write().allocate_page::<BtreePage>()?;
         let new_right = self.pager.write().allocate_page::<BtreePage>()?;
@@ -1016,7 +1016,7 @@ where
     fn balance(&mut self, page_id: PageId) -> BtreeResult<()> {
         let is_root = self.is_root(page_id);
         // Read the page size from the pager.
-        let page_size = self.pager.write().page_size()?;
+        let page_size = self.pager.write().page_size();
         let status = self.check_node_status(page_id)?;
 
         // Nothing to do, the node is balanced.

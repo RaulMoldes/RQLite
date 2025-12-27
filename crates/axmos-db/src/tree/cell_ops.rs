@@ -249,7 +249,7 @@ impl CellBuilder {
     where
         T: Buildable,
     {
-        let page_size = self.pager.write().page_size()?;
+        let page_size = self.pager.write().page_size();
         let max_payload_size: usize = self.compute_available_space_in_first_page(page_size);
         let total_size = data.built_size();
 

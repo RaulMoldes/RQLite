@@ -1,7 +1,7 @@
 // Threadpool tests.
 use crate::{
-    common::errors::ThreadPoolError, multithreading::threadpool::ThreadPool, param_tests,
-    param2_tests,
+    multithreading::threadpool::{ThreadPool, ThreadPoolError},
+    param_tests, param2_tests,
 };
 
 use std::{

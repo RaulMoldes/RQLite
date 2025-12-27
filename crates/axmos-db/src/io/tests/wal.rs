@@ -52,7 +52,7 @@ fn test_wal_push_multiple_records(num_records: usize) {
     let mut last_lsn = None;
 
     for i in 0..num_records {
-        let record = record!(update 1, 1, 1, b"old", b"new");
+        let record = record!(update 1, 1, 1, 1, b"old", b"new");
 
         if first_lsn.is_none() {
             first_lsn = Some(record.lsn());
@@ -79,7 +79,7 @@ fn test_wal_flush_and_reopen() -> io::Result<()> {
     {
         let mut wal = WriteAheadLog::create(&path)?;
         for i in 0..num_records {
-            let record = record!(insert 1, 1, 1, b"new");
+            let record = record!(insert 1, 1, 1,1, b"new");
             wal.push(record)?;
         }
         wal.flush()?;
@@ -124,7 +124,7 @@ fn test_wal_block_rotation(record_size: usize, num_records: usize) {
         let redo = vec![0xBB; record_size / 2];
 
         let record = record!(
-            update i, i, i,
+            update i, i, i, i,
             &undo,
             &redo
         );
@@ -156,7 +156,7 @@ fn test_wal_fills_multiple_blocks() -> io::Result<()> {
         let data = vec![(i % 256) as u8; record_payload_size];
         let record = record!(
             update
-            i, i, i,
+            i, i, i,i,
             &data[..record_payload_size / 2],
             &data[record_payload_size / 2..]
         );
@@ -184,7 +184,7 @@ fn test_wal_reader_basic(read_ahead_blocks: usize) {
     {
         let mut wal = WriteAheadLog::create(&path).unwrap();
         for i in 0..records_to_write {
-            let record = record!(update 1, 1, 1, b"old", b"new");
+            let record = record!(update 1, 1, 1, 1, b"old", b"new");
             wal.push(record).unwrap();
         }
         wal.flush().unwrap();
@@ -213,7 +213,7 @@ fn test_wal_reader_across_blocks(num_records: usize, record_size: usize, read_ah
         for i in 0..num_records {
             let data = vec![(i % 256) as u8; record_size];
             let record = record!(
-                insert i, i, i,
+                insert i, i, i,i,
                 &data
             );
             wal.push(record).expect("Failed to push record to wal!");
@@ -283,6 +283,7 @@ fn test_wal_reader_with_varied_records(read_ahead_blocks: usize) {
                 lsn: i,
                 tid: 1,
                 oid: i,
+                rowid: i,
                 undo_size: *undo_size,
                 redo_size: *redo_size
             );
@@ -361,11 +362,12 @@ fn test_complete_transaction_sequence() -> io::Result<()> {
     let begin_lsn = begin.lsn();
     wal.push(begin)?;
 
-    let insert = record!(insert 2, tid, 100, prev: Some(begin_lsn),  b"new data");
+    let insert = record!(insert 2, tid, 100, 1, prev: Some(begin_lsn),  b"new data");
     let insert_lsn = insert.lsn();
     wal.push(insert)?;
 
-    let update = record!(update 3, tid, 100, prev: Some(insert_lsn), b"new data", b"updated data");
+    let update =
+        record!(update 3, tid, 100, 1, prev: Some(insert_lsn), b"new data", b"updated data");
     let update_lsn = update.lsn();
     wal.push(update)?;
 
@@ -394,17 +396,17 @@ fn test_concurrent_transactions_interleaved() -> io::Result<()> {
     let lsn2 = begin2.lsn();
     wal.push(begin2)?;
 
-    let insert1 = record!(insert 3, 1, 100, prev: Some(lsn1), b"data1");
+    let insert1 = record!(insert 3, 1, 100, 1, prev: Some(lsn1), b"data1");
     let insert1_lsn = insert1.lsn();
     wal.push(insert1)?;
 
-    let insert2 = record!(insert 4, 2, 200, prev: Some(lsn2), b"data2");
+    let insert2 = record!(insert 4, 2, 200, 1, prev: Some(lsn2), b"data2");
     let insert2_lsn = insert2.lsn();
     wal.push(insert2)?;
 
     wal.push(record!(commit 5, 1, prev: Some(insert1_lsn)))?;
 
-    let update2 = record!(update 6, 2, 200, prev: Some(insert2_lsn), b"data2", b"data2_updated");
+    let update2 = record!(update 6, 2, 200, 1, prev: Some(insert2_lsn), b"data2", b"data2_updated");
     let update2_lsn = update2.lsn();
     wal.push(update2)?;
     wal.push(record!(commit 7, 2, prev: Some(update2_lsn)))?;
@@ -424,7 +426,7 @@ fn test_multiple_transactions(num_transactions: usize) {
         let begin_lsn = begin.lsn();
         wal.push(begin).unwrap();
 
-        let insert = record!(insert 2, tid, tid * 100, prev: Some(begin_lsn), b"data");
+        let insert = record!(insert 2, tid, tid * 100, 1, prev: Some(begin_lsn), b"data");
         let insert_lsn = insert.lsn();
         wal.push(insert).unwrap();
 
@@ -461,7 +463,7 @@ fn test_wal_max_size_record() -> io::Result<()> {
 
     let payload_size = max_size.saturating_sub(128);
     let data = vec![0xFFu8; payload_size];
-    let record = record!(update 1, 1, 1, &data[..payload_size/2], &data[payload_size/2..]);
+    let record = record!(update 1, 1, 1, 1, &data[..payload_size/2], &data[payload_size/2..]);
 
     wal.push(record)?;
     wal.flush()?;
@@ -480,7 +482,7 @@ fn test_wal_record_too_large() -> io::Result<()> {
 
     let data = vec![0xFFu8; max_size + 1000];
 
-    let record = record!(update 1, 1, 1, &data, &data);
+    let record = record!(update 1, 1, 1, 1, &data, &data);
 
     let result = wal.push(record);
     assert!(result.is_err());
@@ -493,7 +495,7 @@ fn test_wal_various_payload_sizes(payload_size: usize) {
 
     let undo_data = vec![0xAA; payload_size];
     let redo_data = vec![0xBB; payload_size];
-    let record = record!(update 1, 1, 1, &undo_data, &redo_data);
+    let record = record!(update 1, 1, 1, 1, &undo_data, &redo_data);
 
     wal.push(record).unwrap();
     wal.flush().unwrap();
@@ -506,7 +508,7 @@ fn test_wal_stress_writes(num_records: usize, payload_size: usize) {
 
     for i in 0..num_records {
         let data = vec![(i % 256) as u8; payload_size];
-        let record = record!(update i, i, i, &data[..payload_size/2], &data[payload_size/2..]);
+        let record = record!(update i, i, i, i, &data[..payload_size/2], &data[payload_size/2..]);
         wal.push(record)
             .expect("Failed to push a record to the wal")
     }
@@ -576,13 +578,13 @@ param2_tests!(test_wal_stress_writes, records, payload => [
 // Each record has ~56 bytes header + payload + alignment
 // To fill 40KB block, need roughly 40000 / (record_size + 64) records per block
 param3_tests!(test_wal_reader_across_blocks, records, size, ahead => [
-    (200, 512, 1),   // ~200 * 576 = 115KB -> ~3 blocks
+    (200, 512, 1),
     (200, 512, 2),
     (200, 512, 4),
-    (500, 256, 1),   // ~500 * 320 = 160KB -> ~4 blocks
+    (500, 256, 1),
     (500, 256, 2),
     (500, 256, 4),
-    (1000, 128, 2),  // ~1000 * 192 = 192KB -> ~5 blocks
+    (1000, 128, 2),
     (1000, 128, 4),
     (1000, 128, 8)
 ]);

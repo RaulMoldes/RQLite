@@ -1,5 +1,5 @@
-pub mod errors;
-pub use errors::*;
+//pub mod errors;
+//pub use errors::*;
 
 use std::thread;
 
@@ -14,7 +14,7 @@ pub(crate) fn default_num_workers() -> usize {
 }
 
 /// Magic string that identifies the AxmosDB file format.
-pub(crate) const AXMO: u32 = 0x41584D4F;
+pub(crate) const MAGIC: u64 = 0x41786D6F734442;
 
 /// Maximum page size is 64 KiB.
 pub(crate) const MIN_PAGE_SIZE: usize = 4096;

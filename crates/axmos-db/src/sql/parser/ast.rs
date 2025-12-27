@@ -571,6 +571,7 @@ pub(crate) struct CreateTableStatement {
     pub(crate) table: String,
     pub(crate) columns: Vec<ColumnDefExpr>,
     pub(crate) constraints: Vec<TableConstraintExpr>,
+    pub(crate) if_not_exists: bool,
 }
 
 impl Simplify for CreateTableStatement {
@@ -585,31 +586,27 @@ impl Simplify for CreateTableStatement {
 pub(crate) struct ColumnDefExpr {
     pub(crate) name: String,
     pub(crate) data_type: DataTypeKind,
-    pub(crate) constraints: Vec<ColumnConstraintExpr>,
+    pub(crate) is_non_null: bool,
+    pub(crate) is_unique: bool,
+    pub(crate) default: Option<Expr>,
 }
 
-impl Simplify for ColumnDefExpr {
-    fn simplify(&mut self) {
-        for ct in self.constraints.iter_mut() {
-            ct.simplify();
+impl ColumnDefExpr {
+    pub fn new(name: String, data_type: DataTypeKind) -> Self {
+        Self {
+            name,
+            data_type,
+            is_non_null: false,
+            is_unique: false,
+            default: None,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ColumnConstraintExpr {
-    NotNull,
-    Unique,
-    PrimaryKey,
-    ForeignKey { table: String, column: String },
-    Default(Expr),
-}
-
-impl Simplify for ColumnConstraintExpr {
+impl Simplify for ColumnDefExpr {
     fn simplify(&mut self) {
-        match self {
-            Self::Default(expr) => expr.simplify(),
-            _ => {}
+        if let Some(default_val) = self.default.as_mut() {
+            default_val.simplify();
         }
     }
 }
@@ -655,7 +652,6 @@ pub(crate) enum AlterAction {
     DropColumn(String),
     AlterColumn(AlterColumnStatement),
     AddConstraint(TableConstraintExpr),
-    DropConstraint(String),
 }
 
 impl Simplify for AlterAction {
@@ -1017,24 +1013,18 @@ impl Display for CreateTableStatement {
 impl Display for ColumnDefExpr {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{} {}", self.name, self.data_type)?;
-        for ct in &self.constraints {
-            write!(f, " {ct}")?;
+        if self.is_non_null {
+            write!(f, "NON NULL")?;
+        }
+
+        if self.is_unique {
+            write!(f, "UNIQUE")?;
+        }
+
+        if let Some(value) = self.default.as_ref() {
+            write!(f, "DEFAULT: {value}")?;
         }
         Ok(())
-    }
-}
-
-impl Display for ColumnConstraintExpr {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            ColumnConstraintExpr::NotNull => write!(f, "NOT NULL"),
-            ColumnConstraintExpr::Unique => write!(f, "UNIQUE"),
-            ColumnConstraintExpr::PrimaryKey => write!(f, "PRIMARY KEY"),
-            ColumnConstraintExpr::ForeignKey { table, column } => {
-                write!(f, "REFERENCES {table}({column})")
-            }
-            ColumnConstraintExpr::Default(expr) => write!(f, "DEFAULT {expr}"),
-        }
     }
 }
 
@@ -1077,7 +1067,6 @@ impl Display for AlterAction {
             AlterAction::DropColumn(name) => write!(f, "DROP COLUMN {name}"),
             AlterAction::AlterColumn(col) => write!(f, "ALTER COLUMN {col}"),
             AlterAction::AddConstraint(ct) => write!(f, "ADD {ct}"),
-            AlterAction::DropConstraint(name) => write!(f, "DROP CONSTRAINT {name}"),
         }
     }
 }

@@ -4,7 +4,7 @@
 //! from disk, as well as caching frequently accessed data in memory to improve performance.
 pub mod cache;
 pub mod disk;
-//pub mod logger;
+pub mod logger;
 
 pub mod pager;
 pub mod wal;

@@ -1,14 +1,52 @@
 use std::{
     error::Error,
+    fmt::{Display, Formatter, Result as FmtResult},
     io::{Error as IoError, ErrorKind},
     sync::mpsc,
 };
 
 use crate::{
-    common::errors::{BoxError, TaskError, TaskResult},
     io::pager::SharedPager,
-    multithreading::{TransactionCoordinator, threadpool::ThreadPool},
+    multithreading::{
+        TransactionCoordinator,
+        threadpool::{ThreadPool, ThreadPoolError},
+    },
 };
+
+/// Task runner errors
+#[derive(Debug)]
+pub enum TaskError {
+    Io(IoError),
+    ThreadPool(ThreadPoolError),
+    TaskFailed(String),
+}
+
+impl Display for TaskError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Io(e) => write!(f, "IO error: {}", e),
+            Self::ThreadPool(e) => write!(f, "Thread pool error: {}", e),
+            Self::TaskFailed(msg) => write!(f, "Task failed: {}", msg),
+        }
+    }
+}
+
+impl Error for TaskError {}
+
+impl From<IoError> for TaskError {
+    fn from(e: IoError) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<ThreadPoolError> for TaskError {
+    fn from(e: ThreadPoolError) -> Self {
+        Self::ThreadPool(e)
+    }
+}
+
+pub type TaskResult<T> = Result<T, TaskError>;
+pub type BoxError = Box<dyn Error + Send + 'static>;
 
 /// Context provided to each task, containing thread-local resources.
 pub(crate) struct TaskContext {

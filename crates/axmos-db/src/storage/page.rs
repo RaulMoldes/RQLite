@@ -1,9 +1,10 @@
 use std::{fmt::Debug, mem};
 
 use crate::{
-    DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, DEFAULT_POOL_SIZE, bytemuck_slice,
+    DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, DEFAULT_POOL_SIZE, ObjectId,
+    TransactionId, bytemuck_slice,
     common::{
-        AXMO, DBConfig, DEFAULT_CACHE_SIZE, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MIN_PAGE_SIZE,
+        DBConfig, DEFAULT_CACHE_SIZE, DEFAULT_PAGE_SIZE, MAGIC, MAX_PAGE_SIZE, MIN_PAGE_SIZE,
         PAGE_ALIGNMENT,
     },
     storage::{
@@ -19,7 +20,7 @@ pub(crate) const SIGNATURE_OFFSET: usize = PAGE_ZERO_HEADER_SIZE - SIGNATURE_SIZ
 
 /// Slotted page header.
 #[derive(Debug, Clone, Copy)]
-#[repr(C, align(64))]
+#[repr(C, align(8))]
 pub(crate) struct BtreePageHeader {
     pub(crate) page_number: PageId,
     pub(crate) right_child: Option<PageId>,
@@ -36,7 +37,7 @@ pub(crate) const BTREE_PAGE_HEADER_SIZE: usize = mem::size_of::<BtreePageHeader>
 bytemuck_slice!(BtreePageHeader);
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-#[repr(C, align(64))]
+#[repr(C, align(8))]
 pub(crate) struct OverflowPageHeader {
     pub(crate) page_number: PageId,
     pub(crate) next: Option<PageId>,
@@ -61,17 +62,18 @@ impl OverflowPageHeader {
 
 /// Page Zero must store a little bit more data about the database itself.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(C, align(64))]
+#[repr(C, align(8))]
 pub(crate) struct PageZeroHeader {
+    pub(crate) magic: u64,
     pub(crate) page_number: PageId,
     pub(crate) first_free_page: Option<PageId>,
     pub(crate) last_free_page: Option<PageId>,
     pub(crate) total_pages: u64,
-    pub(crate) axmo: u32,
+    pub(crate) last_run_transaction: TransactionId,
+    pub(crate) last_stored_object: ObjectId,
     pub(crate) page_size: u32,
     pub(crate) free_pages: u32,
     pub(crate) padding: u32,
-    pub(crate) num_slots: u16,
     pub(crate) cache_size: u16,
     pub(crate) min_keys: u8,
     pub(crate) num_siblings_per_side: u8,
@@ -103,11 +105,12 @@ impl PageZeroHeader {
     ) -> Self {
         let aligned_size = page_size.next_multiple_of(PAGE_ALIGNMENT as u32);
         Self {
+            magic: MAGIC,
             page_number,
-            num_slots: 0,
             page_size: aligned_size,
             padding: aligned_size.saturating_sub(page_size),
-            axmo: AXMO,
+            last_run_transaction: 0,
+            last_stored_object: 0,
             total_pages: 1,
             free_pages: 0,
             first_free_page: None,
@@ -227,10 +230,6 @@ impl AvailableSpace for OverflowPage {
 
 /// Only [PageZero] and [BtreePage] are [ComposedBuffer] since Overflow pages do not have cells.
 impl ComposedMetadata for BtreePageHeader {
-    type ItemHeader = CellHeader;
-}
-
-impl ComposedMetadata for PageZeroHeader {
     type ItemHeader = CellHeader;
 }
 

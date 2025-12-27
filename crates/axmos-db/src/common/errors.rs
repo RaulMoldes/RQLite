@@ -1,63 +1,4 @@
-use std::{
-    error::Error,
-    fmt::{Display, Formatter, Result as FmtResult},
-    io::{Error as IoError, ErrorKind},
-    num::{ParseFloatError, ParseIntError},
-};
 
-use crate::types::{LogicalId, ObjectId, TransactionId, core::TypeClass};
-
-/// Thread pool errors
-#[derive(Debug)]
-pub enum ThreadPoolError {
-    ShutdownTimeout,
-    ThreadJoinError(String),
-    PoolShutdown,
-}
-
-impl Display for ThreadPoolError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::ShutdownTimeout => write!(f, "Thread pool shutdown timed out"),
-            Self::ThreadJoinError(msg) => write!(f, "Failed to join thread: {}", msg),
-            Self::PoolShutdown => write!(f, "Thread pool has been shut down"),
-        }
-    }
-}
-
-impl Error for ThreadPoolError {}
-
-/// Task runner errors
-#[derive(Debug)]
-pub enum TaskError {
-    Io(IoError),
-    ThreadPool(ThreadPoolError),
-    TaskFailed(String),
-}
-
-impl Display for TaskError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::Io(e) => write!(f, "IO error: {}", e),
-            Self::ThreadPool(e) => write!(f, "Thread pool error: {}", e),
-            Self::TaskFailed(msg) => write!(f, "Task failed: {}", msg),
-        }
-    }
-}
-
-impl Error for TaskError {}
-
-impl From<IoError> for TaskError {
-    fn from(e: IoError) -> Self {
-        Self::Io(e)
-    }
-}
-
-impl From<ThreadPoolError> for TaskError {
-    fn from(e: ThreadPoolError) -> Self {
-        Self::ThreadPool(e)
-    }
-}
 
 /// Numeric parsing errors
 #[derive(Debug)]
@@ -167,48 +108,6 @@ pub enum AnalyzerError {
     Other(String),
 }
 
-impl Display for AnalyzerError {
-    fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        match self {
-            Self::Parser(e) => write!(f, "{}", e),
-            Self::ColumnValueCountMismatch(row) => {
-                write!(f, "Column count doesn't match values on row {}", row)
-            }
-            Self::NotFound(obj) => write!(f, "Object not found: {}", obj),
-            Self::MultiplePrimaryKeys => write!(f, "Only one primary key per table is allowed"),
-            Self::MissingColumns => {
-                write!(
-                    f,
-                    "Default values not supported, all columns must be specified"
-                )
-            }
-            Self::DuplicatedColumn(col) => write!(f, "Column '{}' specified more than once", col),
-            Self::AlreadyExists(e) => write!(f, "{}", e),
-
-            Self::ConstraintViolation(ct, col) => {
-                write!(f, "Constraint '{}' violated for column '{}'", ct, col)
-            }
-            Self::InvalidExpression => write!(f, "Invalid expression"),
-            Self::AlreadyStarted => write!(f, "Transaction already started on this session"),
-            Self::NotStarted => write!(f, "No active transaction"),
-
-            Self::InvalidFormat(s, expected) => {
-                write!(f, "Invalid format '{}', expected: {}", s, expected)
-            }
-            Self::AliasNotProvided => write!(f, "Alias required for multi-table references"),
-            Self::DuplicatedConstraint(s) => write!(f, "Duplicated constraint on column '{}'", s),
-            Self::Other(s) => write!(f, "{}", s),
-        }
-    }
-}
-
-impl Error for AnalyzerError {}
-
-impl From<ParserError> for AnalyzerError {
-    fn from(value: ParserError) -> Self {
-        Self::Parser(value)
-    }
-}
 
 impl From<TaskError> for AnalyzerError {
     fn from(value: TaskError) -> Self {
@@ -622,37 +521,6 @@ impl From<TaskError> for QueryExecutionError {
     }
 }
 
-/// Transaction errors (top-level)
-#[derive(Debug)]
-pub enum TransactionError {
-    Sql(QueryExecutionError),
-    Aborted(TransactionId),
-    NotActive(TransactionId),
-    WriteWriteConflict(TransactionId, LogicalId),
-    NotFound(TransactionId),
-    TupleNotVisible(TransactionId, LogicalId),
-    Other(String),
-}
-
-impl Display for TransactionError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::Sql(e) => write!(f, "{}", e),
-            Self::Aborted(id) => write!(f, "Transaction {} aborted", id),
-            Self::NotActive(id) => write!(f, "Transaction {} not active", id),
-            Self::WriteWriteConflict(txid, tuple) => {
-                write!(f, "Transaction {} conflict on tuple {}", txid, tuple)
-            }
-            Self::NotFound(id) => write!(f, "Transaction {} not found", id),
-            Self::TupleNotVisible(id, logical) => {
-                write!(f, "Tuple {} not visible to transaction {}", logical, id)
-            }
-            Self::Other(msg) => write!(f, "{}", msg),
-        }
-    }
-}
-
-impl Error for TransactionError {}
 
 impl From<QueryExecutionError> for TransactionError {
     fn from(value: QueryExecutionError) -> Self {

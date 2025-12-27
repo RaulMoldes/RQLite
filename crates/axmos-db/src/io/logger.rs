@@ -1,95 +1,154 @@
 use crate::{
-    io::{
-        pager::SharedPager,
-        wal::{Abort, Begin, Commit, Delete, End, Insert, Operation, Update},
+    RowId, TransactionId,
+    io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
+    multithreading::coordinator::TransactionState,
+    storage::{
+        Allocatable, AvailableSpace, WalMetadata, WalOps, Writable,
+        wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock},
     },
-    storage::wal::{OwnedRecord, RecordType},
-    types::{Lsn, ObjectId, TransactionId},
+    types::{BlockId, Lsn, ObjectId},
 };
 
-use std::{cell::Cell, io};
-
-#[derive(Clone, Debug)]
-pub(crate) struct Logger {
-    transaction_id: TransactionId,
-    last_lsn: Cell<Option<Lsn>>,
-    pager: SharedPager,
+pub trait Operation {
+    fn op_type(&self) -> RecordType;
+    fn object_id(&self) -> Option<ObjectId> {
+        None
+    }
+    fn row_id(&self) -> Option<RowId> {
+        None
+    }
+    fn undo(&self) -> &[u8] {
+        &[]
+    }
+    fn redo(&self) -> &[u8] {
+        &[]
+    }
 }
 
-impl Logger {
-    pub(crate) fn new(transaction_id: TransactionId, pager: SharedPager) -> Self {
+pub struct Begin;
+
+impl Operation for Begin {
+    fn op_type(&self) -> RecordType {
+        RecordType::Begin
+    }
+}
+
+pub struct End;
+
+impl Operation for End {
+    fn op_type(&self) -> RecordType {
+        RecordType::End
+    }
+}
+
+pub struct Commit;
+
+impl Operation for Commit {
+    fn op_type(&self) -> RecordType {
+        RecordType::Commit
+    }
+}
+
+pub struct Abort;
+
+impl Operation for Abort {
+    fn op_type(&self) -> RecordType {
+        RecordType::Abort
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct Update {
+    oid: ObjectId,
+    rowid: RowId,
+    old: Box<[u8]>,
+    new: Box<[u8]>,
+}
+
+impl Update {
+    pub(crate) fn new(oid: ObjectId, rowid: RowId, old: Box<[u8]>, new: Box<[u8]>) -> Self {
         Self {
-            transaction_id,
-            last_lsn: Cell::new(None),
-            pager,
+            oid,
+            rowid,
+            old,
+            new,
         }
     }
+}
 
-    pub fn build_rec<O>(&self, log_record_type: RecordType, operation: O) -> OwnedRecord
-    where
-        O: Operation,
-    {
-        let log = OwnedRecord::new(
-            self.transaction_id,
-            self.last_lsn.get(),
-            operation.object_id(),
-            operation.op_type(),
-            operation.redo(),
-            operation.undo(),
-        );
-
-        self.last_lsn.set(Some(log.lsn()));
-        log
+impl Operation for Update {
+    fn op_type(&self) -> RecordType {
+        RecordType::Update
     }
-
-    /// Write BEGIN record to WAL
-    pub(crate) fn begin(&self) -> io::Result<()> {
-        let operation = Begin;
-        let rec = self.build_rec(RecordType::Begin, operation);
-        self.pager.write().push_to_log(rec)
+    fn object_id(&self) -> Option<ObjectId> {
+        Some(self.oid)
     }
-
-    /// Write COMMIT record to WAL
-    pub(crate) fn commit(&self) -> io::Result<()> {
-        let operation = Commit;
-        let rec = self.build_rec(RecordType::Commit, operation);
-        self.pager.write().push_to_log(rec)
+    fn row_id(&self) -> Option<RowId> {
+        Some(self.rowid)
     }
-
-    /// Write ABORT record to WAL
-    pub(crate) fn rollback(&self) -> io::Result<()> {
-        let operation = Abort;
-        let rec = self.build_rec(RecordType::Abort, operation);
-        self.pager.write().push_to_log(rec)
+    fn redo(&self) -> &[u8] {
+        self.new.as_ref()
     }
-
-    /// Write END record to WAL
-    pub(crate) fn end(&self) -> io::Result<()> {
-        let operation = End;
-        let rec = self.build_rec(RecordType::End, operation);
-        self.pager.write().push_to_log(rec)
+    fn undo(&self) -> &[u8] {
+        self.old.as_ref()
     }
+}
 
-    pub(crate) fn log_insert(&self, table: ObjectId, data: Box<[u8]>) -> io::Result<()> {
-        let op = Insert::new(table, data);
-        let rec = self.build_rec(RecordType::Insert, op);
-        self.pager.write().push_to_log(rec)
+#[repr(C)]
+#[derive(Debug)]
+pub struct Insert {
+    oid: ObjectId,
+    rowid: RowId,
+    new: Box<[u8]>,
+}
+
+impl Insert {
+    pub(crate) fn new(oid: ObjectId, rowid: RowId, new: Box<[u8]>) -> Self {
+        Self { oid, rowid, new }
     }
+}
 
-    pub(crate) fn log_update(
-        &self,
-        table: ObjectId,
-        old_data: Box<[u8]>,
-        new_data: Box<[u8]>,
-    ) -> io::Result<()> {
-        let op = Update::new(table, old_data, new_data);
-        let rec = self.build_rec(RecordType::Insert, op);
-        self.pager.write().push_to_log(rec)
+impl Operation for Insert {
+    fn op_type(&self) -> RecordType {
+        RecordType::Insert
     }
+    fn object_id(&self) -> Option<ObjectId> {
+        Some(self.oid)
+    }
+    fn row_id(&self) -> Option<RowId> {
+        Some(self.rowid)
+    }
+    fn redo(&self) -> &[u8] {
+        self.new.as_ref()
+    }
+}
 
-    pub(crate) fn log_delete(&self, table: ObjectId, old_data: Box<[u8]>) -> io::Result<()> {
-        let op = Delete::new(table, old_data);
-        let rec = self.build_rec(RecordType::Insert, op);
-        self.pager.write().push_to_log(rec)
+#[repr(C)]
+#[derive(Debug)]
+pub struct Delete {
+    oid: ObjectId,
+    rowid: RowId,
+    old: Box<[u8]>,
+}
+
+impl Delete {
+    pub(crate) fn new(oid: ObjectId, rowid: RowId, old: Box<[u8]>) -> Self {
+        Self { oid, rowid, old }
+    }
+}
+
+impl Operation for Delete {
+    fn op_type(&self) -> RecordType {
+        RecordType::Delete
+    }
+    fn object_id(&self) -> Option<ObjectId> {
+        Some(self.oid)
+    }
+    fn row_id(&self) -> Option<RowId> {
+        Some(self.rowid)
+    }
+    fn undo(&self) -> &[u8] {
+        self.old.as_ref()
     }
 }

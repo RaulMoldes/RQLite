@@ -15,9 +15,9 @@
 pub mod common;
 pub mod io;
 mod macros;
-pub mod schema;
-//mod sql;
 mod multithreading;
+pub mod schema;
+mod sql;
 mod storage;
 mod tree;
 pub mod types;

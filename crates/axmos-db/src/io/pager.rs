@@ -1,16 +1,23 @@
 use crate::{
-    DBConfig, DEFAULT_CACHE_SIZE, PAGE_ALIGNMENT,
+    DBConfig, DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, DEFAULT_CACHE_SIZE,
+    MAGIC, PAGE_ALIGNMENT,
     io::{
         cache::PageCache,
         disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
-        wal::WriteAheadLog,
+        wal::{AnalysisResult, WriteAheadLog},
     },
     make_shared,
-    multithreading::frames::{AsReadLatch, AsWriteLatch, Frame, MemFrame, WriteLatch},
+    multithreading::frames::{AsReadLatch, AsWriteLatch, Frame, MemFrame},
+    schema::Schema,
     storage::{
         core::{buffer::MemBlock, traits::Buffer},
-        page::{OverflowPage, PageZero, PageZeroHeader},
+        page::{BtreePage, OverflowPage, PageZero, PageZeroHeader},
         wal::OwnedRecord,
+    },
+    tree::{
+        accessor::{BtreeReadAccessor, BtreeWriteAccessor},
+        bplustree::Btree,
+        comparators::DynComparator,
     },
     types::{PAGE_ZERO, PageId},
 };
@@ -25,7 +32,7 @@ pub struct Pager {
     file: DBFile,
     wal: WriteAheadLog, // TODO: Implement recoverability from the [WAL].
     cache: PageCache,
-    page_zero: Option<MemFrame>, // Page zero is always in memory
+    db_header: Option<PageZeroHeader>, // Page zero header is always in memory
 }
 
 impl<'a> FileOperations for Pager {
@@ -43,7 +50,7 @@ impl<'a> FileOperations for Pager {
             file,
             cache,
             wal,
-            page_zero: None,
+            db_header: None,
         })
     }
 
@@ -62,18 +69,11 @@ impl<'a> FileOperations for Pager {
             file,
             cache,
             wal,
-            page_zero: None,
+            db_header: None,
         };
 
-        let mut page_zero = pager.load_page_zero(block_size)?;
-        let actual_block_size = page_zero.metadata().page_size;
-
-        // If the target page size happens to be greater than the filesystem block size we might have to reload.
-        if actual_block_size > block_size as u32 {
-            page_zero = pager.load_page_zero(actual_block_size as usize)?;
-        };
-
-        pager.page_zero = Some(MemFrame::from(Frame::new(page_zero)));
+        let page_zero = pager.load_page_zero(block_size)?;
+        pager.db_header = Some(*page_zero.metadata());
 
         // TODO. MUST WRITE THE RECOVER FUNCTION TO REPLAY THE WAL HERE.
         Ok(pager)
@@ -102,6 +102,65 @@ impl<'a> FileOperations for Pager {
 }
 
 impl Pager {
+    /// Runs the recovery and truncates the write ahead log
+    pub(crate) fn run_recovery(&mut self) -> io::Result<()> {
+        let analysis = self.wal.run_analysis()?;
+        self.run_undo(&analysis)?;
+        self.run_redo(&analysis)?;
+        self.wal.truncate()?;
+        Ok(())
+    }
+
+    /// Run all the undo.
+    pub(crate) fn run_undo(&mut self, analysis: &AnalysisResult) -> io::Result<()> {
+        for redo_transaction in analysis.needs_undo.iter() {
+            // Reapply all the operations of this transaction
+            for lsn in analysis.try_iter_lsn(redo_transaction).ok_or(IoError::new(
+                ErrorKind::NotSeekable,
+                "transaction not found in th write ahead analysis",
+            ))? {
+                if let Some(delete_operation) = analysis.delete_ops.get(&lsn) {
+                    unimplemented!("Delete operations-undo are not implemented yet");
+                }
+
+                if let Some(update_operation) = analysis.update_ops.get(&lsn) {
+                    unimplemented!("Update operations-undo are not implemented yet");
+                }
+
+                if let Some(insert_operation) = analysis.insert_ops.get(&lsn) {
+                    unimplemented!("Insert operations-undo are not implemented yet");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Run all the redo.
+    pub(crate) fn run_redo(&mut self, analysis: &AnalysisResult) -> io::Result<()> {
+        for redo_transaction in analysis.needs_redo.iter() {
+            // Reapply all the operations of this transaction
+            for lsn in analysis.try_iter_lsn(redo_transaction).ok_or(IoError::new(
+                ErrorKind::NotSeekable,
+                "transaction not found in th write ahead analysis",
+            ))? {
+                if let Some(delete_operation) = analysis.delete_ops.get(&lsn) {
+                    unimplemented!("Delete operations-redo are not implemented yet");
+                }
+
+                if let Some(update_operation) = analysis.update_ops.get(&lsn) {
+                    unimplemented!("Update operations-redo are not implemented yet");
+                }
+
+                if let Some(insert_operation) = analysis.insert_ops.get(&lsn) {
+                    unimplemented!("Insert operations-redo are not implemented yet");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Compute the offset at which a page is placed given the database header size and the page id.
     /// [`PAGEZERO`] contains the header.
     ///
@@ -121,7 +180,7 @@ impl Pager {
     pub(crate) fn from_config(config: DBConfig, path: impl AsRef<Path>) -> io::Result<Self> {
         let mut pager = Pager::create(path)?;
         let page_zero = pager.alloc_page_zero(config)?;
-        pager.page_zero = Some(MemFrame::from(Frame::new(page_zero)));
+        pager.db_header = Some(*page_zero.metadata());
         Ok(pager)
     }
 
@@ -140,6 +199,15 @@ impl Pager {
         Ok(page_zero)
     }
 
+    /// Syncs the header to the disk.
+    fn sync_header(&mut self) -> io::Result<()> {
+        let page_size = self.page_size();
+        let mut zero_from_disk = self.load_page_zero(page_size)?;
+        *zero_from_disk.metadata_mut() = *self.header_unchecked();
+        self.write_block(PAGE_ZERO, zero_from_disk.as_ref(), page_size)?;
+        Ok(())
+    }
+
     /// Push a record to the write ahead log (implementation is not complete)
     pub(crate) fn push_to_log(&mut self, record: OwnedRecord) -> io::Result<()> {
         self.wal.push(record)
@@ -147,12 +215,7 @@ impl Pager {
 
     /// Load block zero from disk
     fn load_page_zero(&mut self, block_size: usize) -> io::Result<PageZero> {
-        self.load_block::<PageZeroHeader>(0, block_size)
-    }
-
-    /// Load a block from disk at the given offset and of the given size.
-    fn load_block<M>(&mut self, offset: u64, block_size: usize) -> io::Result<MemBlock<M>> {
-        let mut block: MemBlock<M> = MemBlock::new(block_size);
+        let mut block: MemBlock<PageZeroHeader> = MemBlock::new(block_size);
         self.read_block(PAGE_ZERO, block.as_mut(), block_size)?;
         Ok(block)
     }
@@ -208,76 +271,56 @@ impl Pager {
 
     /// Check if the pager is intialized
     pub(crate) fn is_initialized(&self) -> bool {
-        self.page_zero.is_some()
+        self.db_header.is_some()
     }
 
-    /// Attempt to get page zero as a frame. Panics if we are not initialized.
-    fn page_zero_frame(&self) -> io::Result<&MemFrame> {
-        self.page_zero
-            .as_ref()
-            .ok_or(IoError::new(ErrorKind::Other, "pager not initialized"))
+    pub(crate) fn header_unchecked(&self) -> &PageZeroHeader {
+        self.db_header.as_ref().expect("Pager not initialized")
     }
 
-    /// Attempt to get page zero as a frame. Panics if we are not initialized.
-    fn page_zero_frame_mut(&mut self) -> io::Result<&mut MemFrame> {
-        self.page_zero
-            .as_mut()
-            .ok_or(IoError::new(ErrorKind::Other, "pager not initialized"))
-    }
-
-    // Utility to execute a callback on page zero.
-    fn with_page_zero<F, R>(&self, f: F) -> io::Result<R>
-    where
-        F: FnOnce(&PageZero) -> R,
-    {
-        let frame = self.page_zero_frame()?;
-        let latch = frame.read()?;
-        Ok(f(&latch))
-    }
-
-    // Utility to execute a mutable callback on page zero.
-    fn with_page_zero_mut<F, R>(&mut self, f: F) -> io::Result<R>
-    where
-        F: FnOnce(&mut PageZero) -> R,
-    {
-        let frame = self.page_zero_frame_mut()?;
-        frame.mark_dirty();
-        let mut latch = frame.write()?;
-        Ok(f(&mut latch))
+    pub(crate) fn header_unchecked_mut(&mut self) -> &mut PageZeroHeader {
+        self.db_header.as_mut().expect("Pager not initialized")
     }
 
     /// Gets the page size from the header.
-    pub fn page_size(&self) -> io::Result<usize> {
-        self.with_page_zero(|pz| pz.metadata().page_size as usize)
+    pub fn page_size(&self) -> usize {
+        self.header_unchecked().page_size as usize
     }
 
-    fn min_keys_per_page(&self) -> io::Result<usize> {
-        self.with_page_zero(|pz| pz.metadata().min_keys as usize)
+    fn min_keys_per_page(&self) -> usize {
+        self.header_unchecked().min_keys as usize
     }
 
-    fn first_free_page(&self) -> io::Result<Option<PageId>> {
-        self.with_page_zero(|pz| pz.metadata().first_free_page)
+    fn first_free_page(&self) -> Option<PageId> {
+        self.header_unchecked().first_free_page
     }
 
-    fn last_free_page(&self) -> io::Result<Option<PageId>> {
-        self.with_page_zero(|pz| pz.metadata().last_free_page)
+    fn last_free_page(&self) -> Option<PageId> {
+        self.header_unchecked().last_free_page
     }
 
-    fn get_next_page(&mut self) -> io::Result<PageId> {
-        self.with_page_zero_mut(|pz| {
-            let next = pz.metadata().total_pages;
-            pz.metadata_mut().total_pages += 1;
-            next
-        })
+    fn get_next_page(&mut self) -> PageId {
+        let header_mut = self.header_unchecked_mut();
+        let next = header_mut.total_pages;
+        header_mut.total_pages += 1;
+        next
     }
 
-    fn try_set_first_free_page(&mut self, value: Option<PageId>) -> io::Result<()> {
-        self.with_page_zero_mut(|pz| pz.metadata_mut().first_free_page = value)?;
-        Ok(())
+    fn set_first_free_page(&mut self, value: Option<PageId>) {
+        self.header_unchecked_mut().first_free_page = value;
     }
 
-    fn try_set_last_free_page(&mut self, value: Option<PageId>) -> io::Result<()> {
-        self.with_page_zero_mut(|pz| pz.metadata_mut().last_free_page = value)?;
+    fn set_last_free_page(&mut self, value: Option<PageId>) {
+        self.header_unchecked_mut().last_free_page = value;
+    }
+
+    fn validate_header(&self) -> io::Result<()> {
+        if self.header_unchecked().magic != MAGIC {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                "Invalid magic string found on header {self.db_header.magic}",
+            ));
+        }
         Ok(())
     }
 
@@ -338,16 +381,16 @@ impl Pager {
         P: Buffer<IdType = PageId>,
         MemFrame: From<Frame<P>> + From<Frame<MemBlock<P::Header>>>,
     {
-        let mem_page = if let Some(page_id) = self.first_free_page()? {
+        let mem_page = if let Some(page_id) = self.first_free_page() {
             let next = self.with_page::<OverflowPage, _, _>(page_id, |overflow| overflow.next())?;
 
-            self.try_set_first_free_page(next)?;
+            self.set_first_free_page(next);
 
             // If we have reinit the last free page, the list of deallocated pages is empty, which means we can unset it.
-            if let Some(last_id) = self.last_free_page()?
+            if let Some(last_id) = self.last_free_page()
                 && last_id == page_id
             {
-                self.try_set_last_free_page(None)?;
+                self.set_last_free_page(None);
             }
 
             // We need to make sure that we hold the only reference to the page in order to be able to dealloc or reinit the page. Take a look at [MemFrame::dealloc] if you want to figure out why.
@@ -360,8 +403,8 @@ impl Pager {
             ))?;
             page.reinit_as::<P::Header>()
         } else {
-            let id = self.get_next_page()?;
-            let page = P::alloc(id, self.page_size()? as usize);
+            let id = self.get_next_page();
+            let page = P::alloc(id, self.page_size() as usize);
 
             let frame = MemFrame::from(Frame::new(page));
             frame
@@ -384,7 +427,7 @@ impl Pager {
             let evicted_id = evicted.page_number();
 
             if evicted.is_dirty() {
-                let page_size = self.page_size()?;
+                let page_size = self.page_size();
                 evicted.with_bytes_mut(|bytes| self.write_block(evicted_id, &bytes, page_size))?;
             };
         };
@@ -405,12 +448,10 @@ impl Pager {
     {
         // Someone asked for page zero, which we have on our local private cache so we return it.
         if id == PAGE_ZERO {
-            let frame = self
-                .page_zero
-                .as_ref()
-                .ok_or(IoError::new(ErrorKind::Other, "Pager not initialized!"))?
-                .clone();
-            return Ok(frame);
+            return Err(IoError::new(
+                ErrorKind::InvalidInput,
+                "cannot read page zero. Page zero is reserved for internal use only.",
+            ));
         };
 
         // First we try to go to the cache.
@@ -418,7 +459,7 @@ impl Pager {
             return Ok(page);
         };
 
-        let page_size = self.page_size()?;
+        let page_size = self.page_size();
 
         // That was a cache miss.
         // we need to go to the disk to find the page.
@@ -456,14 +497,14 @@ impl Pager {
             ));
         };
 
-        let first_free_page = self.first_free_page()?;
+        let first_free_page = self.first_free_page();
 
         // Set the first free page in the header
         if first_free_page.is_none() {
-            self.try_set_first_free_page(Some(id))?;
+            self.set_first_free_page(Some(id));
         };
 
-        if let Some(last_free_id) = self.last_free_page()? {
+        if let Some(last_free_id) = self.last_free_page() {
             // Read the free page and set the next page with the id of the page we have just deallocated.
             self.with_page_mut::<OverflowPage, _, _>(last_free_id, |overflow| {
                 overflow.metadata_mut().next = Some(id);
@@ -471,13 +512,13 @@ impl Pager {
         };
 
         // The new last free page must be the one we have deallocated.
-        self.try_set_last_free_page(Some(id))?;
+        self.set_last_free_page(Some(id));
 
         self.ensure_cached::<P>(id)?;
 
         // We need to ensure that the frame is free
         if let Some(mem_page) = self.cache.remove(id) {
-            let page_size = self.page_size()?;
+            let page_size = self.page_size();
 
             // [MemPage::dealloc] consumes itself and creates a new MemPage with an overflow header.
             let deallocated_page = mem_page.dealloc();
@@ -499,7 +540,7 @@ impl Write for Pager {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let block_size = self.page_size()?;
+        let block_size = self.page_size();
         self.wal.flush()?;
         let pages = self.cache.clear();
         for page in pages {
@@ -508,6 +549,8 @@ impl Write for Pager {
                 page.with_bytes_mut(|bytes| self.write_block(page_number, &bytes, block_size))?;
             };
         }
+
+        self.sync_header()?;
 
         self.file.flush()?;
         Ok(())
@@ -523,5 +566,61 @@ impl Read for Pager {
 impl Seek for Pager {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         self.file.seek(pos)
+    }
+}
+
+pub(crate) struct BtreeBuilder {
+    pager: Option<SharedPager>,
+    min_keys: usize,
+    num_siblings_per_side: usize,
+}
+
+impl Default for BtreeBuilder {
+    fn default() -> Self {
+        Self::new(DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE)
+    }
+}
+
+impl BtreeBuilder {
+    pub(crate) fn new(min_keys: usize, num_siblings_per_side: usize) -> Self {
+        Self {
+            pager: None,
+            min_keys,
+            num_siblings_per_side,
+        }
+    }
+
+    pub(crate) fn build_tree(
+        &self,
+        root: PageId,
+        schema: &Schema,
+    ) -> Btree<BtreePage, DynComparator, BtreeReadAccessor> {
+        let comparator = schema.comparator();
+        let pager = self.pager.as_ref().expect("Pager not intialized").clone();
+        Btree::new(
+            root,
+            pager,
+            self.min_keys,
+            self.num_siblings_per_side,
+            comparator,
+        )
+        .with_accessor(BtreeReadAccessor::new())
+    }
+
+    pub(crate) fn build_tree_mut(
+        &self,
+        root: PageId,
+        schema: &Schema,
+    ) -> Btree<BtreePage, DynComparator, BtreeWriteAccessor> {
+        let comparator = schema.comparator();
+        let pager = self.pager.as_ref().expect("Pager not intialized").clone();
+        Btree::new(
+            root,
+            pager,
+            self.min_keys,
+            self.num_siblings_per_side,
+            comparator,
+        )
+        .with_accessor(BtreeWriteAccessor::new())
     }
 }

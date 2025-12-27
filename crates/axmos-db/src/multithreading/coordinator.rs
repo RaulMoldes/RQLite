@@ -1,20 +1,50 @@
 //! MVCC Transaction System for AxmosDB
 use crate::{
-    common::errors::{TransactionError, TransactionResult},
     io::pager::SharedPager,
     types::{LogicalId, TransactionId},
 };
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
+    error::Error,
+    fmt::{Display, Formatter, Result as FmtResult},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
 
-pub type Version = u16;
+/// Transaction errors (top-level)
+#[derive(Debug)]
+pub enum TransactionError {
+    Aborted(TransactionId),
+    NotActive(TransactionId),
+    WriteWriteConflict(TransactionId, LogicalId),
+    NotFound(TransactionId),
+    TupleNotVisible(TransactionId, LogicalId),
+    Other(String),
+}
 
+impl Display for TransactionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Aborted(id) => write!(f, "Transaction {} aborted", id),
+            Self::NotActive(id) => write!(f, "Transaction {} not active", id),
+            Self::WriteWriteConflict(txid, tuple) => {
+                write!(f, "Transaction {} conflict on tuple {}", txid, tuple)
+            }
+            Self::NotFound(id) => write!(f, "Transaction {} not found", id),
+            Self::TupleNotVisible(id, logical) => {
+                write!(f, "Tuple {} not visible to transaction {}", logical, id)
+            }
+            Self::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl Error for TransactionError {}
+
+pub type TransactionResult<T> = Result<T, TransactionError>;
 /// Last commit timestamp per tuple
 type TupleCommitLog = Arc<RwLock<HashMap<LogicalId, u64>>>;
 
@@ -44,7 +74,7 @@ macro_rules! snapshot {
 
 /// Snapshot of the database state at transaction start time.
 /// Used to determine tuple visibility under snapshot isolation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct Snapshot {
     /// Transaction ID that owns this snapshot
     xid: TransactionId,
@@ -162,7 +192,7 @@ pub struct TransactionMetadata {
     /// Tuples read by this transaction
     read_set: HashSet<LogicalId>,
     /// Tuples written by this transaction with their original version
-    write_set: HashMap<LogicalId, Version>,
+    write_set: HashMap<LogicalId, u8>,
     /// Tracks the timestamp when the transaction actually started.
     start_ts: u64,
 }
@@ -199,11 +229,11 @@ impl TransactionMetadata {
         self.read_set.insert(id);
     }
 
-    pub fn add_to_write_set(&mut self, id: LogicalId, version: Version) {
+    pub fn add_to_write_set(&mut self, id: LogicalId, version: u8) {
         self.write_set.insert(id, version);
     }
 
-    pub fn write_set(&self) -> &HashMap<LogicalId, Version> {
+    pub fn write_set(&self) -> &HashMap<LogicalId, u8> {
         &self.write_set
     }
 }
@@ -371,7 +401,7 @@ impl TransactionCoordinator {
         &self,
         txid: TransactionId,
         logical_id: LogicalId,
-        version: Version,
+        version: u8,
     ) -> TransactionResult<()> {
         let mut txs = self.transactions.write();
 

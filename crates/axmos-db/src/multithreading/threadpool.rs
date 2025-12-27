@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     error::Error,
+    fmt::{Display, Formatter, Result as FmtResult},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -9,8 +10,27 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::common::errors::ThreadPoolError;
 use parking_lot::{Condvar, Mutex};
+
+/// Thread pool errors
+#[derive(Debug)]
+pub enum ThreadPoolError {
+    ShutdownTimeout,
+    ThreadJoinError(String),
+    PoolShutdown,
+}
+
+impl Display for ThreadPoolError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::ShutdownTimeout => write!(f, "Thread pool shutdown timed out"),
+            Self::ThreadJoinError(msg) => write!(f, "Failed to join thread: {}", msg),
+            Self::PoolShutdown => write!(f, "Thread pool has been shut down"),
+        }
+    }
+}
+
+impl Error for ThreadPoolError {}
 
 // Simplistic thread safe queue implementation.
 // Can be improved with crossbeam but for now it is kept like this for more flexibility and to reduce the number of dependencies we rely on.

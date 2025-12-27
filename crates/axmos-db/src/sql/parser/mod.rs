@@ -1,19 +1,38 @@
 pub(crate) mod ast;
 mod lexer;
 
-#[cfg(test)]
-mod tests;
-
 use ast::*;
 use lexer::Lexer;
 
 pub use lexer::Token;
 
-use crate::{
-    database::errors::{ParseResult, ParserError},
-    types::DataTypeKind,
+use crate::types::DataTypeKind;
+use std::{
+    error::Error,
+    fmt::{Display, Formatter, Result as FmtResult},
+    mem,
 };
-use std::mem;
+
+/// Parser errors (Step 1: SQL text -> AST)
+#[derive(Debug, PartialEq, Clone)]
+pub enum ParserError {
+    InvalidExpression(String),
+    UnexpectedToken(String),
+    UnexpectedEof,
+}
+
+impl Display for ParserError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::InvalidExpression(s) => write!(f, "Invalid expression: {}", s),
+            Self::UnexpectedToken(s) => write!(f, "Unexpected token: {}", s),
+            Self::UnexpectedEof => write!(f, "Unexpected end of input"),
+        }
+    }
+}
+
+impl Error for ParserError {}
+pub type ParseResult<T> = Result<T, ParserError>;
 
 /// Main parser implementation.
 /// Uses a pratt parsing approach to parse sql expressions into AST nodes.
@@ -47,7 +66,7 @@ impl Parser {
             self.next_token();
             Ok(())
         } else {
-            Err(ParserError::UnexpectedToken(self.current_token.clone()))
+            Err(ParserError::UnexpectedToken(self.current_token.to_string()))
         }
     }
 
@@ -140,12 +159,6 @@ impl Parser {
 
                     // Check if this is a subquery (SELECT inside parentheses)
                     // This should be handled at the parse_prefix level.
-                    /* if self.current_token == Token::Select {
-                        let subquery = self.parse_select_statement()?;
-                        self.expect(Token::RParen)?;
-                        return Ok(Expr::Subquery(Box::new(subquery)));
-                    }*/
-
                     // Check for DISTINCT in aggregate functions
                     let distinct = self.consume_if(&Token::Distinct);
 
@@ -167,9 +180,6 @@ impl Parser {
                         args,
                         distinct,
                     })
-                /*} else if self.current_token == Token::Comma { CONSUMING THE COMMA TOKEN HERE WAS BREAKING THE COLUMN LIST PARSING
-                self.next_token();
-                Ok(Expr::Identifier(name))*/
                 } else {
                     Ok(Expr::Identifier(name))
                 }
@@ -378,7 +388,7 @@ impl Parser {
                         });
                     }
                     _ => {
-                        return Err(ParserError::UnexpectedToken(self.current_token.clone()));
+                        return Err(ParserError::UnexpectedToken(self.current_token.to_string()));
                     }
                 }
             }
@@ -565,7 +575,7 @@ impl Parser {
                         Ok(Statement::CreateIndex(self.parse_create_index_statement()?))
                     }
 
-                    _ => Err(ParserError::UnexpectedToken(next_token)),
+                    _ => Err(ParserError::UnexpectedToken(next_token.to_string())),
                 }
             }
             Token::Alter => Ok(Statement::AlterTable(self.parse_alter_statement()?)),
@@ -634,16 +644,6 @@ impl Parser {
                 }
 
             // Drop constraint
-            } else if self.consume_if(&Token::Constraint) {
-                if let Token::Identifier(constraint_name) = &self.current_token {
-                    let name = constraint_name.clone();
-                    self.next_token();
-                    AlterAction::DropConstraint(name)
-                } else {
-                    return Err(ParserError::InvalidExpression(
-                        "expected constraint name".to_string(),
-                    ));
-                }
             } else {
                 return Err(ParserError::InvalidExpression(
                     "expected COLUMN or CONSTRAINT after DROP".to_string(),
@@ -719,6 +719,17 @@ impl Parser {
     fn parse_create_table_statement(&mut self) -> ParseResult<CreateTableStatement> {
         self.expect(Token::Create)?;
         self.expect(Token::Table)?;
+
+        // Check for [if_not_exists]
+        let if_not_exists = if self.current_token == Token::If {
+            self.next_token();
+            self.expect(Token::Not)?;
+            self.expect(Token::Exists)?;
+            true
+        } else {
+            false
+        };
+
         let table = if let Token::Identifier(name) = &self.current_token {
             let table_name = name.clone();
             self.next_token();
@@ -747,14 +758,9 @@ impl Parser {
                 self.next_token();
 
                 let data_type = self.parse_data_type()?;
-
-                let col_constraints = self.parse_column_constraints()?;
-
-                columns.push(ColumnDefExpr {
-                    name: col_name,
-                    data_type,
-                    constraints: col_constraints,
-                });
+                let mut column_def = ColumnDefExpr::new(col_name, data_type);
+                self.parse_column_constraints(&mut column_def)?;
+                columns.push(column_def);
             } else {
                 return Err(ParserError::InvalidExpression(
                     "expected column definition or constraint".to_string(),
@@ -772,6 +778,7 @@ impl Parser {
             table,
             columns,
             constraints,
+            if_not_exists,
         })
     }
 
@@ -1454,7 +1461,7 @@ impl Parser {
                     alias,
                 })
             }
-            _ => Err(ParserError::UnexpectedToken(self.current_token.clone())),
+            _ => Err(ParserError::UnexpectedToken(self.current_token.to_string())),
         }
     }
     /// Parses data types.
@@ -1468,25 +1475,15 @@ impl Parser {
             match name.as_str() {
                 "INT" | "INTEGER" => DataTypeKind::Int,
                 "BIGINT" => DataTypeKind::BigInt,
-                "HALFINT" => DataTypeKind::HalfInt,
-                "SMALLINT" => DataTypeKind::SmallInt,
-                "uINT" | "uNSIGNED INTEGER" => DataTypeKind::UInt,
+                "UINT" | "UNSIGNED INTEGER" => DataTypeKind::UInt,
                 "BIGUINT" => DataTypeKind::BigUInt,
-                "HALFUINT" => DataTypeKind::HalfUInt,
-                "SMALLUINT" => DataTypeKind::SmallUInt,
                 "FLOAT" => DataTypeKind::Float,
                 "DOUBLE" => DataTypeKind::Double,
-                "CHAR" => DataTypeKind::Char,
-                "TEXT" => DataTypeKind::Text,
-                "DATE" => DataTypeKind::Date,
-                "TIME" | "DATETIME" => DataTypeKind::DateTime,
-                "BOOLEAN" | "BOOL" => DataTypeKind::Boolean,
-                "BYTE" => DataTypeKind::Byte,
+                "TEXT" => DataTypeKind::Blob,
+                "BOOLEAN" | "BOOL" => DataTypeKind::Bool,
                 "BLOB" => DataTypeKind::Blob,
                 _ => {
-                    return Err(ParserError::UnexpectedToken(Token::Identifier(
-                        name.to_string(),
-                    )));
+                    return Err(ParserError::UnexpectedToken(name.to_string()));
                 }
             }
         } else {
@@ -1512,87 +1509,38 @@ impl Parser {
         };
 
         let data_type = self.parse_data_type()?;
-        let constraints = self.parse_column_constraints()?;
+        let mut column_def = ColumnDefExpr::new(name, data_type);
+        self.parse_column_constraints(&mut column_def)?;
 
-        Ok(ColumnDefExpr {
-            name,
-            data_type,
-            constraints,
-        })
+        Ok(column_def)
     }
 
-    /// Parses all types of column constraints.
-    ///
-    /// Supported types include:
-    ///
-    /// - Not Constraints,
-    /// - Unique Constraints,
-    /// - Primary and Foriegn Keys,
-    /// - Check Constraints,
-    /// - Default Constraints.
-    fn parse_column_constraints(&mut self) -> Result<Vec<ColumnConstraintExpr>, ParserError> {
-        let mut constraints = Vec::new();
-
+    /// Parses all types of column constraints, modifying the passed [ColumnDefExpr] in place in order to set the proper bits.
+    fn parse_column_constraints(
+        &mut self,
+        column_def: &mut ColumnDefExpr,
+    ) -> Result<(), ParserError> {
         loop {
             match &self.current_token {
                 Token::Not => {
                     self.next_token();
                     self.expect(Token::Null)?;
-                    constraints.push(ColumnConstraintExpr::NotNull);
+                    column_def.is_non_null = true;
                 }
                 Token::Unique => {
                     self.next_token();
-                    constraints.push(ColumnConstraintExpr::Unique);
-                }
-                Token::Primary => {
-                    self.next_token();
-                    self.expect(Token::Key)?;
-                    constraints.push(ColumnConstraintExpr::PrimaryKey);
-                }
-                Token::References => {
-                    self.next_token();
-                    let ref_table = if let Token::Identifier(name) = &self.current_token {
-                        let table = name.clone();
-                        self.next_token();
-                        table
-                    } else {
-                        return Err(ParserError::InvalidExpression(
-                            "expected referenced table name".to_string(),
-                        ));
-                    };
-
-                    let ref_column = if self.current_token == Token::LParen {
-                        self.next_token();
-                        let col = if let Token::Identifier(name) = &self.current_token {
-                            let column = name.clone();
-                            self.next_token();
-                            column
-                        } else {
-                            return Err(ParserError::InvalidExpression(
-                                "expected referenced column name".to_string(),
-                            ));
-                        };
-                        self.expect(Token::RParen)?;
-                        col
-                    } else {
-                        "id".to_string() // Default to 'id' if not specified
-                    };
-
-                    constraints.push(ColumnConstraintExpr::ForeignKey {
-                        table: ref_table,
-                        column: ref_column,
-                    });
+                    column_def.is_unique = true;
                 }
                 Token::Default => {
                     self.next_token();
                     let expr = self.parse_expression()?;
-                    constraints.push(ColumnConstraintExpr::Default(expr));
+                    column_def.default = Some(expr);
                 }
                 _ => break,
             }
         }
 
-        Ok(constraints)
+        Ok(())
     }
 
     /// Parses constraints applied at table level.
@@ -1653,7 +1601,7 @@ impl Parser {
                     ref_columns,
                 })
             }
-            _ => Err(ParserError::UnexpectedToken(self.current_token.clone())),
+            _ => Err(ParserError::UnexpectedToken(self.current_token.to_string())),
         }
     }
 }

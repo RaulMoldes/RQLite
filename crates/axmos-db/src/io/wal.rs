@@ -1,5 +1,8 @@
 use crate::{
+    LogicalId, RowId, TransactionId,
     io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
+    io::logger::{Delete, Insert, Update},
+    multithreading::coordinator::TransactionState,
     storage::{
         Allocatable, AvailableSpace, WalMetadata, WalOps, Writable,
         wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock},
@@ -8,168 +11,11 @@ use crate::{
 };
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::{self, Error as IoError, ErrorKind, Read, Seek, SeekFrom, Write},
     path::Path,
 };
-
-pub trait Operation {
-    fn op_type(&self) -> RecordType;
-    fn object_id(&self) -> Option<ObjectId>;
-    fn undo(&self) -> &[u8];
-    fn redo(&self) -> &[u8];
-}
-
-pub struct Begin;
-
-impl Operation for Begin {
-    fn op_type(&self) -> RecordType {
-        RecordType::Begin
-    }
-    fn object_id(&self) -> Option<ObjectId> {
-        None
-    }
-    fn redo(&self) -> &[u8] {
-        &[]
-    }
-    fn undo(&self) -> &[u8] {
-        &[]
-    }
-}
-
-pub struct End;
-
-impl Operation for End {
-    fn op_type(&self) -> RecordType {
-        RecordType::End
-    }
-    fn object_id(&self) -> Option<ObjectId> {
-        None
-    }
-    fn redo(&self) -> &[u8] {
-        &[]
-    }
-    fn undo(&self) -> &[u8] {
-        &[]
-    }
-}
-
-pub struct Commit;
-
-impl Operation for Commit {
-    fn op_type(&self) -> RecordType {
-        RecordType::Commit
-    }
-    fn object_id(&self) -> Option<ObjectId> {
-        None
-    }
-    fn redo(&self) -> &[u8] {
-        &[]
-    }
-    fn undo(&self) -> &[u8] {
-        &[]
-    }
-}
-
-pub struct Abort;
-
-impl Operation for Abort {
-    fn op_type(&self) -> RecordType {
-        RecordType::Abort
-    }
-    fn object_id(&self) -> Option<ObjectId> {
-        None
-    }
-    fn redo(&self) -> &[u8] {
-        &[]
-    }
-    fn undo(&self) -> &[u8] {
-        &[]
-    }
-}
-
-#[repr(C)]
-pub struct Update {
-    oid: ObjectId,
-    old: Box<[u8]>,
-    new: Box<[u8]>,
-}
-
-impl Update {
-    pub(crate) fn new(oid: ObjectId, old: Box<[u8]>, new: Box<[u8]>) -> Self {
-        Self { oid, old, new }
-    }
-}
-
-impl Operation for Update {
-    fn op_type(&self) -> RecordType {
-        RecordType::Update
-    }
-    fn object_id(&self) -> Option<ObjectId> {
-        Some(self.oid)
-    }
-    fn redo(&self) -> &[u8] {
-        self.new.as_ref()
-    }
-    fn undo(&self) -> &[u8] {
-        self.old.as_ref()
-    }
-}
-
-#[repr(C)]
-pub struct Insert {
-    oid: ObjectId,
-    new: Box<[u8]>,
-}
-
-impl Insert {
-    pub(crate) fn new(oid: ObjectId, new: Box<[u8]>) -> Self {
-        Self { oid, new }
-    }
-}
-
-impl Operation for Insert {
-    fn op_type(&self) -> RecordType {
-        RecordType::Insert
-    }
-    fn object_id(&self) -> Option<ObjectId> {
-        Some(self.oid)
-    }
-    fn redo(&self) -> &[u8] {
-        self.new.as_ref()
-    }
-    fn undo(&self) -> &[u8] {
-        &[]
-    }
-}
-
-#[repr(C)]
-pub struct Delete {
-    oid: ObjectId,
-    old: Box<[u8]>,
-}
-
-impl Delete {
-    pub(crate) fn new(oid: ObjectId, old: Box<[u8]>) -> Self {
-        Self { oid, old }
-    }
-}
-
-impl Operation for Delete {
-    fn op_type(&self) -> RecordType {
-        RecordType::Delete
-    }
-    fn object_id(&self) -> Option<ObjectId> {
-        Some(self.oid)
-    }
-    fn redo(&self) -> &[u8] {
-        &[]
-    }
-    fn undo(&self) -> &[u8] {
-        self.old.as_ref()
-    }
-}
 
 #[derive(Debug)]
 pub struct WriteAheadLog {
@@ -262,10 +108,112 @@ impl Seek for WriteAheadLog {
     }
 }
 
+/// Result of the analysis phase.
+///
+/// The objective of the analysis phase is to discover which transactions will need a redo or an undo
+#[derive(Debug, Default)]
+pub struct AnalysisResult {
+    /// Transactions that need to be undo
+    pub needs_undo: HashSet<TransactionId>,
+    /// Transactions that need to be redo
+    pub needs_redo: HashSet<TransactionId>,
+    /// Map of the last lsn for each transaction.
+    pub lsn_chains: HashMap<TransactionId, Vec<Lsn>>,
+    /// Map from transaction ID to its last LSN
+    pub insert_ops: HashMap<Lsn, Insert>,
+    /// Map from transaction ID to its last LSN
+    pub delete_ops: HashMap<Lsn, Delete>,
+    /// Update ops
+    pub update_ops: HashMap<Lsn, Update>,
+    /// The starting point for redo
+    pub start_redo_lsn: Option<Lsn>,
+}
+impl AnalysisResult {
+    pub(crate) fn try_iter_lsn(&self, id: &TransactionId) -> Option<std::slice::Iter<'_, Lsn>> {
+        self.lsn_chains.get(id).map(|vec| vec.iter())
+    }
+}
 impl WriteAheadLog {
     /// Maximum record size that can fit in a single block
     pub(crate) fn max_record_size(&self) -> usize {
         WalBlock::usable_space(self.block_size as usize) as usize
+    }
+
+    /// Runs the analysis phase of the ARIES recovery protocol.
+    pub(crate) fn run_analysis(&mut self) -> io::Result<AnalysisResult> {
+        let mut result = AnalysisResult::default();
+
+        let total_blocks = self.header.metadata().wal_header.total_blocks;
+        if total_blocks == 0 {
+            return Ok(result);
+        }
+
+        let mut reader = WalReader::new(
+            &mut self.file,
+            self.block_size * 4, // Read ahead 4 blocks
+            self.block_size,
+            total_blocks,
+        )?;
+
+        while let Some(record) = reader.next_ref()? {
+            let tid = record.tid();
+            let lsn = record.lsn();
+            let record_type = record.log_type();
+
+            // Track the last LSN for each transaction
+            result
+                .lsn_chains
+                .entry(tid)
+                .or_insert_with(Vec::new)
+                .push(lsn);
+
+            // Set [start_redo_lsn] to the first LSN we see
+            if result.start_redo_lsn.is_none() {
+                result.start_redo_lsn = Some(lsn);
+            }
+
+            match record_type {
+                // By default all transactions will need to be undo unless the have committed.
+                RecordType::Begin => {
+                    result.needs_undo.insert(tid);
+                }
+                RecordType::Commit => {
+                    result.needs_undo.remove(&tid);
+                    result.needs_redo.insert(tid);
+                }
+                RecordType::Abort => {
+                    result.needs_undo.insert(tid);
+                }
+                RecordType::End => {
+                    result.needs_undo.remove(&tid);
+                    result.needs_redo.remove(&tid);
+                }
+                RecordType::Delete => {
+                    let undo_content = Box::from(record.undo_payload());
+                    let oid = record.metadata().object_id;
+                    let row_id = record.metadata().row_id;
+                    let delete = Delete::new(oid, row_id, undo_content);
+                    result.delete_ops.insert(tid, delete);
+                }
+                RecordType::Update => {
+                    let undo_content = Box::from(record.undo_payload());
+                    let redo_content = Box::from(record.redo_payload());
+                    let oid = record.metadata().object_id;
+                    let row_id = record.metadata().row_id;
+                    let update = Update::new(oid, row_id, undo_content, redo_content);
+                    result.update_ops.insert(tid, update);
+                }
+                RecordType::Insert => {
+                    let redo_content = Box::from(record.redo_payload());
+                    let oid = record.metadata().object_id;
+                    let row_id = record.metadata().row_id;
+                    let insert = Insert::new(oid, row_id, redo_content);
+                    result.insert_ops.insert(tid, insert);
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     pub(crate) fn push(&mut self, record: OwnedRecord) -> io::Result<()> {
