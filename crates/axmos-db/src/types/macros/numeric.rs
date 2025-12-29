@@ -68,6 +68,27 @@ macro_rules! numeric {
             fn from_primitive(value: $primitive) -> Self {
                 Self(value as $inner)
             }
+
+
+            fn abs(&self) -> Self {
+                Self($crate::types::core::NumericAbs::numeric_abs(self.0))
+            }
+
+            fn sqrt(&self) -> Self {
+                Self($crate::types::core::NumericRoundOps::numeric_sqrt(self.0))
+            }
+
+            fn floor(&self) -> Self {
+                Self($crate::types::core::NumericRoundOps::numeric_floor(self.0))
+            }
+
+            fn round(&self) -> Self {
+                Self($crate::types::core::NumericRoundOps::numeric_round(self.0))
+            }
+
+            fn ceil(&self) -> Self {
+                Self($crate::types::core::NumericRoundOps::numeric_ceil(self.0))
+            }
         }
 
         impl $marker for $name {}
@@ -101,5 +122,141 @@ macro_rules! promote_symmetric {
     ($a:ty, $b:ty => $output:ty) => {
         $crate::promote_pair!($a, $b => $output);
         $crate::promote_pair!($b, $a => $output);
+    };
+}
+
+#[macro_export]
+macro_rules! arithmetic_op {
+    ($method:ident, $trait_method:ident) => {
+        pub fn $method(&self, other: &DataType) -> TypeSystemResult<DataType> {
+            use crate::types::core::*;
+
+            match (self, other) {
+                // Double combinations
+                (DataType::Double(a), DataType::Double(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::Double(a), DataType::Float(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::Float(a), DataType::Double(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::Double(a), DataType::BigInt(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::BigInt(a), DataType::Double(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::Double(a), DataType::Int(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::Int(a), DataType::Double(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::Double(a), DataType::BigUInt(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::BigUInt(a), DataType::Double(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::Double(a), DataType::UInt(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::UInt(a), DataType::Double(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+
+                // Float combinations
+                (DataType::Float(a), DataType::Float(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::Float(a), DataType::BigInt(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::BigInt(a), DataType::Float(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::Float(a), DataType::Int(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::Int(a), DataType::Float(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::Float(a), DataType::BigUInt(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::BigUInt(a), DataType::Float(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::Float(a), DataType::UInt(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+                (DataType::UInt(a), DataType::Float(b)) => {
+                    Ok(DataType::Double(Float64(a.$trait_method(*b))))
+                }
+
+                // Signed int combinations
+                (DataType::BigInt(a), DataType::BigInt(b)) => {
+                    Ok(DataType::BigInt(Int64(a.$trait_method(*b))))
+                }
+                (DataType::BigInt(a), DataType::Int(b)) => {
+                    Ok(DataType::BigInt(Int64(a.$trait_method(*b))))
+                }
+                (DataType::Int(a), DataType::BigInt(b)) => {
+                    Ok(DataType::BigInt(Int64(a.$trait_method(*b))))
+                }
+                (DataType::Int(a), DataType::Int(b)) => {
+                    Ok(DataType::BigInt(Int64(a.$trait_method(*b))))
+                }
+
+                // Signed + Unsigned
+                (DataType::BigInt(a), DataType::UInt(b)) => {
+                    Ok(DataType::BigInt(Int64(a.$trait_method(*b))))
+                }
+                (DataType::UInt(a), DataType::BigInt(b)) => {
+                    Ok(DataType::BigInt(Int64(a.$trait_method(*b))))
+                }
+                (DataType::BigInt(a), DataType::BigUInt(b)) => {
+                    Ok(DataType::BigInt(Int64(a.$trait_method(*b))))
+                }
+                (DataType::BigUInt(a), DataType::BigInt(b)) => {
+                    Ok(DataType::BigInt(Int64(a.$trait_method(*b))))
+                }
+                (DataType::Int(a), DataType::UInt(b)) => {
+                    Ok(DataType::BigInt(Int64(a.$trait_method(*b))))
+                }
+                (DataType::UInt(a), DataType::Int(b)) => {
+                    Ok(DataType::BigInt(Int64(a.$trait_method(*b))))
+                }
+                (DataType::Int(a), DataType::BigUInt(b)) => {
+                    Ok(DataType::BigInt(Int64(a.$trait_method(*b))))
+                }
+                (DataType::BigUInt(a), DataType::Int(b)) => {
+                    Ok(DataType::BigInt(Int64(a.$trait_method(*b))))
+                }
+
+                // Unsigned combinations
+                (DataType::BigUInt(a), DataType::BigUInt(b)) => {
+                    Ok(DataType::BigUInt(UInt64(a.$trait_method(*b))))
+                }
+                (DataType::BigUInt(a), DataType::UInt(b)) => {
+                    Ok(DataType::BigUInt(UInt64(a.$trait_method(*b))))
+                }
+                (DataType::UInt(a), DataType::BigUInt(b)) => {
+                    Ok(DataType::BigUInt(UInt64(a.$trait_method(*b))))
+                }
+                (DataType::UInt(a), DataType::UInt(b)) => {
+                    Ok(DataType::BigUInt(UInt64(a.$trait_method(*b))))
+                }
+
+                // Non-numeric
+                (a, b) => Err(TypeSystemError::UnexpectedDataType(if !a.is_numeric() {
+                    a.kind()
+                } else {
+                    b.kind()
+                })),
+            }
+        }
     };
 }

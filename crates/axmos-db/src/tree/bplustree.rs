@@ -1,26 +1,20 @@
 use crate::{
     io::pager::SharedPager,
     multithreading::coordinator::Snapshot,
-    multithreading::frames::{Frame, MemFrame},
     schema::base::Schema,
     storage::{
-        BtreeOps,
+        BtreeMetadata, BtreeOps, Identifiable,
         cell::OwnedCell,
-        core::buffer::{MemBlock, PayloadRef},
         page::{BtreePage, OverflowPage},
-        tuple::{RefTupleAccessor, Row, TupleError, TupleReader, TupleRef},
+        tuple::{RefTupleAccessor, Row, Tuple, TupleError, TupleReader, TupleRef},
     },
-    tree::{
-        accessor::{Accessor, PositionStack, ReadAccessor, WriteAccessor},
-        cell_ops::Buildable,
-    },
+    tree::accessor::{BtreePagePosition, TreeReader, TreeWriter},
     types::{PAGE_ZERO, PageId},
 };
 
 use super::{
     accessor::Position,
-    cell_ops::{CellBuilder, CellBytesComparator, CellDeallocator, KeyBytes, Reassembler},
-    comparators::Comparator,
+    cell_ops::{CellBuilder, CellComparator, CellDeallocator, Reassembler},
 };
 
 use std::{
@@ -37,9 +31,9 @@ use std::{
 
 const MINIMUM_KEYS_PER_PAGE: usize = 3;
 
-pub(crate) enum SearchResult<P: BtreeOps> {
-    Found(Position<P>),
-    NotFound(Position<P>),
+pub(crate) enum SearchResult {
+    Found(BtreePagePosition),
+    NotFound(BtreePagePosition),
 }
 
 #[derive(Debug)]
@@ -60,7 +54,7 @@ pub enum BtreeError {
     InvalidIterator((PageId, usize)),
     InvalidPointer(String),
     DuplicatedKey(String),
-    NonExistentKey(String),
+    NonExistentKey,
     TupleReadError(TupleError),
     Other(String),
 }
@@ -73,7 +67,7 @@ impl Display for BtreeError {
             Self::BtreePageNotFound(id) => write!(f, "btree page not found: {id}"),
             Self::InvalidPointer(str) => write!(f, "invalid tree structure: {str}"),
             Self::BtreeUnintialized => f.write_str("btree not initialized"),
-            Self::NonExistentKey(str) => write!(f, "key {str} does not exist"),
+            Self::NonExistentKey => write!(f, "key  does not exist"),
             Self::DuplicatedKey(str) => write!(f, "key {str} is duplicated"),
             Self::TupleReadError(err) => write!(f, "Tuple read error {err}"),
             Self::InvalidIterator(pos) => write!(
@@ -103,30 +97,22 @@ impl From<TupleError> for BtreeError {
     }
 }
 
-pub(crate) struct Btree<P, Cmp, Acc>
+pub(crate) struct Btree<Acc>
 where
-    P: BtreeOps,
-    Cmp: Comparator,
-    Acc: Accessor<P> + PositionStack<P>,
+    Acc: TreeReader,
 {
     pub(crate) root: PageId,
     pub(crate) pager: SharedPager,
     pub(crate) min_keys: usize,
     pub(crate) num_siblings_per_side: usize,
     accessor: Option<Acc>, // Lazy initialization for the accessor.
-    comparator: Cmp,
-    __page_marker: std::marker::PhantomData<P>,
 }
 
 // The accessor cannot be [Clone], so when cloning the btree we must be careful to reinitialize the accessor.
 // It is okay to do it since cloning the btree is only necessary to create an iterator, and iterator creation already initializes the accessor.
-impl<P, Cmp, Acc> Clone for Btree<P, Cmp, Acc>
+impl<Acc> Clone for Btree<Acc>
 where
-    P: BtreeOps,
-    Cmp: Comparator + Clone,
-    MemFrame: From<Frame<P>> + From<Frame<MemBlock<P::Header>>>,
-    Acc: ReadAccessor<P, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>
-        + PositionStack<P>,
+    Acc: TreeReader,
 {
     fn clone(&self) -> Self {
         Self {
@@ -135,17 +121,13 @@ where
             min_keys: self.min_keys,
             num_siblings_per_side: self.num_siblings_per_side,
             accessor: None,
-            comparator: self.comparator.clone(),
-            __page_marker: std::marker::PhantomData::<P>,
         }
     }
 }
 
-impl<P, Cmp, Acc> Btree<P, Cmp, Acc>
+impl<Acc> Btree<Acc>
 where
-    P: BtreeOps,
-    Cmp: Comparator,
-    Acc: ReadAccessor<P> + PositionStack<P>,
+    Acc: TreeReader,
 {
     /// Creates a [Btree] data structure from an existing root page.
     ///
@@ -159,7 +141,6 @@ where
         pager: SharedPager,
         min_keys: usize,
         num_siblings_per_side: usize,
-        comparator: Cmp,
     ) -> Self {
         debug_assert!(
             min_keys >= MINIMUM_KEYS_PER_PAGE,
@@ -170,9 +151,8 @@ where
             pager,
             min_keys,
             num_siblings_per_side,
-            comparator,
+
             accessor: None,
-            __page_marker: std::marker::PhantomData::<P>,
         }
     }
 
@@ -181,7 +161,7 @@ where
         self
     }
 
-    pub(crate) fn root_pos(&self) -> Position<P> {
+    pub(crate) fn root_pos(&self) -> BtreePagePosition {
         Position::start_pos(self.root)
     }
 
@@ -216,13 +196,9 @@ where
     }
 }
 
-impl<P, Cmp, Acc> Btree<P, Cmp, Acc>
+impl<Acc> Btree<Acc>
 where
-    P: BtreeOps,
-    Cmp: Comparator + Clone,
-    MemFrame: From<Frame<P>> + From<Frame<MemBlock<P::Header>>>,
-    Acc: ReadAccessor<P, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>
-        + PositionStack<P>,
+    Acc: TreeReader,
 {
     /// Acquires latches on btreepages with the given accessor
     pub(crate) fn acquire_with_accessor(&mut self, id: PageId) -> BtreeResult<()> {
@@ -231,7 +207,7 @@ where
             return Ok(());
         };
 
-        let frame = self.pager.write().read_page::<P>(id)?;
+        let frame = self.pager.write().read_page::<BtreePage>(id)?;
         self.accessor
             .as_mut()
             .ok_or(BtreeError::BtreeUnintialized)?
@@ -240,7 +216,7 @@ where
     }
 
     /// Gets a shared reference to a page from the stack.
-    pub(crate) fn get_page(&mut self, id: PageId) -> BtreeResult<&P> {
+    pub(crate) fn get_page(&mut self, id: PageId) -> BtreeResult<&BtreePage> {
         self.acquire_with_accessor(id)?;
         self.accessor()?
             .get(id)
@@ -254,36 +230,56 @@ where
     }
 
     /// Traverses the whole tree from the root to the leaf nodes.
-    pub(crate) fn search(&mut self, entry: KeyBytes<'_>) -> BtreeResult<SearchResult<P>> {
-        // TODO: HAY UN CASO ESPECIAL EN EL QUE ESTE ARBOL TIENE PAGE-ZERO en la raiz. hay que controlarlo
-        self.page_search(self.get_root(), entry)
+    ///
+    /// Assumes the entry contains the serialized list of keys.
+    pub(crate) fn search(&mut self, entry: &[u8], schema: &Schema) -> BtreeResult<SearchResult> {
+        self.page_search(self.get_root(), entry, 0, schema)
+    }
+
+    /// Traverses the whole tree from the root to the leaf nodes.
+    ///
+    /// Assumes the entry contains the serialized list of keys.
+    pub(crate) fn search_tuple(
+        &mut self,
+        entry: &Tuple,
+        schema: &Schema,
+    ) -> BtreeResult<SearchResult> {
+        let target_cursor = Tuple::keys_offset(schema.num_values());
+        self.page_search(
+            self.get_root(),
+            entry.effective_data(),
+            target_cursor,
+            schema,
+        )
     }
 
     /// Searches for a specific key on a page (mutably borrowing)
-    fn page_search(
+    pub(crate) fn page_search(
         &mut self,
         page_id: PageId, // Last tracked position
-        entry: KeyBytes<'_>,
-    ) -> BtreeResult<SearchResult<P>> {
+        entry: &[u8],
+        target_cursor: usize,
+        schema: &Schema,
+    ) -> BtreeResult<SearchResult> {
         // Get the start page and allocate a new accessor to start the search.
 
         let is_leaf = self.get_page(page_id)?.is_leaf();
 
         if is_leaf {
             // If the page is a leaf we have reached the end of the tree, therefore we perform binary search inside the page.
-            return self.binary_search_key(page_id, entry);
+            return self.binary_search_key(page_id, entry, target_cursor, schema);
         }
 
         // We are on an interior node, therefore we look for the most suitable child to continue traversing downwards.
 
-        let child = self.find_child(page_id, entry)?;
+        let child = self.find_child(page_id, entry, target_cursor, schema)?;
 
         match child {
             SearchResult::NotFound(position) | SearchResult::Found(position) => {
                 // Track the position.
                 let accessor = self.accessor_mut()?;
                 accessor.push_position(Position::new(page_id, position.slot()));
-                self.page_search(position.entry(), entry)
+                self.page_search(position.entry(), entry, target_cursor, schema)
             }
         }
     }
@@ -296,10 +292,11 @@ where
     ///
     /// - [SearchResult::NotFound] if it does not find the key it is looking for.  The position will include the last slot index in the page.
     fn binary_search_page(
-        page: &P,
-        comparator: CellBytesComparator<Cmp>,
-        search_key: KeyBytes<'_>,
-    ) -> BtreeResult<SearchResult<P>> {
+        page: &BtreePage,
+        comparator: CellComparator,
+        search_key: &[u8],
+        target_cursor: usize,
+    ) -> BtreeResult<SearchResult> {
         let mut slot_count = page.num_slots();
         let last_slot = slot_count;
         let mut left = 0;
@@ -310,7 +307,7 @@ where
 
             let cell = page.cell(mid);
 
-            match comparator.compare_cell_payload(search_key, cell)? {
+            match comparator.compare_cell_payload(search_key, cell, target_cursor)? {
                 Ordering::Equal => {
                     return Ok(SearchResult::Found(Position::new(page.id(), mid)));
                 }
@@ -326,10 +323,11 @@ where
 
     /// Finds the most suitable child to store a particular entry at a given page.
     fn find_child_on_page(
-        page: &P,
-        comparator: CellBytesComparator<Cmp>,
-        search_key: KeyBytes<'_>,
-    ) -> BtreeResult<SearchResult<P>> {
+        page: &BtreePage,
+        comparator: CellComparator,
+        search_key: &[u8],
+        target_cursor: usize,
+    ) -> BtreeResult<SearchResult> {
         let num_slots = page.num_slots();
         let right_child = page.right_child().unwrap_or(PAGE_ZERO);
 
@@ -339,7 +337,7 @@ where
             let cell = page.cell(i);
             // Once we find a suitable child, stop the search.
             if matches!(
-                comparator.compare_cell_payload(search_key, cell)?,
+                comparator.compare_cell_payload(search_key, cell, target_cursor)?,
                 Ordering::Less
             ) {
                 // Note that left child must ever be None for interior pages, so as no one
@@ -358,31 +356,37 @@ where
     fn find_child(
         &mut self,
         page_id: PageId,
-        search_key: KeyBytes<'_>,
-    ) -> BtreeResult<SearchResult<P>> {
-        let comparator = CellBytesComparator::new(self.comparator.clone(), self.pager.clone());
+        search_key: &[u8],
+        target_cursor: usize,
+        schema: &Schema,
+    ) -> BtreeResult<SearchResult> {
+        let comparator = CellComparator::new(schema, self.pager.clone());
         let page = self.get_page(page_id)?;
-        Self::find_child_on_page(page, comparator, search_key)
+        Self::find_child_on_page(page, comparator, search_key, target_cursor)
     }
 
     /// Binary searches over the slots of a Leaf Page in the btree (inmutable access version).
     fn binary_search_key(
         &mut self,
         page_id: PageId,
-        search_key: KeyBytes<'_>,
-    ) -> BtreeResult<SearchResult<P>> {
-        let comparator = CellBytesComparator::new(self.comparator.clone(), self.pager.clone());
+        search_key: &[u8],
+        target_cursor: usize,
+        schema: &Schema,
+    ) -> BtreeResult<SearchResult> {
+        let comparator = CellComparator::new(schema, self.pager.clone());
         let page = self.get_page(page_id)?;
-        Self::binary_search_page(page, comparator, search_key)
+        Self::binary_search_page(page, comparator, search_key, target_cursor)
     }
 
     /// Finds the most suitable slot to insert a particular entry on a given page.
     fn find_slot(
         &mut self,
         page_id: PageId,
-        search_key: KeyBytes<'_>,
-    ) -> BtreeResult<SearchResult<P>> {
-        let comparator = CellBytesComparator::new(self.comparator.clone(), self.pager.clone());
+        search_key: &[u8],
+        target_cursor: usize,
+        schema: &Schema,
+    ) -> BtreeResult<SearchResult> {
+        let comparator = CellComparator::new(schema, self.pager.clone());
         let page = self.get_page(page_id)?;
         let num_slots = page.num_slots();
 
@@ -395,7 +399,7 @@ where
         for i in 0..num_slots {
             let cell = page.cell(i);
 
-            match comparator.compare_cell_payload(search_key, cell)? {
+            match comparator.compare_cell_payload(search_key, cell, target_cursor)? {
                 Ordering::Less => {
                     result = SearchResult::Found(Position::new(page_id, i));
                     break;
@@ -414,7 +418,7 @@ where
     }
 
     /// Obtains the right most position in the tree.
-    fn get_right_most(&mut self) -> BtreeResult<Position<P>> {
+    fn get_right_most(&mut self) -> BtreeResult<BtreePagePosition> {
         let mut current = self.get_root();
         loop {
             let right_child = self.get_page(current)?.right_child();
@@ -431,7 +435,7 @@ where
     }
 
     /// Obtains the right most position in the tree.
-    fn get_left_most(&mut self) -> BtreeResult<Position<P>> {
+    fn get_left_most(&mut self) -> BtreeResult<BtreePagePosition> {
         if self.is_empty()? {
             return Err(BtreeError::BtreeEmpty);
         };
@@ -454,11 +458,9 @@ where
     }
 
     /// Utility to get a row at a specific position in the tree.
-    ///
-    /// TODO: Decouple this function from [Schema] and [Snapshot] by using a [BtreeReader] or some data additional data structure.
     pub(crate) fn get_row_at(
         &mut self,
-        pos: Position<P>,
+        pos: BtreePagePosition,
         schema: &Schema,
         snapshot: &Snapshot,
     ) -> BtreeResult<Option<Row>> {
@@ -478,7 +480,7 @@ where
     /// Executes a callback on the cell at the given position.
     /// For overflow cells, reassembles the full payload first.
     /// For normal cells, passes the payload directly to avoid copying.
-    pub(crate) fn with_cell_at<F, R>(&mut self, pos: Position<P>, f: F) -> BtreeResult<R>
+    pub(crate) fn with_cell_at<F, R>(&mut self, pos: BtreePagePosition, f: F) -> BtreeResult<R>
     where
         F: FnOnce(&[u8]) -> R,
     {
@@ -501,11 +503,11 @@ where
     /// Batch process multiple positions, grouping by page for efficiency.
     pub(crate) fn with_cells_at<F, R>(
         &mut self,
-        positions: &[Position<P>],
+        positions: &[BtreePagePosition],
         mut f: F,
     ) -> BtreeResult<Vec<R>>
     where
-        F: FnMut(Position<P>, &[u8]) -> R,
+        F: FnMut(BtreePagePosition, &[u8]) -> R,
     {
         let mut grouped: BTreeMap<PageId, Vec<(usize, usize)>> = BTreeMap::new();
 
@@ -523,7 +525,7 @@ where
             let page = self.get_page(page_id)?;
 
             for (original_idx, slot) in slots {
-                let pos = Position::<P>::new(page_id, slot);
+                let pos = BtreePagePosition::new(page_id, slot);
                 let cell = page.cell(slot);
 
                 let result = if cell.metadata().is_overflow() {
@@ -563,7 +565,7 @@ where
         }
     }
 
-    pub(crate) fn iter_forward(&mut self) -> BtreeResult<BtreePositionalIterator<P, Cmp, Acc>>
+    pub(crate) fn iter_forward(&mut self) -> BtreeResult<BtreePositionalIterator<Acc>>
     where
         Acc: Default,
     {
@@ -580,7 +582,7 @@ where
         )
     }
 
-    pub(crate) fn into_iter_backward(&mut self) -> BtreeResult<BtreePositionalIterator<P, Cmp, Acc>>
+    pub(crate) fn into_iter_backward(&mut self) -> BtreeResult<BtreePositionalIterator<Acc>>
     where
         Acc: Default,
     {
@@ -596,6 +598,43 @@ where
             IterDirection::Forward,
         )
     }
+
+    /// Prints the string to stdout
+    pub(crate) fn to_string(&self, schema: &Schema, snapshot: &Snapshot) -> BtreeResult<String>
+    where
+        Acc: Default,
+    {
+        let printer = BtreePrinter::new(self.clone(), schema, snapshot);
+        printer.as_json()
+    }
+
+    /// Prints the string to a file.
+    pub(crate) fn export_to(
+        &self,
+        path: impl AsRef<Path>,
+        schema: &Schema,
+        snapshot: &Snapshot,
+    ) -> BtreeResult<()>
+    where
+        Acc: Default,
+    {
+        let path = path.as_ref();
+
+        // Verify that the parent dir exists.
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            return Err(BtreeError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("directory {:?} does not exist", parent),
+            )));
+        }
+
+        fs::write(path, self.to_string(schema, snapshot)?)?;
+
+        Ok(())
+    }
 }
 
 enum BorrowDirection {
@@ -604,17 +643,12 @@ enum BorrowDirection {
 }
 
 /// Mutable / Write only accessor.
-impl<P, Cmp, Acc> Btree<P, Cmp, Acc>
+impl<Acc> Btree<Acc>
 where
-    P: BtreeOps,
-    Cmp: Comparator + Clone,
-    MemFrame: From<Frame<P>> + From<Frame<MemBlock<P::Header>>>,
-    Acc: WriteAccessor<P, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>
-        + PositionStack<P>
-        + ReadAccessor<P, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>,
+    Acc: TreeWriter,
 {
     /// Gets a mutable reference from a page
-    pub(crate) fn get_page_mut(&mut self, id: PageId) -> BtreeResult<&mut P> {
+    pub(crate) fn get_page_mut(&mut self, id: PageId) -> BtreeResult<&mut BtreePage> {
         self.acquire_with_accessor(id)?;
         self.accessor_mut()?
             .get_mut(id)
@@ -624,10 +658,19 @@ where
 
     /// Inserts a key at the corresponding position in the Btree.
     /// Returns an [BtreeError] if the key already exists.
-    pub(crate) fn insert<T: Buildable>(&mut self, page_id: PageId, data: T) -> BtreeResult<()> {
-        let key = data.key_bytes();
-
-        let search_result = self.search(key)?;
+    pub(crate) fn insert(
+        &mut self,
+        page_id: PageId,
+        data: Tuple,
+        schema: &Schema,
+    ) -> BtreeResult<()> {
+        let target_cursor = Tuple::keys_offset(schema.num_values());
+        let search_result = self.page_search(
+            self.get_root(),
+            &data.effective_data(),
+            target_cursor,
+            schema,
+        )?;
 
         match search_result {
             SearchResult::Found(pos) => Err(IoError::new(
@@ -637,7 +680,7 @@ where
 
             SearchResult::NotFound(pos) => {
                 let page_id = pos.entry();
-                self.insert_cell(page_id, data)?;
+                self.insert_cell(page_id, data, target_cursor, schema)?;
                 Ok(())
             }
         }?;
@@ -652,13 +695,13 @@ where
     /// Uses the [find_slot] function in order to find the best fit slot for the cell given its key.
     /// Assumes the page is a leaf page.
     /// This method must not be called on interior nodes.
-    pub(crate) fn insert_cell<T: Buildable>(
+    pub(crate) fn insert_cell(
         &mut self,
         page_id: PageId,
-        data: T,
+        data: Tuple,
+        target_cursor: usize,
+        schema: &Schema,
     ) -> BtreeResult<()> {
-        let key = data.key_bytes();
-
         let max_cell_storage_size = {
             let page = self.get_page(page_id)?;
             std::cmp::min(page.max_allowed_payload_size(), page.free_space() as u16) as usize
@@ -666,10 +709,11 @@ where
 
         let builder = CellBuilder::new(max_cell_storage_size, self.min_keys, self.pager.clone());
 
+        let key = &data.effective_data();
         // Find the corresponding slot in the leaf page.
-        let slot_result = self.find_slot(page_id, key)?;
+        let slot_result = self.find_slot(page_id, key, target_cursor, schema)?;
 
-        let cell = builder.build_cell(data)?;
+        let cell = builder.build_cell(data, schema)?;
         let page = self.get_page_mut(page_id)?;
         match slot_result {
             // Slot not found so we just append the cell at the end of the page.
@@ -690,10 +734,14 @@ where
 
     /// Updates the cell content on a given leaf page at the given [Position].
     /// Assumes the position pointer is valid and the page is a leaf page.
-    fn update_cell<T: Buildable>(&mut self, pos: Position<P>, data: T) -> BtreeResult<()> {
+    fn update_cell(
+        &mut self,
+        pos: BtreePagePosition,
+        data: Tuple,
+        schema: &Schema,
+    ) -> BtreeResult<()> {
         let page_id = pos.entry();
         let slot = pos.slot();
-        let key = data.key_bytes();
 
         let max_cell_storage_size = {
             let page = self.get_page_mut(page_id)?;
@@ -701,7 +749,7 @@ where
         };
 
         let builder = CellBuilder::new(max_cell_storage_size, self.min_keys, self.pager.clone());
-        let cell = builder.build_cell(data)?;
+        let cell = builder.build_cell(data, schema)?;
         let page = self.get_page_mut(page_id)?;
         let old_cell = page.replace(slot, cell)?;
 
@@ -716,16 +764,25 @@ where
 
     /// Inserts a key at the corresponding position in the Btree.
     /// Updates its contents if it already exists.
-    pub(crate) fn upsert<T: Buildable>(&mut self, page_id: PageId, data: T) -> BtreeResult<()> {
-        let key = data.key_bytes();
-        let start_pos: Position<P> = Position::start_pos(page_id);
-        let search_result = self.search(key)?;
+    pub(crate) fn upsert(
+        &mut self,
+        page_id: PageId,
+        data: Tuple,
+        schema: &Schema,
+    ) -> BtreeResult<()> {
+        let target_cursor = Tuple::keys_offset(schema.num_values());
+        let search_result = self.page_search(
+            self.get_root(),
+            &data.effective_data(),
+            target_cursor,
+            schema,
+        )?;
 
         match search_result {
-            SearchResult::Found(pos) => self.update_cell(pos, data)?, // This logic is similar to [self.insert]
+            SearchResult::Found(pos) => self.update_cell(pos, data, schema)?, // This logic is similar to [self.insert]
             SearchResult::NotFound(pos) => {
                 let page_id = pos.entry();
-                self.insert_cell(page_id, data)?;
+                self.insert_cell(page_id, data, target_cursor, schema)?;
             }
         };
 
@@ -736,16 +793,23 @@ where
 
     /// Updates a key at the corresponding position in the Btree.
     /// Returns an [IoError] if the key is not found.
-    pub(crate) fn update<T: Buildable>(&mut self, page_id: PageId, data: T) -> BtreeResult<()> {
-        let start_pos: Position<P> = Position::start_pos(page_id);
-        let key = data.key_bytes();
-        let search_result = self.search(key)?;
+    pub(crate) fn update(
+        &mut self,
+        page_id: PageId,
+        data: Tuple,
+        schema: &Schema,
+    ) -> BtreeResult<()> {
+        let target_cursor = Tuple::keys_offset(schema.num_values());
+        let search_result = self.page_search(
+            self.get_root(),
+            &data.effective_data(),
+            target_cursor,
+            schema,
+        )?;
 
         match search_result {
-            SearchResult::Found(pos) => self.update_cell(pos, data),
-            SearchResult::NotFound(_) => {
-                Err(BtreeError::NonExistentKey(key.as_str().unwrap().to_owned()))
-            }
+            SearchResult::Found(pos) => self.update_cell(pos, data, schema),
+            SearchResult::NotFound(_) => Err(BtreeError::NonExistentKey),
         }?;
 
         // Cleanup traversal here.
@@ -755,14 +819,17 @@ where
 
     /// Removes the entry corresponding to the given key if it exists.
     /// Returns an [BtreeError] if the key is not found.
-    pub(crate) fn remove(&mut self, page_id: PageId, key: KeyBytes<'_>) -> BtreeResult<()> {
-        let start_pos: Position<P> = Position::start_pos(page_id);
-        let search = self.search(key)?;
+    pub(crate) fn remove(
+        &mut self,
+        page_id: PageId,
+        key: &[u8],
+        schema: &Schema,
+    ) -> BtreeResult<()> {
+        let start_pos: BtreePagePosition = Position::start_pos(page_id);
+        let search = self.search(key, schema)?;
 
         match search {
-            SearchResult::NotFound(_) => {
-                Err(BtreeError::NonExistentKey(key.as_str().unwrap().to_owned()))
-            }
+            SearchResult::NotFound(_) => Err(BtreeError::NonExistentKey),
             SearchResult::Found(pos) => {
                 let page_id = pos.entry();
                 let slot = pos.slot();
@@ -1068,7 +1135,7 @@ where
             let parent_child_page = self.get_page_mut(prev_id)?;
             parent_child_page
                 .right_child()
-                .map(|id| Position::<P>::new(id, parent_child_page.num_slots()))
+                .map(|id| BtreePagePosition::new(id, parent_child_page.num_slots()))
         } else {
             None
         };
@@ -1079,7 +1146,7 @@ where
             parent_child_page
                 .cell(0)
                 .left_child()
-                .map(|id| Position::<P>::new(id, 0))
+                .map(|id| BtreePagePosition::new(id, 0))
         } else {
             None
         };
@@ -1102,7 +1169,7 @@ where
                 .and_then(|child_slot| {
                     parent_page
                         .child(child_slot)
-                        .map(|id| Position::<P>::new(id, child_slot))
+                        .map(|id| BtreePagePosition::new(id, child_slot))
                 });
 
             // If the last loaded sibling is < last_parent_slot, this means there are other siblings in the parent at the left of the chain that we have not loaded. We load the last one in order to re-link with the rest of the siblings later.
@@ -1111,7 +1178,7 @@ where
                 .and_then(|child_slot| {
                     parent_page
                         .child(child_slot)
-                        .map(|id| Position::<P>::new(id, child_slot))
+                        .map(|id| BtreePagePosition::new(id, child_slot))
                 });
             (left, right)
         };
@@ -1337,9 +1404,9 @@ where
     fn load_siblings(
         &mut self,
         page: PageId,
-        parent_position: &Position<P>,
+        parent_position: &BtreePagePosition,
         num_siblings_per_side: usize,
-    ) -> BtreeResult<VecDeque<Position<P>>> {
+    ) -> BtreeResult<VecDeque<BtreePagePosition>> {
         let slot = parent_position.slot();
         let parent_id = parent_position.entry();
         let parent_page = self.get_page_mut(parent_id)?;
@@ -1475,7 +1542,11 @@ where
 
     // This should be only called on leaf nodes. on interior nodes it is a brainfuck to also be fixing pointers to right most children every time we borrow a single cell.
     // See SQLite 3.0 balance siblings algorithm: https://sqlite.org/btreemodule.html
-    fn balance_siblings(&mut self, page_id: PageId, parent_pos: &Position<P>) -> BtreeResult<()> {
+    fn balance_siblings(
+        &mut self,
+        page_id: PageId,
+        parent_pos: &BtreePagePosition,
+    ) -> BtreeResult<()> {
         let is_leaf = self.get_page_mut(page_id)?.is_leaf();
 
         if !is_leaf {
@@ -1667,63 +1738,21 @@ where
 
         Ok(())
     }
-
-    /// Prints the string to stdout
-    pub(crate) fn to_string(&self) -> BtreeResult<String>
-    where
-        P: Clone,
-        Cmp: Clone,
-        Acc: Default,
-    {
-        let printer = BtreePrinter::new(self.clone());
-        printer.as_json()
-    }
-
-    /// Prints the string to a file.
-    pub(crate) fn export_to(&self, path: impl AsRef<Path>) -> BtreeResult<()>
-    where
-        P: Clone,
-        Cmp: Clone,
-        Acc: Default,
-    {
-        let path = path.as_ref();
-
-        // Verify that the parent dir exists.
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-            && !parent.exists()
-        {
-            return Err(BtreeError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("directory {:?} does not exist", parent),
-            )));
-        }
-
-        fs::write(path, self.to_string()?)?;
-
-        Ok(())
-    }
 }
 
-pub(crate) struct BtreePrinter<
-    P: BtreeOps,
-    Cmp: Comparator,
-    Acc: ReadAccessor<P> + PositionStack<P>,
-> {
-    buffer: BTreeMap<PageId, P>,
-    tree: Btree<P, Cmp, Acc>,
+pub(crate) struct BtreePrinter<'a, Acc: TreeReader> {
+    buffer: BTreeMap<PageId, BtreePage>,
+    tree: Btree<Acc>,
+    schema: &'a Schema,
+    snapshot: &'a Snapshot,
 }
 
-impl<P, Cmp, Acc> BtreePrinter<P, Cmp, Acc>
+impl<'a, Acc> BtreePrinter<'a, Acc>
 where
-    P: BtreeOps + Clone,
-    Cmp: Comparator + Clone,
-    MemFrame: From<Frame<P>> + From<Frame<MemBlock<P::Header>>>,
-    Acc: ReadAccessor<P, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>
-        + PositionStack<P>,
+    Acc: TreeReader,
 {
     /// Create a new btree displayer for the provided root node.
-    pub(crate) fn new(mut tree: Btree<P, Cmp, Acc>) -> Self
+    pub(crate) fn new(mut tree: Btree<Acc>, schema: &'a Schema, snapshot: &'a Snapshot) -> Self
     where
         Acc: Default,
     {
@@ -1734,6 +1763,8 @@ where
         Self {
             buffer: BTreeMap::new(),
             tree,
+            schema,
+            snapshot,
         }
     }
 
@@ -1781,24 +1812,42 @@ where
 
         if !page.is_empty() {
             let cell = page.cell(0);
-            let key = cell.key_bytes();
-            string.push_str(&format!("{key:?}"));
 
-            for i in 1..page.num_slots() {
-                string.push(',');
-                string.push_str(&format!("{:?}", &page.cell(i).effective_data()));
+            let reader = TupleReader::from_schema(&self.schema);
+            if let Some(layout) =
+                reader.parse_for_snapshot(cell.effective_data(), &self.snapshot)?
+            {
+                let tuple = TupleRef::new(cell.effective_data(), layout);
+                string.push_str(&format!(
+                    "{}",
+                    tuple.display_with(&self.schema, &self.snapshot)
+                ));
+
+                for i in 1..page.num_slots() {
+                    if let Some(layout) =
+                        reader.parse_for_snapshot(page.cell(i).effective_data(), &self.snapshot)?
+                    {
+                        let cell = page.cell(i);
+                        let tuple = TupleRef::new(cell.effective_data(), layout);
+                        string.push(',');
+                        string.push_str(&format!(
+                            "{}",
+                            tuple.display_with(&self.schema, &self.snapshot)
+                        ));
+                    }
+                }
             }
-        }
 
-        string.push_str("],\"children\":[");
+            string.push_str("],\"children\":[");
 
-        if page.right_child().is_some() {
-            for (i, child) in page.iter_children().enumerate() {
-                if i == 0 {
-                    string.push_str(&format!("\"{child}\""));
-                } else {
-                    string.push_str(&format!(",\"{child}\""));
-                };
+            if page.right_child().is_some() {
+                for (i, child) in page.iter_children().enumerate() {
+                    if i == 0 {
+                        string.push_str(&format!("\"{child}\""));
+                    } else {
+                        string.push_str(&format!(",\"{child}\""));
+                    };
+                }
             }
         }
 
@@ -1818,29 +1867,20 @@ pub(crate) enum IterDirection {
 /// Iterator that yields cell positions instead of entire [`Payloads<'_>`]
 /// My first idea was iterate over full payload objects, however, this comes with the downside of having to create a copy of each cell we visit. This is pretty awful specially with overflow cells that occupy a lot of space.
 /// Positions are always small (10 bytes data structures) and therefore the time required to iterate remaings constant. Later, if required, we provide the [with_cells_at] and [with_cell_at] functions to execute custom payloads at specific positions in the btree.
-pub(crate) struct BtreePositionalIterator<
-    P: BtreeOps,
-    Cmp: Comparator,
-    Acc: ReadAccessor<P> + PositionStack<P>,
-> {
-    tree: Btree<P, Cmp, Acc>,
+pub(crate) struct BtreePositionalIterator<Acc: TreeReader> {
+    tree: Btree<Acc>,
     current_page: Option<PageId>,
     current_slot: isize,
     direction: IterDirection,
-    _phantom: PhantomData<Cmp>,
 }
 
-impl<P, Cmp, Acc> BtreePositionalIterator<P, Cmp, Acc>
+impl<Acc> BtreePositionalIterator<Acc>
 where
-    P: BtreeOps,
-    Cmp: Comparator + Clone,
-    MemFrame: From<Frame<P>> + From<Frame<MemBlock<P::Header>>>,
-    Acc: ReadAccessor<P, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>
-        + PositionStack<P>,
+    Acc: TreeReader,
 {
     // build an iterator from a tree at a given position and for the given direction.
     pub(crate) fn from_position(
-        mut tree: Btree<P, Cmp, Acc>,
+        mut tree: Btree<Acc>,
         page: PageId,
         slot: isize,
         direction: IterDirection,
@@ -1861,14 +1901,13 @@ where
             current_page: Some(page),
             current_slot: slot,
             direction,
-            _phantom: PhantomData,
         };
 
-        iterator.validate(Position::<P>::new(page, slot as usize))?;
+        iterator.validate(BtreePagePosition::new(page, slot as usize))?;
         Ok(iterator)
     }
 
-    fn validate(&mut self, pos: Position<P>) -> BtreeResult<()> {
+    fn validate(&mut self, pos: BtreePagePosition) -> BtreeResult<()> {
         let page = self.tree.get_page(pos.entry())?;
         if !page.is_leaf() || pos.slot() > page.num_slots() {
             return Err(BtreeError::InvalidIterator((pos.entry(), pos.slot())));
@@ -1907,17 +1946,17 @@ where
 
         Ok(false)
     }
+
+    pub(crate) fn get_tree(&self) -> Btree<Acc> {
+        self.tree.clone()
+    }
 }
 
-impl<P, Cmp, Acc> Iterator for BtreePositionalIterator<P, Cmp, Acc>
+impl<Acc> Iterator for BtreePositionalIterator<Acc>
 where
-    P: BtreeOps,
-    Cmp: Comparator + Clone,
-    MemFrame: From<Frame<P>> + From<Frame<MemBlock<P::Header>>>,
-    Acc: ReadAccessor<P, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>
-        + PositionStack<P>,
+    Acc: TreeReader,
 {
-    type Item = BtreeResult<Position<P>>;
+    type Item = BtreeResult<BtreePagePosition>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let page_id = self.current_page?;
@@ -1930,7 +1969,7 @@ where
                 };
 
                 if self.current_slot < num_slots {
-                    let pos = Position::<P>::new(page_id, self.current_slot as usize);
+                    let pos = BtreePagePosition::new(page_id, self.current_slot as usize);
                     self.current_slot += 1;
                     Some(Ok(pos))
                 } else {
@@ -1958,11 +1997,9 @@ where
     }
 }
 
-impl<P, Cmp, Acc> Drop for BtreePositionalIterator<P, Cmp, Acc>
+impl<Acc> Drop for BtreePositionalIterator<Acc>
 where
-    P: BtreeOps,
-    Cmp: Comparator,
-    Acc: ReadAccessor<P> + PositionStack<P>,
+    Acc: TreeReader,
 {
     fn drop(&mut self) {
         if let Some(page) = self.current_page {
@@ -1971,13 +2008,9 @@ where
     }
 }
 
-impl<P, Cmp, Acc> DoubleEndedIterator for BtreePositionalIterator<P, Cmp, Acc>
+impl<Acc> DoubleEndedIterator for BtreePositionalIterator<Acc>
 where
-    P: BtreeOps,
-    Cmp: Comparator + Clone,
-    MemFrame: From<Frame<P>> + From<Frame<MemBlock<P::Header>>>,
-    Acc: ReadAccessor<P, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>
-        + PositionStack<P>,
+    Acc: TreeReader,
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         let original_direction = self.direction;

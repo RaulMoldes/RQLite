@@ -1,0 +1,164 @@
+use super::utils::{TestConfig, TestDb, make_relation};
+use crate::{
+    ObjectId,
+    io::pager::BtreeBuilder,
+    multithreading::coordinator::Snapshot,
+    schema::catalog::{Catalog, CatalogError, CatalogTrait},
+    storage::page::BtreePage,
+};
+
+macro_rules! test_catalog {
+    ($db:expr) => {{
+        let mut pager = $db.pager.write();
+        let meta_table = pager
+            .allocate_page::<BtreePage>()
+            .expect("Failed to allocate meta_table");
+        let meta_index = pager
+            .allocate_page::<BtreePage>()
+            .expect("Failed to allocate meta_index");
+        drop(pager);
+        Catalog::new(meta_table, meta_index)
+    }};
+}
+
+pub fn test_get_relation_by_name(count: usize) {
+    let config = TestConfig::default();
+    let db = TestDb::new("catalog_get_by_name", &config).expect("Failed to create test db");
+    let mut catalog = test_catalog!(&db);
+    let builder = BtreeBuilder::default().with_pager(db.pager.clone());
+    let snapshot = Snapshot::default();
+
+    for i in 0..count {
+        let rel = make_relation(i as ObjectId, &format!("named_table_{}", i));
+        catalog
+            .store_relation(rel, &builder, snapshot.xid())
+            .expect("Store failed");
+    }
+
+    for i in 0..count {
+        let rel = catalog
+            .get_relation_by_name(&format!("named_table_{}", i), &builder, &snapshot)
+            .expect("Get by name failed");
+
+        assert!(rel.object_id() == i as ObjectId);
+        assert!(rel.name() == format!("named_table_{}", i));
+    }
+
+    let missing = catalog.get_relation_by_name("nonexistent_table", &builder, &snapshot);
+    assert!(matches!(missing, Err(CatalogError::InvalidObjectName(_))));
+}
+
+pub fn test_store_relation(count: usize) {
+    let config = TestConfig::default();
+    let db = TestDb::new("catalog_store", &config).expect("Failed to create test db");
+    let mut catalog = test_catalog!(&db);
+    let builder = BtreeBuilder::default().with_pager(db.pager.clone());
+    let snapshot = Snapshot::default();
+
+    for i in 0..count {
+        let rel = make_relation(i as ObjectId, &format!("table_{}", i));
+        catalog
+            .store_relation(rel, &builder, snapshot.xid())
+            .expect("Store failed");
+    }
+
+    for i in 0..count {
+        let rel = catalog
+            .get_relation(i as ObjectId, &builder, &snapshot)
+            .expect("Get failed");
+
+        assert!(rel.object_id() == i as ObjectId);
+        assert!(rel.name() == format!("table_{}", i));
+    }
+}
+
+pub fn test_get_relation(count: usize) {
+    let config = TestConfig::default();
+    let db = TestDb::new("catalog_get", &config).expect("Failed to create test db");
+    let mut catalog = test_catalog!(&db);
+    let builder = BtreeBuilder::default().with_pager(db.pager.clone());
+    let snapshot = Snapshot::default();
+
+    for i in 0..count {
+        let rel = make_relation(i as ObjectId, &format!("get_table_{}", i));
+        catalog
+            .store_relation(rel, &builder, snapshot.xid())
+            .expect("Store failed");
+    }
+
+    for i in 0..count {
+        let rel = catalog
+            .get_relation(i as ObjectId, &builder, &snapshot)
+            .expect("Get failed");
+
+        assert!(rel.object_id() == i as ObjectId);
+        assert!(rel.name() == format!("get_table_{}", i));
+    }
+
+    let missing = catalog.get_relation(count as ObjectId + 999, &builder, &snapshot);
+    assert!(matches!(missing, Err(CatalogError::TableNotFound(_))));
+}
+
+pub fn test_update_relation(count: usize) {
+    let config = TestConfig::default();
+    let db = TestDb::new("catalog_update", &config).expect("Failed to create test db");
+    let mut catalog = test_catalog!(&db);
+    let builder = BtreeBuilder::default().with_pager(db.pager.clone());
+    let snapshot = Snapshot::default();
+
+    for i in 0..count {
+        let rel = make_relation(i as ObjectId, &format!("original_{}", i));
+        catalog
+            .store_relation(rel, &builder, snapshot.xid())
+            .expect("Store failed");
+    }
+
+    for i in 0..count {
+        let updated = make_relation(i as ObjectId, &format!("updated_{}", i));
+        catalog
+            .update_relation(updated, &builder, &snapshot)
+            .expect("Update failed");
+    }
+
+    for i in 0..count {
+        let rel = catalog
+            .get_relation(i as ObjectId, &builder, &snapshot)
+            .expect("Get failed");
+
+        assert!(rel.name() == format!("updated_{}", i));
+    }
+}
+
+pub fn test_delete_relation(count: usize, delete_count: usize) {
+    let config = TestConfig::default();
+    let db = TestDb::new("catalog_delete", &config).expect("Failed to create test db");
+    let mut catalog = test_catalog!(&db);
+    let builder = BtreeBuilder::default().with_pager(db.pager.clone());
+    let snapshot = Snapshot::default();
+
+    for i in 0..count {
+        let rel = make_relation(i as ObjectId, &format!("deletable_{}", i));
+        catalog
+            .store_relation(rel, &builder, snapshot.xid())
+            .expect("Store failed");
+    }
+
+    for i in 0..delete_count {
+        let rel = catalog
+            .get_relation(i as ObjectId, &builder, &snapshot)
+            .expect("Get failed");
+        catalog
+            .remove_relation(rel, &builder, &snapshot, false)
+            .expect("Delete failed");
+    }
+
+    for i in 0..delete_count {
+        let result = catalog.get_relation(i as ObjectId, &builder, &snapshot);
+        assert!(matches!(result, Err(CatalogError::TableNotFound(_))));
+    }
+
+    for i in delete_count..count {
+        let result = catalog.get_relation(i as ObjectId, &builder, &snapshot);
+        assert!(result.is_ok());
+    }
+}

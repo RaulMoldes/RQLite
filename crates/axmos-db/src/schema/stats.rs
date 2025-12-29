@@ -2,10 +2,6 @@ use super::base::Column;
 use crate::{
     DEFAULT_BTREE_MIN_KEYS, DEFAULT_PAGE_SIZE, DataType,
     storage::{BtreeOps, page::BtreePage},
-    tree::{
-        cell_ops::KeyBytes,
-        comparators::{Comparator, DynComparator, Ranger, VarlenComparator},
-    },
     types::{Blob, DataTypeKind, DataTypeRef, SerializationError, SerializationResult},
 };
 use rkyv::{
@@ -53,14 +49,13 @@ impl From<f64> for Selectivity {
 pub(crate) struct StatsCollector {
     column_idx: usize,
     dtype: DataTypeKind,
-    comparator: DynComparator,
 
     // Accumulated statistics
     null_count: u64,
     total_count: u64,
     total_len: u64,
-    min_bytes: Option<Box<[u8]>>,
-    max_bytes: Option<Box<[u8]>>,
+    min: Option<DataType>,
+    max: Option<DataType>,
 
     // For NDV estimation using HyperLogLog-like approach (simplified)
     distinct_hashes: HashSet<u128>,
@@ -74,14 +69,12 @@ impl StatsCollector {
         Self {
             column_idx,
             dtype: column.datatype(),
-            comparator: column
-                .comparator()
-                .unwrap_or(DynComparator::Variable(VarlenComparator)),
+
             null_count: 0,
             total_count: 0,
             total_len: 0,
-            min_bytes: None,
-            max_bytes: None,
+            min: None,
+            max: None,
             distinct_hashes: HashSet::new(),
             sample_values: Vec::new(),
         }
@@ -106,35 +99,28 @@ impl StatsCollector {
         }
 
         // Get the raw bytes for comparison
-        let bytes: &[u8] = value.as_bytes();
+        let Some(owned) = value.to_owned() else {
+            return;
+        };
 
         // Update length tracking for variable-length types
-        self.total_len += bytes.len() as u64;
+        self.total_len += owned.runtime_size() as u64;
 
         // Update min
-        match &self.min_bytes {
-            None => self.min_bytes = Some(Box::from(bytes)),
+        match &self.min {
+            None => self.min = Some(owned.clone()),
             Some(current_min) => {
-                if matches!(
-                    self.comparator
-                        .compare(KeyBytes::from(bytes), KeyBytes::from(current_min.as_ref())),
-                    Ok(Ordering::Less)
-                ) {
-                    self.min_bytes = Some(Box::from(bytes));
+                if current_min > &owned {
+                    self.min = Some(owned.clone());
                 }
             }
         }
 
-        // Update max
-        match &self.max_bytes {
-            None => self.max_bytes = Some(Box::from(bytes)),
+        match &self.max {
+            None => self.max = Some(owned),
             Some(current_max) => {
-                if matches!(
-                    self.comparator
-                        .compare(KeyBytes::from(bytes), KeyBytes::from(current_max.as_ref())),
-                    Ok(Ordering::Greater)
-                ) {
-                    self.max_bytes = Some(Box::from(bytes));
+                if current_max < &owned {
+                    self.max = Some(owned);
                 }
             }
         }
@@ -156,8 +142,8 @@ impl StatsCollector {
 
         let mut stats = ColumnStats::new(ndv, self.null_count);
 
-        if let (Some(min), Some(max)) = (self.min_bytes, self.max_bytes) {
-            stats = stats.with_range_bytes(min, max);
+        if let (Some(min), Some(max)) = (self.min, self.max) {
+            stats = stats.with_range(min, max);
         }
 
         if let Some(avg) = avg_len {
@@ -209,9 +195,12 @@ impl ColumnStats {
     }
 
     /// Sets the min/max byte ranges.
-    pub fn with_range_bytes(mut self, min: Box<[u8]>, max: Box<[u8]>) -> Self {
-        self.min_bytes = Some(min);
-        self.max_bytes = Some(max);
+    pub fn with_range(mut self, min: DataType, max: DataType) -> Self {
+        let buffer_min = min.serialize().expect("Serialization failed");
+        let buffer_max = max.serialize().expect("Serialization failed");
+
+        self.min_bytes = Some(buffer_min);
+        self.max_bytes = Some(buffer_max);
         self
     }
 
@@ -235,29 +224,40 @@ impl ColumnStats {
         }
     }
 
-    /// Estimates selectivity for a range predicate using byte-based comparison.
+    /// Estimates selectivity for a range predicate
     ///
-    /// This method uses the `Ranger` trait to compute byte differences between
-    /// boundaries, allowing accurate range selectivity for any comparable type.
-    ///
-    /// # Arguments
-    ///
-    /// * `low` - Optional lower bound (inclusive)
-    /// * `high` - Optional upper bound (inclusive)
-    /// * `ranger` - A type implementing both `Comparator` and `Ranger`
-    ///
-    /// # Returns
-    ///
-    /// Estimated fraction of rows in the range (0.0 to 1.0)
-    pub(crate) fn selectivity_range<R: Comparator + Ranger>(
+    /// Currently only supports numeric types.
+    pub(crate) fn selectivity_range(
         &self,
-        low: KeyBytes<'_>,
-        high: KeyBytes<'_>,
-        ranger: &R,
+        low: DataType,
+        high: DataType,
+        kind: DataTypeKind,
     ) -> Selectivity {
-        ranger
-            .selectivity_range(low, high)
-            .unwrap_or(Selectivity::Uncomputable)
+        if let Some(min_bytes) = self.min_bytes.as_ref() {
+            if let Some(max_bytes) = self.max_bytes.as_ref() {
+                if kind.is_numeric() {
+                    let (lower_type, _) = kind
+                        .deserialize(&min_bytes, 0)
+                        .expect("Failed to deserialize");
+                    let (higher_type, _) = kind
+                        .deserialize(&max_bytes, 0)
+                        .expect("Failed to deserialize");
+
+                    // We have checked that the type is numeric so it is safe to unwrap here.
+                    let low_type_f64 = lower_type.to_f64().unwrap();
+                    let high_type_f64 = higher_type.to_f64().unwrap();
+
+                    let low_f64: f64 = low.to_f64().unwrap();
+                    let high_f64: f64 = high.to_f64().unwrap();
+                    let overlap = high_f64 - low_f64;
+                    let full = high_type_f64 - low_type_f64;
+
+                    return Selectivity::from(overlap / full);
+                }
+            }
+        }
+
+        Selectivity::Uncomputable
     }
 
     /// Estimates null selectivity.
@@ -266,37 +266,6 @@ impl ColumnStats {
             Selectivity::from(self.null_count as f64 / row_count)
         } else {
             Selectivity::Empty
-        }
-    }
-
-    /// Updates statistics with a new value.
-    ///
-    /// Used during statistics collection to incrementally track min/max/count.
-    pub(crate) fn update_with_value<C: Comparator>(&mut self, value: KeyBytes<'_>, comparator: &C) {
-        // Update min
-        match &self.min_bytes {
-            None => self.min_bytes = Some(value.to_vec().into_boxed_slice()),
-            Some(current_min) => {
-                if matches!(
-                    comparator.compare(value, KeyBytes::from(current_min.as_ref())),
-                    Ok(Ordering::Less)
-                ) {
-                    self.min_bytes = Some(value.to_vec().into_boxed_slice());
-                }
-            }
-        }
-
-        // Update max
-        match &self.max_bytes {
-            None => self.max_bytes = Some(value.to_vec().into_boxed_slice()),
-            Some(current_max) => {
-                if matches!(
-                    comparator.compare(value, KeyBytes::from(current_max.as_ref())),
-                    Ok(Ordering::Greater)
-                ) {
-                    self.max_bytes = Some(value.to_vec().into_boxed_slice());
-                }
-            }
         }
     }
 }

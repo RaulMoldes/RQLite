@@ -1,4 +1,6 @@
 pub mod binder;
-//pub mod executor;
 pub mod parser;
-//pub mod planner;
+pub mod planner;
+
+#[cfg(test)]
+mod tests;

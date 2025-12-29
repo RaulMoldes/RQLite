@@ -6,7 +6,7 @@
       "request": "launch",
       "name": "Debug Rust test (AxmosDB)",
       "program": "${workspaceFolder}/target/debug/deps/axmosdb-8bb0e681490bd1ed",
-      "args": ["--nocapture", "storage::tests::cell_misc::write_to"],
+      "args": ["--nocapture", "test_store_and_get_relation"],
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"],
       "env": {

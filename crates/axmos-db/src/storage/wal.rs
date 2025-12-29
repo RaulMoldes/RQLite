@@ -145,8 +145,8 @@ pub struct RecordHeader {
     pub(crate) lsn: Lsn,
     pub(crate) tid: TransactionId,
     pub(crate) prev_lsn: Option<Lsn>,
-    pub(crate) object_id: ObjectId,
-    pub(crate) row_id: RowId,
+    pub(crate) object_id: Option<ObjectId>,
+    pub(crate) row_id: Option<RowId>,
     pub(crate) total_size: u32,
     pub(crate) undo_len: u16,
     pub(crate) redo_len: u16,
@@ -160,8 +160,8 @@ impl RecordHeader {
     fn new(
         lsn: Lsn,
         tid: TransactionId,
-        object_id: ObjectId,
-        row_id: RowId,
+        object_id: Option<ObjectId>,
+        row_id: Option<RowId>,
         prev_lsn: Option<Lsn>,
         total_size: u32,
         undo_len: u16,
@@ -204,8 +204,8 @@ impl OwnedRecord {
         lsn: Lsn,
         tid: TransactionId,
         prev_lsn: Option<Lsn>,
-        object_id: ObjectId,
-        row_id: RowId,
+        object_id: Option<ObjectId>,
+        row_id: Option<RowId>,
         log_type: RecordType,
         undo_payload: &[u8],
         redo_payload: &[u8],
@@ -527,8 +527,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
-            $crate::types::ObjectId::default(),
-            $crate::types::RowId::default(),
+            None,
+            None,
             $crate::storage::wal::RecordType::Begin,
             &[],
             &[],
@@ -540,8 +540,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $tid,
             None,
-            $crate::types::ObjectId::default(),
-            $crate::types::RowId::default(),
+            None,
+            None,
             $crate::storage::wal::RecordType::Begin,
             &[],
             &[],
@@ -554,8 +554,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
-            $crate::types::ObjectId::default(),
-            $crate::types::RowId::default(),
+            None,
+            None,
             $crate::storage::wal::RecordType::Commit,
             &[],
             &[],
@@ -567,8 +567,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
-            $crate::types::ObjectId::default(),
-            $crate::types::RowId::default(),
+            None,
+            None,
             $crate::storage::wal::RecordType::Commit,
             &[],
             &[],
@@ -580,8 +580,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $tid,
             None,
-            $crate::types::ObjectId::default(),
-            $crate::types::RowId::default(),
+            None,
+            None,
             $crate::storage::wal::RecordType::Commit,
             &[],
             &[],
@@ -593,8 +593,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $tid,
             $prev_lsn,
-            $crate::types::ObjectId::default(),
-            $crate::types::RowId::default(),
+            None,
+            None,
             $crate::storage::wal::RecordType::Commit,
             &[],
             &[],
@@ -607,8 +607,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
-            $crate::types::ObjectId::default(),
-            $crate::types::RowId::default(),
+            None,
+            None,
             $crate::storage::wal::RecordType::Abort,
             &[],
             &[],
@@ -620,8 +620,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
-            $crate::types::ObjectId::default(),
-            $crate::types::RowId::default(),
+            None,
+            None,
             $crate::storage::wal::RecordType::Abort,
             &[],
             &[],
@@ -634,8 +634,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
-            $crate::types::ObjectId::default(),
-            $crate::types::RowId::default(),
+            None,
+            None,
             $crate::storage::wal::RecordType::End,
             &[],
             &[],
@@ -647,8 +647,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
-            $crate::types::ObjectId::default(),
-            $crate::types::RowId::default(),
+            None,
+            None,
             $crate::storage::wal::RecordType::End,
             &[],
             &[],
@@ -661,8 +661,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
-            $crate::types::ObjectId::from($oid as u64),
-            $crate::types::RowId::from($rowid as u64),
+            Some($crate::types::ObjectId::from($oid as u64)),
+            Some($crate::types::RowId::from($rowid as u64)),
             $crate::storage::wal::RecordType::Update,
             $old,
             $new,
@@ -674,8 +674,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
-            $crate::types::ObjectId::from($oid as u64),
-            $crate::types::RowId::from($rowid as u64),
+            Some($crate::types::ObjectId::from($oid as u64)),
+            Some($crate::types::RowId::from($rowid as u64)),
             $crate::storage::wal::RecordType::Update,
             $old,
             $new,
@@ -687,8 +687,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $tid,
             None,
-            $oid,
-            $rowid,
+            Some($oid),
+            Some($rowid),
             $crate::storage::wal::RecordType::Update,
             $old,
             $new,
@@ -700,8 +700,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $tid,
             $prev_lsn,
-            $oid,
-            $rowid,
+            Some($oid),
+            Some($rowid),
             $crate::storage::wal::RecordType::Update,
             $old,
             $new,
@@ -709,13 +709,13 @@ macro_rules! record {
     }};
 
     // Insert records
-    (insert $lsn:expr, $tid:expr, $oid:expr,  $rowid:expr, $data:expr) => {{
+    (insert $lsn:expr, $tid:expr, $oid:expr, $rowid:expr, $data:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
-            $crate::types::ObjectId::from($oid as u64),
-            $crate::types::RowId::from($rowid as u64),
+            Some($crate::types::ObjectId::from($oid as u64)),
+            Some($crate::types::RowId::from($rowid as u64)),
             $crate::storage::wal::RecordType::Insert,
             &[],
             $data,
@@ -727,8 +727,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
-            $crate::types::ObjectId::from($oid as u64),
-            $crate::types::RowId::from($rowid as u64),
+            Some($crate::types::ObjectId::from($oid as u64)),
+            Some($crate::types::RowId::from($rowid as u64)),
             $crate::storage::wal::RecordType::Insert,
             &[],
             $data,
@@ -740,21 +740,21 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $tid,
             None,
-            $oid,
-            $rowid,
+            Some($oid),
+            Some($rowid),
             $crate::storage::wal::RecordType::Insert,
             &[],
             $data,
         )
     }};
 
-    (insert_tid $lsn:expr, $tid:expr, $oid:expr,$rowid:expr, prev: $prev_lsn:expr, $data:expr) => {{
+    (insert_tid $lsn:expr, $tid:expr, $oid:expr, $rowid:expr, prev: $prev_lsn:expr, $data:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
             $lsn as $crate::types::Lsn,
             $tid,
             $prev_lsn,
-            $oid,
-            $rowid,
+            Some($oid),
+            Some($rowid),
             $crate::storage::wal::RecordType::Insert,
             &[],
             $data,
@@ -767,34 +767,34 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
-            $crate::types::ObjectId::from($oid as u64),
-            $crate::types::RowId::from($rowid as u64),
+            Some($crate::types::ObjectId::from($oid as u64)),
+            Some($crate::types::RowId::from($rowid as u64)),
             $crate::storage::wal::RecordType::Delete,
             $old_data,
             &[],
         )
     }};
 
-    (delete $lsn:expr, $tid:expr, $oid:expr, $rowid: expr, prev: $prev_lsn:expr, $old_data:expr) => {{
+    (delete $lsn:expr, $tid:expr, $oid:expr, $rowid:expr, prev: $prev_lsn:expr, $old_data:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
-            $crate::types::ObjectId::from($oid as u64),
-            $crate::types::RowId::from($rowid as u64),
+            Some($crate::types::ObjectId::from($oid as u64)),
+            Some($crate::types::RowId::from($rowid as u64)),
             $crate::storage::wal::RecordType::Delete,
             $old_data,
             &[],
         )
     }};
 
-    (delete_tid $lsn:expr, $tid:expr, $oid:expr,$rowid:expr, $old_data:expr) => {{
+    (delete_tid $lsn:expr, $tid:expr, $oid:expr, $rowid:expr, $old_data:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
             $lsn as $crate::types::Lsn,
             $tid,
             None,
-            $oid,
-            $rowid,
+            Some($oid),
+            Some($rowid),
             $crate::storage::wal::RecordType::Delete,
             $old_data,
             &[],
@@ -806,8 +806,8 @@ macro_rules! record {
             $lsn as $crate::types::Lsn,
             $tid,
             $prev_lsn,
-            $oid,
-            $rowid,
+            Some($oid),
+            Some($rowid),
             $crate::storage::wal::RecordType::Delete,
             $old_data,
             &[],
@@ -815,13 +815,13 @@ macro_rules! record {
     }};
 
     // Basic dynamic type with data slices
-    (rec_type: $rec_type:expr, tid: $tid:expr, lsn: $lsn:expr, oid: $oid:expr, rowid: $rowid:expr,  undo: $undo:expr, redo: $redo:expr) => {{
+    (rec_type: $rec_type:expr, tid: $tid:expr, lsn: $lsn:expr, oid: $oid:expr, rowid: $rowid:expr, undo: $undo:expr, redo: $redo:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
-            $crate::types::ObjectId::from($oid as u64),
-            $crate::types::RowId::from($rowid as u64),
+            Some($crate::types::ObjectId::from($oid as u64)),
+            Some($crate::types::RowId::from($rowid as u64)),
             $rec_type,
             $undo,
             $redo,
@@ -829,13 +829,13 @@ macro_rules! record {
     }};
 
     // Dynamic type with prev_lsn and data slices
-    (rec_type: $rec_type:expr, lsn: $lsn:expr, tid: $tid:expr, oid: $oid:expr,  rowid: $rowid:expr, prev: $prev_lsn:expr, undo: $undo:expr, redo: $redo:expr) => {{
+    (rec_type: $rec_type:expr, lsn: $lsn:expr, tid: $tid:expr, oid: $oid:expr, rowid: $rowid:expr, prev: $prev_lsn:expr, undo: $undo:expr, redo: $redo:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
-            $crate::types::ObjectId::from($oid as u64),
-            $crate::types::RowId::from($rowid as u64),
+            Some($crate::types::ObjectId::from($oid as u64)),
+            Some($crate::types::RowId::from($rowid as u64)),
             $rec_type,
             $undo,
             $redo,
@@ -843,15 +843,15 @@ macro_rules! record {
     }};
 
     // Dynamic type with sized payloads (generates zero-filled vecs)
-    (rec_type: $rec_type:expr,  lsn: $lsn:expr, tid: $tid:expr, oid: $oid:expr, rowid: $rowid:expr, undo_size: $undo_size:expr, redo_size: $redo_size:expr) => {{
+    (rec_type: $rec_type:expr, lsn: $lsn:expr, tid: $tid:expr, oid: $oid:expr, rowid: $rowid:expr, undo_size: $undo_size:expr, redo_size: $redo_size:expr) => {{
         let undo_data = vec![0u8; $undo_size];
         let redo_data = vec![0u8; $redo_size];
         $crate::storage::wal::OwnedRecord::new(
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
-            $crate::types::ObjectId::from($oid as u64),
-            $crate::types::RowId::from($rowid as u64),
+            Some($crate::types::ObjectId::from($oid as u64)),
+            Some($crate::types::RowId::from($rowid as u64)),
             $rec_type,
             &undo_data,
             &redo_data,
@@ -859,23 +859,23 @@ macro_rules! record {
     }};
 
     // Dynamic type with prev_lsn and sized payloads
-    (rec_type: $rec_type:expr,  lsn: $lsn:expr, tid: $tid:expr, oid: $oid:expr, rowid: $rowid: expr,  prev: $prev_lsn:expr, undo_size: $undo_size:expr, redo_size: $redo_size:expr) => {{
+    (rec_type: $rec_type:expr, lsn: $lsn:expr, tid: $tid:expr, oid: $oid:expr, rowid: $rowid:expr, prev: $prev_lsn:expr, undo_size: $undo_size:expr, redo_size: $redo_size:expr) => {{
         let undo_data = vec![0u8; $undo_size];
         let redo_data = vec![0u8; $redo_size];
         $crate::storage::wal::OwnedRecord::new(
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
-            $crate::types::ObjectId::from($oid as u64),
-            $crate::types::RowId::from($rowid as u64),
+            Some($crate::types::ObjectId::from($oid as u64)),
+            Some($crate::types::RowId::from($rowid as u64)),
             $rec_type,
             &undo_data,
             &redo_data,
         )
     }};
 
-    // Dynamic type with TransactionId and ObjectId directly
-    (rec_type: $rec_type:expr,  lsn: $lsn:expr, tid_raw: $tid:expr, oid_raw: $oid:expr, rowid: $rowid: expr, undo: $undo:expr, redo: $redo:expr) => {{
+    // Dynamic type with TransactionId and ObjectId directly (already Option)
+    (rec_type: $rec_type:expr, lsn: $lsn:expr, tid_raw: $tid:expr, oid_raw: $oid:expr, rowid_raw: $rowid:expr, undo: $undo:expr, redo: $redo:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
             $lsn as $crate::types::Lsn,
             $tid,
@@ -888,7 +888,7 @@ macro_rules! record {
         )
     }};
 
-    (rec_type: $rec_type:expr,  lsn: $lsn:expr, tid_raw: $tid:expr, oid_raw: $oid:expr,rowid: $rowid: expr,  prev: $prev_lsn:expr, undo: $undo:expr, redo: $redo:expr) => {{
+    (rec_type: $rec_type:expr, lsn: $lsn:expr, tid_raw: $tid:expr, oid_raw: $oid:expr, rowid_raw: $rowid:expr, prev: $prev_lsn:expr, undo: $undo:expr, redo: $redo:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
             $lsn as $crate::types::Lsn,
             $tid,
@@ -902,26 +902,26 @@ macro_rules! record {
     }};
 
     // Static type identifier pattern
-    ($type:ident,  lsn: $lsn:expr, $tid:expr, $oid:expr, $rowid:expr, $undo:expr, $redo:expr) => {{
+    ($type:ident, lsn: $lsn:expr, $tid:expr, $oid:expr, $rowid:expr, $undo:expr, $redo:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             None,
-            $crate::types::ObjectId::from($oid as u64),
-            $crate::types::RowId::from($rowid as u64),
+            Some($crate::types::ObjectId::from($oid as u64)),
+            Some($crate::types::RowId::from($rowid as u64)),
             $crate::storage::wal::RecordType::$type,
             $undo,
             $redo,
         )
     }};
 
-    ($type:ident,  lsn: $lsn:expr, $tid:expr, $oid:expr,  $rowid:expr,prev: $prev_lsn:expr, $undo:expr, $redo:expr) => {{
+    ($type:ident, lsn: $lsn:expr, $tid:expr, $oid:expr, $rowid:expr, prev: $prev_lsn:expr, $undo:expr, $redo:expr) => {{
         $crate::storage::wal::OwnedRecord::new(
             $lsn as $crate::types::Lsn,
             $crate::types::TransactionId::from($tid as u64),
             $prev_lsn,
-            $crate::types::ObjectId::from($oid as u64),
-            $crate::types::RowId::from($rowid as u64),
+            Some($crate::types::ObjectId::from($oid as u64)),
+            Some($crate::types::RowId::from($rowid as u64)),
             $crate::storage::wal::RecordType::$type,
             $undo,
             $redo,

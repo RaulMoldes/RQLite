@@ -3,7 +3,6 @@ use crate::{
     multithreading::coordinator::Snapshot,
     schema::{Schema, base::SchemaError},
     storage::core::buffer::{Payload, PayloadRef},
-    tree::cell_ops::{AsKeyBytes, Buildable, KeyBytes},
     types::{DataType, DataTypeKind, DataTypeRef, TransactionId},
 };
 
@@ -88,11 +87,22 @@ fn aligned_offset(offset: usize, align: usize) -> usize {
 }
 
 /// A row is a higher level representation of a tuple
+#[derive(Clone)]
 pub(crate) struct Row(Box<[DataType]>);
+
+impl Default for Row {
+    fn default() -> Self {
+        Self::new_empty()
+    }
+}
 
 impl Row {
     pub(crate) fn new(data: Box<[DataType]>) -> Self {
         Self(data)
+    }
+
+    pub(crate) fn new_empty() -> Self {
+        Self(Box::new([]))
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -427,19 +437,6 @@ impl<'a, 'b> RefTupleAccessor<'a, 'b> {
             schema: self.schema,
         }
     }
-
-    #[inline]
-    pub(crate) fn key_bytes_of(&self) -> KeyBytes<'_> {
-        let layout = self.reader().parse_last_version(self.tuple.data).unwrap();
-        let keys_start = layout.key_offsets[0];
-        let keys_end = layout.value_offsets[0];
-        KeyBytes::from(&self.tuple.data[keys_start..keys_end])
-    }
-
-    #[inline]
-    pub(crate) fn key_bytes_len(&self) -> usize {
-        self.key_bytes_of().len()
-    }
 }
 
 /// Tuple modifier with an owned version of the tuple
@@ -480,22 +477,6 @@ impl<'a> OwnedTupleAccessor<'a> {
         }
     }
 
-    #[inline]
-    pub(crate) fn key_bytes_of(&self) -> KeyBytes<'_> {
-        let layout = self
-            .reader()
-            .parse_last_version(self.tuple.data.effective_data())
-            .unwrap();
-        let keys_start = layout.key_offsets[0];
-        let keys_end = layout.value_offsets[0];
-        KeyBytes::from(&self.tuple.data.effective_data()[keys_start..keys_end])
-    }
-
-    #[inline]
-    pub(crate) fn key_bytes_len(&self) -> usize {
-        self.key_bytes_of().len()
-    }
-
     pub(crate) fn into_data(self) -> Payload {
         self.tuple.into_data()
     }
@@ -526,46 +507,6 @@ impl<'a> OwnedTupleAccessor<'a> {
 
     pub(crate) fn is_deleted(&self) -> bool {
         self.tuple.is_deleted()
-    }
-}
-
-impl<'a> Buildable for OwnedTupleAccessor<'a> {
-    fn built_size(&self) -> usize {
-        self.tuple.serialized_size()
-    }
-}
-
-impl<'a> AsKeyBytes<'_> for OwnedTupleAccessor<'a> {
-    fn key_bytes(&self) -> KeyBytes<'_> {
-        self.key_bytes_of()
-    }
-
-    fn key_start(&self) -> usize {
-        let reader = self.reader();
-        let layout = reader
-            .parse_last_version(self.tuple.data.effective_data())
-            .unwrap();
-        layout.key_offsets[0]
-    }
-
-    fn key_size(&self) -> usize {
-        self.key_bytes_len()
-    }
-}
-
-impl<'a, 'schema> AsKeyBytes<'a> for RefTupleAccessor<'a, 'schema> {
-    fn key_bytes(&self) -> KeyBytes<'_> {
-        self.key_bytes_of()
-    }
-
-    fn key_start(&self) -> usize {
-        let reader = self.reader();
-        let layout = reader.parse_last_version(self.tuple.data).unwrap();
-        layout.key_offsets[0]
-    }
-
-    fn key_size(&self) -> usize {
-        self.key_bytes_len()
     }
 }
 
@@ -791,6 +732,7 @@ impl TupleLayout {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct TupleRef<'a> {
     data: &'a [u8],
     layout: TupleLayout,
@@ -799,18 +741,6 @@ pub(crate) struct TupleRef<'a> {
 impl<'a> TupleRef<'a> {
     pub fn new(data: &'a [u8], layout: TupleLayout) -> Self {
         Self { data, layout }
-    }
-
-    #[inline]
-    pub(crate) fn key_bytes(&self) -> KeyBytes<'_> {
-        let keys_start = self.layout.key_offsets[0];
-        let keys_end = self.layout.value_offsets[0];
-        KeyBytes::from(&self.data[keys_start..keys_end])
-    }
-
-    #[inline]
-    pub(crate) fn key_bytes_len(&self) -> usize {
-        self.key_bytes().len()
     }
 
     #[inline]
@@ -929,6 +859,15 @@ impl<'a> TupleRef<'a> {
 
         Ok(Row(data.into_boxed_slice()))
     }
+
+    pub fn format_with(&self, schema: &'a Schema, snapshot: &'a Snapshot) -> TupleFormatter<'a> {
+        let new_layout = TupleReader::from_schema(schema)
+            .parse_for_snapshot(self.data, snapshot)
+            .expect("Failed to parse")
+            .expect("Tuple is not visible");
+        let new_tuple = TupleRef::new(self.data, new_layout);
+        TupleFormatter::new(new_tuple, schema)
+    }
 }
 
 /// Layout: [Header][Null Bitmap][Keys][Values][Delta0][Delta1]...[DeltaN]
@@ -951,13 +890,44 @@ impl Tuple {
     }
 
     #[inline]
-    pub(crate) fn data(&self) -> &[u8] {
+    pub(crate) fn effective_data(&self) -> &[u8] {
         self.data.effective_data()
     }
 
     #[inline]
-    pub(crate) fn data_mut(&mut self) -> &mut [u8] {
+    pub(crate) fn effective_data_mut(&mut self) -> &mut [u8] {
         self.data.effective_data_mut()
+    }
+
+    #[inline]
+    pub(crate) fn full_data(&self) -> &[u8] {
+        self.data.full_data()
+    }
+
+    #[inline]
+    pub(crate) fn keys_offset(num_values: usize) -> usize {
+        TupleHeader::SIZE + null_bitmap_size(num_values)
+    }
+
+    pub fn as_tuple_ref_with_schema(&self, schema: &Schema) -> TupleRef<'_> {
+        let reader = TupleReader::from_schema(schema);
+        let layout = reader
+            .parse_last_version(self.effective_data())
+            .expect("Parsing failed");
+        TupleRef::new(self.data.effective_data(), layout)
+    }
+
+    pub fn as_tuple_ref(&self, schema: &Schema, snapshot: &Snapshot) -> Option<TupleRef<'_>> {
+        let reader = TupleReader::from_schema(schema);
+        let layout = reader
+            .parse_for_snapshot(self.effective_data(), snapshot)
+            .expect("Parsing failed")?;
+        Some(TupleRef::new(self.data.effective_data(), layout))
+    }
+
+    #[inline]
+    pub(crate) fn full_data_mut(&mut self) -> &mut [u8] {
+        self.data.full_data_mut()
     }
 
     pub(crate) fn version(&self) -> u8 {
@@ -1184,6 +1154,10 @@ impl Tuple {
         layout.delta_start() < self.data.len()
     }
 
+    pub(crate) fn total_size(&self) -> usize {
+        self.full_data().len()
+    }
+
     /// Parses the delta directory and counts the number of active versions in the tuple at this point in time.
     pub(crate) fn num_versions_with_schema(&self, schema: &Schema) -> TupleResult<usize> {
         let reader = TupleReader::from_schema(schema);
@@ -1247,12 +1221,142 @@ impl Tuple {
     pub(crate) fn serialized_size(&self) -> usize {
         self.data.full_data().len()
     }
+}
 
-    /// Consumes the tuple and creates a tuple accessor that can be used to create cells.
-    pub(crate) fn into_buildable_with_schema(self, schema: &Schema) -> OwnedTupleAccessor {
-        OwnedTupleAccessor {
+impl From<&Tuple> for Box<[u8]> {
+    fn from(value: &Tuple) -> Self {
+        Box::from(value.full_data())
+    }
+}
+
+impl<'a, 'b> Display for RefTupleAccessor<'a, 'b> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let row = self.to_row().map_err(|_| std::fmt::Error)?;
+
+        write!(f, "(")?;
+        for (i, value) in row.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{value}")?;
+        }
+        write!(f, ")")
+    }
+}
+
+impl<'a> Display for OwnedTupleAccessor<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let reader = self.reader();
+        let layout = reader
+            .parse_last_version(self.tuple.effective_data())
+            .map_err(|_| std::fmt::Error)?;
+
+        let tuple_ref = TupleRef::new(self.tuple.effective_data(), layout);
+        let accessor = RefTupleAccessor::new(tuple_ref, self.schema);
+
+        write!(f, "{accessor}")
+    }
+}
+
+pub struct DisplayWith<'a, T> {
+    tuple: &'a T,
+    schema: &'a Schema,
+    snapshot: &'a Snapshot,
+}
+
+impl<'a> Display for DisplayWith<'a, TupleRef<'a>> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let s = self
+            .tuple
+            .format_with(self.schema, self.snapshot)
+            .to_string();
+        write!(f, "{s}")
+    }
+}
+
+impl<'a> Display for DisplayWith<'a, Tuple> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let s = self
+            .tuple
+            .as_tuple_ref(&self.schema, &self.snapshot)
+            .expect("Tuple is not visible")
+            .format_with(self.schema, self.snapshot)
+            .to_string();
+        write!(f, "{s}")
+    }
+}
+
+impl<'a> TupleRef<'a> {
+    pub fn display_with(
+        &'a self,
+        schema: &'a Schema,
+        snapshot: &'a Snapshot,
+    ) -> DisplayWith<'a, TupleRef<'a>> {
+        DisplayWith {
             tuple: self,
             schema,
+            snapshot,
+        }
+    }
+}
+
+pub struct TupleFormatter<'a> {
+    tuple: TupleRef<'a>,
+    schema: &'a Schema,
+    only_keys: bool,
+    pretty: bool,
+}
+
+impl<'a> TupleFormatter<'a> {
+    fn new(tuple: TupleRef<'a>, schema: &'a Schema) -> Self {
+        Self {
+            tuple,
+            schema,
+            only_keys: false,
+
+            pretty: false,
+        }
+    }
+
+    pub fn keys_only(mut self) -> Self {
+        self.only_keys = true;
+        self
+    }
+
+    pub fn pretty(mut self) -> Self {
+        self.pretty = true;
+        self
+    }
+
+    pub fn to_string(self) -> String {
+        let accessor = RefTupleAccessor::new(self.tuple, self.schema);
+
+        let row = match accessor.to_row() {
+            Ok(r) => r,
+            Err(_) => return "<invalid tuple>".to_string(),
+        };
+
+        let columns = self.schema.columns();
+
+        let mut values = Vec::new();
+
+        for (idx, value) in row.iter().enumerate() {
+            if self.only_keys && idx >= self.schema.num_keys() {
+                break;
+            }
+
+            let rendered = value.to_string();
+            if self.pretty {
+                values.push(format!("{} = {}", columns[idx].name, rendered));
+            } else {
+                values.push(rendered);
+            }
+        }
+
+        if self.pretty {
+            format!("{{ {} }}", values.join(", "))
+        } else {
+            format!("({})", values.join(", "))
         }
     }
 }
@@ -1390,7 +1494,7 @@ mod tuple_tests {
         let builder = TupleBuilder::from_schema(&schema);
         let tuple = builder.build(row, 1).unwrap();
 
-        assert!(!tuple.is_visible(4));
+        assert!(tuple.is_visible(4));
         assert!(tuple.is_visible(5));
         assert!(tuple.is_visible(100));
     }
@@ -1403,7 +1507,7 @@ mod tuple_tests {
         let mut tuple = builder.build(row, 1).unwrap();
         tuple.delete(15).unwrap();
 
-        assert!(!tuple.is_visible(4));
+        assert!(tuple.is_visible(4));
         assert!(tuple.is_visible(5));
         assert!(tuple.is_visible(10));
         assert!(!tuple.is_visible(15));
@@ -1426,25 +1530,6 @@ mod tuple_tests {
         let loaded = Tuple::from_slice_unchecked(&buffer).unwrap();
         assert_eq!(loaded.version(), tuple.version());
         assert_eq!(loaded.xmin(), tuple.xmin());
-    }
-
-    #[test]
-    fn test_tuple_ref_key_bytes() {
-        let schema = test_schema();
-        let row = test_row();
-        let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 1).unwrap();
-
-        let reader = TupleReader::from_schema(&schema);
-        let layout = reader
-            .parse_last_version(tuple.data.effective_data())
-            .unwrap();
-        let reference = TupleRef::new(tuple.data.effective_data(), layout);
-
-        let accessor = RefTupleAccessor::new(reference, &schema);
-
-        let key_bytes = accessor.key_bytes();
-        assert!(!key_bytes.is_empty());
     }
 
     #[test]
@@ -1505,13 +1590,128 @@ mod tuple_tests {
 
         let reader = TupleReader::from_schema(&schema);
         let layout = reader
-            .parse_last_version(accessor.tuple.data.effective_data())
+            .parse_version(accessor.tuple.data.effective_data(), 0)
             .unwrap();
         let ref_v0 = TupleRef::new(accessor.tuple.data.effective_data(), layout);
         let ref_accessor = RefTupleAccessor::new(ref_v0, &schema);
         match ref_accessor.value(1).unwrap() {
             DataTypeRef::BigInt(v) => assert_eq!(v.value(), 30),
             _ => panic!("Expected BigInt"),
+        }
+    }
+
+    #[test]
+    fn test_keys_offset_calculation() {
+        assert_eq!(Tuple::keys_offset(0), 24);
+        assert_eq!(Tuple::keys_offset(1), 25);
+        assert_eq!(Tuple::keys_offset(7), 25);
+        assert_eq!(Tuple::keys_offset(8), 25);
+        assert_eq!(Tuple::keys_offset(9), 26);
+        assert_eq!(Tuple::keys_offset(16), 26);
+        assert_eq!(Tuple::keys_offset(17), 27);
+    }
+
+    #[test]
+    fn test_tuple_serialization_biguint_key() {
+        let schema = Schema::new_table(vec![
+            Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+            Column::new_with_defaults(DataTypeKind::Blob, "name"),
+        ]);
+
+        let row = Row::new(Box::new([
+            DataType::BigUInt(crate::UInt64(42)),
+            DataType::Blob(Blob::from("test")),
+        ]));
+
+        let builder = TupleBuilder::from_schema(&schema);
+        let tuple = builder.build(row, 1).unwrap();
+
+        assert_eq!(tuple.version(), 0);
+        assert_eq!(tuple.xmin(), 1);
+        assert_eq!(tuple.xmax(), None);
+
+        let reader = TupleReader::from_schema(&schema);
+        let layout = reader.parse_last_version(tuple.effective_data()).unwrap();
+        let tuple_ref = TupleRef::new(tuple.effective_data(), layout);
+
+        let key = tuple_ref.key_with_schema(0, &schema).unwrap();
+        match key {
+            DataTypeRef::BigUInt(v) => assert_eq!(v.value(), 42),
+            _ => panic!("Expected BigUInt, got {:?}", key),
+        }
+    }
+
+    #[test]
+    fn test_tuple_key_offset_in_serialized_data() {
+        let schema = Schema::new_table(vec![
+            Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+            Column::new_with_defaults(DataTypeKind::BigUInt, "value"),
+        ]);
+
+        let row = Row::new(Box::new([
+            DataType::BigUInt(crate::UInt64(0x123456789ABCDEF0)),
+            DataType::BigUInt(crate::UInt64(999)),
+        ]));
+
+        let builder = TupleBuilder::from_schema(&schema);
+        let tuple = builder.build(row, 1).unwrap();
+
+        let data = tuple.effective_data();
+        let offset = Tuple::keys_offset(schema.num_values());
+        dbg!(offset);
+
+        let (key_value, _) = DataTypeKind::BigUInt
+            .deserialize(data, offset)
+            .expect("Deserialization failed");
+
+        assert_eq!(
+            key_value.to_owned().unwrap(),
+            DataType::BigUInt(crate::UInt64(0x123456789ABCDEF0)),
+            "Key value at offset {} should match",
+            offset
+        );
+    }
+
+    #[test]
+    fn test_tuple_serialization_composite_key() {
+        let schema = Schema::new_index(
+            vec![
+                Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+                Column::new_with_defaults(DataTypeKind::Blob, "name"),
+                Column::new_with_defaults(DataTypeKind::BigUInt, "extra"),
+            ],
+            2,
+        );
+
+        let row = Row::new(Box::new([
+            DataType::BigUInt(crate::UInt64(100)),
+            DataType::Blob(Blob::from("hello")),
+            DataType::BigUInt(crate::UInt64(999)),
+        ]));
+
+        let builder = TupleBuilder::from_schema(&schema);
+        let tuple = builder.build(row, 1).unwrap();
+
+        let reader = TupleReader::from_schema(&schema);
+        let layout = reader.parse_last_version(tuple.effective_data()).unwrap();
+        let tuple_ref = TupleRef::new(tuple.effective_data(), layout);
+
+        let key0 = tuple_ref.key_with_schema(0, &schema).unwrap();
+        match key0 {
+            DataTypeRef::BigUInt(v) => assert_eq!(v.value(), 100),
+            _ => panic!("Expected BigUInt for key 0"),
+        }
+
+        let key1 = tuple_ref.key_with_schema(1, &schema).unwrap();
+        match key1 {
+            DataTypeRef::Blob(v) => assert_eq!(v.data().unwrap(), b"hello"),
+            _ => panic!("Expected Blob for key 1"),
+        }
+
+        let val = tuple_ref.value_with_schema(0, &schema).unwrap();
+        match val {
+            DataTypeRef::BigUInt(v) => assert_eq!(v.value(), 999),
+            _ => panic!("Expected BigUInt for value"),
         }
     }
 }

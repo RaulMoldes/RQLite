@@ -9,12 +9,9 @@ use std::{
     fmt::{Display, Formatter, Result as FmtResult},
 };
 
-mod analyzer;
-mod binder;
-mod bounds;
-
-#[cfg(test)]
-mod tests;
+pub mod analyzer;
+pub mod binder;
+pub mod bounds;
 
 /// Object already exists errors
 #[derive(Debug, Clone, PartialEq)]

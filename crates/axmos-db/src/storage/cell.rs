@@ -7,7 +7,6 @@ use crate::{
         },
         tuple::{OwnedTupleAccessor, Tuple},
     },
-    tree::cell_ops::{AsKeyBytes, KeyBytes},
     types::PageId,
 };
 
@@ -23,10 +22,6 @@ pub struct CellHeader {
     left_child: Option<PageId>,
     // Size here represents the total size of the cell, including padding.
     size: u64, // We do not know how much data are we going to store on a cell. When creating overflow pages it can become quite big so it is best to be prepared.
-    /// Keys offset in the payload
-    key_start: u16,
-    // Size of the keys in the payload
-    key_size: u16,
     /// Effective size of the cell payload
     effective_size: u32,
     // Wether this is an overflow cell or not.
@@ -37,19 +32,12 @@ bytemuck_slice!(CellHeader);
 pub const CELL_HEADER_SIZE: usize = mem::size_of::<CellHeader>();
 
 impl CellHeader {
-    pub fn new(
-        key_start: usize,
-        key_size: usize,
-        payload_size: usize,
-        effective_size: usize,
-        is_overflow: bool,
-    ) -> Self {
+    pub fn new(payload_size: usize, effective_size: usize, is_overflow: bool) -> Self {
         CellHeader {
             left_child: None,
             size: payload_size as u64,
             is_overflow,
-            key_start: key_start as u16,
-            key_size: key_size as u16,
+
             effective_size: effective_size as u32,
         }
     }
@@ -67,15 +55,6 @@ impl CellHeader {
     #[inline]
     pub fn size(&self) -> u64 {
         self.size
-    }
-    #[inline]
-    pub fn key_start(&self) -> usize {
-        self.key_start as usize
-    }
-
-    #[inline]
-    pub fn key_size(&self) -> usize {
-        self.key_size as usize
     }
 
     #[inline]
@@ -146,24 +125,6 @@ impl<'a> CellRef<'a> {
     #[inline]
     pub fn len(&self) -> usize {
         self.header.len()
-    }
-
-    #[inline]
-    pub fn key_bytes(&self) -> KeyBytes<'_> {
-        KeyBytes::from(
-            &self.effective_data()
-                [self.header.key_start()..self.header.key_start() + self.header.key_size()],
-        )
-    }
-
-    #[inline]
-    pub fn key_start(&self) -> usize {
-        self.header.key_start()
-    }
-
-    #[inline]
-    pub fn key_size(&self) -> usize {
-        self.header.key_size()
     }
 
     /// Total size (header + padded payload)
@@ -276,24 +237,6 @@ impl<'a> CellMut<'a> {
         self.header
     }
 
-    #[inline]
-    pub fn key_bytes(&self) -> KeyBytes<'_> {
-        KeyBytes::from(
-            &self.effective_data()
-                [self.header.key_start()..self.header.key_start() + self.header.key_size()],
-        )
-    }
-
-    #[inline]
-    pub fn key_start(&self) -> usize {
-        self.header.key_start()
-    }
-
-    #[inline]
-    pub fn key_size(&self) -> usize {
-        self.header.key_size()
-    }
-
     /// Effective data without padding
     #[inline]
     pub fn full_data(&self) -> &[u8] {
@@ -371,18 +314,19 @@ pub struct OwnedCell {
     payload: Payload,
 }
 
+impl From<Tuple> for OwnedCell {
+    fn from(value: Tuple) -> Self {
+        Self::from_tuple(value)
+    }
+}
+
 impl OwnedCell {
     /// Zero copy from aligned payload (zero alloc)
-    pub fn from_aligned_payload_wih_key_bounds(
-        payload: Payload,
-        key_start: usize,
-        key_size: usize,
-        is_overflow: bool,
-    ) -> Self {
+    pub fn from_aligned_payload(payload: Payload, is_overflow: bool) -> Self {
         let effective_size = payload.len();
         let size = payload.capacity();
 
-        let header = CellHeader::new(key_start, key_size, size, effective_size, is_overflow);
+        let header = CellHeader::new(size, effective_size, is_overflow);
 
         Self { header, payload }
     }
@@ -391,19 +335,13 @@ impl OwnedCell {
     ///
     /// Since aligned payload is always aligned to [CELL_ALIGNMENT] and [CellHeader] is also,
     /// no padding computation will be needed.
-    pub fn from_tuple(tuple: OwnedTupleAccessor<'_>) -> Self {
-        let reader = tuple.reader();
+    pub fn from_tuple(tuple: Tuple) -> Self {
         let payload = tuple.into_data();
-        let layout = reader
-            .parse_last_version(payload.effective_data())
-            .expect("Failed to parse tuple");
-        let key_start = layout.key_start();
-        let key_size = layout.key_size();
-        Self::from_aligned_payload_wih_key_bounds(payload, key_start, key_size, false)
+        Self::from_aligned_payload(payload, false)
     }
 
     /// Creates a new owned cell with explicit key bounds
-    pub fn new_with_key_bounds(data: &[u8], key_start: usize, key_size: usize) -> Self {
+    pub fn new(data: &[u8]) -> Self {
         let effective_size = data.len();
         let padding = Self::compute_padding(effective_size);
         let padded_size = effective_size + padding;
@@ -411,16 +349,11 @@ impl OwnedCell {
         let mut payload = Payload::alloc_aligned(effective_size).unwrap();
         payload.effective_data_mut().copy_from_slice(data);
 
-        Self::from_aligned_payload_wih_key_bounds(payload, key_start, key_size, false)
+        Self::from_aligned_payload(payload, false)
     }
 
     /// Creates a new overflow cell.
-    pub fn new_overflow_with_key_bounds(
-        data: &[u8],
-        overflow_page: PageId,
-        key_start: usize,
-        key_size: usize,
-    ) -> Self {
+    pub fn new_overflow(data: &[u8], overflow_page: PageId) -> Self {
         let effective_size = data.len() + mem::size_of::<PageId>();
         let padding = Self::compute_padding(effective_size);
         let padded_size = effective_size + padding;
@@ -430,7 +363,7 @@ impl OwnedCell {
         payload.effective_data_mut()[data.len()..effective_size]
             .copy_from_slice(&overflow_page.to_be_bytes());
 
-        Self::from_aligned_payload_wih_key_bounds(payload, key_start, key_size, true)
+        Self::from_aligned_payload(payload, true)
     }
 
     /// Computes the padding required to align [payload_size] to [CELL_ALIGNMENT]
@@ -461,16 +394,6 @@ impl OwnedCell {
             header: *cell.metadata(),
             payload,
         }
-    }
-
-    #[inline]
-    pub fn key_start(&self) -> usize {
-        self.header.key_start() as usize
-    }
-
-    #[inline]
-    pub fn key_size(&self) -> usize {
-        self.header.key_size() as usize
     }
 
     #[inline]
@@ -529,14 +452,6 @@ impl OwnedCell {
     #[inline]
     pub fn len(&self) -> usize {
         self.header.len()
-    }
-
-    #[inline]
-    pub fn key_bytes(&self) -> KeyBytes<'_> {
-        KeyBytes::from(
-            &self.effective_data()
-                [self.header.key_start()..self.header.key_start() + self.header.key_size()],
-        )
     }
 
     /// Total size (header + padded payload)
@@ -624,12 +539,6 @@ impl<'a> From<&'a mut OwnedCell> for CellMut<'a> {
     }
 }
 
-impl From<OwnedTupleAccessor<'_>> for OwnedCell {
-    fn from(tuple: OwnedTupleAccessor<'_>) -> Self {
-        Self::from_tuple(tuple)
-    }
-}
-
 impl WritableLayout for OwnedCell {
     type Header = CellHeader;
 
@@ -663,47 +572,5 @@ impl<'a> WritableLayout for CellMut<'a> {
 
     fn content(&self) -> &[u8] {
         &self.data.full_data()
-    }
-}
-
-impl<'a> AsKeyBytes<'a> for CellMut<'a> {
-    fn key_bytes(&'a self) -> KeyBytes<'a> {
-        self.key_bytes()
-    }
-
-    fn key_size(&self) -> usize {
-        self.key_size()
-    }
-
-    fn key_start(&self) -> usize {
-        self.key_start()
-    }
-}
-
-impl<'a> AsKeyBytes<'a> for CellRef<'a> {
-    fn key_bytes(&'a self) -> KeyBytes<'a> {
-        self.key_bytes()
-    }
-
-    fn key_size(&self) -> usize {
-        self.key_size()
-    }
-
-    fn key_start(&self) -> usize {
-        self.key_start()
-    }
-}
-
-impl<'a> AsKeyBytes<'a> for OwnedCell {
-    fn key_bytes(&'a self) -> KeyBytes<'a> {
-        self.key_bytes()
-    }
-
-    fn key_size(&self) -> usize {
-        self.key_size()
-    }
-
-    fn key_start(&self) -> usize {
-        self.key_start()
     }
 }

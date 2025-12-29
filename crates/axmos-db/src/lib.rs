@@ -16,14 +16,12 @@ pub mod common;
 pub mod io;
 mod macros;
 mod multithreading;
+pub mod runtime;
 pub mod schema;
 mod sql;
 mod storage;
 mod tree;
 pub mod types;
-
-//#[cfg(test)]
-//pub mod test_utils;
 
 /// Jemalloc apparently has better alignment guarantees than rust's standard allocator.
 /// Rust's global system allocator does not seem to guarantee that allocations are aligned.

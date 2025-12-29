@@ -1,12 +1,13 @@
 use crate::{
-    ObjectId, TransactionId, UInt64,
+    ObjectId, SerializationError, TransactionId, UInt64,
+    core::SerializableType,
     io::pager::BtreeBuilder,
     make_shared,
     multithreading::coordinator::Snapshot,
     storage::tuple::{RefTupleAccessor, Tuple, TupleBuilder, TupleError, TupleReader, TupleRef},
     tree::{
+        accessor::BtreePagePosition,
         bplustree::{BtreeError, SearchResult},
-        cell_ops::AsKeyBytes,
     },
     types::{Blob, DataType, DataTypeRef, PageId},
 };
@@ -29,6 +30,7 @@ pub enum CatalogError {
     InvalidObjectName(String),
     BtreeError(BtreeError),
     TupleError(TupleError),
+    Serialization(SerializationError),
     Other(String),
 }
 
@@ -39,6 +41,7 @@ impl Display for CatalogError {
             Self::InvalidObjectName(name) => write!(f, "object with name {name}does not exist"),
             Self::BtreeError(err) => write!(f, "Btree error: {err}"),
             Self::TupleError(err) => write!(f, "Tuple error {err}"),
+            Self::Serialization(err) => write!(f, "serialization error {err}"),
             Self::Other(string) => write!(f, "{string}"),
         }
     }
@@ -47,6 +50,11 @@ impl Display for CatalogError {
 impl From<BtreeError> for CatalogError {
     fn from(value: BtreeError) -> Self {
         Self::BtreeError(value)
+    }
+}
+impl From<SerializationError> for CatalogError {
+    fn from(value: SerializationError) -> Self {
+        Self::Serialization(value)
     }
 }
 impl From<TupleError> for CatalogError {
@@ -82,6 +90,12 @@ impl Catalog {
         }
     }
 
+    pub(crate) fn fetch_add_last_stored(&mut self, add: u64) -> ObjectId {
+        let current = self.last_stored_object;
+        self.last_stored_object += add;
+        current
+    }
+
     pub(crate) fn with_last_stored_object(mut self, last_stored: ObjectId) -> Self {
         self.last_stored_object = last_stored;
         self
@@ -104,7 +118,7 @@ impl Catalog {
         relation: &Relation,
         transaction_id: TransactionId,
     ) -> CatalogResult<Tuple> {
-        let schema = meta_table_schema();
+        let schema = meta_index_schema();
         let builder = TupleBuilder::from_schema(&schema);
         let t = builder.build(relation.to_meta_index_row(), transaction_id)?;
 
@@ -123,7 +137,7 @@ impl Catalog {
         let relation = self.get_relation(id, builder, snapshot)?;
         let schema = relation.schema();
         let root = relation.root();
-        let mut table = builder.build_tree(root, &schema);
+        let mut table = builder.build_tree(root);
 
         // Initialize collectors for each column
         let mut collectors: Vec<StatsCollector> = schema
@@ -143,56 +157,50 @@ impl Catalog {
             1
         };
 
-        // Not sure if this approach will work as the iterator needs to acquire the RcPageAccessor mutably.
         for (i, position) in table.iter_forward()?.enumerate() {
-            if let Ok(pos) = position {
-                // Track pages
-                page_set.insert(pos.entry());
+            let pos: BtreePagePosition = position?;
+            // Track pages
+            let entry: PageId = pos.entry();
+            page_set.insert(entry);
 
-                row_count += 1;
+            row_count += 1;
 
-                // Apply sampling
-                if sample_threshold > 1 && row_count % sample_threshold != 0 {
-                    continue;
-                }
+            // Apply sampling
+            if sample_threshold > 1 && row_count % sample_threshold != 0 {
+                continue;
+            }
 
-                // Check max sample rows
-                if max_sample_rows > 0 && row_count > max_sample_rows as u64 {
-                    break;
-                }
+            // Check max sample rows
+            if max_sample_rows > 0 && row_count > max_sample_rows as u64 {
+                break;
+            }
 
-                // Process the tuple
-                table.with_cell_at(pos, |bytes| {
-                    total_row_size += bytes.len() as u64;
+            // Process the tuple
+            table.with_cell_at(pos, |bytes: &[u8]| {
+                total_row_size += bytes.len() as u64;
 
-                    let reader = TupleReader::from_schema(&schema);
-                    if let Some(layout) = reader.parse_for_snapshot(bytes, &snapshot)? {
-                        let tuple = TupleRef::new(bytes, layout);
-                        let accessor = RefTupleAccessor::new(tuple, &schema);
+                let reader = TupleReader::from_schema(&schema);
+                if let Some(layout) = reader.parse_for_snapshot(bytes, &snapshot)? {
+                    let tuple = TupleRef::new(bytes, layout);
+                    let accessor = RefTupleAccessor::new(tuple, &schema);
 
-                        // Collect key column stats
-                        for i in 0..schema.num_keys() {
-                            if let Ok(value) = accessor.key(i) {
-                                collectors[i].observe(value);
-                            }
-                        }
-
-                        // Collect value column stats
-                        for i in 0..schema.num_values() {
-                            let col_idx = schema.num_keys as usize + i;
-                            if let Ok(value) = accessor.value(i) {
-                                collectors[col_idx].observe(value);
-                            }
+                    // Collect key column stats
+                    for i in 0..schema.num_keys() {
+                        if let Ok(value) = accessor.key(i) {
+                            collectors[i].observe(value);
                         }
                     }
-                    Ok::<(), TupleError>(())
-                })??;
-            } else {
-                return Err(CatalogError::Other(format!(
-                    "Unable to compute stats for table {}. Failed at iteration {}",
-                    id, i
-                )));
-            }
+
+                    // Collect value column stats
+                    for i in 0..schema.num_values() {
+                        let col_idx = schema.num_keys as usize + i;
+                        if let Ok(value) = accessor.value(i) {
+                            collectors[col_idx].observe(value);
+                        }
+                    }
+                }
+                Ok::<(), TupleError>(())
+            })??;
         }
 
         // Finalize statistics
@@ -237,7 +245,7 @@ impl Catalog {
         max_sample_rows: usize,
     ) -> CatalogResult<()> {
         let schema = meta_table_schema();
-        let mut meta_table = builder.build_tree(self.meta_table, &schema);
+        let mut meta_table = builder.build_tree(self.meta_table);
 
         let mut relations_to_analyze: Vec<ObjectId> = Vec::new();
 
@@ -277,12 +285,11 @@ impl CatalogTrait for Catalog {
         snapshot: &Snapshot,
     ) -> CatalogResult<()> {
         let schema = meta_table_schema();
-        let mut meta_table = builder.build_tree_mut(self.meta_table, &schema);
+        let mut meta_table = builder.build_tree_mut(self.meta_table);
 
         let tuple = Self::relation_as_meta_table_tuple(&relation, snapshot.xid())?;
 
-        let result =
-            meta_table.update(self.meta_table, tuple.into_buildable_with_schema(&schema))?;
+        let result = meta_table.update(self.meta_table, tuple, &schema)?;
 
         Ok(())
     }
@@ -307,16 +314,16 @@ impl CatalogTrait for Catalog {
             }
         };
 
-        let schema = meta_table_schema();
-        let mut meta_table = builder.build_tree_mut(self.meta_table, &schema);
+        let table_schema = meta_table_schema();
+        let mut meta_table = builder.build_tree_mut(self.meta_table);
 
-        let schema = meta_index_schema();
-        let mut meta_index = builder.build_tree_mut(self.meta_index, &schema);
+        let index_schema = meta_index_schema();
+        let mut meta_index = builder.build_tree_mut(self.meta_index);
 
         let blob = Blob::from(rel.name());
         let row_id = UInt64::from(rel.object_id());
-        meta_index.remove(self.meta_index, blob.key_bytes())?;
-        meta_table.remove(self.meta_table, row_id.key_bytes())?;
+        meta_index.remove(self.meta_index, blob.as_ref(), &index_schema)?;
+        meta_table.remove(self.meta_table, &row_id.serialize()?, &table_schema)?;
 
         Ok(())
     }
@@ -332,23 +339,23 @@ impl CatalogTrait for Catalog {
         let schema = meta_index_schema();
 
         // Store the relation in the meta-table
-        let mut tree = builder.build_tree_mut(self.meta_index, &schema);
+        let mut tree = builder.build_tree_mut(self.meta_index);
 
         let tuple = Self::relation_as_meta_index_tuple(&relation, transaction_id)?;
 
         // Will replace existing relation if it exists.
-        tree.upsert(self.meta_table, tuple.into_buildable_with_schema(&schema))?;
+        tree.upsert(self.meta_index, tuple, &schema)?;
 
         let schema = meta_table_schema();
         let object_id = relation.object_id();
 
         // Store the relation in the meta-table
-        let mut tree = builder.build_tree_mut(self.meta_table, &schema);
+        let mut tree = builder.build_tree_mut(self.meta_table);
 
         let tuple = Self::relation_as_meta_table_tuple(&relation, transaction_id)?;
 
         // Will replace existing relation if it exists.
-        tree.upsert(self.meta_table, tuple.into_buildable_with_schema(&schema))?;
+        tree.upsert(self.meta_table, tuple, &schema)?;
 
         self.last_stored_object += 1;
         Ok(())
@@ -362,9 +369,9 @@ impl CatalogTrait for Catalog {
         snapshot: &Snapshot,
     ) -> CatalogResult<ObjectId> {
         let schema = meta_index_schema();
-        let mut meta_index = builder.build_tree(self.meta_index, &schema);
+        let mut meta_index = builder.build_tree(self.meta_index);
         let name = Blob::from(name);
-        let result = meta_index.search(name.key_bytes())?;
+        let result = meta_index.search(name.as_ref(), &schema)?;
 
         match result {
             SearchResult::Found(pos) => {
@@ -393,9 +400,9 @@ impl CatalogTrait for Catalog {
         snapshot: &Snapshot,
     ) -> CatalogResult<Relation> {
         let schema = meta_table_schema();
-        let mut meta_table = builder.build_tree(self.meta_table, &schema);
-        let row_id = UInt64(id);
-        let result = meta_table.search(row_id.key_bytes())?;
+        let mut meta_table = builder.build_tree(self.meta_table);
+        let row_id = UInt64(id).serialize()?;
+        let result = meta_table.search(row_id.as_ref(), &schema)?;
 
         match result {
             SearchResult::Found(pos) => {
@@ -516,6 +523,7 @@ pub type TestMetaIndex = HashMap<String, ObjectId>;
 
 // Mock test catalog for tests
 #[cfg(test)]
+#[derive(Clone)]
 pub struct MemCatalog {
     meta_table: TestMetaTable,
     meta_index: TestMetaIndex,
@@ -592,4 +600,50 @@ impl CatalogTrait for MemCatalog {
         self.meta_index.remove(relation.name());
         Ok(())
     }
+}
+
+#[derive(Clone)]
+pub struct StatisticsProvider<C: CatalogTrait + Clone> {
+    catalog: C,
+    builder: BtreeBuilder,
+    snapshot: Snapshot,
+}
+
+impl<C> StatisticsProvider<C>
+where
+    C: CatalogTrait + Clone,
+{
+    pub fn new(catalog: C, builder: BtreeBuilder, snapshot: Snapshot) -> Self {
+        Self {
+            catalog,
+            builder,
+            snapshot,
+        }
+    }
+}
+
+impl<C: CatalogTrait + Clone> StatsProvider for StatisticsProvider<C> {
+    fn get_stats(&self, object: ObjectId) -> Option<Stats> {
+        let relation = self
+            .catalog
+            .get_relation(object, &self.builder, &self.snapshot)
+            .ok()?;
+        relation.stats().cloned()
+    }
+
+    fn get_column_stats(&self, object: ObjectId, column_index: usize) -> Option<ColumnStats> {
+        let relation = self
+            .catalog
+            .get_relation(object, &self.builder, &self.snapshot)
+            .ok()?;
+        relation
+            .stats()
+            .map(|s| s.get_column_stats(column_index).cloned())
+            .flatten()
+    }
+}
+
+pub trait StatsProvider {
+    fn get_stats(&self, object: ObjectId) -> Option<Stats>;
+    fn get_column_stats(&self, object: ObjectId, column_index: usize) -> Option<ColumnStats>;
 }

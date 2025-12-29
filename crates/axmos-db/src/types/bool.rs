@@ -80,7 +80,7 @@ impl From<bool> for Bool {
 // Instead, we manually implement DeserializableType:
 
 /// Reference type for Bool that reads from a u8
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct BoolRef<'a>(&'a u8);
 
 impl<'a> BoolRef<'a> {

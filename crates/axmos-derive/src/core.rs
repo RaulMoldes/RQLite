@@ -108,10 +108,10 @@ pub enum DelegateTarget {
 
 // Indicator to determine whether we have to wrap th eresult over the ref enum or over the main enum (for some methods like reinterpret cast)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WrapResult {
-    #[default]
-    Main, // Main implementation
-    Ref, // Reference enum implementation.
+pub struct WrapVariant {
+    is_result: bool,
+    is_tuple: bool,
+    target: DelegateTarget,
 }
 
 // Delegate attribute representation
@@ -144,11 +144,14 @@ pub struct DelegateAttr {
     // Any custom args.
     pub args: Option<TokenStream>,
 
+    /// Filter the implementation of the trait for spedific variants attrs.
+    pub only_for: Option<String>,
+
     // Call args
     pub call_args: Option<TokenStream>,
 
     /// WHether or not to wrap the result
-    pub wrap_result: Option<WrapResult>,
+    pub wrap_variant: Option<WrapVariant>,
 
     // Generic parameters for the method
     pub generics: Option<TokenStream>,
@@ -203,8 +206,8 @@ impl DelegateAttr {
         self.call_args.as_ref()
     }
 
-    pub fn wrap_result(&self) -> Option<&WrapResult> {
-        self.wrap_result.as_ref()
+    pub fn wrap_variant(&self) -> Option<&WrapVariant> {
+        self.wrap_variant.as_ref()
     }
 
     // Obtain the generated name.
@@ -226,11 +229,12 @@ impl DelegateAttr {
         let mut consumes_itself = true;
         let mut kind = DelegateKind::Method;
         let mut target = DelegateTarget::Main;
-        let mut wrap_result = None;
+        let mut wrap_variant = None;
         let mut args = None;
         let mut call_args = None;
         let mut generics = None;
         let mut where_clause = None;
+        let mut only_for = None;
 
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("trait") {
@@ -264,13 +268,29 @@ impl DelegateAttr {
                     "ref" => DelegateTarget::Ref,
                     _ => return Err(meta.error("target must be 'main', 'kind', or 'ref'")),
                 };
-            } else if meta.path.is_ident("wrap_result") {
+            } else if meta.path.is_ident("only_for") {
                 let v: LitStr = meta.value()?.parse()?;
-                wrap_result = match v.value().as_str() {
-                    "main" => Some(WrapResult::Main),
-                    "ref" => Some(WrapResult::Ref),
-                    _ => return Err(meta.error("wrapper must be 'main', or 'ref'")),
+                only_for = Some(v.value());
+            } else if meta.path.is_ident("wrap_variant") {
+                let v: LitStr = meta.value()?.parse()?;
+                let value = v.value();
+                // Parse format: "main" or "main,result" or "main,tuple" or "main,result,tuple"
+                let parts: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
+
+                let target = match parts.get(0) {
+                    Some(&"main") => DelegateTarget::Main,
+                    Some(&"ref") => DelegateTarget::Ref,
+                    _ => return Err(meta.error("wrap_variant target must be 'main' or 'ref'")),
                 };
+
+                let is_result = parts.iter().any(|&p| p == "result");
+                let is_tuple = parts.iter().any(|&p| p == "tuple");
+
+                wrap_variant = Some(WrapVariant {
+                    target,
+                    is_result,
+                    is_tuple,
+                });
             } else if meta.path.is_ident("args") {
                 let v: LitStr = meta.value()?.parse()?;
                 args = Some(v.parse::<TokenStream>()?);
@@ -300,9 +320,10 @@ impl DelegateAttr {
             target,
             args,
             call_args,
-            wrap_result,
+            wrap_variant,
             generics,
             where_clause,
+            only_for,
         }))
     }
 }
@@ -313,18 +334,33 @@ impl DelegateAttr {
 #[derive(Debug, Default)]
 pub struct VariantAttrs {
     pub is_null: bool,
+    pub is_numeric: bool,
 }
 
 impl VariantAttrs {
     fn parse(attrs: &[Attribute]) -> Self {
         Self {
             is_null: attrs.iter().any(|a| a.path().is_ident("null")),
+            is_numeric: attrs.iter().any(|a| a.path().is_ident("numeric")),
+        }
+    }
+
+    pub fn has_attr(&self, name: &str) -> bool {
+        match name {
+            "null" => self.is_null,
+            "numeric" => self.is_numeric,
+            _ => false,
         }
     }
 
     /// Whether the #[is_null] attribute is set for this target variant.
     pub fn is_null(&self) -> bool {
         self.is_null
+    }
+
+    /// Whether the #[is_null] attribute is set for this target variant.
+    pub fn is_numeric(&self) -> bool {
+        self.is_numeric
     }
 }
 
@@ -349,6 +385,10 @@ impl VariantInfo {
 
     pub fn is_null(&self) -> bool {
         self.attrs.is_null()
+    }
+
+    pub fn is_numeric(&self) -> bool {
+        self.attrs.is_numeric()
     }
 }
 
@@ -503,6 +543,15 @@ fn autogen_kind_enum(info: &EnumInfo) -> TokenStream {
         })
         .collect();
 
+    let is_numeric_arms: Vec<_> = info
+        .iter_variants()
+        .map(|v| {
+            let vn = v.name();
+            let is_null = v.is_numeric();
+            quote! { Self::#vn => #is_null }
+        })
+        .collect();
+
     // Generates one method to match for each variant.
     let is_type_methods: Vec<_> = info
         .iter_variants()
@@ -526,6 +575,7 @@ fn autogen_kind_enum(info: &EnumInfo) -> TokenStream {
                 match self { #(Self::#variants => stringify!(#variants),)* }
             }
             #[inline] pub const fn is_null(self) -> bool { match self { #(#is_null_arms,)* } }
+            #[inline] pub const fn is_numeric(self) -> bool { match self { #(#is_numeric_arms,)* } }
             #[inline] pub fn from_repr(v: u8) -> Option<Self> {
                 match v { #(#indices => Some(Self::#variants),)* _ => None }
             }
@@ -597,6 +647,27 @@ fn autogen_ref_enum(info: &EnumInfo) -> TokenStream {
         })
         .collect();
 
+    // Generates to_f64 arms for numeric variants
+    let to_f64_arms: Vec<_> = info
+        .iter_variants()
+        .map(|v| {
+            let vn = v.name();
+            if v.is_numeric() {
+                if v.inner_type().is_some() {
+                    quote! { Self::#vn(inner) => Some(inner.0 as f64) }
+                } else {
+                    quote! { Self::#vn => None }
+                }
+            } else {
+                if v.inner_type().is_some() {
+                    quote! { Self::#vn(_) => None }
+                } else {
+                    quote! { Self::#vn => None }
+                }
+            }
+        })
+        .collect();
+
     let as_bytes_arms: Vec<_> = info
         .iter_variants()
         .map(|v| {
@@ -616,7 +687,10 @@ fn autogen_ref_enum(info: &EnumInfo) -> TokenStream {
         impl<'a> #ref_name<'a> {
             #[inline] pub fn kind(&self) -> #kind_name { match self { #(#kind_arms,)* } }
             #[inline] pub fn is_null(&self) -> bool { self.kind().is_null() }
+            #[inline] pub fn is_numeric(&self) -> bool { self.kind().is_numeric() }
             #[inline] pub fn to_owned(&self) -> Option<#main_name> { match self {#(#to_owned_arms,)*}  }
+
+             #[inline] pub fn to_f64(&self) -> Option<f64> { match self {#(#to_f64_arms,)*}  }
             #[inline] pub fn as_bytes(&self) -> &[u8] { match self {#(#as_bytes_arms,)*}  }
         }
     }
@@ -634,6 +708,27 @@ fn autogen_base(info: &EnumInfo) -> TokenStream {
                 quote! { Self::#vn(_) => #kind_name::#vn }
             } else {
                 quote! { Self::#vn => #kind_name::#vn }
+            }
+        })
+        .collect();
+
+    // Generates to_f64 arms for numeric variants
+    let to_f64_arms: Vec<_> = info
+        .iter_variants()
+        .map(|v| {
+            let vn = v.name();
+            if v.is_numeric() {
+                if v.inner_type().is_some() {
+                    quote! { Self::#vn(inner) => Some(inner.0 as f64) }
+                } else {
+                    quote! { Self::#vn => None }
+                }
+            } else {
+                if v.inner_type().is_some() {
+                    quote! { Self::#vn(_) => None }
+                } else {
+                    quote! { Self::#vn => None }
+                }
             }
         })
         .collect();
@@ -676,7 +771,14 @@ fn autogen_base(info: &EnumInfo) -> TokenStream {
         impl #name {
             #[inline] pub fn kind(&self) -> #kind_name { match self { #(#kind_arms,)* } }
             #[inline] pub fn is_null(&self) -> bool { self.kind().is_null() }
+            #[inline] pub fn is_numeric(&self) -> bool { self.kind().is_numeric() }
             #[inline] pub fn is_some(&self) -> bool { !self.is_null() }
+            /// Converts numeric variants to f64 for comparisons.
+            /// Returns None for non-numeric types.
+            #[inline]
+            pub fn to_f64(&self) -> Option<f64> {
+                match self { #(#to_f64_arms,)* }
+            }
             #(#is_methods)*
             #(#as_methods)*
         }
@@ -724,65 +826,129 @@ fn autogen_delegates(info: &EnumInfo) -> TokenStream {
             .iter_variants()
             .map(|v| {
                 let vn = v.name();
+
+                // Check if this variant should use the delegate or the default
+                let should_delegate = if let Some(ref attr_filter) = d.only_for {
+                    v.attrs.has_attr(attr_filter)
+                } else {
+                    true // No filter, delegate for all variants with inner type
+                };
+
                 if let Some(ty) = v.inner_type() {
-                    match *d.delegate_type() {
-                        DelegateKind::Const => {
-                            let pat = if target == DelegateTarget::Kind {
-                                quote! { Self::#vn }
-                            } else if v.inner_type().is_some() {
-                                quote! { Self::#vn(inner) }
-                            } else {
-                                quote! { Self::#vn }
-                            };
-                            quote! { #pat => <#ty as #trait_path>::#original_name }
-                        }
-                        DelegateKind::Method => {
-                            let call_expr = if let Some(ca) = d.call_args() {
-                                quote! { <#ty as #trait_path>::#original_name(#ca) }
-                            } else if target == DelegateTarget::Ref {
-                                // For ref target, call the trait method directly on inner (which is already the Ref type)
-                                quote! { #trait_path::#original_name(inner) }
-                            } else if d.consumes_itself() {
-                                quote! { <#ty as #trait_path>::#original_name(inner) }
-                            } else {
-                                quote! { <#ty as #trait_path>::#original_name(*inner) }
-                            };
+                    if should_delegate {
+                        match *d.delegate_type() {
+                            DelegateKind::Const => {
+                                let pat = if target == DelegateTarget::Kind {
+                                    quote! { Self::#vn }
+                                } else if v.inner_type().is_some() {
+                                    quote! { Self::#vn(inner) }
+                                } else {
+                                    quote! { Self::#vn }
+                                };
+                                quote! { #pat => <#ty as #trait_path>::#original_name }
+                            }
+                            DelegateKind::Method => {
+                                let call_expr = if let Some(ca) = d.call_args() {
+                                    quote! { <#ty as #trait_path>::#original_name(#ca) }
+                                } else if target == DelegateTarget::Ref {
+                                    quote! { #trait_path::#original_name(inner) }
+                                } else if d.consumes_itself() {
+                                    quote! { <#ty as #trait_path>::#original_name(inner) }
+                                } else {
+                                    quote! { <#ty as #trait_path>::#original_name(*inner) }
+                                };
 
-                            let pat = if target == DelegateTarget::Kind {
-                                quote! { Self::#vn }
-                            } else if d.call_args.is_some()
-                                && d.has_custom_args()
-                                && !d.consumes_itself()
-                            {
-                                quote! { Self::#vn(_) }
-                            } else if d.consumes_itself() {
-                                quote! { Self::#vn(inner) }
-                            } else {
-                                quote! { Self::#vn(inner) }
-                            };
+                                let pat = if target == DelegateTarget::Kind {
+                                    quote! { Self::#vn }
+                                } else if d.call_args.is_some()
+                                    && d.has_custom_args()
+                                    && !d.consumes_itself()
+                                {
+                                    quote! { Self::#vn(_) }
+                                } else if d.consumes_itself() {
+                                    quote! { Self::#vn(inner) }
+                                } else {
+                                    quote! { Self::#vn(inner) }
+                                };
 
-                            match d.wrap_result {
-                                Some(WrapResult::Ref) => {
-                                    quote! {
-                                        #pat => {
-                                            let (r, sz) = #call_expr?;
-                                            Ok((#ref_name::#vn(r), sz))
+                                if let Some(ref variant) = d.wrap_variant {
+                                    match variant.target {
+                                        DelegateTarget::Ref => {
+                                            if variant.is_tuple {
+                                                if variant.is_result {
+                                                    quote! {
+                                                        #pat => {
+                                                            let (r, sz) = #call_expr?;
+                                                            Ok((#ref_name::#vn(r), sz))
+                                                        }
+                                                    }
+                                                } else {
+                                                    quote! {
+                                                        #pat => {
+                                                            let (r, sz) = #call_expr;
+                                                            (#ref_name::#vn(r), sz)
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                if variant.is_result {
+                                                    quote! {
+                                                        #pat => {
+                                                            let r = #call_expr?;
+                                                            Ok(#ref_name::#vn(r))
+                                                        }
+                                                    }
+                                                } else {
+                                                    quote! {
+                                                        #pat => #ref_name::#vn(#call_expr)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        DelegateTarget::Main => {
+                                            if variant.is_tuple {
+                                                if variant.is_result {
+                                                    quote! {
+                                                        #pat => {
+                                                            let (r, sz) = #call_expr?;
+                                                            Ok((#name::#vn(r), sz))
+                                                        }
+                                                    }
+                                                } else {
+                                                    quote! {
+                                                        #pat => {
+                                                            let (r, sz) = #call_expr;
+                                                            (#name::#vn(r), sz)
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                if variant.is_result {
+                                                    quote! {
+                                                        #pat => {
+                                                            let r = #call_expr?;
+                                                            Ok(#name::#vn(r))
+                                                        }
+                                                    }
+                                                } else {
+                                                    quote! {
+                                                        #pat => #name::#vn(#call_expr)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        DelegateTarget::Kind => {
+                                            quote! { #pat => #call_expr }
                                         }
                                     }
-                                }
-                                Some(WrapResult::Main) => {
-                                    quote! {
-                                        #pat => {
-                                            let r = #call_expr?;
-                                            Ok(#name::#vn(r))
-                                        }
-                                    }
-                                }
-                                None => {
+                                } else {
                                     quote! { #pat => #call_expr }
                                 }
                             }
                         }
+                    } else {
+                        let pat = quote! { Self::#vn(_) };
+                        quote! { #pat => #default }
                     }
                 } else {
                     quote! { Self::#vn => #default }

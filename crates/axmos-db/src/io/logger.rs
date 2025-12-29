@@ -1,12 +1,7 @@
 use crate::{
-    RowId, TransactionId,
-    io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
-    multithreading::coordinator::TransactionState,
-    storage::{
-        Allocatable, AvailableSpace, WalMetadata, WalOps, Writable,
-        wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock},
-    },
-    types::{BlockId, Lsn, ObjectId},
+    RowId,
+    storage::wal::{OwnedRecord, RecordType},
+    types::{Lsn, ObjectId, TransactionId},
 };
 
 pub trait Operation {
@@ -22,6 +17,20 @@ pub trait Operation {
     }
     fn redo(&self) -> &[u8] {
         &[]
+    }
+
+    /// Convert this operation into an OwnedRecord
+    fn into_record(&self, lsn: Lsn, tid: TransactionId, prev_lsn: Option<Lsn>) -> OwnedRecord {
+        OwnedRecord::new(
+            lsn,
+            tid,
+            prev_lsn,
+            self.object_id(),
+            self.row_id(),
+            self.op_type(),
+            self.undo(),
+            self.redo(),
+        )
     }
 }
 

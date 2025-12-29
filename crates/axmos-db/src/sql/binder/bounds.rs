@@ -25,12 +25,26 @@ pub enum AggregateFunction {
     Max,
 }
 
+impl AggregateFunction {
+    pub fn name(&self) -> &'static str {
+        match self {
+            AggregateFunction::Count => "COUNT",
+            AggregateFunction::Sum => "SUM",
+            AggregateFunction::Avg => "AVG",
+            AggregateFunction::Min => "MIN",
+            AggregateFunction::Max => "MAX",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalarFunction {
     Length,
     Upper,
     Lower,
-    Trim,
+    Cast,
+    LTrim,
+    RTrim,
     Concat,
     Abs,
     Round,
@@ -40,6 +54,28 @@ pub enum ScalarFunction {
     Coalesce,
     NullIf,
     Unknown(String),
+}
+
+impl ScalarFunction {
+    pub fn name(&self) -> String {
+        match self {
+            ScalarFunction::Length => "LENGTH".to_string(),
+            ScalarFunction::Upper => "UPPER".to_string(),
+            ScalarFunction::Lower => "LOWER".to_string(),
+            ScalarFunction::Cast => "CAST".to_string(),
+            ScalarFunction::LTrim => "LTRIM".to_string(),
+            ScalarFunction::RTrim => "RTRIM".to_string(),
+            ScalarFunction::Concat => "CONCAT".to_string(),
+            ScalarFunction::Abs => "ABS".to_string(),
+            ScalarFunction::Round => "ROUND".to_string(),
+            ScalarFunction::Ceil => "CEIL".to_string(),
+            ScalarFunction::Floor => "FLOOR".to_string(),
+            ScalarFunction::Sqrt => "SQRT".to_string(),
+            ScalarFunction::Coalesce => "COALESCE".to_string(),
+            ScalarFunction::NullIf => "NULLIF".to_string(),
+            ScalarFunction::Unknown(name) => name.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

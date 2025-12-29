@@ -1,5 +1,5 @@
 use crate::{
-    multithreading::frames::{Latch, ReadLatch, WriteLatch},
+    multithreading::frames::{Latch, MemFrame, ReadLatch, WriteLatch},
     storage::page::BtreePage,
     storage::{Identifiable, core::traits::Buffer},
 };
@@ -17,6 +17,8 @@ use std::{
 #[repr(C, packed)]
 #[derive(Debug, PartialEq, PartialOrd)]
 pub struct Position<P: Buffer<IdType: Eq + Hash + Clone + Copy>>(P::IdType, usize);
+
+pub type BtreePagePosition = Position<BtreePage>;
 
 impl<P> Display for Position<P>
 where
@@ -222,6 +224,20 @@ where
     }
 }
 
+// The tracker cannot be cloned.
+impl<P, L> Clone for BtreeAccessor<P, L>
+where
+    P: Buffer<IdType: Eq + Hash>,
+    L: Latch<P>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            tracker: AccessTracker::new(),
+            traversal: self.traversal.clone(),
+        }
+    }
+}
+
 pub(crate) trait PositionStack<P: Buffer<IdType: Eq + Hash>> {
     /// Push a position onto the traversal stack
     fn push_position(&mut self, position: Position<P>);
@@ -415,3 +431,10 @@ where
 
 pub type BtreeReadAccessor = ReadTreeAccessor<BtreePage>;
 pub type BtreeWriteAccessor = MutableTreeAccessor<BtreePage>;
+
+pub(crate) trait TreeWriter = WriteAccessor<BtreePage, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>
+    + ReadAccessor<BtreePage, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>
+    + PositionStack<BtreePage>;
+
+pub(crate) trait TreeReader = ReadAccessor<BtreePage, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>
+    + PositionStack<BtreePage>;

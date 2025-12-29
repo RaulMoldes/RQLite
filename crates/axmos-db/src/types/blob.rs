@@ -1,10 +1,6 @@
 use crate::{
     SerializationResult,
-    core::{DeserializableType, Hashable, RefTrait, RuntimeSized, SerializableType},
-    tree::{
-        cell_ops::{AsKeyBytes, KeyBytes},
-        comparators::{Comparator, VarlenComparator},
-    },
+    core::{DeserializableType, RefTrait, RuntimeSized, SerializableType},
     types::{
         SerializationError, TypeSystemResult, VarInt,
         core::{NumericType, TypeCast, TypeClass, TypeRef, VarlenType},
@@ -15,6 +11,7 @@ use crate::{
 use std::{
     cmp::{Ordering, PartialEq},
     fmt::{Debug, Display, Formatter, Result as FmtResult},
+    io::{self, Error as IoError, ErrorKind},
     ops::{Deref, DerefMut},
 };
 
@@ -97,6 +94,10 @@ impl Blob {
     pub fn to_string_lossy_unchecked(&self) -> String {
         String::from_utf8_lossy(self.data().unwrap()).into_owned()
     }
+
+    pub fn as_blob_ref(&self) -> BlobRef<'_> {
+        BlobRef::from(self.as_ref())
+    }
 }
 
 impl Display for Blob {
@@ -144,11 +145,10 @@ impl PartialEq for Blob {
 
 impl Eq for Blob {}
 
-/// See [VarlenComparator] for details
 impl PartialOrd for Blob {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let comparator = VarlenComparator;
-        comparator.compare(self.key_bytes(), other.key_bytes()).ok()
+        let comparator = BlobComparator;
+        comparator.partial_cmp_blobs(&self.as_blob_ref(), &other.as_blob_ref())
     }
 }
 
@@ -249,22 +249,8 @@ impl<'a> Eq for BlobRef<'a> {}
 /// See [VarlenComparator] for details
 impl<'a> PartialOrd for BlobRef<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let comparator = VarlenComparator;
-        comparator.compare(self.key_bytes(), other.key_bytes()).ok()
-    }
-}
-
-impl<'a> AsKeyBytes<'a> for BlobRef<'a> {
-    fn key_bytes(&'a self) -> KeyBytes<'a> {
-        KeyBytes::from(self.as_ref())
-    }
-
-    fn key_size(&self) -> usize {
-        self.total_length()
-    }
-
-    fn key_start(&self) -> usize {
-        0
+        let comparator = BlobComparator;
+        comparator.partial_cmp_blobs(self, other)
     }
 }
 
@@ -379,5 +365,65 @@ impl SerializableType for Blob {
         let data_bytes = self.as_ref();
         writer[cursor..cursor + self.runtime_size()].copy_from_slice(data_bytes);
         Ok(cursor + self.runtime_size())
+    }
+}
+
+/// Comparator for variable-length data with VarInt length prefix.
+///
+/// Format: `[VarInt length][data bytes]`
+/// Comparison is lexicographic on the data portion.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BlobComparator;
+
+impl BlobComparator {
+    fn partial_cmp_blobs(&self, lhs: &BlobRef<'_>, rhs: &BlobRef<'_>) -> Option<Ordering> {
+        if lhs.as_ref().as_ptr() == rhs.as_ref().as_ptr() && lhs.len() == rhs.len() {
+            return Some(Ordering::Equal);
+        }
+
+        let lhs_len: usize = lhs.data_length().ok()?;
+        let left_data = lhs.data().ok()?;
+
+        let rhs_len: usize = rhs.data_length().ok()?;
+        let right_data = rhs.data().ok()?;
+
+        let min_len = lhs_len.min(rhs_len);
+
+        if min_len > 8 {
+            // Compare in 8-byte chunks for efficiency
+            let chunk_count = min_len / 8;
+            for i in 0..chunk_count {
+                let lhs_chunk = &left_data[i * 8..(i + 1) * 8];
+                let rhs_chunk = &right_data[i * 8..(i + 1) * 8];
+
+                // Use big-endian for lexicographic ordering
+                let lhs_u64 = u64::from_be_bytes(lhs_chunk.try_into().unwrap());
+                let rhs_u64 = u64::from_be_bytes(rhs_chunk.try_into().unwrap());
+
+                match lhs_u64.cmp(&rhs_u64) {
+                    Ordering::Equal => continue,
+                    other => return Some(other),
+                }
+            }
+
+            // Compare remaining bytes
+            for i in (chunk_count * 8)..min_len {
+                match left_data[i].cmp(&right_data[i]) {
+                    Ordering::Equal => continue,
+                    other => return Some(other),
+                }
+            }
+        } else {
+            // Compare small payloads byte by byte
+            for i in 0..min_len {
+                match left_data[i].cmp(&right_data[i]) {
+                    Ordering::Equal => continue,
+                    other => return Some(other),
+                }
+            }
+        }
+
+        // If all compared bytes are equal, decide by length
+        Some(lhs_len.cmp(&rhs_len))
     }
 }

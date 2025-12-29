@@ -319,7 +319,9 @@ impl TransactionCoordinator {
     /// Begin a new transaction.
     /// Returns a [TransactionHandle] to the thread that requested the begin operation.
     pub fn begin(&self) -> TransactionResult<TransactionHandle> {
-        let txid = 0; // TODO , GENERATE TRANSACTION IDS.
+        let txid = self
+            .last_created_transaction
+            .fetch_add(1, Ordering::Relaxed);
 
         // Create snapshot under read lock
         let snapshot = self.snapshot(txid)?;
@@ -506,6 +508,7 @@ impl TransactionCoordinator {
 
 /// Handle to an active transaction
 /// Provides a safe interface for transaction operations
+#[derive(Clone)]
 pub struct TransactionHandle {
     id: TransactionId,
     snapshot: Snapshot,
@@ -522,12 +525,12 @@ impl TransactionHandle {
     }
 
     /// Commit this transaction
-    pub fn commit(self) -> TransactionResult<()> {
+    pub fn commit(&self) -> TransactionResult<()> {
         self.coordinator.commit(self.id)
     }
 
     /// Abort this transaction
-    pub fn abort(self) -> TransactionResult<()> {
+    pub fn abort(&self) -> TransactionResult<()> {
         self.coordinator.abort(self.id)
     }
 }

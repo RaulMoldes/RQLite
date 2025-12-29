@@ -1,29 +1,23 @@
 use crate::{
     DBConfig,
     io::pager::{Pager, SharedPager},
-    storage::{cell::OwnedCell, core::buffer::Payload, page::BtreePage},
-    tree::{
-        accessor::{Accessor, BtreeWriteAccessor},
-        bplustree::{Btree, BtreeError, BtreeResult, SearchResult},
-        cell_ops::{AsKeyBytes, Buildable, KeyBytes},
-        comparators::{
-            Comparator, DynComparator,
-            numeric::{NumericComparator, SignedNumericComparator},
-        },
+    multithreading::coordinator::Snapshot,
+    schema::{Column, Schema},
+    storage::{
+        page::BtreePage,
+        tuple::{Row, Tuple, TupleBuilder, TupleReader, TupleRef},
     },
-    varint::MAX_VARINT_LEN,
+    tree::{
+        accessor::{BtreeWriteAccessor, TreeReader},
+        bplustree::{Btree, BtreeError, BtreeResult, SearchResult},
+    },
+    types::{Blob, DataType, DataTypeKind, UInt64},
 };
 
-use rand::{
-    Rng, SeedableRng,
-    distr::{Distribution, StandardUniform, uniform::SampleUniform},
-    seq::SliceRandom,
-};
+use rand::{Rng, SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha20Rng;
 
 use std::{
-    collections::BTreeSet,
-    fmt::Debug as FmtDebug,
     io::{self, Write},
     path::{Path, PathBuf},
     process,
@@ -32,352 +26,6 @@ use std::{
 };
 
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-pub trait TestCopyKeyTrait:
-    From<usize> + Buildable + FmtDebug + Copy + for<'a> AsKeyBytes<'a>
-{
-    fn get_comparator() -> DynComparator;
-}
-
-// Macro to automate the generation of btrees for different key types.
-macro_rules! impl_test_key_comparator {
-    ($key_ty:ty, signed) => {
-        impl TestCopyKeyTrait for $key_ty {
-            fn get_comparator() -> DynComparator {
-                DynComparator::SignedNumeric(SignedNumericComparator::with_type::<Self>())
-            }
-        }
-    };
-    ($key_ty:ty, unsigned) => {
-        impl TestCopyKeyTrait for $key_ty {
-            fn get_comparator() -> DynComparator {
-                DynComparator::StrictNumeric(NumericComparator::with_type::<Self>())
-            }
-        }
-    };
-}
-
-// Macro to automate the generation of fixed size keys for the bplustree.
-macro_rules! fixed_size_test_key {
-    ($name:ident, $inner:ty) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name(pub $inner);
-
-        impl $name {
-            pub fn new(value: $inner) -> Self {
-                Self(value)
-            }
-
-            pub fn value(&self) -> $inner {
-                self.0
-            }
-        }
-
-        impl From<$inner> for $name {
-            fn from(value: $inner) -> Self {
-                Self::new(value)
-            }
-        }
-
-        impl From<usize> for $name {
-            fn from(value: usize) -> Self {
-                Self::new(value as $inner)
-            }
-        }
-
-        impl AsRef<[u8]> for $name {
-            fn as_ref(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        &self.0 as *const $inner as *const u8,
-                        std::mem::size_of::<$inner>(),
-                    )
-                }
-            }
-        }
-
-        impl From<$name> for Box<[u8]> {
-            fn from(value: $name) -> Self {
-                Box::from(value.as_ref())
-            }
-        }
-
-        impl From<$name> for $crate::storage::core::buffer::Payload {
-            fn from(value: $name) -> Self {
-                let data = value.as_ref();
-                let mut payload = Self::alloc_aligned(data.len()).unwrap();
-                payload.effective_data_mut().copy_from_slice(data);
-                payload
-            }
-        }
-
-        impl From<$name> for $crate::storage::cell::OwnedCell {
-            fn from(key: $name) -> $crate::storage::cell::OwnedCell {
-                $crate::storage::cell::OwnedCell::new_with_key_bounds(
-                    key.as_ref(),
-                    0,
-                    std::mem::size_of::<$inner>(),
-                )
-            }
-        }
-
-        impl $crate::tree::cell_ops::Buildable for $name {
-            fn built_size(&self) -> usize {
-                std::mem::size_of::<$inner>()
-            }
-        }
-
-        impl<'a> $crate::tree::cell_ops::AsKeyBytes<'a> for $name {
-            fn key_bytes(&'a self) -> $crate::tree::cell_ops::KeyBytes<'a> {
-                $crate::tree::cell_ops::KeyBytes::from(self.as_ref())
-            }
-
-            fn key_start(&self) -> usize {
-                0
-            }
-
-            fn key_size(&self) -> usize {
-                self.built_size()
-            }
-        }
-    };
-}
-
-fixed_size_test_key!(TestKeyI8, i8);
-fixed_size_test_key!(TestKeyU8, u8);
-fixed_size_test_key!(TestKeyI16, i16);
-fixed_size_test_key!(TestKeyU16, u16);
-fixed_size_test_key!(TestKeyI32, i32);
-fixed_size_test_key!(TestKeyU32, u32);
-fixed_size_test_key!(TestKeyI64, i64);
-fixed_size_test_key!(TestKeyU64, u64);
-fixed_size_test_key!(TestKeyI128, i128);
-fixed_size_test_key!(TestKeyU128, u128);
-
-impl_test_key_comparator!(TestKeyI8, signed);
-impl_test_key_comparator!(TestKeyI16, signed);
-impl_test_key_comparator!(TestKeyI32, signed);
-impl_test_key_comparator!(TestKeyI64, signed);
-impl_test_key_comparator!(TestKeyI128, signed);
-impl_test_key_comparator!(TestKeyU8, unsigned);
-impl_test_key_comparator!(TestKeyU16, unsigned);
-impl_test_key_comparator!(TestKeyU32, unsigned);
-impl_test_key_comparator!(TestKeyU64, unsigned);
-impl_test_key_comparator!(TestKeyU128, unsigned);
-
-/// Variable-length string key with VarInt prefix.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TestVarKey {
-    encoded: Vec<u8>,
-}
-
-impl TestVarKey {
-    /// Create a key from a string (encodes with VarInt length prefix).
-    pub fn from_str(s: &str) -> Self {
-        use crate::types::VarInt;
-        let raw = s.as_bytes();
-        let mut buffer = [0u8; MAX_VARINT_LEN];
-        let len_bytes = VarInt::encode(raw.len() as i64, &mut buffer);
-        let mut encoded = len_bytes.to_vec();
-        encoded.extend_from_slice(raw);
-        Self { encoded }
-    }
-
-    /// Create a key with specific total size (for overflow testing).
-    pub fn with_size(prefix: &str, total_size: usize) -> Self {
-        use crate::types::VarInt;
-        let prefix_bytes = prefix.as_bytes();
-        let padding = total_size.saturating_sub(prefix_bytes.len());
-        let mut raw = Vec::with_capacity(total_size);
-        raw.extend_from_slice(prefix_bytes);
-        raw.extend(std::iter::repeat(b'X').take(padding));
-
-        let mut buffer = [0u8; MAX_VARINT_LEN];
-        let len_bytes = VarInt::encode(raw.len() as i64, &mut buffer);
-        let mut encoded = len_bytes.to_vec();
-        encoded.extend_from_slice(&raw);
-        Self { encoded }
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.encoded
-    }
-}
-
-impl AsRef<[u8]> for TestVarKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.encoded
-    }
-}
-
-impl From<TestVarKey> for Box<[u8]> {
-    fn from(value: TestVarKey) -> Self {
-        value.encoded.into_boxed_slice()
-    }
-}
-
-impl From<TestVarKey> for OwnedCell {
-    fn from(key: TestVarKey) -> OwnedCell {
-        OwnedCell::new_with_key_bounds(&key.encoded, 0, key.encoded.len())
-    }
-}
-
-impl Buildable for TestVarKey {
-    fn built_size(&self) -> usize {
-        self.encoded.len()
-    }
-}
-
-impl From<TestVarKey> for Payload {
-    fn from(value: TestVarKey) -> Self {
-        let data = value.as_ref();
-        let mut payload = Self::alloc_aligned(data.len()).unwrap();
-        payload.effective_data_mut().copy_from_slice(data);
-        payload
-    }
-}
-
-impl<'a> AsKeyBytes<'a> for TestVarKey {
-    fn key_bytes(&'a self) -> KeyBytes<'a> {
-        KeyBytes::from(self.encoded.as_slice())
-    }
-
-    fn key_start(&self) -> usize {
-        0
-    }
-
-    fn key_size(&self) -> usize {
-        self.encoded.len()
-    }
-}
-
-/// Key generators for tests.
-
-/// Sequential i32 keys: [0, 1, 2, ..., count-1]
-pub fn seq<T: From<usize>>(count: usize) -> Vec<T> {
-    (0..count).map(|v| T::from(v)).collect()
-}
-
-/// Random unique keys
-pub fn rand_unique<K, I>(count: usize, seed: u64) -> Vec<K>
-where
-    K: From<I> + Ord,
-    I: Ord + Copy + SampleUniform,
-    StandardUniform: Distribution<I>,
-{
-    let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    let mut set = BTreeSet::new();
-
-    while set.len() < count {
-        set.insert(K::from(rng.random::<I>()));
-    }
-
-    set.into_iter().collect()
-}
-
-/// Random (possibly duplicate) keys
-pub fn rand_keys<K, I>(count: usize, seed: u64) -> Vec<K>
-where
-    K: From<I>,
-    I: Copy + SampleUniform,
-    StandardUniform: Distribution<I>,
-{
-    let mut rng = ChaCha20Rng::seed_from_u64(seed);
-
-    (0..count).map(|_| K::from(rng.random::<I>())).collect()
-}
-
-/// Sequential variable-length string keys.
-pub fn seq_var(count: usize, prefix: &str) -> Vec<TestVarKey> {
-    (0..count)
-        .map(|i| TestVarKey::from_str(&format!("{}{:08}", prefix, i)))
-        .collect()
-}
-
-/// Variable-length keys with random sizes.
-pub fn rand_size_var(count: usize, seed: u64, min: usize, max: usize) -> Vec<TestVarKey> {
-    let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    (0..count)
-        .map(|i| {
-            let size = rng.random_range(min..=max);
-            TestVarKey::with_size(&format!("{:08}", i), size)
-        })
-        .collect()
-}
-
-/// Shuffle keys with given seed.
-pub fn shuffle<T: Clone>(keys: &[T], seed: u64) -> Vec<T> {
-    let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    let mut result = keys.to_vec();
-    result.shuffle(&mut rng);
-    result
-}
-
-/// Reverse key order.
-pub fn reverse<T: Clone>(keys: &[T]) -> Vec<T> {
-    keys.iter().rev().cloned().collect()
-}
-
-/// Interleave: odd indices first, then even.
-pub fn interleave<T: Clone>(keys: &[T]) -> Vec<T> {
-    let mut result = Vec::with_capacity(keys.len());
-    for i in (1..keys.len()).step_by(2) {
-        result.push(keys[i].clone());
-    }
-    for i in (0..keys.len()).step_by(2) {
-        result.push(keys[i].clone());
-    }
-    result
-}
-
-/// Generate keys in "zigzag" pattern: 0, n-1, 1, n-2, 2, n-3, ...
-pub fn zigzag<T: Clone>(keys: &[T]) -> Vec<T> {
-    let n = keys.len();
-    let mut result = Vec::with_capacity(n);
-    let mut lo = 0;
-    let mut hi = n.saturating_sub(1);
-    let mut take_low = true;
-
-    while lo <= hi && result.len() < n {
-        if take_low {
-            result.push(keys[lo].clone());
-            lo += 1;
-        } else {
-            result.push(keys[hi].clone());
-            if hi == 0 {
-                break;
-            }
-            hi -= 1;
-        }
-        take_low = !take_low;
-    }
-    result
-}
-
-/// Generate unique temporary database path.
-pub fn temp_db_path(prefix: &str) -> PathBuf {
-    let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut path = std::env::temp_dir();
-    path.push(format!(
-        "axmos_{}_{}_{}_{}.db",
-        prefix,
-        process::id(),
-        counter,
-        SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    path
-}
-
-/// Clean up test database files.
-pub fn cleanup(path: &Path) {
-    let _ = std::fs::remove_file(path);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::remove_file(dir.join("axmos.log"));
-    }
-}
 
 /// Test configuration builder.
 #[derive(Debug, Clone)]
@@ -426,7 +74,32 @@ impl Default for TestConfig {
     }
 }
 
-// Test database data structure
+/// Generate unique temporary database path.
+pub fn temp_db_path(prefix: &str) -> PathBuf {
+    let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "axmos_{}_{}_{}_{}.db",
+        prefix,
+        process::id(),
+        counter,
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    path
+}
+
+/// Clean up test database files.
+pub fn cleanup(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::remove_file(dir.join("axmos.log"));
+    }
+}
+
+/// Test database wrapper that handles setup and cleanup.
 pub struct TestDb {
     pub path: PathBuf,
     pub pager: SharedPager,
@@ -446,50 +119,134 @@ impl TestDb {
 
 impl Drop for TestDb {
     fn drop(&mut self) {
-        // Flush and cleanup
         let _ = self.pager.write().flush();
         cleanup(&self.path);
     }
 }
 
-// Type alias for testing btrees.
-pub(crate) type TestBtree<Cmp> = Btree<BtreePage, Cmp, BtreeWriteAccessor>;
+/// Schema factory for test tuples.
+/// Creates a simple schema with a BigUInt key and a Blob value.
+pub fn test_schema() -> Schema {
+    Schema::new_table(vec![
+        Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+        Column::new_with_defaults(DataTypeKind::Blob, "data"),
+    ])
+}
 
-/// Assertion utilities
+/// Create a test tuple with the given key value.
+pub fn make_tuple(schema: &Schema, key: u64, xmin: u64) -> Tuple {
+    let row = Row::new(Box::new([
+        DataType::BigUInt(UInt64(key)),
+        DataType::Blob(Blob::from(format!("value_{}", key))),
+    ]));
+    let builder = TupleBuilder::from_schema(schema);
+    builder.build(row, xmin).expect("Failed to build tuple")
+}
+
+/// Extract the key bytes from a tuple for searching.
+pub fn tuple_key_bytes(tuple: &Tuple, schema: &Schema) -> Box<[u8]> {
+    let offset = Tuple::keys_offset(schema.num_values());
+    Box::from(&tuple.effective_data()[offset..])
+}
+
+/// Extract key bytes for a given key value (without creating a full tuple).
+pub fn key_bytes_for_value(key: u64) -> Box<[u8]> {
+    let key_data = UInt64(key);
+    Box::from(key_data.as_ref())
+}
+
+/// Type alias for testing btrees.
+pub(crate) type TestBtree<Acc> = Btree<Acc>;
+
+/// Create a default snapshot for testing.
+pub fn test_snapshot() -> Snapshot {
+    Snapshot::default()
+}
+
+/// Sequential keys: [0, 1, 2, ..., count-1]
+pub fn seq(count: usize) -> Vec<u64> {
+    (0..count as u64).collect()
+}
+
+/// Shuffle keys with given seed.
+pub fn shuffle(keys: &[u64], seed: u64) -> Vec<u64> {
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    let mut result = keys.to_vec();
+    result.shuffle(&mut rng);
+    result
+}
+
+/// Reverse key order.
+pub fn reverse(keys: &[u64]) -> Vec<u64> {
+    keys.iter().rev().cloned().collect()
+}
+
+/// Interleave: odd indices first, then even.
+pub fn interleave(keys: &[u64]) -> Vec<u64> {
+    let mut result = Vec::with_capacity(keys.len());
+    for i in (1..keys.len()).step_by(2) {
+        result.push(keys[i]);
+    }
+    for i in (0..keys.len()).step_by(2) {
+        result.push(keys[i]);
+    }
+    result
+}
+
+/// Generate keys in "zigzag" pattern: 0, n-1, 1, n-2, 2, n-3, ...
+pub fn zigzag(keys: &[u64]) -> Vec<u64> {
+    let n = keys.len();
+    let mut result = Vec::with_capacity(n);
+    let mut lo = 0;
+    let mut hi = n.saturating_sub(1);
+    let mut take_low = true;
+
+    while lo <= hi && result.len() < n {
+        if take_low {
+            result.push(keys[lo]);
+            lo += 1;
+        } else {
+            result.push(keys[hi]);
+            if hi == 0 {
+                break;
+            }
+            hi -= 1;
+        }
+        take_low = !take_low;
+    }
+    result
+}
+
 /// Verify a key exists in the tree.
-pub fn assert_key_exists<K, Cmp: Comparator + Clone>(
-    tree: &mut TestBtree<Cmp>,
-    key: &K,
-) -> BtreeResult<()>
-where
-    K: for<'a> AsKeyBytes<'a>,
-{
-    let key_bytes = key.key_bytes();
-    match tree.search(key_bytes)? {
+pub fn assert_key_exists<Acc: TreeReader>(
+    tree: &mut TestBtree<Acc>,
+    key: u64,
+    schema: &Schema,
+) -> BtreeResult<()> {
+    let key_bytes = key_bytes_for_value(key);
+    match tree.search(&key_bytes, schema)? {
         SearchResult::Found(_) => {
             tree.accessor_mut()?.clear();
             Ok(())
         }
         SearchResult::NotFound(_) => {
             tree.accessor_mut()?.clear();
-            Err(BtreeError::Other("Key not found".into()))
+            Err(BtreeError::Other(format!("Key {} not found", key)))
         }
     }
 }
 
 /// Verify a key does not exist in the tree.
-pub fn assert_key_missing<K, Cmp: Comparator + Clone>(
-    tree: &mut TestBtree<Cmp>,
-    key: &K,
-) -> BtreeResult<()>
-where
-    K: for<'a> AsKeyBytes<'a>,
-{
-    let key_bytes = key.key_bytes();
-    match tree.search(key_bytes)? {
+pub fn assert_key_missing<Acc: TreeReader>(
+    tree: &mut TestBtree<Acc>,
+    key: u64,
+    schema: &Schema,
+) -> BtreeResult<()> {
+    let key_bytes = key_bytes_for_value(key);
+    match tree.search(&key_bytes, &schema)? {
         SearchResult::Found(_) => {
             tree.accessor_mut()?.clear();
-            Err(BtreeError::Other("Key should not exist".into()))
+            Err(BtreeError::Other(format!("Key {} should not exist", key)))
         }
         SearchResult::NotFound(_) => {
             tree.accessor_mut()?.clear();
@@ -499,7 +256,7 @@ where
 }
 
 /// Count all keys in the tree via forward iteration.
-pub fn count_keys<Cmp: Comparator + Clone>(tree: &mut TestBtree<Cmp>) -> BtreeResult<usize> {
+pub fn count_keys<Acc: TreeReader + Default>(tree: &mut TestBtree<Acc>) -> BtreeResult<usize> {
     let mut count = 0;
     let mut iter = tree.iter_forward()?;
     while let Some(result) = iter.next() {
@@ -510,8 +267,8 @@ pub fn count_keys<Cmp: Comparator + Clone>(tree: &mut TestBtree<Cmp>) -> BtreeRe
 }
 
 /// Verify key count matches expected.
-pub fn assert_count<Cmp: Comparator + Clone>(
-    tree: &mut TestBtree<Cmp>,
+pub fn assert_count<Acc: TreeReader + Default>(
+    tree: &mut TestBtree<Acc>,
     expected: usize,
 ) -> BtreeResult<()> {
     if expected == 0 {

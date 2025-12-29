@@ -1,113 +1,72 @@
 //! Logical operators represent the logical structure of a query plan.
 //!
-//! These operators are algebra-level representations that describe what the query does,
-//! not how it will be executed. This is defined by physical operators.
+//! These operators describe WHAT the query does, not HOW it will be executed.
 
-use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use crate::{
+    schema::Schema,
+    sql::{
+        binder::bounds::*,
+        parser::ast::{BinaryOperator, JoinType},
+    },
+    types::ObjectId,
+};
 
-use crate::database::schema::Schema;
-use crate::sql::binder::ast::*;
-use crate::sql::parser::ast::{BinaryOperator, JoinType};
-use crate::types::ObjectId;
-
-use super::memo::GroupId;
 use super::prop::LogicalProperties;
+use super::{ExprId, memo::GroupId};
 
-/// A logical expression in the memo
+/// A logical expression in the memo.
 #[derive(Debug, Clone)]
-pub(crate) struct LogicalExpr {
-    pub(crate) id: super::ExprId,
-    pub(crate) op: LogicalOperator,
-    pub(crate) children: Vec<GroupId>,
-    pub(crate) properties: LogicalProperties,
+pub struct LogicalExpr {
+    pub id: ExprId,
+    pub op: LogicalOperator,
+    pub children: Vec<GroupId>,
+    pub properties: LogicalProperties,
 }
 
 impl LogicalExpr {
-    pub(crate) fn new(op: LogicalOperator, children: Vec<GroupId>) -> Self {
-        let properties = LogicalProperties::default();
+    pub fn new(op: LogicalOperator, children: Vec<GroupId>) -> Self {
         Self {
             id: super::ExprId::default(),
             op,
             children,
-            properties,
+            properties: LogicalProperties::default(),
         }
     }
 
-    pub(crate) fn with_properties(mut self, props: LogicalProperties) -> Self {
+    pub fn with_properties(mut self, props: LogicalProperties) -> Self {
         self.properties = props;
         self
     }
 }
 
-/// Logical operators - describe the logical structure of a query
+/// Logical operators.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum LogicalOperator {
-    // Scan operators
+pub enum LogicalOperator {
     TableScan(TableScanOp),
     IndexScan(IndexScanOp),
-
-    // Selection and projection
     Filter(FilterOp),
     Project(ProjectOp),
-
-    // Join operators
     Join(JoinOp),
-
-    // Set operations
-    Union(UnionOp),
-    Intersect(IntersectOp),
-    Except(ExceptOp),
-
-    // Aggregation
     Aggregate(AggregateOp),
-
-    // Sorting and limiting
     Sort(SortOp),
     Limit(LimitOp),
-
-    // Distinct
     Distinct(DistinctOp),
-
-    // DML operations
     Insert(InsertOp),
     Update(UpdateOp),
     Delete(DeleteOp),
-
-    // Values (for INSERT ... VALUES)
     Values(ValuesOp),
-
-    Materialize(MaterializeOp),
-
-    // Empty relation (for queries with no FROM)
     Empty(EmptyOp),
-}
-
-// Implement display for logical plan
-#[derive(Debug, Clone)]
-pub(crate) struct LogicalPlan {
-    pub(crate) op: LogicalOperator,
-    pub(crate) children: Vec<LogicalPlan>,
-    pub(crate) properties: LogicalProperties,
-}
-
-impl Display for LogicalPlan {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}", self.explain())
-    }
+    Materialize(MaterializeOp),
 }
 
 impl LogicalOperator {
-    /// Get the output schema of this operator
-    pub(crate) fn output_schema(&self) -> &Schema {
+    pub fn output_schema(&self) -> &Schema {
         match self {
             Self::TableScan(op) => &op.schema,
             Self::IndexScan(op) => &op.schema,
             Self::Filter(op) => &op.input_schema,
             Self::Project(op) => &op.output_schema,
             Self::Join(op) => &op.output_schema,
-            Self::Union(op) => &op.schema,
-            Self::Intersect(op) => &op.schema,
-            Self::Except(op) => &op.schema,
             Self::Aggregate(op) => &op.output_schema,
             Self::Sort(op) => &op.schema,
             Self::Limit(op) => &op.schema,
@@ -121,18 +80,20 @@ impl LogicalOperator {
         }
     }
 
-    /// Check if this operator is a leaf (has no children)
-    pub(crate) fn is_leaf(&self) -> bool {
+    pub fn is_leaf(&self) -> bool {
         matches!(
             self,
             Self::TableScan(_) | Self::IndexScan(_) | Self::Values(_) | Self::Empty(_)
         )
     }
 
-    /// Get the arity (number of children) of this operator
-    pub(crate) fn arity(&self) -> usize {
+    pub fn arity(&self) -> usize {
         match self {
-            Self::TableScan(_) | Self::IndexScan(_) | Self::Values(_) | Self::Empty(_) => 0,
+            Self::TableScan(_)
+            | Self::IndexScan(_)
+            | Self::Values(_)
+            | Self::Empty(_)
+            | Self::Materialize(_) => 0,
             Self::Filter(_)
             | Self::Project(_)
             | Self::Sort(_)
@@ -141,51 +102,9 @@ impl LogicalOperator {
             | Self::Aggregate(_)
             | Self::Insert(_)
             | Self::Update(_)
-            | Self::Delete(_)
-            | Self::Materialize(_) => 1,
-            Self::Join(_) | Self::Union(_) | Self::Intersect(_) | Self::Except(_) => 2,
+            | Self::Delete(_) => 1,
+            Self::Join(_) => 2,
         }
-    }
-}
-
-/// Table scan operator (reads all rows from a table)
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct TableScanOp {
-    pub(crate) table_id: ObjectId,
-    pub(crate) table_name: String,
-    pub(crate) schema: Schema, // Output schema (may be projected)
-    pub(crate) table_schema: Schema,
-    /// Columns to read (if None, read all)
-    pub(crate) columns: Option<Vec<usize>>,
-    /// Inline filter predicate (pushed down)
-    pub(crate) predicate: Option<BoundExpression>,
-}
-
-impl TableScanOp {
-    pub(crate) fn new(table_id: ObjectId, table_name: String, schema: Schema) -> Self {
-        Self {
-            table_id,
-            table_name,
-            table_schema: schema.clone(),
-            schema,
-            columns: None,
-            predicate: None,
-        }
-    }
-
-    pub(crate) fn with_columns(mut self, columns: Vec<usize>) -> Self {
-        let projected_cols: Vec<_> = columns
-            .iter()
-            .map(|&idx| self.table_schema.columns()[idx].clone())
-            .collect();
-        self.schema = Schema::from_columns(&projected_cols, 0);
-        self.columns = Some(columns);
-        self
-    }
-
-    pub(crate) fn with_predicate(mut self, predicate: BoundExpression) -> Self {
-        self.predicate = Some(predicate);
-        self
     }
 }
 
@@ -200,24 +119,67 @@ impl MaterializeOp {
     }
 }
 
-/// Index scan operator - reads rows using an index
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct IndexScanOp {
-    pub(crate) table_id: ObjectId,
-    pub(crate) index_id: ObjectId,
+/// Logical plan tree (for display/debugging).
+#[derive(Debug, Clone)]
+pub struct LogicalPlan {
+    pub op: LogicalOperator,
+    pub children: Vec<LogicalPlan>,
+    pub properties: LogicalProperties,
+}
 
-    pub(crate) schema: Schema,
-    /// The indexed columns
-    pub(crate) index_columns: Vec<usize>,
-    /// Range predicates on the index
-    pub(crate) range_start: Option<BoundExpression>,
-    pub(crate) range_end: Option<BoundExpression>,
-    /// Additional filter after index lookup
-    pub(crate) residual_predicate: Option<BoundExpression>,
+/// Table scan operator.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableScanOp {
+    pub table_id: ObjectId,
+    pub table_name: String,
+    pub schema: Schema,
+    pub table_schema: Schema,
+    pub columns: Option<Vec<usize>>,
+    pub predicate: Option<BoundExpression>,
+}
+
+impl TableScanOp {
+    pub fn new(table_id: ObjectId, table_name: String, schema: Schema) -> Self {
+        Self {
+            table_id,
+            table_name,
+            table_schema: schema.clone(),
+            schema,
+            columns: None,
+            predicate: None,
+        }
+    }
+
+    pub fn with_columns(mut self, columns: Vec<usize>) -> Self {
+        let projected_cols: Vec<_> = columns
+            .iter()
+            .filter_map(|&idx| self.table_schema.column(idx).cloned())
+            .collect();
+        self.schema = Schema::new_table_with_num_keys(projected_cols, 0);
+        self.columns = Some(columns);
+        self
+    }
+
+    pub fn with_predicate(mut self, predicate: BoundExpression) -> Self {
+        self.predicate = Some(predicate);
+        self
+    }
+}
+
+/// Index scan operator.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexScanOp {
+    pub table_id: ObjectId,
+    pub index_id: ObjectId,
+    pub schema: Schema,
+    pub index_columns: Vec<usize>,
+    pub range_start: Option<BoundExpression>,
+    pub range_end: Option<BoundExpression>,
+    pub residual_predicate: Option<BoundExpression>,
 }
 
 impl IndexScanOp {
-    pub(crate) fn new(
+    pub fn new(
         table_id: ObjectId,
         index_id: ObjectId,
         schema: Schema,
@@ -234,31 +196,31 @@ impl IndexScanOp {
         }
     }
 
-    pub(crate) fn with_range_start(mut self, range_start: BoundExpression) -> Self {
-        self.range_start = Some(range_start);
+    pub fn with_range(
+        mut self,
+        start: Option<BoundExpression>,
+        end: Option<BoundExpression>,
+    ) -> Self {
+        self.range_start = start;
+        self.range_end = end;
         self
     }
 
-    pub(crate) fn with_range_end(mut self, range_end: BoundExpression) -> Self {
-        self.range_end = Some(range_end);
-        self
-    }
-
-    pub(crate) fn with_predicate(mut self, pred: BoundExpression) -> Self {
+    pub fn with_residual(mut self, pred: BoundExpression) -> Self {
         self.residual_predicate = Some(pred);
         self
     }
 }
 
-/// Filter operator - applies a predicate to filter rows
+/// Filter operator.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct FilterOp {
-    pub(crate) predicate: BoundExpression,
-    pub(crate) input_schema: Schema,
+pub struct FilterOp {
+    pub predicate: BoundExpression,
+    pub input_schema: Schema,
 }
 
 impl FilterOp {
-    pub(crate) fn new(predicate: BoundExpression, input_schema: Schema) -> Self {
+    pub fn new(predicate: BoundExpression, input_schema: Schema) -> Self {
         Self {
             predicate,
             input_schema,
@@ -266,26 +228,22 @@ impl FilterOp {
     }
 }
 
-/// Project operator - selects and computes columns
+/// Project operator.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ProjectOp {
-    pub(crate) expressions: Vec<ProjectExpr>,
-    pub(crate) input_schema: Schema,
-    pub(crate) output_schema: Schema,
+pub struct ProjectOp {
+    pub expressions: Vec<ProjectExpr>,
+    pub input_schema: Schema,
+    pub output_schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ProjectExpr {
-    pub(crate) expr: BoundExpression,
-    pub(crate) alias: Option<String>,
+pub struct ProjectExpr {
+    pub expr: BoundExpression,
+    pub alias: Option<String>,
 }
 
 impl ProjectOp {
-    pub(crate) fn new(
-        expressions: Vec<ProjectExpr>,
-        input_schema: Schema,
-        output_schema: Schema,
-    ) -> Self {
+    pub fn new(expressions: Vec<ProjectExpr>, input_schema: Schema, output_schema: Schema) -> Self {
         Self {
             expressions,
             input_schema,
@@ -294,18 +252,18 @@ impl ProjectOp {
     }
 }
 
-/// Join operator
+/// Join operator.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct JoinOp {
-    pub(crate) join_type: JoinType,
-    pub(crate) condition: Option<BoundExpression>,
-    pub(crate) left_schema: Schema,
-    pub(crate) right_schema: Schema,
-    pub(crate) output_schema: Schema,
+pub struct JoinOp {
+    pub join_type: JoinType,
+    pub condition: Option<BoundExpression>,
+    pub left_schema: Schema,
+    pub right_schema: Schema,
+    pub output_schema: Schema,
 }
 
 impl JoinOp {
-    pub(crate) fn new(
+    pub fn new(
         join_type: JoinType,
         condition: Option<BoundExpression>,
         left_schema: Schema,
@@ -322,17 +280,16 @@ impl JoinOp {
     }
 
     fn merge_schemas(left: &Schema, right: &Schema) -> Schema {
-        let mut cols = left.columns().clone();
-        cols.extend(right.columns().clone());
-        Schema::from_columns(&cols, 0)
+        let mut cols = left.clone().into_column_list();
+        cols.extend(right.clone().into_column_list());
+        Schema::new_table_with_num_keys(cols, 0)
     }
 
-    /// Check if this is an equi-join (join on equality conditions)
-    pub(crate) fn is_equi_join(&self) -> bool {
-        match &self.condition {
-            Some(expr) => Self::is_equi_condition(expr),
-            None => false,
-        }
+    /// Checks if this is an equi-join.
+    pub fn is_equi_join(&self) -> bool {
+        self.condition
+            .as_ref()
+            .map_or(false, |c| Self::is_equi_condition(c))
     }
 
     fn is_equi_condition(expr: &BoundExpression) -> bool {
@@ -353,8 +310,8 @@ impl JoinOp {
         }
     }
 
-    /// Extract equi-join keys (left column index, right column index)
-    pub(crate) fn extract_equi_keys(&self) -> Vec<(usize, usize)> {
+    /// Extracts equi-join keys as (left_col, right_col) pairs.
+    pub fn extract_equi_keys(&self) -> Vec<(usize, usize)> {
         let mut keys = Vec::new();
         if let Some(cond) = &self.condition {
             Self::collect_equi_keys(cond, &mut keys);
@@ -385,42 +342,25 @@ impl JoinOp {
     }
 }
 
+/// Aggregate operator.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct UnionOp {
-    pub(crate) all: bool, // UNION ALL vs UNION
-    pub(crate) schema: Schema,
+pub struct AggregateOp {
+    pub group_by: Vec<BoundExpression>,
+    pub aggregates: Vec<AggregateExpr>,
+    pub input_schema: Schema,
+    pub output_schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct IntersectOp {
-    pub(crate) all: bool,
-    pub(crate) schema: Schema,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ExceptOp {
-    pub(crate) all: bool,
-    pub(crate) schema: Schema,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct AggregateOp {
-    pub(crate) group_by: Vec<BoundExpression>,
-    pub(crate) aggregates: Vec<AggregateExpr>,
-    pub(crate) input_schema: Schema,
-    pub(crate) output_schema: Schema,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct AggregateExpr {
-    pub(crate) func: AggregateFunction,
-    pub(crate) arg: Option<BoundExpression>,
-    pub(crate) distinct: bool,
-    pub(crate) output_idx: usize,
+pub struct AggregateExpr {
+    pub func: AggregateFunction,
+    pub arg: Option<BoundExpression>,
+    pub distinct: bool,
+    pub output_idx: usize,
 }
 
 impl AggregateOp {
-    pub(crate) fn new(
+    pub fn new(
         group_by: Vec<BoundExpression>,
         aggregates: Vec<AggregateExpr>,
         input_schema: Schema,
@@ -435,34 +375,36 @@ impl AggregateOp {
     }
 }
 
+/// Sort operator.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SortOp {
-    pub(crate) order_by: Vec<SortExpr>,
-    pub(crate) schema: Schema,
+pub struct SortOp {
+    pub order_by: Vec<SortExpr>,
+    pub schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SortExpr {
-    pub(crate) expr: BoundExpression,
-    pub(crate) asc: bool,
-    pub(crate) nulls_first: bool,
+pub struct SortExpr {
+    pub expr: BoundExpression,
+    pub asc: bool,
+    pub nulls_first: bool,
 }
 
 impl SortOp {
-    pub(crate) fn new(order_by: Vec<SortExpr>, schema: Schema) -> Self {
+    pub fn new(order_by: Vec<SortExpr>, schema: Schema) -> Self {
         Self { order_by, schema }
     }
 }
 
+/// Limit operator.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct LimitOp {
-    pub(crate) limit: usize,
-    pub(crate) offset: Option<usize>,
-    pub(crate) schema: Schema,
+pub struct LimitOp {
+    pub limit: usize,
+    pub offset: Option<usize>,
+    pub schema: Schema,
 }
 
 impl LimitOp {
-    pub(crate) fn new(limit: usize, offset: Option<usize>, schema: Schema) -> Self {
+    pub fn new(limit: usize, offset: Option<usize>, schema: Schema) -> Self {
         Self {
             limit,
             offset,
@@ -471,26 +413,28 @@ impl LimitOp {
     }
 }
 
+/// Distinct operator.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct DistinctOp {
-    pub(crate) schema: Schema,
+pub struct DistinctOp {
+    pub schema: Schema,
 }
 
 impl DistinctOp {
-    pub(crate) fn new(schema: Schema) -> Self {
+    pub fn new(schema: Schema) -> Self {
         Self { schema }
     }
 }
 
+/// Insert operator.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct InsertOp {
-    pub(crate) table_id: ObjectId,
-    pub(crate) columns: Vec<usize>,
-    pub(crate) table_schema: Schema,
+pub struct InsertOp {
+    pub table_id: ObjectId,
+    pub columns: Vec<usize>,
+    pub table_schema: Schema,
 }
 
 impl InsertOp {
-    pub(crate) fn new(table_id: ObjectId, columns: Vec<usize>, table_schema: Schema) -> Self {
+    pub fn new(table_id: ObjectId, columns: Vec<usize>, table_schema: Schema) -> Self {
         Self {
             table_id,
             columns,
@@ -499,15 +443,16 @@ impl InsertOp {
     }
 }
 
+/// Update operator.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct UpdateOp {
-    pub(crate) table_id: ObjectId,
-    pub(crate) assignments: Vec<(usize, BoundExpression)>,
-    pub(crate) table_schema: Schema,
+pub struct UpdateOp {
+    pub table_id: ObjectId,
+    pub assignments: Vec<(usize, BoundExpression)>,
+    pub table_schema: Schema,
 }
 
 impl UpdateOp {
-    pub(crate) fn new(
+    pub fn new(
         table_id: ObjectId,
         assignments: Vec<(usize, BoundExpression)>,
         table_schema: Schema,
@@ -520,14 +465,15 @@ impl UpdateOp {
     }
 }
 
+/// Delete operator.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct DeleteOp {
-    pub(crate) table_id: ObjectId,
-    pub(crate) table_schema: Schema,
+pub struct DeleteOp {
+    pub table_id: ObjectId,
+    pub table_schema: Schema,
 }
 
 impl DeleteOp {
-    pub(crate) fn new(table_id: ObjectId, table_schema: Schema) -> Self {
+    pub fn new(table_id: ObjectId, table_schema: Schema) -> Self {
         Self {
             table_id,
             table_schema,
@@ -535,25 +481,27 @@ impl DeleteOp {
     }
 }
 
+/// Values operator (literal rows).
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ValuesOp {
-    pub(crate) rows: Vec<Vec<BoundExpression>>,
-    pub(crate) schema: Schema,
+pub struct ValuesOp {
+    pub rows: Vec<Vec<BoundExpression>>,
+    pub schema: Schema,
 }
 
 impl ValuesOp {
-    pub(crate) fn new(rows: Vec<Vec<BoundExpression>>, schema: Schema) -> Self {
+    pub fn new(rows: Vec<Vec<BoundExpression>>, schema: Schema) -> Self {
         Self { rows, schema }
     }
 }
 
+/// Empty operator (no rows).
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct EmptyOp {
-    pub(crate) schema: Schema,
+pub struct EmptyOp {
+    pub schema: Schema,
 }
 
 impl EmptyOp {
-    pub(crate) fn new(schema: Schema) -> Self {
+    pub fn new(schema: Schema) -> Self {
         Self { schema }
     }
 }

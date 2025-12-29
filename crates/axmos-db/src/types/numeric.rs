@@ -51,22 +51,30 @@ numeric! {
     marker    FloatType,
 }
 
-// Generate promotion tables.
-// Signed and unsigned always promote to signed.
+promote_symmetric!(Int64, Int32 => i64);
+
+// Unsigned int combinations
+promote_symmetric!(UInt64, UInt32 => u64);
+
+// Signed + Unsigned promote to i64 (to handle potential negative results)
 promote_symmetric!(Int32, UInt32 => i64);
-promote_symmetric!(Int64, UInt32 => i64);
 promote_symmetric!(Int32, UInt64 => i64);
+promote_symmetric!(Int64, UInt32 => i64);
 promote_symmetric!(Int64, UInt64 => i64);
 
-// Signed and float always promote to float.
+// Signed int + Float promote to f64
 promote_symmetric!(Int32, Float32 => f64);
-promote_symmetric!(Int64, Float32 => f64);
 promote_symmetric!(Int32, Float64 => f64);
+promote_symmetric!(Int64, Float32 => f64);
 promote_symmetric!(Int64, Float64 => f64);
 
-// Float promotes to float.
-promote_symmetric!(UInt64, UInt32 => u64);
-promote_symmetric!(Int64, Int32 => i64);
+// Unsigned int + Float promote to f64
+promote_symmetric!(UInt32, Float32 => f64);
+promote_symmetric!(UInt32, Float64 => f64);
+promote_symmetric!(UInt64, Float32 => f64);
+promote_symmetric!(UInt64, Float64 => f64);
+
+// Float combinations
 promote_symmetric!(Float64, Float32 => f64);
 
 #[inline]

@@ -62,6 +62,17 @@ pub trait NumericType: FixedSizeType {
 
     /// Convert back from the primitive type to the target type.
     fn from_primitive(value: Self::Primitive) -> Self;
+
+    /// Numeric function operators.
+    fn abs(&self) -> Self;
+
+    fn sqrt(&self) -> Self;
+
+    fn floor(&self) -> Self;
+
+    fn round(&self) -> Self;
+
+    fn ceil(&self) -> Self;
 }
 
 /// Numeric types specializations.
@@ -267,9 +278,15 @@ pub trait DeserializableType: RefTrait {
 /// Trait for making types deserializable.
 ///
 /// If the type implements AsRef this is automatically derived. If not (like for booleans), it has to be manually implemented.
-pub trait SerializableType: TypeClass {
+pub trait SerializableType: TypeClass + RuntimeSized {
     /// Serializes the data type to a byte slice.
     fn write_to(&self, writer: &mut [u8], cursor: usize) -> SerializationResult<usize>;
+
+    fn serialize(&self) -> SerializationResult<Box<[u8]>> {
+        let mut buffer = vec![0u8; self.runtime_size()];
+        self.write_to(&mut buffer, 0)?;
+        Ok(buffer.into_boxed_slice())
+    }
 }
 
 impl<T: TypeClass + BytemuckDeserializable + AsRef<[u8]>> SerializableType for T {
@@ -300,6 +317,7 @@ impl<T: BytemuckDeserializable> DeserializableType for T {
 
     fn deserialize(buffer: &[u8], cursor: usize) -> SerializationResult<(Self::Ref<'_>, usize)> {
         let cursor = Self::aligned_offset(cursor);
+        println!("Leyendo cursor: {cursor}");
         let (data_ref, bytes_read) = Self::reinterpret_cast(&buffer[cursor..])?;
         Ok((data_ref, cursor + bytes_read))
     }
@@ -359,5 +377,147 @@ impl<T: AsRef<[u8]>> Hashable for T {
 impl<T: FixedSizeType> RuntimeSized for T {
     fn runtime_size(&self) -> usize {
         T::SIZE.unwrap_or(0)
+    }
+}
+
+pub trait NumericAbs {
+    fn numeric_abs(self) -> Self;
+}
+
+pub trait NumericRoundOps {
+    fn numeric_sqrt(self) -> Self;
+    fn numeric_floor(self) -> Self;
+    fn numeric_round(self) -> Self;
+    fn numeric_ceil(self) -> Self;
+}
+
+// Implementations for signed integers
+impl NumericAbs for i32 {
+    fn numeric_abs(self) -> Self {
+        self.abs()
+    }
+}
+
+impl NumericAbs for i64 {
+    fn numeric_abs(self) -> Self {
+        self.abs()
+    }
+}
+
+// Unsigned integers are already positive
+impl NumericAbs for u32 {
+    fn numeric_abs(self) -> Self {
+        self
+    }
+}
+
+impl NumericAbs for u64 {
+    fn numeric_abs(self) -> Self {
+        self
+    }
+}
+
+// Floats
+impl NumericAbs for f32 {
+    fn numeric_abs(self) -> Self {
+        self.abs()
+    }
+}
+
+impl NumericAbs for f64 {
+    fn numeric_abs(self) -> Self {
+        self.abs()
+    }
+}
+
+// NumericOps for integers (sqrt converts through f64, floor/round/ceil are no-ops)
+impl NumericRoundOps for i32 {
+    fn numeric_sqrt(self) -> Self {
+        (self as f64).sqrt() as Self
+    }
+    fn numeric_floor(self) -> Self {
+        self
+    }
+    fn numeric_round(self) -> Self {
+        self
+    }
+    fn numeric_ceil(self) -> Self {
+        self
+    }
+}
+
+impl NumericRoundOps for i64 {
+    fn numeric_sqrt(self) -> Self {
+        (self as f64).sqrt() as Self
+    }
+    fn numeric_floor(self) -> Self {
+        self
+    }
+    fn numeric_round(self) -> Self {
+        self
+    }
+    fn numeric_ceil(self) -> Self {
+        self
+    }
+}
+
+impl NumericRoundOps for u32 {
+    fn numeric_sqrt(self) -> Self {
+        (self as f64).sqrt() as Self
+    }
+    fn numeric_floor(self) -> Self {
+        self
+    }
+    fn numeric_round(self) -> Self {
+        self
+    }
+    fn numeric_ceil(self) -> Self {
+        self
+    }
+}
+
+impl NumericRoundOps for u64 {
+    fn numeric_sqrt(self) -> Self {
+        (self as f64).sqrt() as Self
+    }
+    fn numeric_floor(self) -> Self {
+        self
+    }
+    fn numeric_round(self) -> Self {
+        self
+    }
+    fn numeric_ceil(self) -> Self {
+        self
+    }
+}
+
+// NumericOps for floats
+impl NumericRoundOps for f32 {
+    fn numeric_sqrt(self) -> Self {
+        self.sqrt()
+    }
+    fn numeric_floor(self) -> Self {
+        self.floor()
+    }
+    fn numeric_round(self) -> Self {
+        self.round()
+    }
+    fn numeric_ceil(self) -> Self {
+        self.ceil()
+    }
+}
+
+impl NumericRoundOps for f64 {
+    fn numeric_sqrt(self) -> Self {
+        self.sqrt()
+    }
+    fn numeric_floor(self) -> Self {
+        self.floor()
+    }
+    fn numeric_round(self) -> Self {
+        self.round()
+    }
+    fn numeric_ceil(self) -> Self {
+        self.ceil()
     }
 }

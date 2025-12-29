@@ -245,7 +245,7 @@ param2_type_tests!(test_memblock_cast, from, to => [
 
 // Tests de Cell
 fn test_cell_align(size: usize) {
-    let c = OwnedCell::new_with_key_bounds(&vec![0xAB; size], 0, 0);
+    let c = OwnedCell::new(&vec![0xAB; size]);
     assert_eq!(c.total_size() % CELL_ALIGNMENT as usize, 0);
     assert_eq!(c.effective_data().len(), size);
 }
@@ -256,7 +256,7 @@ param_tests!(test_cell_align, size => [
 
 fn test_cell_rt(size: usize) {
     let p: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
-    let c = OwnedCell::new_with_key_bounds(&p, 0, 0);
+    let c = OwnedCell::new(&p);
     let mut buf = vec![0u8; c.total_size()];
     c.write_to(&mut buf);
     assert_eq!(c.effective_data(), &p[..]);
@@ -270,20 +270,20 @@ param_tests!(test_cell_rt, size => [
 test_suite!(cell_misc {
     create => {
         use super::test_helpers::*;
-        let c = OwnedCell::new_with_key_bounds(&[1, 2, 3, 4, 5], 0, 0);
+        let c = OwnedCell::new(&[1, 2, 3, 4, 5]);
         assert_eq!(c.effective_data(), &[1, 2, 3, 4, 5]);
         assert!(!c.is_overflow());
     },
     overflow => {
         use super::test_helpers::*;
 
-        let c = OwnedCell::new_overflow_with_key_bounds(&[0xCC; 100], 2, 0, 0);
+        let c = OwnedCell::new(&[0xCC; 100]);
         assert!(c.is_overflow());
         assert_eq!(c.overflow_page(), Some(2));
     },
     write_to => {
         use super::test_helpers::*;
-        let c = OwnedCell::new_with_key_bounds(&[1, 2, 3, 4], 0, 0);
+        let c = OwnedCell::new(&[1, 2, 3, 4]);
         println!("Cell:");
         dbg!(&c);
         let mut buf = vec![0u8; c.total_size()];
@@ -300,8 +300,7 @@ fn test_page_alloc(size: usize) {
 fn test_page_multi(size: usize) {
     let mut p = BtreePage::alloc(1, size);
     for i in 0..10u8 {
-        p.push(OwnedCell::new_with_key_bounds(&[i; 50], 0, 0))
-            .unwrap();
+        p.push(OwnedCell::new(&[i; 50])).unwrap();
     }
     for i in 0..10u8 {
         assert_eq!(p.cell(i as usize).effective_data()[0], i);
@@ -311,19 +310,16 @@ fn test_page_multi(size: usize) {
 fn test_page_insert_at(size: usize) {
     let mut p = BtreePage::alloc(1, size);
     for i in 0..3u8 {
-        p.push(OwnedCell::new_with_key_bounds(&[i; 32], 0, 0))
-            .unwrap();
+        p.push(OwnedCell::new(&[i; 32])).unwrap();
     }
-    p.insert(1, OwnedCell::new_with_key_bounds(&[0xFF; 32], 0, 0))
-        .unwrap();
+    p.insert(1, OwnedCell::new(&[0xFF; 32])).unwrap();
     assert_eq!(p.cell(1).effective_data()[0], 0xFF);
 }
 
 fn test_page_remove(size: usize) {
     let mut p = BtreePage::alloc(1, size);
     for i in 0..5u8 {
-        p.push(OwnedCell::new_with_key_bounds(&[i; 32], 0, 0))
-            .unwrap();
+        p.push(OwnedCell::new(&[i; 32])).unwrap();
     }
     assert_eq!(p.remove(2).unwrap().effective_data()[0], 2);
     assert_eq!(p.cell(2).effective_data()[0], 3);
@@ -340,7 +336,7 @@ test_suite!(pg_stress {
         let mut p = BtreePage::alloc(1, 8192);
         for i in 0u32..50 {
             if p.has_space_for(64 + CELL_HEADER_SIZE + 2) {
-                p.push(OwnedCell::new_with_key_bounds(&[(i % 256) as u8; 64], 0, 0)).unwrap();
+                p.push(OwnedCell::new(&[(i % 256) as u8; 64])).unwrap();
             }
         }
         let n = p.num_slots();
@@ -351,7 +347,7 @@ test_suite!(pg_stress {
         }
         for i in 0..rm {
             if p.has_space_for(64 + CELL_HEADER_SIZE + 2) {
-                p.push(OwnedCell::new_with_key_bounds(&[((0xF0u32 + i) % 256) as u8; 64], 0, 0)).unwrap();
+                p.push(OwnedCell::new(&[((0xF0u32 + i) % 256) as u8; 64])).unwrap();
             }
         }
     },
@@ -359,14 +355,14 @@ test_suite!(pg_stress {
         use super::test_helpers::*;
         let mut p = BtreePage::alloc(1, 4096);
         while p.has_space_for(32 + CELL_HEADER_SIZE + 2) {
-            p.push(OwnedCell::new_with_key_bounds(&[0xAA; 32], 0, 0)).unwrap();
+            p.push(OwnedCell::new(&[0xAA; 32])).unwrap();
         }
         let n = p.num_slots();
         while p.num_slots() > 0 {
             p.remove(0).unwrap();
         }
         while p.has_space_for(32 + CELL_HEADER_SIZE + 2) {
-            p.push(OwnedCell::new_with_key_bounds(&[0xBB; 32], 0, 0)).unwrap();
+            p.push(OwnedCell::new(&[0xBB; 32])).unwrap();
         }
         assert!(p.num_slots() >= n - 1);
     },
@@ -380,7 +376,7 @@ test_suite!(overflow_pg {
     to_overflow => {
         use super::test_helpers::*;
         let mut p = BtreePage::alloc(1, 4096);
-        p.push(OwnedCell::new_with_key_bounds(&[1, 2, 3], 0, 0)).unwrap();
+        p.push(OwnedCell::new(&[1, 2, 3])).unwrap();
         let id = p.id();
         let o: OverflowPage = p.into();
         assert_eq!(o.page_number(), id);
@@ -405,7 +401,7 @@ fn test_wal_push_read() {
     let mut b = alloc;
     let (undo, redo) = ([0xAA; 64], [0xBB; 64]);
 
-    let record = record!(update 1, 1, 1,&undo, &redo);
+    let record = record!(update 1, 1, 1,1, &undo, &redo);
     let lsn = record.lsn();
     b.try_push(lsn, record).unwrap();
     let r = b.record(0);
@@ -422,7 +418,7 @@ test_suite!(wal_misc {
         for i in 0u32..20 {
             let r = record!(
                 update i,
-                i, i,
+                i, i,i,
                 &[(i % 256) as u8; 64],
                 &[((i + 1) % 256) as u8; 64]
             );
@@ -444,7 +440,7 @@ test_suite!(wal_misc {
         let first = record!(begin 1, 1);
         let lsn = first.lsn();
         let second = record!(
-            update 1, 1, 1, prev: Some(lsn),
+            update 1, 1, 1,1, prev: Some(lsn),
             &[1],
             &[2]
         );
@@ -456,7 +452,7 @@ test_suite!(wal_rec {
     create => {
         use super::test_helpers::*;
         let r = record!(
-            update 1, 1, 1,
+            update 1, 1, 1,1,
             &[1, 2, 3],
             &[4, 5, 6]
         );
@@ -468,7 +464,7 @@ test_suite!(wal_rec {
         for u in [0, 1, 7, 8, 15, 31, 63] {
             for r in [0, 1, 7, 8, 15, 31, 63] {
                 let rec = record!(
-                    update 1, 1, 1,
+                    update 1, 1, 1,1,
                     &vec![0; u],
                     &vec![0; r]
                 );
@@ -479,7 +475,7 @@ test_suite!(wal_rec {
     write_to => {
         use super::test_helpers::*;
         let r = record!(
-            update 1, 1, 1,
+            update 1, 1, 1,1,
             &[0; 50],
             &[0; 50]
         );
@@ -489,7 +485,7 @@ test_suite!(wal_rec {
     as_ref => {
         use super::test_helpers::*;
         let r = record!(
-            update 1, 1, 1,
+            update 1, 1, 1,1,
             &[1, 2],
             &[3, 4]
         );

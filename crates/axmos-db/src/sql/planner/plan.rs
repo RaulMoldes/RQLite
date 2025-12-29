@@ -1,127 +1,115 @@
 //! Plan builder - converts bound statements to logical plans in the memo.
 //!
-//! This module translates the output of the binder (BoundStatement) into
+//! This module translates the output of the binder (`BoundStatement`) into
 //! logical operators that can be optimized by the Cascades optimizer.
 
-use crate::database::SharedCatalog;
-use crate::database::schema::Schema;
-use crate::sql::binder::ast::*;
-use crate::sql::parser::ast::JoinType;
-use crate::transactions::accessor::RcPageAccessor;
-use crate::types::ObjectId;
+use crate::{
+    io::pager::BtreeBuilder,
+    multithreading::coordinator::Snapshot,
+    schema::{
+        Schema,
+        catalog::{CatalogTrait, StatisticsProvider},
+    },
+    sql::{
+        binder::bounds::*,
+        parser::ast::JoinType,
+        planner::{PlannerError, PlannerResult},
+    },
+    types::ObjectId,
+};
 
 use super::logical::*;
 use super::memo::{GroupId, Memo};
-use super::prop::LogicalProperties;
-use super::prop::PropertyDeriver;
-use super::stats::StatisticsProvider;
-use super::{OptimizerError, OptimizerResult};
+use super::prop::{LogicalProperties, PropertyDeriver};
 
-/// Builds logical plans from bound statements
-pub struct PlanBuilder<'a, P: StatisticsProvider> {
+/// Builds logical plans from bound statements.
+pub struct Planner<'a, C: CatalogTrait + Clone> {
     memo: &'a mut Memo,
-    catalog: SharedCatalog,
-    accessor: RcPageAccessor,
-
-    deriver: PropertyDeriver<'a, P>,
-    /// CTE storage for WITH queries - maps CTE index to its built group
+    deriver: &'a PropertyDeriver<StatisticsProvider<C>>,
+    /// CTE storage for WITH queries.
     cte_groups: Vec<Option<GroupId>>,
 }
 
-impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
-    pub fn new(
-        memo: &'a mut Memo,
-        catalog: SharedCatalog,
-        accessor: RcPageAccessor,
-        stats_provider: &'a P,
-    ) -> Self {
+impl<'a, C: CatalogTrait + Clone> Planner<'a, C> {
+    pub fn new(memo: &'a mut Memo, deriver: &'a PropertyDeriver<StatisticsProvider<C>>) -> Self {
         Self {
             memo,
-            catalog,
-            accessor,
-            deriver: PropertyDeriver::new(stats_provider),
+            deriver,
             cte_groups: Vec::new(),
         }
     }
 
-    pub fn build(mut self, stmt: &BoundStatement) -> OptimizerResult<GroupId> {
+    /// Main entry point: builds a logical plan from a bound statement.
+    pub fn build(&mut self, stmt: &BoundStatement) -> PlannerResult<GroupId> {
         match stmt {
-            BoundStatement::Select(select) => self.build_select(select),
-            BoundStatement::Insert(insert) => self.build_insert(insert),
-            BoundStatement::Update(update) => self.build_update(update),
-            BoundStatement::Delete(delete) => self.build_delete(delete),
-            BoundStatement::With(with) => self.build_with(with),
+            BoundStatement::Select(s) => self.build_select(s),
+            BoundStatement::Insert(i) => self.build_insert(i),
+            BoundStatement::Update(u) => self.build_update(u),
+            BoundStatement::Delete(d) => self.build_delete(d),
+            BoundStatement::With(w) => self.build_with(w),
             BoundStatement::CreateTable(_)
             | BoundStatement::CreateIndex(_)
             | BoundStatement::AlterTable(_)
             | BoundStatement::DropTable(_)
-            | BoundStatement::Transaction(_) => Err(OptimizerError::Unsupported(
-                "DDL and transaction statements are executed directly".to_string(),
-            )),
+            | BoundStatement::Transaction(_) => Err(PlannerError::UnsupportedStatement),
         }
     }
 
-    fn build_select(&mut self, select: &BoundSelect) -> OptimizerResult<GroupId> {
+    fn build_select(&mut self, select: &BoundSelect) -> PlannerResult<GroupId> {
+        // FROM clause
         let from_group = match &select.from {
             Some(table_ref) => self.build_table_ref(table_ref)?,
             None => self.build_empty(&select.schema)?,
         };
 
-        let filtered_group = match &select.where_clause {
-            Some(predicate) => self.build_filter(from_group, predicate.clone())?,
+        // WHERE clause
+        let filtered = match &select.where_clause {
+            Some(pred) => self.build_filter(from_group, pred.clone())?,
             None => from_group,
         };
 
-        let aggregated_group =
-            if !select.group_by.is_empty() || self.has_aggregates(&select.columns) {
-                self.build_aggregate(
-                    filtered_group,
-                    &select.group_by,
-                    &select.columns,
-                    &select.schema,
-                )?
-            } else {
-                filtered_group
-            };
-
-        let having_group = match &select.having {
-            Some(predicate) => self.build_filter(aggregated_group, predicate.clone())?,
-            None => aggregated_group,
-        };
-
-        // In case there are aggregates, the projection is handled by the aggregate node itself.
-        let projected_group = if !self.has_aggregates(&select.columns) {
-            self.build_project(having_group, &select.columns, &select.schema)?
+        // GROUP BY / aggregates
+        let aggregated = if !select.group_by.is_empty() || self.has_aggregates(&select.columns) {
+            self.build_aggregate(filtered, &select.group_by, &select.columns, &select.schema)?
         } else {
-            aggregated_group
+            filtered
         };
 
-        let distinct_group = if select.distinct {
-            self.build_distinct(projected_group, &select.schema)?
+        // HAVING clause
+        let having_applied = match &select.having {
+            Some(pred) => self.build_filter(aggregated, pred.clone())?,
+            None => aggregated,
+        };
+
+        // SELECT projection (skip if already handled by aggregate)
+        let projected = if !self.has_aggregates(&select.columns) {
+            self.build_project(having_applied, &select.columns, &select.schema)?
         } else {
-            projected_group
+            having_applied
         };
 
-        let sorted_group = if !select.order_by.is_empty() {
-            self.build_sort(distinct_group, &select.order_by, &select.schema)?
+        // DISTINCT
+        let distinct_applied = if select.distinct {
+            self.build_distinct(projected, &select.schema)?
         } else {
-            distinct_group
+            projected
         };
 
-        let limited_group = match select.limit {
-            Some(limit) => self.build_limit(sorted_group, limit, select.offset, &select.schema)?,
-            None => match select.offset {
-                Some(offset) if offset > 0 => {
-                    self.build_limit(sorted_group, usize::MAX, Some(offset), &select.schema)?
-                }
-                _ => sorted_group,
-            },
+        // ORDER BY
+        let sorted = if !select.order_by.is_empty() {
+            self.build_sort(distinct_applied, &select.order_by, &select.schema)?
+        } else {
+            distinct_applied
         };
 
-        Ok(limited_group)
+        // LIMIT / OFFSET
+        let limited =
+            self.apply_limit_offset(sorted, select.limit, select.offset, &select.schema)?;
+
+        Ok(limited)
     }
 
-    fn build_table_ref(&mut self, table_ref: &BoundTableRef) -> OptimizerResult<GroupId> {
+    fn build_table_ref(&mut self, table_ref: &BoundTableRef) -> PlannerResult<GroupId> {
         match table_ref {
             BoundTableRef::BaseTable { table_id, schema } => {
                 let table_name = self.get_table_name(*table_id)?;
@@ -146,16 +134,11 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
                     right.schema().clone(),
                 )
             }
-            BoundTableRef::Cte { cte_idx, .. } => {
-                if let Some(Some(group_id)) = self.cte_groups.get(*cte_idx) {
-                    Ok(*group_id)
-                } else {
-                    Err(OptimizerError::Other(format!(
-                        "CTE index {} not found",
-                        cte_idx
-                    )))
-                }
-            }
+            BoundTableRef::Cte { cte_idx, .. } => self
+                .cte_groups
+                .get(*cte_idx)
+                .and_then(|g| *g)
+                .ok_or(PlannerError::UnboundedItem(*cte_idx)),
         }
     }
 
@@ -164,25 +147,19 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
         table_id: ObjectId,
         table_name: String,
         schema: Schema,
-    ) -> OptimizerResult<GroupId> {
+    ) -> PlannerResult<GroupId> {
         let op = LogicalOperator::TableScan(TableScanOp::new(table_id, table_name, schema));
-        let props = self.deriver.derive(&op, &[]);
-        let expr = LogicalExpr::new(op, vec![]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
+        self.insert_with_properties(op, vec![])
     }
 
     fn build_filter(
         &mut self,
         input: GroupId,
         predicate: BoundExpression,
-    ) -> OptimizerResult<GroupId> {
+    ) -> PlannerResult<GroupId> {
         let input_props = self.get_group_properties(input)?;
-        let input_schema = input_props.schema.clone();
-
-        let op = LogicalOperator::Filter(FilterOp::new(predicate, input_schema));
-        let props = self.deriver.derive(&op, &[&input_props]);
-        let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
+        let op = LogicalOperator::Filter(FilterOp::new(predicate, input_props.schema.clone()));
+        self.insert_with_properties(op, vec![input])
     }
 
     fn build_project(
@@ -190,9 +167,8 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
         input: GroupId,
         columns: &[BoundSelectItem],
         output_schema: &Schema,
-    ) -> OptimizerResult<GroupId> {
+    ) -> PlannerResult<GroupId> {
         let input_props = self.get_group_properties(input)?;
-        let input_schema = input_props.schema.clone();
 
         let expressions: Vec<ProjectExpr> = columns
             .iter()
@@ -204,12 +180,10 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
 
         let op = LogicalOperator::Project(ProjectOp::new(
             expressions,
-            input_schema,
+            input_props.schema.clone(),
             output_schema.clone(),
         ));
-        let props = self.deriver.derive(&op, &[&input_props]);
-        let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
+        self.insert_with_properties(op, vec![input])
     }
 
     fn build_join(
@@ -220,15 +194,10 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
         condition: Option<BoundExpression>,
         left_schema: Schema,
         right_schema: Schema,
-    ) -> OptimizerResult<GroupId> {
-        let left_props = self.get_group_properties(left)?;
-        let right_props = self.get_group_properties(right)?;
-
+    ) -> PlannerResult<GroupId> {
         let op =
             LogicalOperator::Join(JoinOp::new(join_type, condition, left_schema, right_schema));
-        let props = self.deriver.derive(&op, &[&left_props, &right_props]);
-        let expr = LogicalExpr::new(op, vec![left, right]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
+        self.insert_with_properties(op, vec![left, right])
     }
 
     fn build_aggregate(
@@ -237,9 +206,8 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
         group_by: &[BoundExpression],
         columns: &[BoundSelectItem],
         output_schema: &Schema,
-    ) -> OptimizerResult<GroupId> {
+    ) -> PlannerResult<GroupId> {
         let input_props = self.get_group_properties(input)?;
-        let input_schema = input_props.schema.clone();
 
         let mut aggregates = Vec::new();
         for (idx, item) in columns.iter().enumerate() {
@@ -249,12 +217,10 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
         let op = LogicalOperator::Aggregate(AggregateOp::new(
             group_by.to_vec(),
             aggregates,
-            input_schema,
+            input_props.schema.clone(),
             output_schema.clone(),
         ));
-        let props = self.deriver.derive(&op, &[&input_props]);
-        let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
+        self.insert_with_properties(op, vec![input])
     }
 
     fn build_sort(
@@ -262,9 +228,7 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
         input: GroupId,
         order_by: &[BoundOrderBy],
         schema: &Schema,
-    ) -> OptimizerResult<GroupId> {
-        let input_props = self.get_group_properties(input)?;
-
+    ) -> PlannerResult<GroupId> {
         let sort_exprs: Vec<SortExpr> = order_by
             .iter()
             .map(|o| SortExpr {
@@ -275,9 +239,7 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
             .collect();
 
         let op = LogicalOperator::Sort(SortOp::new(sort_exprs, schema.clone()));
-        let props = self.deriver.derive(&op, &[&input_props]);
-        let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
+        self.insert_with_properties(op, vec![input])
     }
 
     fn build_limit(
@@ -286,75 +248,63 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
         limit: usize,
         offset: Option<usize>,
         schema: &Schema,
-    ) -> OptimizerResult<GroupId> {
-        let input_props = self.get_group_properties(input)?;
-
+    ) -> PlannerResult<GroupId> {
         let op = LogicalOperator::Limit(LimitOp::new(limit, offset, schema.clone()));
-        let props = self.deriver.derive(&op, &[&input_props]);
-        let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
+        self.insert_with_properties(op, vec![input])
     }
 
-    fn build_distinct(&mut self, input: GroupId, schema: &Schema) -> OptimizerResult<GroupId> {
-        let input_props = self.get_group_properties(input)?;
-
+    fn build_distinct(&mut self, input: GroupId, schema: &Schema) -> PlannerResult<GroupId> {
         let op = LogicalOperator::Distinct(DistinctOp::new(schema.clone()));
-        let props = self.deriver.derive(&op, &[&input_props]);
-        let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
+        self.insert_with_properties(op, vec![input])
     }
 
-    fn build_empty(&mut self, schema: &Schema) -> OptimizerResult<GroupId> {
+    fn build_empty(&mut self, schema: &Schema) -> PlannerResult<GroupId> {
         let op = LogicalOperator::Empty(EmptyOp::new(schema.clone()));
-        let props = self.deriver.derive(&op, &[]);
-        let expr = LogicalExpr::new(op, vec![]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
+        self.insert_with_properties(op, vec![])
     }
 
-    fn build_insert(&mut self, insert: &BoundInsert) -> OptimizerResult<GroupId> {
-        let source_group = match &insert.source {
-            BoundInsertSource::Values(rows) => self.build_values(rows, &insert.table_schema)?,
-            BoundInsertSource::Query(query) => self.build_select(query)?,
-        };
-
-        let source_props = self.get_group_properties(source_group)?;
-
-        let op = LogicalOperator::Insert(InsertOp::new(
-            insert.table_id,
-            insert.columns.clone(),
-            insert.table_schema.clone(),
-        ));
-        let props = self.deriver.derive(&op, &[&source_props]);
-        let expr = LogicalExpr::new(op, vec![source_group]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
+    fn build_materialize(&mut self, input: GroupId) -> PlannerResult<GroupId> {
+        let input_props = self.get_group_properties(input)?;
+        let op = LogicalOperator::Materialize(MaterializeOp::new(input_props.schema.clone()));
+        self.insert_with_properties(op, vec![input])
     }
 
     fn build_values(
         &mut self,
         rows: &[Vec<BoundExpression>],
         schema: &Schema,
-    ) -> OptimizerResult<GroupId> {
+    ) -> PlannerResult<GroupId> {
         let op = LogicalOperator::Values(ValuesOp::new(rows.to_vec(), schema.clone()));
-        let props = self.deriver.derive(&op, &[]);
-        let expr = LogicalExpr::new(op, vec![]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
+        self.insert_with_properties(op, vec![])
     }
 
-    fn build_update(&mut self, update: &BoundUpdate) -> OptimizerResult<GroupId> {
+    fn build_insert(&mut self, insert: &BoundInsert) -> PlannerResult<GroupId> {
+        let source_group = match &insert.source {
+            BoundInsertSource::Values(rows) => self.build_values(rows, &insert.table_schema)?,
+            BoundInsertSource::Query(query) => self.build_select(query)?,
+        };
+
+        let op = LogicalOperator::Insert(InsertOp::new(
+            insert.table_id,
+            insert.columns.clone(),
+            insert.table_schema.clone(),
+        ));
+        self.insert_with_properties(op, vec![source_group])
+    }
+
+    fn build_update(&mut self, update: &BoundUpdate) -> PlannerResult<GroupId> {
         let table_name = self.get_table_name(update.table_id)?;
 
         let scan_group =
             self.build_table_scan(update.table_id, table_name, update.table_schema.clone())?;
 
-        let filtered_group = match &update.filter {
-            Some(predicate) => self.build_filter(scan_group, predicate.clone())?,
+        let filtered = match &update.filter {
+            Some(pred) => self.build_filter(scan_group, pred.clone())?,
             None => scan_group,
         };
 
-        // INSERT MATERIALIZE HERE to solve the Halloween Problem
-        let materialized_group = self.build_materialize(filtered_group)?;
-
-        let materialized_props = self.get_group_properties(materialized_group)?;
+        // Materialize to prevent Halloween problem
+        let materialized = self.build_materialize(filtered)?;
 
         let assignments: Vec<(usize, BoundExpression)> = update
             .assignments
@@ -367,45 +317,29 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
             assignments,
             update.table_schema.clone(),
         ));
-        let props = self.deriver.derive(&op, &[&materialized_props]);
-        let expr = LogicalExpr::new(op, vec![materialized_group]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
+        self.insert_with_properties(op, vec![materialized])
     }
 
-    fn build_materialize(&mut self, input: GroupId) -> OptimizerResult<GroupId> {
-        let input_props = self.get_group_properties(input)?;
-        let schema = input_props.schema.clone();
-
-        let op = LogicalOperator::Materialize(MaterializeOp::new(schema));
-        let props = self.deriver.derive(&op, &[&input_props]);
-        let expr = LogicalExpr::new(op, vec![input]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
-    }
-
-    fn build_delete(&mut self, delete: &BoundDelete) -> OptimizerResult<GroupId> {
+    fn build_delete(&mut self, delete: &BoundDelete) -> PlannerResult<GroupId> {
         let table_name = self.get_table_name(delete.table_id)?;
 
         let scan_group =
             self.build_table_scan(delete.table_id, table_name, delete.table_schema.clone())?;
 
-        let filtered_group = match &delete.filter {
-            Some(predicate) => self.build_filter(scan_group, predicate.clone())?,
+        let filtered = match &delete.filter {
+            Some(pred) => self.build_filter(scan_group, pred.clone())?,
             None => scan_group,
         };
 
-        // INSERT MATERIALIZE HERE to solve the Halloween Problem
-        let materialized_group = self.build_materialize(filtered_group)?;
-
-        let materialized_props = self.get_group_properties(materialized_group)?;
+        // Materialize to prevent Halloween problem
+        let materialized = self.build_materialize(filtered)?;
 
         let op =
             LogicalOperator::Delete(DeleteOp::new(delete.table_id, delete.table_schema.clone()));
-        let props = self.deriver.derive(&op, &[&materialized_props]);
-        let expr = LogicalExpr::new(op, vec![materialized_group]).with_properties(props);
-        Ok(self.memo.insert_logical_expr(expr))
+        self.insert_with_properties(op, vec![materialized])
     }
 
-    fn build_with(&mut self, with: &BoundWith) -> OptimizerResult<GroupId> {
+    fn build_with(&mut self, with: &BoundWith) -> PlannerResult<GroupId> {
         self.cte_groups = vec![None; with.ctes.len()];
 
         for (idx, cte_query) in with.ctes.iter().enumerate() {
@@ -416,25 +350,50 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
         self.build_select(&with.body)
     }
 
-    fn get_group_properties(&self, group_id: GroupId) -> OptimizerResult<LogicalProperties> {
-        let group = self
-            .memo
-            .get_group(group_id)
-            .ok_or_else(|| OptimizerError::InvalidState("Group not found".to_string()))?;
-        Ok(group.logical_props.clone())
+    /// Applies LIMIT and OFFSET if present.
+    fn apply_limit_offset(
+        &mut self,
+        input: GroupId,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        schema: &Schema,
+    ) -> PlannerResult<GroupId> {
+        match (limit, offset) {
+            (Some(l), _) => self.build_limit(input, l, offset, schema),
+            (None, Some(o)) if o > 0 => self.build_limit(input, usize::MAX, Some(o), schema),
+            _ => Ok(input),
+        }
     }
 
-    fn get_table_name(&self, table_id: ObjectId) -> OptimizerResult<String> {
-        match self
-            .catalog
-            .get_relation_unchecked(table_id, self.accessor.clone())
-        {
-            Ok(relation) => Ok(relation.name().to_string()),
-            Err(_) => Err(OptimizerError::Other(format!(
-                "Table {:?} not found in catalog",
-                table_id
-            ))),
-        }
+    /// Inserts a logical expression with derived properties.
+    fn insert_with_properties(
+        &mut self,
+        op: LogicalOperator,
+        children: Vec<GroupId>,
+    ) -> PlannerResult<GroupId> {
+        let child_props: Vec<LogicalProperties> = children
+            .iter()
+            .map(|&gid| self.get_group_properties(gid))
+            .collect::<PlannerResult<_>>()?;
+
+        let child_refs: Vec<&LogicalProperties> = child_props.iter().collect();
+        let props = self.deriver.derive(&op, &child_refs);
+
+        let expr = LogicalExpr::new(op, children).with_properties(props);
+        Ok(self.memo.insert_logical_expr(expr))
+    }
+
+    fn get_group_properties(&self, group_id: GroupId) -> PlannerResult<LogicalProperties> {
+        self.memo
+            .get_group(group_id)
+            .map(|g| g.logical_props.clone())
+            .ok_or(PlannerError::InvalidState)
+    }
+
+    fn get_table_name(&self, table_id: ObjectId) -> PlannerResult<String> {
+        // Note: This requires catalog access with proper context.
+        // For now, return a placeholder. In production, this would query the catalog.
+        Ok(format!("table_{}", table_id))
     }
 
     fn has_aggregates(&self, columns: &[BoundSelectItem]) -> bool {
@@ -525,8 +484,8 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
                     self.collect_aggregates(cond, output_idx, aggregates);
                     self.collect_aggregates(result, output_idx, aggregates);
                 }
-                if let Some(else_e) = else_expr {
-                    self.collect_aggregates(else_e, output_idx, aggregates);
+                if let Some(e) = else_expr {
+                    self.collect_aggregates(e, output_idx, aggregates);
                 }
             }
             BoundExpression::Function { args, .. } => {
@@ -554,43 +513,38 @@ impl<'a, P: StatisticsProvider> PlanBuilder<'a, P> {
         }
     }
 
-    /// Convert a memo group to a LogicalPlan tree
-    pub fn build_logical_plan(&self, group_id: GroupId) -> OptimizerResult<LogicalPlan> {
-        self.build_logical_plan_recursive(group_id, &mut vec![])
+    /// Converts a memo group to a LogicalPlan tree (for debugging/explain).
+    pub fn build_logical_plan(&self, group_id: GroupId) -> PlannerResult<LogicalPlan> {
+        self.build_logical_plan_recursive(group_id, &mut Vec::new())
     }
 
     fn build_logical_plan_recursive(
         &self,
         group_id: GroupId,
         visited: &mut Vec<GroupId>,
-    ) -> OptimizerResult<LogicalPlan> {
-        // Prevent infinite recursion
+    ) -> PlannerResult<LogicalPlan> {
         if visited.contains(&group_id) {
-            return Err(OptimizerError::InvalidState(
-                "Cycle detected in logical plan".to_string(),
-            ));
+            return Err(PlannerError::Other("cycle detected in plan".to_string()));
         }
         visited.push(group_id);
 
         let group = self
             .memo
             .get_group(group_id)
-            .ok_or_else(|| OptimizerError::InvalidState("Group not found".to_string()))?;
+            .ok_or(PlannerError::InvalidState)?;
 
-        // Get the best expression from the group (for now, just take the first)
         let expr = group
             .logical_exprs
             .first()
-            .ok_or_else(|| OptimizerError::InvalidState("No logical expr in group".to_string()))?
+            .ok_or(PlannerError::InvalidState)?
             .clone();
 
-        // Build children plans
-        let mut children = Vec::new();
-        for child_id in &expr.children {
-            children.push(self.build_logical_plan_recursive(*child_id, visited)?);
-        }
+        let children: Vec<LogicalPlan> = expr
+            .children
+            .iter()
+            .map(|&cid| self.build_logical_plan_recursive(cid, visited))
+            .collect::<PlannerResult<_>>()?;
 
-        // Remove from visited for other paths
         visited.pop();
 
         Ok(LogicalPlan {

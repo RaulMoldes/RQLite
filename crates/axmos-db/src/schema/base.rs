@@ -1,10 +1,6 @@
 use super::stats::Stats;
 use crate::{
     storage::tuple::Row,
-    tree::comparators::{
-        CompositeComparator, DynComparator, FixedSizeBytesComparator, NumericComparator,
-        SignedNumericComparator, VarlenComparator,
-    },
     types::{
         Blob, DataType, DataTypeKind, ObjectId, PageId, RowId, SerializationError,
         SerializationResult, UInt64,
@@ -60,7 +56,7 @@ impl Display for SchemaError {
 impl Error for SchemaError {}
 pub type SchemaResult<T> = Result<T, SchemaError>;
 
-#[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub(crate) struct Schema {
     pub(crate) columns: Vec<Column>,
     pub(crate) num_keys: usize,
@@ -77,6 +73,29 @@ pub struct IndexHandle {
     indexed_columns: Vec<usize>,
 }
 
+impl IndexHandle {
+    pub(crate) fn new(id: ObjectId, columns: Vec<usize>) -> Self {
+        Self {
+            id,
+            indexed_columns: columns,
+        }
+    }
+
+    pub(crate) fn id(&self) -> ObjectId {
+        self.id
+    }
+
+    pub(crate) fn indexed_column_ids(&self) -> &[usize] {
+        &self.indexed_columns
+    }
+}
+
+impl Default for Schema {
+    fn default() -> Self {
+        Self::new_empty()
+    }
+}
+
 impl Schema {
     /// Collects an array of columns and builds a column index from it.
     fn build_column_index(columns: &[Column]) -> HashMap<String, usize> {
@@ -87,23 +106,24 @@ impl Schema {
             .collect()
     }
 
-    /// Get a key comparator for this schema.
-    pub(crate) fn comparator(&self) -> DynComparator {
-        if self.num_keys > 1 {
-            let comparators: Vec<DynComparator> = self
-                .iter_keys()
-                .map(|col| {
-                    col.comparator()
-                        .unwrap_or(DynComparator::Variable(VarlenComparator))
-                })
-                .collect();
-            DynComparator::Composite(CompositeComparator::new(comparators))
+    /// Returns a reference to the columns vector
+    pub(crate) fn columns(&self) -> &[Column] {
+        &self.columns
+    }
+
+    pub(crate) fn new_empty() -> Self {
+        Self::new_table_with_num_keys(vec![], 0)
+    }
+
+    /// Collect all the index information from this schema.
+    pub(crate) fn get_indexes(&self) -> Vec<IndexHandle> {
+        if let Some(indexes) = &self.table_indexes {
+            indexes
+                .iter()
+                .map(|(id, col_info)| IndexHandle::new(*id, col_info.clone()))
+                .collect()
         } else {
-            self.columns
-                .first()
-                .map(|c| c.comparator())
-                .flatten()
-                .unwrap_or(DynComparator::Variable(VarlenComparator))
+            Vec::new()
         }
     }
 
@@ -113,6 +133,18 @@ impl Schema {
         Self {
             columns,
             num_keys: 1, // Tables always have one key.
+            table_constraints: Some(Vec::new()),
+            table_indexes: Some(HashMap::new()),
+            column_index,
+        }
+    }
+
+    /// Create a new schema of any type
+    pub(crate) fn new_table_with_num_keys(columns: Vec<Column>, num_keys: usize) -> Self {
+        let column_index = Self::build_column_index(&columns);
+        Self {
+            columns,
+            num_keys, // Tables always have one key.
             table_constraints: Some(Vec::new()),
             table_indexes: Some(HashMap::new()),
             column_index,
@@ -129,6 +161,11 @@ impl Schema {
             table_indexes: None,
             column_index,
         }
+    }
+
+    /// Moves out of itself and creates a new list of columns.
+    pub(crate) fn into_column_list(self) -> Vec<Column> {
+        self.columns
     }
 
     /// Index can be identified because they do not have table constraints.
@@ -224,8 +261,9 @@ impl Schema {
     pub(crate) fn add_index(&mut self, index: IndexHandle) -> SchemaResult<()> {
         if let Some(indexes) = self.table_indexes.as_mut() {
             let last_index = self.columns.len() - 1;
-            Self::validate_index_list(&index.indexed_columns, last_index)?;
-            indexes.insert(index.id, index.indexed_columns);
+            let columns = index.indexed_column_ids();
+            Self::validate_index_list(&columns, last_index)?;
+            indexes.insert(index.id, columns.to_vec());
             Ok(())
         } else {
             return Err(SchemaError::NotATable);
@@ -342,29 +380,9 @@ impl Column {
         &self.name
     }
 
-    /// Build a comparator from this column.
-    pub(crate) fn comparator(&self) -> Option<DynComparator> {
-        match self.datatype() {
-            DataTypeKind::Blob => Some(DynComparator::Variable(VarlenComparator)),
-            DataTypeKind::Int
-            | DataTypeKind::BigInt
-            | DataTypeKind::Double
-            | DataTypeKind::Float => Some(DynComparator::SignedNumeric(
-                SignedNumericComparator::for_size(self.datatype().fixed_size().unwrap()),
-            )),
-            DataTypeKind::UInt | DataTypeKind::BigUInt => Some(DynComparator::StrictNumeric(
-                NumericComparator::for_size(self.datatype().fixed_size().unwrap()),
-            )),
-            DataTypeKind::Bool => Some(DynComparator::FixedSizeBytes(
-                FixedSizeBytesComparator::for_size(1),
-            )),
-            _ => None, // Null type does not have a comparator
-        }
-    }
-
     /// Add a default constraint to the column
     pub(crate) fn with_default(mut self, default: DataType) -> SchemaResult<Self> {
-        if default.kind() != DataTypeKind::from_repr(self.dtype).unwrap_or(DataTypeKind::Null) {
+        if default.kind() != self.datatype() && !default.is_null() {
             return Err(SchemaError::InvalidDataType(default.kind()));
         };
 
@@ -377,14 +395,14 @@ impl Column {
         // We cannot serialize safely nulls by now o we set the value to none.
         if default.is_null() {
             self.default = None;
+        } else {
+            let required_size = default.runtime_size();
+            let mut writer = Vec::with_capacity(required_size);
+            default.write_to(&mut writer, 0).map_err(|e| {
+                SchemaError::Other(format!("failed to deserialize default dataype {e}"))
+            })?;
+            self.default = Some(writer.into_boxed_slice());
         };
-
-        let required_size = default.runtime_size();
-        let mut writer = Vec::with_capacity(required_size);
-        default.write_to(&mut writer, 0).map_err(|e| {
-            SchemaError::Other(format!("failed to deserialize default dataype {e}"))
-        })?;
-        self.default = Some(writer.into_boxed_slice());
         Ok(self)
     }
 
@@ -461,6 +479,10 @@ impl Relation {
     /// Returns the relation's object id
     pub(crate) fn object_id(&self) -> ObjectId {
         self.object_id
+    }
+
+    pub(crate) fn stats(&self) -> Option<&Stats> {
+        self.stats.as_ref()
     }
     /// Returns the relation's name
     pub(crate) fn name(&self) -> &str {
@@ -560,5 +582,25 @@ impl Relation {
             next_row_id,
             stats,
         }
+    }
+
+    /// Gets the next row id for tables. Panics if called on an index.
+    pub(crate) fn next_row_id(&self) -> UInt64 {
+        UInt64::from(
+            self.next_row_id
+                .expect("next_row_id called on index relation"),
+        )
+    }
+
+    /// Increments the row counter. Only valid for tables.
+    pub(crate) fn increment_row_id(&mut self) {
+        if let Some(ref mut row_id) = self.next_row_id {
+            *row_id += 1;
+        }
+    }
+
+    /// Get indexes from the schema (returns empty vec for index relations)
+    pub(crate) fn get_indexes(&self) -> Vec<IndexHandle> {
+        self.schema.get_indexes()
     }
 }

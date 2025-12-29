@@ -1034,7 +1034,8 @@ impl<C: CatalogTrait> Binder<C> {
             "LENGTH" | "CHAR_LENGTH" => ScalarFunction::Length,
             "UPPER" => ScalarFunction::Upper,
             "LOWER" => ScalarFunction::Lower,
-            "TRIM" => ScalarFunction::Trim,
+            "LTRIM" => ScalarFunction::LTrim,
+            "RTRIM" => ScalarFunction::RTrim,
             "CONCAT" => ScalarFunction::Concat,
             "ABS" => ScalarFunction::Abs,
             "ROUND" => ScalarFunction::Round,
@@ -1105,14 +1106,15 @@ impl<C: CatalogTrait> Binder<C> {
             ScalarFunction::Length => DataTypeKind::Int,
             ScalarFunction::Upper
             | ScalarFunction::Lower
-            | ScalarFunction::Trim
+            | ScalarFunction::RTrim
+            | ScalarFunction::LTrim
             | ScalarFunction::Concat => DataTypeKind::Blob,
             ScalarFunction::Abs
             | ScalarFunction::Round
             | ScalarFunction::Ceil
             | ScalarFunction::Floor
             | ScalarFunction::Sqrt => DataTypeKind::Double,
-            ScalarFunction::Coalesce | ScalarFunction::NullIf => args
+            ScalarFunction::Coalesce | ScalarFunction::NullIf | ScalarFunction::Cast => args
                 .first()
                 .map(|a| a.data_type())
                 .unwrap_or(DataTypeKind::Null),

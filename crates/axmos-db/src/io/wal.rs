@@ -139,6 +139,10 @@ impl WriteAheadLog {
         WalBlock::usable_space(self.block_size as usize) as usize
     }
 
+    pub(crate) fn last_lsn(&self) -> Option<Lsn> {
+        self.header.last_lsn()
+    }
+
     /// Runs the analysis phase of the ARIES recovery protocol.
     pub(crate) fn run_analysis(&mut self) -> io::Result<AnalysisResult> {
         let mut result = AnalysisResult::default();
@@ -190,23 +194,41 @@ impl WriteAheadLog {
                 }
                 RecordType::Delete => {
                     let undo_content = Box::from(record.undo_payload());
-                    let oid = record.metadata().object_id;
-                    let row_id = record.metadata().row_id;
+                    let oid = record
+                        .metadata()
+                        .object_id
+                        .expect("Object id must be set for delete operations");
+                    let row_id = record
+                        .metadata()
+                        .row_id
+                        .expect("Row id must be set for delete operations");
                     let delete = Delete::new(oid, row_id, undo_content);
                     result.delete_ops.insert(tid, delete);
                 }
                 RecordType::Update => {
                     let undo_content = Box::from(record.undo_payload());
                     let redo_content = Box::from(record.redo_payload());
-                    let oid = record.metadata().object_id;
-                    let row_id = record.metadata().row_id;
+                    let oid = record
+                        .metadata()
+                        .object_id
+                        .expect("Object id must be set for update operations");
+                    let row_id = record
+                        .metadata()
+                        .row_id
+                        .expect("Row id must be set for update operations");
                     let update = Update::new(oid, row_id, undo_content, redo_content);
                     result.update_ops.insert(tid, update);
                 }
                 RecordType::Insert => {
                     let redo_content = Box::from(record.redo_payload());
-                    let oid = record.metadata().object_id;
-                    let row_id = record.metadata().row_id;
+                    let oid = record
+                        .metadata()
+                        .object_id
+                        .expect("Object id must be set for insert operations");
+                    let row_id = record
+                        .metadata()
+                        .row_id
+                        .expect("Row id must be set for insert operations");
                     let insert = Insert::new(oid, row_id, redo_content);
                     result.insert_ops.insert(tid, insert);
                 }
@@ -217,6 +239,7 @@ impl WriteAheadLog {
     }
 
     pub(crate) fn push(&mut self, record: OwnedRecord) -> io::Result<()> {
+        let lsn = record.lsn();
         let record_size = record.total_size();
 
         // Check if record can ever fit in a block

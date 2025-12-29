@@ -1,9 +1,10 @@
 use crate::{
     DBConfig, DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, DEFAULT_CACHE_SIZE,
-    MAGIC, PAGE_ALIGNMENT,
+    MAGIC, PAGE_ALIGNMENT, TransactionId,
     io::{
         cache::PageCache,
         disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
+        logger::Operation,
         wal::{AnalysisResult, WriteAheadLog},
     },
     make_shared,
@@ -12,14 +13,12 @@ use crate::{
     storage::{
         core::{buffer::MemBlock, traits::Buffer},
         page::{BtreePage, OverflowPage, PageZero, PageZeroHeader},
-        wal::OwnedRecord,
     },
     tree::{
-        accessor::{BtreeReadAccessor, BtreeWriteAccessor},
+        accessor::{BtreeReadAccessor, BtreeWriteAccessor, TreeReader, TreeWriter},
         bplustree::Btree,
-        comparators::DynComparator,
     },
-    types::{PAGE_ZERO, PageId},
+    types::{Lsn, PAGE_ZERO, PageId},
 };
 
 use std::{
@@ -209,8 +208,16 @@ impl Pager {
     }
 
     /// Push a record to the write ahead log (implementation is not complete)
-    pub(crate) fn push_to_log(&mut self, record: OwnedRecord) -> io::Result<()> {
-        self.wal.push(record)
+    pub(crate) fn push_to_log<O: Operation>(
+        &mut self,
+        operation: O,
+        tid: TransactionId,
+        prev_lsn: Option<Lsn>,
+    ) -> io::Result<Lsn> {
+        let lsn = self.wal.last_lsn().map(|l| l + 1).unwrap_or(0);
+        let record = operation.into_record(lsn, tid, prev_lsn);
+        self.wal.push(record)?;
+        Ok(lsn)
     }
 
     /// Load block zero from disk
@@ -287,8 +294,12 @@ impl Pager {
         self.header_unchecked().page_size as usize
     }
 
-    fn min_keys_per_page(&self) -> usize {
+    pub fn min_keys_per_page(&self) -> usize {
         self.header_unchecked().min_keys as usize
+    }
+
+    pub fn num_siblings_per_side(&self) -> usize {
+        self.header_unchecked().num_siblings_per_side as usize
     }
 
     fn first_free_page(&self) -> Option<PageId> {
@@ -569,6 +580,7 @@ impl Seek for Pager {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct BtreeBuilder {
     pager: Option<SharedPager>,
     min_keys: usize,
@@ -590,37 +602,38 @@ impl BtreeBuilder {
         }
     }
 
-    pub(crate) fn build_tree(
-        &self,
-        root: PageId,
-        schema: &Schema,
-    ) -> Btree<BtreePage, DynComparator, BtreeReadAccessor> {
-        let comparator = schema.comparator();
-        let pager = self.pager.as_ref().expect("Pager not intialized").clone();
-        Btree::new(
-            root,
-            pager,
-            self.min_keys,
-            self.num_siblings_per_side,
-            comparator,
-        )
-        .with_accessor(BtreeReadAccessor::new())
+    pub(crate) fn with_pager(mut self, pager: SharedPager) -> Self {
+        self.pager = Some(pager);
+        self
     }
 
-    pub(crate) fn build_tree_mut(
+    pub(crate) fn build_tree_with_accessor<Acc: TreeReader>(
         &self,
         root: PageId,
-        schema: &Schema,
-    ) -> Btree<BtreePage, DynComparator, BtreeWriteAccessor> {
-        let comparator = schema.comparator();
+        accessor: Acc,
+    ) -> Btree<Acc> {
         let pager = self.pager.as_ref().expect("Pager not intialized").clone();
-        Btree::new(
-            root,
-            pager,
-            self.min_keys,
-            self.num_siblings_per_side,
-            comparator,
-        )
-        .with_accessor(BtreeWriteAccessor::new())
+        Btree::new(root, pager, self.min_keys, self.num_siblings_per_side).with_accessor(accessor)
+    }
+
+    pub(crate) fn build_tree_mut_with_accessor<Acc: TreeWriter>(
+        &self,
+        root: PageId,
+        accessor: Acc,
+    ) -> Btree<Acc> {
+        let pager = self.pager.as_ref().expect("Pager not intialized").clone();
+        Btree::new(root, pager, self.min_keys, self.num_siblings_per_side).with_accessor(accessor)
+    }
+
+    pub(crate) fn build_tree(&self, root: PageId) -> Btree<BtreeReadAccessor> {
+        let pager = self.pager.as_ref().expect("Pager not intialized").clone();
+        Btree::new(root, pager, self.min_keys, self.num_siblings_per_side)
+            .with_accessor(BtreeReadAccessor::new())
+    }
+
+    pub(crate) fn build_tree_mut(&self, root: PageId) -> Btree<BtreeWriteAccessor> {
+        let pager = self.pager.as_ref().expect("Pager not intialized").clone();
+        Btree::new(root, pager, self.min_keys, self.num_siblings_per_side)
+            .with_accessor(BtreeWriteAccessor::new())
     }
 }
