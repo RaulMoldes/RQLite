@@ -81,11 +81,19 @@ impl<'a, C: CatalogTrait + Clone> Planner<'a, C> {
             None => aggregated,
         };
 
-        // SELECT projection (skip if already handled by aggregate)
-        let projected = if !self.has_aggregates(&select.columns) {
-            self.build_project(having_applied, &select.columns, &select.schema)?
+        // ORDER BY (must go before the projection since it needs the full input schema)
+        let sorted = if !select.order_by.is_empty() {
+            let input_props = self.get_group_properties(having_applied)?;
+            self.build_sort(having_applied, &select.order_by, &input_props.schema)?
         } else {
             having_applied
+        };
+
+        // SELECT projection (after sort)
+        let projected = if !self.has_aggregates(&select.columns) {
+            self.build_project(sorted, &select.columns, &select.schema)?
+        } else {
+            sorted
         };
 
         // DISTINCT
@@ -95,16 +103,13 @@ impl<'a, C: CatalogTrait + Clone> Planner<'a, C> {
             projected
         };
 
-        // ORDER BY
-        let sorted = if !select.order_by.is_empty() {
-            self.build_sort(distinct_applied, &select.order_by, &select.schema)?
-        } else {
-            distinct_applied
-        };
-
         // LIMIT / OFFSET
-        let limited =
-            self.apply_limit_offset(sorted, select.limit, select.offset, &select.schema)?;
+        let limited = self.apply_limit_offset(
+            distinct_applied,
+            select.limit,
+            select.offset,
+            &select.schema,
+        )?;
 
         Ok(limited)
     }

@@ -57,7 +57,7 @@ impl Error for SchemaError {}
 pub type SchemaResult<T> = Result<T, SchemaError>;
 
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub(crate) struct Schema {
+pub struct Schema {
     pub(crate) columns: Vec<Column>,
     pub(crate) num_keys: usize,
     pub(crate) table_constraints: Option<Vec<TableConstraint>>,
@@ -125,6 +125,13 @@ impl Schema {
         } else {
             Vec::new()
         }
+    }
+
+    pub(crate) fn has_primary_key(&self) -> bool {
+        self.table_constraints.as_ref().is_some_and(|v| {
+            v.iter()
+                .any(|c| matches!(c, TableConstraint::PrimaryKey(_)))
+        })
     }
 
     /// Create a new table schema.
@@ -250,13 +257,6 @@ impl Schema {
         Ok(())
     }
 
-    fn has_primary_key(&self) -> bool {
-        self.table_constraints.as_ref().is_some_and(|v| {
-            v.iter()
-                .any(|c| matches!(c, TableConstraint::PrimaryKey(_)))
-        })
-    }
-
     /// Adds an index to a table schema.
     pub(crate) fn add_index(&mut self, index: IndexHandle) -> SchemaResult<()> {
         if let Some(indexes) = self.table_indexes.as_mut() {
@@ -352,6 +352,15 @@ pub(crate) enum TableConstraint {
 pub struct ForeignKeyInfo {
     ref_table: ObjectId,
     ref_columns: Vec<usize>, // List of bound column indexes in the ref table
+}
+
+impl ForeignKeyInfo {
+    pub(crate) fn for_table_and_columns(ref_table: ObjectId, ref_columns: Vec<usize>) -> Self {
+        Self {
+            ref_table,
+            ref_columns,
+        }
+    }
 }
 
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -602,5 +611,9 @@ impl Relation {
     /// Get indexes from the schema (returns empty vec for index relations)
     pub(crate) fn get_indexes(&self) -> Vec<IndexHandle> {
         self.schema.get_indexes()
+    }
+
+    pub(crate) fn schema_mut(&mut self) -> &mut Schema {
+        &mut self.schema
     }
 }

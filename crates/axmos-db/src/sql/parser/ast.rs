@@ -284,7 +284,7 @@ impl Simplify for Expr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct WhenClause {
+pub struct WhenClause {
     pub(crate) condition: Expr,
     pub(crate) result: Expr,
 }
@@ -332,7 +332,7 @@ pub(crate) enum UnaryOperator {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SelectStatement {
+pub struct SelectStatement {
     pub(crate) distinct: bool,
     pub(crate) columns: Vec<SelectItem>,
     pub(crate) from: Option<TableReference>,
@@ -430,7 +430,7 @@ pub(crate) enum JoinType {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct OrderByExpr {
+pub struct OrderByExpr {
     pub(crate) expr: Expr,
     pub(crate) asc: bool,
 }
@@ -442,7 +442,7 @@ impl Simplify for OrderByExpr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Statement {
+pub enum Statement {
     With(WithStatement),
     Select(SelectStatement),
     Insert(InsertStatement),
@@ -470,7 +470,7 @@ impl Simplify for Statement {
     }
 }
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct WithStatement {
+pub struct WithStatement {
     pub(crate) recursive: bool,
     pub(crate) ctes: Vec<(String, SelectStatement)>,
     pub(crate) body: Box<SelectStatement>,
@@ -487,7 +487,7 @@ impl Simplify for WithStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct InsertStatement {
+pub struct InsertStatement {
     pub(crate) table: String,
     pub(crate) columns: Option<Vec<String>>,
     pub(crate) values: Values,
@@ -522,7 +522,7 @@ impl Simplify for Values {
     }
 }
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct UpdateStatement {
+pub struct UpdateStatement {
     pub(crate) table: String,
     pub(crate) set_clauses: Vec<SetClause>,
     pub(crate) where_clause: Option<Expr>,
@@ -541,7 +541,7 @@ impl Simplify for UpdateStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SetClause {
+pub struct SetClause {
     pub(crate) column: String,
     pub(crate) value: Expr,
 }
@@ -553,7 +553,7 @@ impl Simplify for SetClause {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct DeleteStatement {
+pub struct DeleteStatement {
     pub(crate) table: String,
     pub(crate) where_clause: Option<Expr>,
 }
@@ -567,7 +567,7 @@ impl Simplify for DeleteStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CreateTableStatement {
+pub struct CreateTableStatement {
     pub(crate) table: String,
     pub(crate) columns: Vec<ColumnDefExpr>,
     pub(crate) constraints: Vec<TableConstraintExpr>,
@@ -583,7 +583,7 @@ impl Simplify for CreateTableStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ColumnDefExpr {
+pub struct ColumnDefExpr {
     pub(crate) name: String,
     pub(crate) data_type: DataTypeKind,
     pub(crate) is_non_null: bool,
@@ -623,7 +623,7 @@ pub(crate) enum TableConstraintExpr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct AlterTableStatement {
+pub struct AlterTableStatement {
     pub(crate) table: String,
     pub(crate) action: AlterAction,
 }
@@ -635,7 +635,7 @@ impl Simplify for AlterTableStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct AlterColumnStatement {
+pub struct AlterColumnStatement {
     pub(crate) name: String,
     pub(crate) action: AlterColumnAction,
 }
@@ -682,14 +682,14 @@ impl Simplify for AlterColumnAction {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct DropTableStatement {
+pub struct DropTableStatement {
     pub(crate) table: String,
     pub(crate) if_exists: bool,
     pub(crate) cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CreateIndexStatement {
+pub struct CreateIndexStatement {
     pub(crate) name: String,
     pub(crate) table: String,
     pub(crate) columns: Vec<IndexColumn>,
@@ -698,7 +698,7 @@ pub(crate) struct CreateIndexStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct IndexColumn {
+pub struct IndexColumn {
     pub(crate) name: String,
     pub(crate) order: Option<OrderDirection>,
 }
@@ -710,7 +710,7 @@ pub(crate) enum OrderDirection {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum TransactionStatement {
+pub enum TransactionStatement {
     Begin,
     Commit,
     Rollback,

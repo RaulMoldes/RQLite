@@ -8,7 +8,9 @@ use crate::{
         page::{BtreePage, OverflowPage},
         tuple::{RefTupleAccessor, Row, Tuple, TupleError, TupleReader, TupleRef},
     },
-    tree::accessor::{BtreePagePosition, TreeReader, TreeWriter},
+    tree::accessor::{
+        Accessor, BtreePagePosition, BtreeReadAccessor, BtreeWriteAccessor, TreeReader, TreeWriter,
+    },
     types::{PAGE_ZERO, PageId},
 };
 
@@ -24,7 +26,6 @@ use std::{
     fmt::{Display, Formatter, Result as FmtResult},
     fs,
     io::{self, Error as IoError, ErrorKind},
-    marker::PhantomData,
     path::Path,
     usize,
 };
@@ -108,23 +109,6 @@ where
     accessor: Option<Acc>, // Lazy initialization for the accessor.
 }
 
-// The accessor cannot be [Clone], so when cloning the btree we must be careful to reinitialize the accessor.
-// It is okay to do it since cloning the btree is only necessary to create an iterator, and iterator creation already initializes the accessor.
-impl<Acc> Clone for Btree<Acc>
-where
-    Acc: TreeReader,
-{
-    fn clone(&self) -> Self {
-        Self {
-            root: self.root,
-            pager: self.pager.clone(),
-            min_keys: self.min_keys,
-            num_siblings_per_side: self.num_siblings_per_side,
-            accessor: None,
-        }
-    }
-}
-
 impl<Acc> Btree<Acc>
 where
     Acc: TreeReader,
@@ -194,6 +178,26 @@ where
     pub(crate) fn accessor_mut(&mut self) -> BtreeResult<&mut Acc> {
         self.accessor.as_mut().ok_or(BtreeError::BtreeUnintialized)
     }
+
+    pub(crate) fn cloned_shared(&self) -> Btree<BtreeReadAccessor> {
+        Btree::new(
+            self.get_root(),
+            self.get_pager().clone(),
+            self.min_keys,
+            self.num_siblings_per_side,
+        )
+        .with_accessor(BtreeReadAccessor::new())
+    }
+
+    pub(crate) fn cloned_mut(&self) -> Btree<BtreeWriteAccessor> {
+        Btree::new(
+            self.get_root(),
+            self.get_pager().clone(),
+            self.min_keys,
+            self.num_siblings_per_side,
+        )
+        .with_accessor(BtreeWriteAccessor::new())
+    }
 }
 
 impl<Acc> Btree<Acc>
@@ -206,6 +210,15 @@ where
         if id == 0 {
             return Ok(());
         };
+
+        if self
+            .accessor
+            .as_ref()
+            .ok_or(BtreeError::BtreeUnintialized)?
+            .contains(id)
+        {
+            return Ok(());
+        }
 
         let frame = self.pager.write().read_page::<BtreePage>(id)?;
         self.accessor
@@ -565,7 +578,7 @@ where
         }
     }
 
-    pub(crate) fn iter_forward(&mut self) -> BtreeResult<BtreePositionalIterator<Acc>>
+    pub(crate) fn iter_forward(&mut self) -> BtreeResult<BtreePositionalIterator>
     where
         Acc: Default,
     {
@@ -575,14 +588,14 @@ where
 
         let left_most_position = self.get_left_most()?;
         BtreePositionalIterator::from_position(
-            self.clone(),
+            self.cloned_shared(),
             left_most_position.entry(),
             left_most_position.slot() as isize,
             IterDirection::Forward,
         )
     }
 
-    pub(crate) fn into_iter_backward(&mut self) -> BtreeResult<BtreePositionalIterator<Acc>>
+    pub(crate) fn into_iter_backward(&mut self) -> BtreeResult<BtreePositionalIterator>
     where
         Acc: Default,
     {
@@ -592,7 +605,7 @@ where
 
         let right_most_position = self.get_right_most()?;
         BtreePositionalIterator::from_position(
-            self.clone(),
+            self.cloned_shared(),
             right_most_position.entry(),
             right_most_position.slot() as isize,
             IterDirection::Forward,
@@ -604,7 +617,7 @@ where
     where
         Acc: Default,
     {
-        let printer = BtreePrinter::new(self.clone(), schema, snapshot);
+        let printer = BtreePrinter::new(self.cloned_shared(), schema, snapshot);
         printer.as_json()
     }
 
@@ -1740,24 +1753,22 @@ where
     }
 }
 
-pub(crate) struct BtreePrinter<'a, Acc: TreeReader> {
+pub(crate) struct BtreePrinter<'a> {
     buffer: BTreeMap<PageId, BtreePage>,
-    tree: Btree<Acc>,
+    tree: Btree<BtreeReadAccessor>,
     schema: &'a Schema,
     snapshot: &'a Snapshot,
 }
 
-impl<'a, Acc> BtreePrinter<'a, Acc>
-where
-    Acc: TreeReader,
-{
+impl<'a> BtreePrinter<'a> {
     /// Create a new btree displayer for the provided root node.
-    pub(crate) fn new(mut tree: Btree<Acc>, schema: &'a Schema, snapshot: &'a Snapshot) -> Self
-    where
-        Acc: Default,
-    {
+    pub(crate) fn new(
+        mut tree: Btree<BtreeReadAccessor>,
+        schema: &'a Schema,
+        snapshot: &'a Snapshot,
+    ) -> Self {
         if !tree.is_initialized() {
-            tree = tree.with_accessor(Acc::default());
+            tree = tree.with_accessor(BtreeReadAccessor::default());
         };
 
         Self {
@@ -1867,30 +1878,26 @@ pub(crate) enum IterDirection {
 /// Iterator that yields cell positions instead of entire [`Payloads<'_>`]
 /// My first idea was iterate over full payload objects, however, this comes with the downside of having to create a copy of each cell we visit. This is pretty awful specially with overflow cells that occupy a lot of space.
 /// Positions are always small (10 bytes data structures) and therefore the time required to iterate remaings constant. Later, if required, we provide the [with_cells_at] and [with_cell_at] functions to execute custom payloads at specific positions in the btree.
-pub(crate) struct BtreePositionalIterator<Acc: TreeReader> {
-    tree: Btree<Acc>,
+pub(crate) struct BtreePositionalIterator {
+    tree: Btree<BtreeReadAccessor>,
     current_page: Option<PageId>,
     current_slot: isize,
     direction: IterDirection,
 }
 
-impl<Acc> BtreePositionalIterator<Acc>
-where
-    Acc: TreeReader,
-{
+impl BtreePositionalIterator {
     // build an iterator from a tree at a given position and for the given direction.
     pub(crate) fn from_position(
-        mut tree: Btree<Acc>,
+        mut tree: Btree<BtreeReadAccessor>,
         page: PageId,
         slot: isize,
         direction: IterDirection,
-    ) -> BtreeResult<Self>
-    where
-        Acc: Default,
-    {
+    ) -> BtreeResult<Self> {
         if !tree.is_initialized() {
-            tree = tree.with_accessor(Acc::default());
+            tree = tree.with_accessor(BtreeReadAccessor::new());
         };
+
+        assert!(tree.accessor.is_some());
 
         if tree.is_empty()? {
             return Err(BtreeError::BtreeEmpty);
@@ -1918,8 +1925,6 @@ where
     /// Advance pages in normal order.
     fn adv(&mut self) -> BtreeResult<bool> {
         if let Some(current) = self.current_page {
-            println!("Iterando en pagina");
-            println!("{current}");
             self.current_page = self.tree.get_page(current)?.next_sibling();
             self.tree.accessor_mut()?.release(current);
             self.current_slot = 0;
@@ -1947,15 +1952,16 @@ where
         Ok(false)
     }
 
-    pub(crate) fn get_tree(&self) -> Btree<Acc> {
-        self.tree.clone()
+    pub(crate) fn get_tree(&self) -> Btree<BtreeReadAccessor> {
+        self.tree.cloned_shared()
+    }
+
+    pub(crate) fn get_tree_mut(&self) -> Btree<BtreeWriteAccessor> {
+        self.tree.cloned_mut()
     }
 }
 
-impl<Acc> Iterator for BtreePositionalIterator<Acc>
-where
-    Acc: TreeReader,
-{
+impl Iterator for BtreePositionalIterator {
     type Item = BtreeResult<BtreePagePosition>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1997,10 +2003,7 @@ where
     }
 }
 
-impl<Acc> Drop for BtreePositionalIterator<Acc>
-where
-    Acc: TreeReader,
-{
+impl Drop for BtreePositionalIterator {
     fn drop(&mut self) {
         if let Some(page) = self.current_page {
             self.tree.accessor_mut().unwrap().release(page);
@@ -2008,10 +2011,7 @@ where
     }
 }
 
-impl<Acc> DoubleEndedIterator for BtreePositionalIterator<Acc>
-where
-    Acc: TreeReader,
-{
+impl DoubleEndedIterator for BtreePositionalIterator {
     fn next_back(&mut self) -> Option<Self::Item> {
         let original_direction = self.direction;
         self.direction = match original_direction {

@@ -1,6 +1,7 @@
 use crate::{
     DBConfig, DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, DEFAULT_CACHE_SIZE,
-    MAGIC, PAGE_ALIGNMENT, TransactionId,
+    MAGIC, PAGE_ALIGNMENT, TransactionId, UInt64,
+    core::SerializableType,
     io::{
         cache::PageCache,
         disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
@@ -9,14 +10,16 @@ use crate::{
     },
     make_shared,
     multithreading::frames::{AsReadLatch, AsWriteLatch, Frame, MemFrame},
-    schema::Schema,
+    runtime::{RuntimeError, RuntimeResult, context::TransactionContext},
+    schema::catalog::CatalogTrait,
     storage::{
         core::{buffer::MemBlock, traits::Buffer},
-        page::{BtreePage, OverflowPage, PageZero, PageZeroHeader},
+        page::{OverflowPage, PageZero, PageZeroHeader},
+        tuple::{Tuple, TupleError},
     },
     tree::{
         accessor::{BtreeReadAccessor, BtreeWriteAccessor, TreeReader, TreeWriter},
-        bplustree::Btree,
+        bplustree::{Btree, SearchResult},
     },
     types::{Lsn, PAGE_ZERO, PageId},
 };
@@ -74,7 +77,6 @@ impl<'a> FileOperations for Pager {
         let page_zero = pager.load_page_zero(block_size)?;
         pager.db_header = Some(*page_zero.metadata());
 
-        // TODO. MUST WRITE THE RECOVER FUNCTION TO REPLAY THE WAL HERE.
         Ok(pager)
     }
 
@@ -102,16 +104,23 @@ impl<'a> FileOperations for Pager {
 
 impl Pager {
     /// Runs the recovery and truncates the write ahead log
-    pub(crate) fn run_recovery(&mut self) -> io::Result<()> {
+    pub(crate) fn run_recovery(
+        &mut self,
+        context: &mut TransactionContext<BtreeWriteAccessor>,
+    ) -> RuntimeResult<()> {
         let analysis = self.wal.run_analysis()?;
-        self.run_undo(&analysis)?;
-        self.run_redo(&analysis)?;
+        self.run_undo(&analysis, context)?;
+        self.run_redo(&analysis, context)?;
         self.wal.truncate()?;
         Ok(())
     }
 
     /// Run all the undo.
-    pub(crate) fn run_undo(&mut self, analysis: &AnalysisResult) -> io::Result<()> {
+    pub(crate) fn run_undo(
+        &mut self,
+        analysis: &AnalysisResult,
+        ctx: &mut TransactionContext<BtreeWriteAccessor>,
+    ) -> RuntimeResult<()> {
         for redo_transaction in analysis.needs_undo.iter() {
             // Reapply all the operations of this transaction
             for lsn in analysis.try_iter_lsn(redo_transaction).ok_or(IoError::new(
@@ -119,15 +128,81 @@ impl Pager {
                 "transaction not found in th write ahead analysis",
             ))? {
                 if let Some(delete_operation) = analysis.delete_ops.get(&lsn) {
-                    unimplemented!("Delete operations-undo are not implemented yet");
-                }
+                    let table_id = delete_operation
+                        .object_id()
+                        .ok_or(RuntimeError::InvalidState)?;
 
+                    // Get builder and snapshot
+                    let builder = ctx.tree_builder();
+                    let snapshot = ctx.snapshot();
+
+                    // Locate the table
+                    let table = ctx.catalog().get_relation(table_id, &builder, &snapshot)?;
+
+                    let schema = table.schema();
+
+                    let data = Tuple::from_slice_unchecked(delete_operation.undo())?;
+
+                    // Locate the btree
+                    let mut btree = builder.build_tree_mut(table.root());
+                    btree.update(table.root(), data, schema)?;
+                }
                 if let Some(update_operation) = analysis.update_ops.get(&lsn) {
-                    unimplemented!("Update operations-undo are not implemented yet");
+                    let table_id = update_operation
+                        .object_id()
+                        .ok_or(RuntimeError::InvalidState)?;
+
+                    // Get builder and snapshot
+                    let builder = ctx.tree_builder();
+                    let snapshot = ctx.snapshot();
+
+                    // Locate the table
+                    let table = ctx.catalog().get_relation(table_id, &builder, &snapshot)?;
+
+                    let schema = table.schema();
+
+                    let data = Tuple::from_slice_unchecked(update_operation.undo())?;
+
+                    // Locate the btree
+                    let mut btree = builder.build_tree_mut(table.root());
+                    btree.update(table.root(), data, schema)?;
                 }
 
                 if let Some(insert_operation) = analysis.insert_ops.get(&lsn) {
-                    unimplemented!("Insert operations-undo are not implemented yet");
+                    let table_id = insert_operation
+                        .object_id()
+                        .ok_or(RuntimeError::InvalidState)?;
+
+                    let row_id = insert_operation
+                        .row_id()
+                        .map(|r| UInt64::from(r))
+                        .ok_or(RuntimeError::InvalidState)?
+                        .serialize()?;
+
+                    // Get builder and snapshot
+                    let builder = ctx.tree_builder();
+                    let snapshot = ctx.snapshot();
+
+                    // Locate the table
+                    let table = ctx.catalog().get_relation(table_id, &builder, &snapshot)?;
+
+                    let schema = table.schema();
+
+                    // Locate the btree
+                    let mut btree = builder.build_tree_mut(table.root());
+                    let Ok(SearchResult::Found(position)) = btree.search(&row_id, schema) else {
+                        return Err(RuntimeError::InvalidState);
+                    };
+
+                    let tuple = btree.with_cell_at(position, |bytes| {
+                        let mut tuple = Tuple::from_slice_unchecked(bytes)?;
+                        tuple.delete(ctx.tid())?;
+                        tuple.vacuum_with_schema(ctx.snapshot().xmin(), schema)?;
+
+                        Ok::<Tuple, TupleError>(tuple)
+                    })??;
+
+                    btree.update(table.root(), tuple, schema)?;
                 }
             }
         }
@@ -136,7 +211,11 @@ impl Pager {
     }
 
     /// Run all the redo.
-    pub(crate) fn run_redo(&mut self, analysis: &AnalysisResult) -> io::Result<()> {
+    pub(crate) fn run_redo(
+        &mut self,
+        analysis: &AnalysisResult,
+        ctx: &mut TransactionContext<BtreeWriteAccessor>,
+    ) -> RuntimeResult<()> {
         for redo_transaction in analysis.needs_redo.iter() {
             // Reapply all the operations of this transaction
             for lsn in analysis.try_iter_lsn(redo_transaction).ok_or(IoError::new(
@@ -144,15 +223,82 @@ impl Pager {
                 "transaction not found in th write ahead analysis",
             ))? {
                 if let Some(delete_operation) = analysis.delete_ops.get(&lsn) {
-                    unimplemented!("Delete operations-redo are not implemented yet");
+                    let table_id = delete_operation
+                        .object_id()
+                        .ok_or(RuntimeError::InvalidState)?;
+
+                    let row_id = delete_operation
+                        .row_id()
+                        .map(|r| UInt64::from(r))
+                        .ok_or(RuntimeError::InvalidState)?
+                        .serialize()?;
+
+                    // Get builder and snapshot
+                    let builder = ctx.tree_builder();
+                    let snapshot = ctx.snapshot();
+
+                    // Locate the table
+                    let table = ctx.catalog().get_relation(table_id, &builder, &snapshot)?;
+
+                    let schema = table.schema();
+
+                    // Locate the btree
+                    let mut btree = builder.build_tree_mut(table.root());
+                    let Ok(SearchResult::Found(position)) = btree.search(&row_id, schema) else {
+                        return Err(RuntimeError::InvalidState);
+                    };
+
+                    let tuple = btree.with_cell_at(position, |bytes| {
+                        let mut tuple = Tuple::from_slice_unchecked(bytes)?;
+                        tuple.delete(ctx.tid())?;
+                        tuple.vacuum_with_schema(ctx.snapshot().xmin(), schema)?;
+
+                        Ok::<Tuple, TupleError>(tuple)
+                    })??;
+
+                    btree.update(table.root(), tuple, schema)?;
                 }
 
                 if let Some(update_operation) = analysis.update_ops.get(&lsn) {
-                    unimplemented!("Update operations-redo are not implemented yet");
+                    let table_id = update_operation
+                        .object_id()
+                        .ok_or(RuntimeError::InvalidState)?;
+
+                    // Get builder and snapshot
+                    let builder = ctx.tree_builder();
+                    let snapshot = ctx.snapshot();
+
+                    // Locate the table
+                    let table = ctx.catalog().get_relation(table_id, &builder, &snapshot)?;
+
+                    let schema = table.schema();
+
+                    let data = Tuple::from_slice_unchecked(update_operation.redo())?;
+
+                    // Locate the btree
+                    let mut btree = builder.build_tree_mut(table.root());
+                    btree.update(table.root(), data, schema)?;
                 }
 
                 if let Some(insert_operation) = analysis.insert_ops.get(&lsn) {
-                    unimplemented!("Insert operations-redo are not implemented yet");
+                    let table_id = insert_operation
+                        .object_id()
+                        .ok_or(RuntimeError::InvalidState)?;
+
+                    // Get builder and snapshot
+                    let builder = ctx.tree_builder();
+                    let snapshot = ctx.snapshot();
+
+                    // Locate the table
+                    let table = ctx.catalog().get_relation(table_id, &builder, &snapshot)?;
+
+                    let schema = table.schema();
+
+                    let data = Tuple::from_slice_unchecked(insert_operation.redo())?;
+
+                    // Locate the btree
+                    let mut btree = builder.build_tree_mut(table.root());
+                    btree.upsert(table.root(), data, schema)?;
                 }
             }
         }
@@ -581,7 +727,7 @@ impl Seek for Pager {
 }
 
 #[derive(Clone)]
-pub(crate) struct BtreeBuilder {
+pub struct BtreeBuilder {
     pager: Option<SharedPager>,
     min_keys: usize,
     num_siblings_per_side: usize,
@@ -594,7 +740,7 @@ impl Default for BtreeBuilder {
 }
 
 impl BtreeBuilder {
-    pub(crate) fn new(min_keys: usize, num_siblings_per_side: usize) -> Self {
+    pub fn new(min_keys: usize, num_siblings_per_side: usize) -> Self {
         Self {
             pager: None,
             min_keys,
@@ -602,7 +748,7 @@ impl BtreeBuilder {
         }
     }
 
-    pub(crate) fn with_pager(mut self, pager: SharedPager) -> Self {
+    pub fn with_pager(mut self, pager: SharedPager) -> Self {
         self.pager = Some(pager);
         self
     }

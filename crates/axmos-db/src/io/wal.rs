@@ -1,13 +1,12 @@
 use crate::{
-    LogicalId, RowId, TransactionId,
+    TransactionId,
     io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
     io::logger::{Delete, Insert, Update},
-    multithreading::coordinator::TransactionState,
     storage::{
         Allocatable, AvailableSpace, WalMetadata, WalOps, Writable,
         wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock},
     },
-    types::{BlockId, Lsn, ObjectId},
+    types::{BlockId, Lsn},
 };
 
 use std::{

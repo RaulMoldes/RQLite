@@ -317,7 +317,7 @@ impl<T: BytemuckDeserializable> DeserializableType for T {
 
     fn deserialize(buffer: &[u8], cursor: usize) -> SerializationResult<(Self::Ref<'_>, usize)> {
         let cursor = Self::aligned_offset(cursor);
-        println!("Leyendo cursor: {cursor}");
+
         let (data_ref, bytes_read) = Self::reinterpret_cast(&buffer[cursor..])?;
         Ok((data_ref, cursor + bytes_read))
     }

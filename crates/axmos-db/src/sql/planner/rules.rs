@@ -962,7 +962,9 @@ impl ImplementationRule for JoinRule {
             )),
             expr.children.clone(),
         ));
+        /*
 
+        COMMENTED THIS UNTIL MERGE JOIN AND HASH JOIN ARE IMPLEMENTED
         // Hash join (for equi-joins)
         if join.is_equi_join() {
             let keys = join.extract_equi_keys();
@@ -1010,7 +1012,7 @@ impl ImplementationRule for JoinRule {
                 merge_expr.properties.ordering = output_ordering;
                 impls.push(merge_expr);
             }
-        }
+        }*/
 
         Ok(impls)
     }

@@ -2,7 +2,7 @@
 name = "axmosdb"
 version = "0.1.0"
 edition = "2024"
-description = "A SQLite-compatible storage engine implementatio in Rust"
+description = "A fully functional database implementation."
 authors = ["Raul Moldes <raul.moldes.work@gmail.com>"]
 license = "Apache-2.0"
 readme = "README.md"
@@ -18,9 +18,6 @@ regex = "1.12.2"
 axmos-derive = { path = "../axmos-derive/"}
 rand = "0.9.2"
 rand_chacha = "0.9.0"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-ctrlc = "3.4"
 murmur3 = "0.5"
 bytemuck = "1.24"
 indexmap = "2"
@@ -30,9 +27,11 @@ rkyv = { version = "0.8", features = ["alloc"] }
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 tempfile = "3.6.0"
-libc = "0.2"
 serial_test = "2.0"
-once_cell = "1.21.3"
+
+[[bin]]
+name = "axmos-server"
+path = "src/bin/axmos_server.rs"
 
 [lib]
 doctest = false

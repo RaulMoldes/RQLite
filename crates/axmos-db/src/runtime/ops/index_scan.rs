@@ -21,7 +21,7 @@ pub(crate) struct OpenIndexScan<Acc: TreeReader + Clone> {
     table_tree: Btree<Acc>,
     index_schema: Schema,
     table_schema: Schema,
-    index_cursor: BtreePositionalIterator<Acc>,
+    index_cursor: Option<BtreePositionalIterator>,
     stats: ExecutionStats,
 }
 
@@ -82,7 +82,7 @@ where
             table_tree,
             index_schema,
             table_schema,
-            index_cursor: index_tree.iter_forward()?,
+            index_cursor: index_tree.iter_forward().ok(),
             stats: ExecutionStats::default(),
         })
     }
@@ -140,8 +140,17 @@ where
 {
     type Closed = ClosedIndexScan<Acc>;
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
+        if self.index_cursor.is_none() {
+            return Ok(None);
+        };
+
         loop {
-            let next_pos = match self.index_cursor.next() {
+            let next_pos = match self
+                .index_cursor
+                .as_mut()
+                .ok_or(RuntimeError::InvalidState)?
+                .next()
+            {
                 Some(res) => res?,
                 None => {
                     return Ok(None);
@@ -151,7 +160,11 @@ where
             self.stats.rows_scanned += 1;
             let snapshot = self.ctx.snapshot();
 
-            let mut tree = self.index_cursor.get_tree();
+            let mut tree = self
+                .index_cursor
+                .as_ref()
+                .ok_or(RuntimeError::InvalidState)?
+                .get_tree();
             let maybe_row = tree
                 .get_row_at(next_pos, &self.index_schema, &snapshot)?
                 .filter(|r| {

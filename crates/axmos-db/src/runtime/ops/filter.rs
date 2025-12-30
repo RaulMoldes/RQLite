@@ -60,6 +60,7 @@ impl<Child: RunningExecutor> RunningExecutor for OpenFilter<Child> {
                     self.stats.rows_scanned += 1;
 
                     let evaluator = ExpressionEvaluator::new(&row, &self.schema);
+
                     if evaluator.evaluate_as_bool(&self.predicate)? {
                         self.stats.rows_produced += 1;
                         return Ok(Some(row));

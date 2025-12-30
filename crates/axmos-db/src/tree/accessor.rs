@@ -78,6 +78,8 @@ where
 pub(crate) trait Accessor<P: Buffer<IdType: Eq + Hash>> {
     type LatchType: Latch<P>;
 
+    fn contains(&self, id: <P as Identifiable>::IdType) -> bool;
+
     fn try_acquire<F: Identifiable<IdType = P::IdType>>(&mut self, value: F) -> io::Result<()>
     where
         for<'a> Self::LatchType: TryFrom<&'a F, Error = IoError>;
@@ -129,6 +131,10 @@ where
     L: Latch<P>,
 {
     type LatchType = L;
+
+    fn contains(&self, id: <P as Identifiable>::IdType) -> bool {
+        self.latches.get(&id).is_some()
+    }
 
     /// Acquires a latch for the given access mode.
     fn try_acquire<F: Identifiable<IdType = P::IdType>>(&mut self, value: F) -> io::Result<()>
@@ -309,6 +315,10 @@ where
 {
     type LatchType = L;
 
+    fn contains(&self, id: <P as Identifiable>::IdType) -> bool {
+        self.tracker.contains(id)
+    }
+
     fn try_acquire<F: Identifiable<IdType = P::IdType>>(&mut self, value: F) -> io::Result<()>
     where
         for<'a> L: TryFrom<&'a F, Error = IoError>,
@@ -430,11 +440,33 @@ where
 }
 
 pub type BtreeReadAccessor = ReadTreeAccessor<BtreePage>;
-pub type BtreeWriteAccessor = MutableTreeAccessor<BtreePage>;
 
+impl std::fmt::Debug for BtreeReadAccessor {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str("Read tree accessor")
+    }
+}
+pub type BtreeWriteAccessor = MutableTreeAccessor<BtreePage>;
+impl std::fmt::Debug for BtreeWriteAccessor {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str("Write tree accessor")
+    }
+}
 pub(crate) trait TreeWriter = WriteAccessor<BtreePage, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>
     + ReadAccessor<BtreePage, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>
-    + PositionStack<BtreePage>;
+    + PositionStack<BtreePage>
+    + std::fmt::Debug;
 
 pub(crate) trait TreeReader = ReadAccessor<BtreePage, LatchType: for<'a> TryFrom<&'a MemFrame, Error = IoError>>
-    + PositionStack<BtreePage>;
+    + PositionStack<BtreePage>
+    + std::fmt::Debug;
+
+impl<P, L> Drop for BtreeAccessor<P, L>
+where
+    P: Buffer<IdType: Eq + Hash>,
+    L: Latch<P>,
+{
+    fn drop(&mut self) {
+        self.clear();
+    }
+}

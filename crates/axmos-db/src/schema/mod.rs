@@ -2,18 +2,16 @@ pub(crate) mod base;
 pub(crate) mod catalog;
 pub(crate) mod stats;
 
+pub use catalog::SharedCatalog;
+
 #[cfg(test)]
 mod tests;
 
 use crate::DataType;
-use crate::bytemuck_slice;
+
 use crate::types::DataTypeKind;
 pub(crate) use base::{Column, Schema};
-use rkyv::{
-    Archive, Deserialize, Serialize, from_bytes, rancor::Error as RkyvError, to_bytes,
-    util::AlignedVec,
-};
-pub(crate) use stats::{ColumnStats, Stats};
+pub(crate) use stats::Stats;
 
 pub(crate) fn meta_table_schema() -> Schema {
     Schema::new_table(vec![

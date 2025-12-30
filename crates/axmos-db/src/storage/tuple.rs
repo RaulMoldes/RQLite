@@ -1,5 +1,5 @@
 use crate::{
-    CELL_ALIGNMENT, SerializationError, SerializationResult, bytemuck_struct,
+    SerializationError, SerializationResult, bytemuck_struct,
     multithreading::coordinator::Snapshot,
     schema::{Schema, base::SchemaError},
     storage::core::buffer::{Payload, PayloadRef},
@@ -8,6 +8,7 @@ use crate::{
 
 use std::{
     alloc::AllocError,
+    collections::HashMap,
     error::Error,
     fmt::{Display, Formatter, Result as FmtResult},
     io::Error as IoError,
@@ -87,8 +88,8 @@ fn aligned_offset(offset: usize, align: usize) -> usize {
 }
 
 /// A row is a higher level representation of a tuple
-#[derive(Clone)]
-pub(crate) struct Row(Box<[DataType]>);
+#[derive(Clone, Debug)]
+pub struct Row(Box<[DataType]>);
 
 impl Default for Row {
     fn default() -> Self {
@@ -97,24 +98,24 @@ impl Default for Row {
 }
 
 impl Row {
-    pub(crate) fn new(data: Box<[DataType]>) -> Self {
+    pub fn new(data: Box<[DataType]>) -> Self {
         Self(data)
     }
 
-    pub(crate) fn new_empty() -> Self {
+    pub fn new_empty() -> Self {
         Self(Box::new([]))
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Validate a row by checking all value and keys against a [Schema]
-    pub(crate) fn validate(&self, schema: &Schema) -> TupleResult<()> {
+    fn validate(&self, schema: &Schema) -> TupleResult<()> {
         if schema.num_columns() != self.len() {
             return Err(TupleError::InvalidValueCount(self.len()));
         }
@@ -137,32 +138,32 @@ impl Row {
     }
 
     /// Returns a reference to a key
-    pub(crate) fn key(&self, index: usize, schema: &Schema) -> Option<&DataType> {
+    pub fn key(&self, index: usize, schema: &Schema) -> Option<&DataType> {
         (index < schema.num_keys()).then(|| &self.0[index])
     }
 
     /// Returns a reference to a value in the row.
-    pub(crate) fn value(&self, index: usize, schema: &Schema) -> Option<&DataType> {
+    pub fn value(&self, index: usize, schema: &Schema) -> Option<&DataType> {
         self.0.get(schema.num_keys() + index)
     }
 
-    pub(crate) fn key_mut(&mut self, index: usize, schema: &Schema) -> Option<&mut DataType> {
+    pub fn key_mut(&mut self, index: usize, schema: &Schema) -> Option<&mut DataType> {
         (index < schema.num_keys()).then(|| &mut self.0[index])
     }
 
-    pub(crate) fn value_mut(&mut self, index: usize, schema: &Schema) -> Option<&mut DataType> {
+    pub fn value_mut(&mut self, index: usize, schema: &Schema) -> Option<&mut DataType> {
         self.0.get_mut(schema.num_keys() + index)
     }
 
-    pub(crate) fn iter(&self) -> Iter<'_, DataType> {
+    pub fn iter(&self) -> Iter<'_, DataType> {
         self.0.iter()
     }
 
-    pub(crate) fn iter_mut(&mut self) -> IterMut<'_, DataType> {
+    pub fn iter_mut(&mut self) -> IterMut<'_, DataType> {
         self.0.iter_mut()
     }
 
-    pub(crate) fn into_inner(self) -> Box<[DataType]> {
+    pub fn into_inner(self) -> Box<[DataType]> {
         self.0
     }
 }
@@ -452,7 +453,7 @@ impl<'a> OwnedTupleAccessor<'a> {
 
     fn add_version(
         &mut self,
-        modified: &[(usize, DataType)],
+        modified: &HashMap<usize, DataType>,
         new_xmin: TransactionId,
     ) -> TupleResult<()> {
         self.tuple
@@ -717,6 +718,7 @@ impl TupleLayout {
 
     fn is_valid_for_snapshot(&self, snapshot: &Snapshot) -> bool {
         let created_before = snapshot.is_committed_before_snapshot(self.version_xmin);
+
         if let Some(xmax) = self.version_xmax {
             return created_before && !snapshot.is_committed_before_snapshot(xmax);
         }
@@ -935,6 +937,11 @@ impl Tuple {
         header.version()
     }
 
+    // Utility to vacuum the tuple after each operation
+    fn vaccum_for_snapshot(&mut self, schema: &Schema, snapshot: &Snapshot) -> TupleResult<usize> {
+        self.vacuum_with_schema(snapshot.xmin(), schema)
+    }
+
     pub(crate) fn xmin(&self) -> TransactionId {
         let (header, _) = TupleHeader::read_from(self.data.effective_data(), 0);
         header.xmin()
@@ -964,7 +971,7 @@ impl Tuple {
     /// Each change: [field_idx: u8][value (aligned)]
     pub(crate) fn add_version_with_schema(
         &mut self,
-        modified: &[(usize, DataType)],
+        modified: &HashMap<usize, DataType>,
         new_xmin: TransactionId,
         schema: &Schema,
     ) -> TupleResult<()> {
@@ -1543,8 +1550,8 @@ mod tuple_tests {
 
         assert_eq!(accessor.version(), 0);
         assert!(!accessor.has_history());
-
-        let modifications = vec![(1, DataType::BigInt(Int64(31)))];
+        let mut modifications = HashMap::new();
+        modifications.insert(1, DataType::BigInt(Int64(31)));
         accessor.add_version(&modifications, 10).unwrap();
 
         assert_eq!(accessor.version(), 1);
@@ -1572,10 +1579,9 @@ mod tuple_tests {
         let builder = TupleBuilder::from_schema(&schema);
         let tuple = builder.build(row, 1).unwrap();
         let mut accessor = OwnedTupleAccessor::new(tuple, &schema);
-
-        accessor
-            .add_version(&[(1, DataType::BigInt(Int64(31)))], 10)
-            .unwrap();
+        let mut modifications = HashMap::new();
+        modifications.insert(1, DataType::BigInt(Int64(31)));
+        accessor.add_version(&modifications, 10).unwrap();
 
         let reader = TupleReader::from_schema(&schema);
         let layout = reader

@@ -1,10 +1,12 @@
 // src/runtime/ops/project.rs
 
 use crate::{
-    runtime::eval::ExpressionEvaluator,
-    runtime::{ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeResult},
+    runtime::{
+        ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeError, RuntimeResult,
+        eval::ExpressionEvaluator,
+    },
     schema::Schema,
-    sql::{planner::logical::ProjectExpr, planner::physical::PhysProjectOp},
+    sql::planner::{logical::ProjectExpr, physical::PhysProjectOp},
     storage::tuple::Row,
     types::DataType,
 };
@@ -64,9 +66,21 @@ impl<Child: RunningExecutor> RunningExecutor for OpenProject<Child> {
                 let evaluator = ExpressionEvaluator::new(&row, &self.input_schema);
                 let mut projected: Vec<DataType> = Vec::with_capacity(self.expressions.len());
 
-                for proj_expr in &self.expressions {
+                for (i, proj_expr) in self.expressions.iter().enumerate() {
                     let value = evaluator.evaluate(&proj_expr.expr)?;
-                    projected.push(value);
+                    println!("Column {i}: got value {:?}", value);
+                    // Cast to the expected output type from the schema
+                    let expected_type = self
+                        .output_schema
+                        .column(i)
+                        .ok_or(RuntimeError::ColumnNotFound(i))?
+                        .datatype();
+                    println!("Column {i}: expected type {:?}", expected_type);
+                    println!("Trying to cast column {i}");
+                    println!("Expected type {}", expected_type);
+                    let casted = value.try_cast(expected_type)?;
+                    println!("Cast suceessful");
+                    projected.push(casted);
                 }
 
                 self.stats.rows_produced += 1;

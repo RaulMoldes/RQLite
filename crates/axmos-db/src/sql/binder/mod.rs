@@ -198,23 +198,26 @@ fn resolve_in_scope(
             .get_entry(table_name)
             .ok_or_else(|| ScopeError::NotFound(DatabaseItem::Table(table_name.to_string())))?;
 
-        let col_idx = entry.schema.column_index.get(column).ok_or_else(|| {
+        let col_idx_in_table = entry.schema.column_index.get(column).ok_or_else(|| {
             ScopeError::NotFound(DatabaseItem::Column(
                 table_name.to_string(),
                 column.to_string(),
             ))
         })?;
 
-        let col = entry.schema.column(*col_idx).ok_or_else(|| {
+        let col = entry.schema.column(*col_idx_in_table).ok_or_else(|| {
             ScopeError::NotFound(DatabaseItem::Column(
                 table_name.to_string(),
                 column.to_string(),
             ))
         })?;
+
+        // Calculate the global column index by adding the offset from previous tables
+        let global_col_idx = calculate_column_offset(scope, entry.scope_index) + *col_idx_in_table;
 
         Ok(ResolvedColumn {
             scope_index: entry.scope_index,
-            column_idx: *col_idx,
+            column_idx: global_col_idx,
             data_type: col.datatype(),
             table_id: entry.table_id,
         })
@@ -224,11 +227,15 @@ fn resolve_in_scope(
         let mut found_count = 0;
 
         for entry in scope.iter() {
-            if let Some(col_idx) = entry.schema.column_index.get(column) {
-                if let Some(col) = entry.schema.column(*col_idx) {
+            if let Some(col_idx_in_table) = entry.schema.column_index.get(column) {
+                if let Some(col) = entry.schema.column(*col_idx_in_table) {
+                    // Calculate the global column index
+                    let global_col_idx =
+                        calculate_column_offset(scope, entry.scope_index) + *col_idx_in_table;
+
                     found = Some(ResolvedColumn {
                         scope_index: entry.scope_index,
-                        column_idx: *col_idx,
+                        column_idx: global_col_idx,
                         data_type: col.datatype(),
                         table_id: entry.table_id,
                     });
@@ -246,4 +253,16 @@ fn resolve_in_scope(
             _ => Err(ScopeError::AmbiguousColumn(column.to_string())),
         }
     }
+}
+
+/// Calculate the column offset for entries before the given scope_index
+fn calculate_column_offset(scope: &QueryScope, target_scope_index: usize) -> usize {
+    let mut offset = 0;
+    for entry in scope.iter() {
+        if entry.scope_index >= target_scope_index {
+            break;
+        }
+        offset += entry.schema.num_columns();
+    }
+    offset
 }

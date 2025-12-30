@@ -12,6 +12,8 @@ use crate::{
     types::{Blob, DataType, DataTypeRef, PageId},
 };
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::{
     Stats,
     base::Relation,
@@ -75,10 +77,10 @@ fn current_timestamp() -> u64 {
 }
 
 #[derive(Debug)]
-pub(crate) struct Catalog {
+pub struct Catalog {
     meta_table: PageId,
     meta_index: PageId,
-    last_stored_object: ObjectId,
+    last_stored_object: AtomicU64,
 }
 
 impl Catalog {
@@ -86,18 +88,13 @@ impl Catalog {
         Self {
             meta_table,
             meta_index,
-            last_stored_object: 0,
+            last_stored_object: AtomicU64::new(0),
         }
     }
 
-    pub(crate) fn fetch_add_last_stored(&mut self, add: u64) -> ObjectId {
-        let current = self.last_stored_object;
-        self.last_stored_object += add;
-        current
-    }
-
-    pub(crate) fn with_last_stored_object(mut self, last_stored: ObjectId) -> Self {
-        self.last_stored_object = last_stored;
+    pub(crate) fn with_last_stored_object(self, last_stored: ObjectId) -> Self {
+        self.last_stored_object
+            .store(last_stored, Ordering::Relaxed);
         self
     }
 
@@ -128,16 +125,14 @@ impl Catalog {
     /// Recomputes the statistics for a single item in the catalog
     fn recompute_relation_stats(
         &mut self,
-        id: ObjectId,
+        relation: &Relation,
         builder: &BtreeBuilder,
         snapshot: &Snapshot,
         sample_rate: f64,
         max_sample_rows: usize,
-    ) -> CatalogResult<()> {
-        let relation = self.get_relation(id, builder, snapshot)?;
+    ) -> CatalogResult<Option<Stats>> {
         let schema = relation.schema();
         let root = relation.root();
-        let mut table = builder.build_tree(root);
 
         // Initialize collectors for each column
         let mut collectors: Vec<StatsCollector> = schema
@@ -155,6 +150,12 @@ impl Catalog {
             (1.0 / sample_rate) as u64
         } else {
             1
+        };
+
+        let mut table = builder.build_tree(root);
+
+        if table.is_empty()? {
+            return Ok(None);
         };
 
         for (i, position) in table.iter_forward()?.enumerate() {
@@ -230,10 +231,7 @@ impl Catalog {
             stats.add_column_stats(col_idx, col_stats);
         }
 
-        let updated_relation = relation.with_stats(stats);
-        self.update_relation(updated_relation, &builder, &snapshot)?;
-
-        Ok(())
+        Ok(Some(stats))
     }
 
     /// Recomputes statistics for all the tables in the catalog
@@ -245,29 +243,48 @@ impl Catalog {
         max_sample_rows: usize,
     ) -> CatalogResult<()> {
         let schema = meta_table_schema();
-        let mut meta_table = builder.build_tree(self.meta_table);
 
         let mut relations_to_analyze: Vec<ObjectId> = Vec::new();
+        {
+            let mut meta_table = builder.build_tree(self.meta_table);
 
-        // Collect all relations from the meta table
-        for iter_result in meta_table.iter_forward()? {
-            if let Ok(pos) = iter_result {
-                meta_table.with_cell_at(pos, |bytes| {
-                    let reader = TupleReader::from_schema(&schema);
-                    if let Some(layout) = reader.parse_for_snapshot(bytes, &snapshot)? {
-                        let tuple = TupleRef::new(bytes, layout);
-                        let accessor = RefTupleAccessor::new(tuple, &schema);
-                        if let Ok(DataTypeRef::BigUInt(value)) = accessor.key(0) {
-                            relations_to_analyze.push(value.value())
+            if meta_table.is_empty()? {
+                return Ok(());
+            }
+
+            // Collect all relations from the meta table
+            for iter_result in meta_table.iter_forward()? {
+                if let Ok(pos) = iter_result {
+                    meta_table.with_cell_at(pos, |bytes| {
+                        let reader = TupleReader::from_schema(&schema);
+                        if let Some(layout) = reader.parse_for_snapshot(bytes, &snapshot)? {
+                            let tuple = TupleRef::new(bytes, layout);
+                            let accessor = RefTupleAccessor::new(tuple, &schema);
+                            if let Ok(DataTypeRef::BigUInt(value)) = accessor.key(0) {
+                                relations_to_analyze.push(value.value())
+                            }
                         }
-                    }
-                    Ok::<(), TupleError>(())
-                })??;
+                        Ok::<(), TupleError>(())
+                    })??;
+                }
             }
         }
 
         for id in relations_to_analyze {
-            self.recompute_relation_stats(id, builder, snapshot, sample_rate, max_sample_rows)?;
+            let relation = self.get_relation(id, builder, snapshot)?;
+            let Some(stats) = self.recompute_relation_stats(
+                &relation,
+                builder,
+                snapshot,
+                sample_rate,
+                max_sample_rows,
+            )?
+            else {
+                continue;
+            };
+
+            let updated_relation = relation.with_stats(stats);
+            self.update_relation(updated_relation, &builder, &snapshot)?;
         }
 
         Ok(())
@@ -357,7 +374,9 @@ impl CatalogTrait for Catalog {
         // Will replace existing relation if it exists.
         tree.upsert(self.meta_table, tuple, &schema)?;
 
-        self.last_stored_object += 1;
+        self.last_stored_object
+            .store(relation.object_id(), Ordering::Relaxed);
+
         Ok(())
     }
 
@@ -392,6 +411,10 @@ impl CatalogTrait for Catalog {
         };
     }
 
+    fn get_next_object_id(&self) -> ObjectId {
+        self.last_stored_object.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// Gets a relation from the meta table
     fn get_relation(
         &self,
@@ -401,6 +424,7 @@ impl CatalogTrait for Catalog {
     ) -> CatalogResult<Relation> {
         let schema = meta_table_schema();
         let mut meta_table = builder.build_tree(self.meta_table);
+
         let row_id = UInt64(id).serialize()?;
         let result = meta_table.search(row_id.as_ref(), &schema)?;
 
@@ -465,6 +489,10 @@ impl CatalogTrait for SharedCatalog {
     ) -> CatalogResult<ObjectId> {
         self.read().bind_relation(name, builder, snapshot)
     }
+
+    fn get_next_object_id(&self) -> ObjectId {
+        self.read().get_next_object_id()
+    }
 }
 
 pub trait CatalogTrait {
@@ -513,6 +541,8 @@ pub trait CatalogTrait {
         let id = self.bind_relation(name, builder, snapshot)?;
         self.get_relation(id, builder, snapshot)
     }
+
+    fn get_next_object_id(&self) -> ObjectId;
 }
 
 #[cfg(test)]
@@ -552,6 +582,10 @@ impl CatalogTrait for MemCatalog {
             .get(name)
             .ok_or(CatalogError::InvalidObjectName(name.to_string()))?;
         Ok(*object)
+    }
+
+    fn get_next_object_id(&self) -> ObjectId {
+        self.meta_table.len() as u64
     }
 
     fn get_relation(
@@ -646,4 +680,97 @@ impl<C: CatalogTrait + Clone> StatsProvider for StatisticsProvider<C> {
 pub trait StatsProvider {
     fn get_stats(&self, object: ObjectId) -> Option<Stats>;
     fn get_column_stats(&self, object: ObjectId, column_index: usize) -> Option<ColumnStats>;
+}
+
+// Test para Catalog::analyze (añadir en catalog.rs dentro de #[cfg(test)])
+#[cfg(test)]
+mod analyze_tests {
+    use super::*;
+    use crate::{
+        DBConfig,
+        io::pager::{Pager, SharedPager},
+        multithreading::coordinator::TransactionCoordinator,
+        schema::base::{Column, Schema},
+        snapshot,
+        storage::page::BtreePage,
+        types::DataTypeKind,
+    };
+    use tempfile::TempDir;
+
+    fn setup_test_db() -> (TempDir, SharedPager, BtreeBuilder, TransactionCoordinator) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.db");
+
+        let pager = Pager::from_config(DBConfig::default(), &path).unwrap();
+        let pager = SharedPager::from(pager);
+
+        let tree_builder = {
+            let p = pager.read();
+            BtreeBuilder::new(p.min_keys_per_page(), p.num_siblings_per_side())
+                .with_pager(pager.clone())
+        };
+
+        let coordinator = TransactionCoordinator::new(pager.clone());
+
+        (dir, pager, tree_builder, coordinator)
+    }
+
+    #[test]
+    fn test_catalog_analyze_empty() {
+        let (_dir, pager, tree_builder, coordinator) = setup_test_db();
+
+        // Allocate meta pages
+        let (meta_table, meta_index) = {
+            let mut p = pager.write();
+            let mt = p.allocate_page::<BtreePage>().unwrap();
+            let mi = p.allocate_page::<BtreePage>().unwrap();
+            (mt, mi)
+        };
+
+        let mut catalog = Catalog::new(meta_table, meta_index);
+        let snapshot = snapshot!(xid: 1, xmin: 0);
+
+        // Analyze on empty catalog should succeed
+        let result = catalog.analyze(&tree_builder, &snapshot, 1.0, 10000);
+        dbg!(&result);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_catalog_analyze_with_table() {
+        let (_dir, pager, tree_builder, coordinator) = setup_test_db();
+
+        // Allocate meta pages
+        let (meta_table, meta_index, table_root) = {
+            let mut p = pager.write();
+            let mt = p.allocate_page::<BtreePage>().unwrap();
+            let mi = p.allocate_page::<BtreePage>().unwrap();
+            let tr = p.allocate_page::<BtreePage>().unwrap();
+            (mt, mi, tr)
+        };
+
+        let mut catalog = Catalog::new(meta_table, meta_index);
+        let snapshot = snapshot!(xid: 1, xmin: 0);
+
+        // Create a test table schema
+        let relation = Relation::table(
+            1,
+            "test_table",
+            table_root,
+            vec![
+                Column::new_with_defaults(DataTypeKind::BigInt, "id"),
+                Column::new_with_defaults(DataTypeKind::Blob, "name"),
+            ],
+        );
+
+        // Store the relation
+        catalog
+            .store_relation(relation, &tree_builder, snapshot.xid())
+            .unwrap();
+
+        // Now analyze
+        let result = catalog.analyze(&tree_builder, &snapshot, 1.0, 10000);
+
+        assert!(result.is_ok());
+    }
 }

@@ -179,6 +179,21 @@ impl<C: CatalogTrait> Binder<C> {
         })
     }
 
+    fn calculate_column_offset(&self, target_scope_index: usize) -> usize {
+        if let Some(scope) = self.scopes.current() {
+            let mut offset = 0;
+            for entry in scope.iter() {
+                if entry.scope_index >= target_scope_index {
+                    break;
+                }
+                offset += entry.schema.num_columns();
+            }
+            offset
+        } else {
+            0
+        }
+    }
+
     /// Binds a reference to a table. Adds to scope any new table entries.
     fn bind_table_ref(&mut self, table_ref: &TableReference) -> BinderResult<BoundTableRef> {
         match table_ref {
@@ -277,11 +292,13 @@ impl<C: CatalogTrait> Binder<C> {
                     // Expand star to all columns from all tables in scope
                     if let Some(scope) = self.scopes.current() {
                         for entry in scope.iter() {
+                            let offset = self.calculate_column_offset(entry.scope_index);
+
                             for (col_idx, col) in entry.schema.iter_columns().enumerate() {
                                 let col_ref = BoundColumnRef {
                                     table_id: entry.table_id,
                                     scope_index: entry.scope_index,
-                                    column_idx: col_idx,
+                                    column_idx: offset + col_idx,
                                     data_type: col.datatype(),
                                 };
 

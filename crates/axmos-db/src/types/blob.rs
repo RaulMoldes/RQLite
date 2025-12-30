@@ -11,7 +11,6 @@ use crate::{
 use std::{
     cmp::{Ordering, PartialEq},
     fmt::{Debug, Display, Formatter, Result as FmtResult},
-    io::{self, Error as IoError, ErrorKind},
     ops::{Deref, DerefMut},
 };
 

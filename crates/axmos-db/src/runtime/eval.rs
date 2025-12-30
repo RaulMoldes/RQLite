@@ -233,6 +233,7 @@ impl<'a> ExpressionEvaluator<'a> {
     /// Evaluate expression as boolean (for WHERE clauses, etc.)
     pub(crate) fn evaluate_as_bool(&self, expr: &BoundExpression) -> EvaluationResult<bool> {
         let result = self.evaluate(expr)?;
+
         match &result {
             DataType::Bool(Bool(b)) => Ok(*b),
             DataType::Null => Ok(false), // NULL is treated as false in boolean context
@@ -263,7 +264,7 @@ impl<'a> ExpressionEvaluator<'a> {
             .as_bool()
             .ok_or(TypeSystemError::UnexpectedDataType(left.kind()))?
             .value();
-        let r = left
+        let r = right
             .as_bool()
             .ok_or(TypeSystemError::UnexpectedDataType(right.kind()))?
             .value();
@@ -284,7 +285,7 @@ impl<'a> ExpressionEvaluator<'a> {
             .as_bool()
             .ok_or(TypeSystemError::UnexpectedDataType(left.kind()))?
             .value();
-        let r = left
+        let r = right
             .as_bool()
             .ok_or(TypeSystemError::UnexpectedDataType(right.kind()))?
             .value();

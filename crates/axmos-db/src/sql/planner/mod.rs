@@ -102,7 +102,7 @@ pub(crate) struct OptimizationStats {
 }
 
 /// Cascades-style query optimizer.
-pub(crate) struct CascadesOptimizer<C: CatalogTrait + Clone> {
+pub struct CascadesOptimizer<C: CatalogTrait + Clone> {
     cost_model: DefaultCostModel,
     deriver: PropertyDeriver<StatisticsProvider<C>>,
     transformation_rules: Vec<Box<dyn TransformationRule>>,
@@ -133,7 +133,7 @@ impl<C: CatalogTrait + Clone> CascadesOptimizer<C> {
     }
 
     /// Creates an optimizer with default configuration.
-    pub(crate) fn with_defaults(catalog: C, builder: BtreeBuilder, snapshot: Snapshot) -> Self {
+    pub fn with_defaults(catalog: C, builder: BtreeBuilder, snapshot: Snapshot) -> Self {
         Self::new(
             crate::DEFAULT_PAGE_SIZE as u32,
             catalog,
@@ -169,7 +169,7 @@ impl<C: CatalogTrait + Clone> CascadesOptimizer<C> {
     /// Main optimization entry point.
     ///
     /// Takes a bound statement and returns an optimized physical plan.
-    pub(crate) fn optimize(&mut self, stmt: &BoundStatement) -> PlannerResult<PhysicalPlan> {
+    pub fn optimize(&mut self, stmt: &BoundStatement) -> PlannerResult<PhysicalPlan> {
         let start = std::time::Instant::now();
 
         // Reset state

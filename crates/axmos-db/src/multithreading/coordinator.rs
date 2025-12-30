@@ -52,10 +52,20 @@ type TupleCommitLog = Arc<RwLock<HashMap<LogicalId, u64>>>;
 #[macro_export]
 macro_rules! snapshot {
     (xid: $xid:expr, xmin: $xmin:expr, xmax: $xmax:expr) => {{
-        $crate::transactions::Snapshot::new(
+        $crate::multithreading::coordinator::Snapshot::new(
             $crate::types::TransactionId::from($xid as u64),
             $crate::types::TransactionId::from($xmin as u64),
-            $crate::types::TransactionId::from($xmax as u64),
+            Some($crate::types::TransactionId::from($xmax as u64)),
+            std::collections::HashSet::new(),
+        )
+    }};
+
+
+    (xid: $xid:expr, xmin: $xmin:expr) => {{
+        $crate::multithreading::coordinator::Snapshot::new(
+            $crate::types::TransactionId::from($xid as u64),
+            $crate::types::TransactionId::from($xmin as u64),
+            None,
             std::collections::HashSet::new(),
         )
     }};
@@ -63,10 +73,10 @@ macro_rules! snapshot {
     (xid: $xid:expr, xmin: $xmin:expr, xmax: $xmax:expr, active: [$($active:expr),* $(,)?]) => {{
         let mut active_set = std::collections::HashSet::new();
         $(active_set.insert($crate::types::TransactionId::from($active as u64));)*
-        $crate::transactions::Snapshot::new(
+        $crate::multithreading::Snapshot::new(
             $crate::types::TransactionId::from($xid as u64),
             $crate::types::TransactionId::from($xmin as u64),
-            $crate::types::TransactionId::from($xmax as u64),
+            Some($crate::types::TransactionId::from($xmax as u64)),
             active_set,
         )
     }};
@@ -151,7 +161,7 @@ impl Snapshot {
         // Transaction started after our snapshot,
         // Then it is impossible it committed before the snapshot was taken
         if let Some(max_tx) = self.xmax
-            && max_tx <= txid
+            && max_tx < txid
         {
             return false;
         };
@@ -294,6 +304,20 @@ impl TransactionCoordinator {
         self.last_created_transaction
             .store(last_id, Ordering::Relaxed);
         self
+    }
+
+    pub fn with_last_committed_transaction(mut self, last_id: TransactionId) -> Self {
+        self.last_committed = Some(last_id);
+        self
+    }
+
+    pub fn get_last_committed(&self) -> TransactionId {
+        self.last_committed.unwrap_or(0)
+    }
+
+    pub fn get_next_transaction(&self) -> TransactionId {
+        self.last_created_transaction
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     /// Create a snapshot of the database state for a given transaction id.

@@ -1,6 +1,6 @@
 use crate::{
     runtime::{
-        ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeResult,
+        ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeError, RuntimeResult,
         context::TransactionContext, eval::ExpressionEvaluator,
     },
     sql::planner::physical::SeqScanOp,
@@ -13,7 +13,7 @@ use crate::schema::catalog::CatalogTrait;
 pub(crate) struct OpenSeqScan<Acc: TreeReader + Clone> {
     op: SeqScanOp,
     ctx: TransactionContext<Acc>,
-    cursor: BtreePositionalIterator<Acc>,
+    cursor: Option<BtreePositionalIterator>,
     stats: ExecutionStats,
 }
 
@@ -59,7 +59,7 @@ where
         let schema = table.schema();
         let mut table = ctx.build_tree(root_page);
 
-        let cursor = table.iter_forward()?;
+        let cursor = table.iter_forward().ok();
         Ok(Self {
             op,
             ctx,
@@ -100,8 +100,18 @@ where
 {
     type Closed = ClosedSeqScan<Acc>;
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
+        // If building the cursor failed, it means the table was empty
+        if self.cursor.is_none() {
+            return Ok(None);
+        };
+
         loop {
-            let next_pos = match self.cursor.next() {
+            let next_pos = match self
+                .cursor
+                .as_mut()
+                .ok_or(RuntimeError::InvalidState)?
+                .next()
+            {
                 Some(res) => res?,
                 None => {
                     return Ok(None);
@@ -111,7 +121,11 @@ where
             self.stats.rows_scanned += 1;
             let snapshot = self.ctx.snapshot();
 
-            let mut tree = self.cursor.get_tree();
+            let mut tree = self
+                .cursor
+                .as_ref()
+                .ok_or(RuntimeError::InvalidState)?
+                .get_tree();
             let maybe_row = tree
                 .get_row_at(next_pos, &self.op.output_schema, &snapshot)?
                 .filter(|r| {

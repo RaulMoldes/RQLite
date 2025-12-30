@@ -333,7 +333,7 @@ mod cell_comparator_tests {
         schema::{Column, Schema},
         storage::{
             cell::OwnedCell,
-            tuple::{Row, Tuple, TupleBuilder},
+            tuple::{Row, TupleBuilder},
         },
         tree::cell_ops::CellComparator,
         types::{Blob, DataType, DataTypeKind, UInt64},
@@ -400,7 +400,6 @@ mod cell_comparator_tests {
         assert_eq!(result, Ordering::Less);
     }
 
-    /// Test 8: CellComparator - target mayor que celda
     #[test]
     fn test_cell_comparator_greater_than() {
         let schema = Schema::new_table(vec![
@@ -557,7 +556,7 @@ mod reassembler_tests {
         schema::{Column, Schema},
         storage::{
             cell::OwnedCell,
-            tuple::{Row, Tuple, TupleBuilder, TupleReader, TupleRef},
+            tuple::{Row, TupleBuilder, TupleReader, TupleRef},
         },
         tree::cell_ops::{CellComparator, Reassembler},
         types::{Blob, DataType, DataTypeKind, DataTypeRef, UInt64},
@@ -572,7 +571,6 @@ mod reassembler_tests {
         Pager::from_config(config, &db_path).unwrap().into()
     }
 
-    /// Test 12: Reassembler con celda normal (no overflow)
     #[test]
     fn test_reassembler_normal_cell() {
         let schema = Schema::new_table(vec![
@@ -609,7 +607,6 @@ mod reassembler_tests {
         }
     }
 
-    /// Test 13: Comparación después de reassembly
     #[test]
     fn test_comparison_after_reassembly() {
         let schema = Schema::new_table(vec![
@@ -633,24 +630,20 @@ mod reassembler_tests {
         reassembler.reassemble(cell.as_cell_ref()).unwrap();
         let reassembled_data = reassembler.into_boxed_slice();
 
-        // Ahora usar CellComparator.compare_keys directamente con los datos reassembled
         let comparator = CellComparator::new(&schema, pager);
 
-        // Comparar con key = 100 (igual)
         let search_key = UInt64(100);
         let result = comparator
             .compare_keys(search_key.as_ref(), &reassembled_data, 0)
             .unwrap();
         assert_eq!(result, Ordering::Equal);
 
-        // Comparar con key = 50 (menor)
         let search_key = UInt64(50);
         let result = comparator
             .compare_keys(search_key.as_ref(), &reassembled_data, 0)
             .unwrap();
         assert_eq!(result, Ordering::Less);
 
-        // Comparar con key = 150 (mayor)
         let search_key = UInt64(150);
         let result = comparator
             .compare_keys(search_key.as_ref(), &reassembled_data, 0)

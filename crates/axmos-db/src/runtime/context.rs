@@ -5,10 +5,9 @@ use crate::{
         pager::{BtreeBuilder, SharedPager},
     },
     multithreading::coordinator::{Snapshot, TransactionHandle},
-    schema::{Schema, catalog::SharedCatalog},
-    storage::page::BtreePage,
+    schema::catalog::SharedCatalog,
     tree::{
-        accessor::{PositionStack, ReadAccessor, TreeReader},
+        accessor::{BtreeReadAccessor, BtreeWriteAccessor, TreeReader},
         bplustree::Btree,
     },
     types::{Lsn, ObjectId, PageId, RowId, TransactionId},
@@ -146,4 +145,9 @@ where
         BtreeBuilder::new(pager.min_keys_per_page(), pager.num_siblings_per_side())
             .with_pager(self.pager.clone())
     }
+}
+
+pub(crate) enum RuntimeContext {
+    Read(TransactionContext<BtreeReadAccessor>),
+    Write(TransactionContext<BtreeWriteAccessor>),
 }

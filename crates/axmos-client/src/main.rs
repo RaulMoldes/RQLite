@@ -1,196 +1,398 @@
-// src/bin/client.rs
+//! AxmosDB Client
+//!
+//! Command-line client for connecting to an AxmosDB server.
+//!
+//! Usage:
+//!   axmos-client -h <host> -p <port>
+//!
+//! Interactive commands:
+//!   CREATEDB <path>     - Create a new database
+//!   OPENDB <path>       - Open an existing database
+//!   CLOSE             - Close current database
+//!   EXPLAIN <query>   - Show query execution plan
+//!   ANALYZE [rate] [max_rows] - Update statistics
+//!   PING              - Check server health
+//!   QUIT / EXIT       - Disconnect and exit
+//!   SHUTDOWN          - Shutdown the server
+//!   <sql>             - Execute SQL query
 
-mod protocol;
+use axmosdb::tcp::{Request, Response, TcpError, recv_response, send_request};
 
-use protocol::{SqlRequest, SqlResponse};
 use std::{
-    io::{self, BufRead, BufReader, Write},
+    env,
+    io::{self, BufRead, BufReader, BufWriter, Write},
     net::TcpStream,
+    process,
+    time::Instant,
 };
 
-const DEFAULT_HOST: &str = "127.0.0.1";
-const DEFAULT_PORT: u16 = 5433;
+struct ClientConfig {
+    host: String,
+    port: u16,
+}
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-
-    let host = args.get(1).map(String::as_str).unwrap_or(DEFAULT_HOST);
-    let port: u16 = args
-        .get(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_PORT);
-
-    let addr = format!("{}:{}", host, port);
-
-    println!("Connecting to AxmosDB at {}...", addr);
-
-    let stream = match TcpStream::connect(&addr) {
-        Ok(s) => {
-            println!("Connected successfully!");
-            println!("Type SQL queries ending with ';' or :quit to exit\n");
-            s
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".into(),
+            port: 5432,
         }
-        Err(e) => {
-            eprintln!("Failed to connect: {}", e);
-            return;
-        }
-    };
+    }
+}
 
-    let mut writer = match stream.try_clone() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to clone stream: {}", e);
-            return;
-        }
-    };
+impl ClientConfig {
+    fn from_args() -> Result<Self, String> {
+        let args: Vec<String> = env::args().collect();
+        let mut config = Self::default();
 
-    let mut reader = BufReader::new(stream);
-    let stdin = io::stdin();
-    let mut query_buffer = String::new();
-
-    loop {
-        // Show appropriate prompt
-        if query_buffer.is_empty() {
-            print!("axmosdb> ");
-        } else {
-            print!("      -> ");
-        }
-
-        if io::stdout().flush().is_err() {
-            break;
-        }
-
-        let mut input = String::new();
-        if stdin.read_line(&mut input).is_err() {
-            eprintln!("Failed to read input");
-            break;
-        }
-
-        let trimmed = input.trim();
-
-        // Handle special commands
-        match trimmed.to_lowercase().as_str() {
-            ":quit" | ":exit" | "\\q" => {
-                println!("Goodbye!");
-                break;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "-h" | "--host" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err("Missing host value".into());
+                    }
+                    config.host = args[i].clone();
+                }
+                "-p" | "--port" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err("Missing port value".into());
+                    }
+                    config.port = args[i].parse().map_err(|_| "Invalid port number")?;
+                }
+                "--help" => {
+                    print_usage();
+                    process::exit(0);
+                }
+                arg => {
+                    return Err(format!("Unknown argument: {}", arg));
+                }
             }
-            ":help" | "\\h" | "\\?" => {
-                print_help();
+            i += 1;
+        }
+
+        Ok(config)
+    }
+
+    fn address(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+fn print_usage() {
+    eprintln!("AxmosDB Client v0.1.0");
+    eprintln!();
+    eprintln!("Usage: axmos-client [OPTIONS]");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  -h, --host <HOST>    Server host (default: 127.0.0.1)");
+    eprintln!("  -p, --port <PORT>    Server port (default: 5432)");
+    eprintln!("  --help               Show this help message");
+    eprintln!();
+    eprintln!("Interactive Commands:");
+    eprintln!("  CREATEDB <path>              Create a new database");
+    eprintln!("  OPENDB <path>                Open an existing database");
+    eprintln!("  CLOSE                      Close current database");
+    eprintln!("  EXPLAIN <query>            Show query execution plan");
+    eprintln!("  ANALYZE [rate] [max_rows]  Update table statistics");
+    eprintln!("  PING                       Check server health");
+    eprintln!("  QUIT, EXIT                 Disconnect and exit");
+    eprintln!("  SHUTDOWN                   Shutdown the server");
+    eprintln!("  <sql>                      Execute SQL statement");
+    eprintln!();
+    eprintln!("Examples:");
+    eprintln!("  axmos-client -h localhost -p 5433");
+    eprintln!("  axmos-client --port 8080");
+}
+
+struct Client {
+    reader: BufReader<TcpStream>,
+    writer: BufWriter<TcpStream>,
+}
+
+impl Client {
+    fn connect(config: &ClientConfig) -> Result<Self, String> {
+        let addr = config.address();
+        let stream = TcpStream::connect(&addr)
+            .map_err(|e| format!("Failed to connect to {}: {}", addr, e))?;
+
+        let reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+        let writer = BufWriter::new(stream);
+
+        Ok(Self { reader, writer })
+    }
+
+    fn send(&mut self, request: Request) -> Result<Response, TcpError> {
+        send_request(&mut self.writer, &request)?;
+        recv_response(&mut self.reader)
+    }
+
+    fn run_interactive(&mut self) {
+        let stdin = io::stdin();
+        let mut stdout = io::stdout();
+
+        loop {
+            // Print prompt
+            print!("axmos> ");
+            stdout.flush().ok();
+
+            // Read line
+            let mut line = String::new();
+            match stdin.lock().read_line(&mut line) {
+                Ok(0) => {
+                    // EOF
+                    println!();
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("Read error: {}", e);
+                    break;
+                }
+            }
+
+            let line = line.trim();
+            if line.is_empty() {
                 continue;
             }
-            ":clear" | "\\c" => {
-                query_buffer.clear();
-                println!("Query buffer cleared.");
-                continue;
+
+            // Parse and execute command
+            match self.execute_command(line) {
+                CommandResult::Continue => {}
+                CommandResult::Exit => break,
+                CommandResult::ServerShutdown => {
+                    println!("Server is shutting down.");
+                    break;
+                }
             }
-            "" => {
-                continue;
+        }
+    }
+
+    fn execute_command(&mut self, input: &str) -> CommandResult {
+        let upper = input.to_uppercase();
+        let parts: Vec<&str> = upper.splitn(2, char::is_whitespace).collect();
+        let cmd = parts[0].to_uppercase();
+        let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+
+        // Handle local commands
+        match cmd.as_str() {
+            "QUIT" | "EXIT" | "\\Q" => {
+                return CommandResult::Exit;
+            }
+            "HELP" | "\\?" => {
+                print_interactive_help();
+                return CommandResult::Continue;
             }
             _ => {}
         }
 
-        // Accumulate query
-        if !query_buffer.is_empty() {
-            query_buffer.push(' ');
-        }
-        query_buffer.push_str(trimmed);
-
-        // Check if query is complete (ends with semicolon)
-        if !query_buffer.ends_with(';') {
-            continue;
-        }
-
-        // Remove trailing semicolon
-        let query = query_buffer.trim_end_matches(';').trim().to_string();
-        query_buffer.clear();
-
-        if query.is_empty() {
-            continue;
-        }
-
-        // Send request
-        let request = SqlRequest { sql: query };
-
-        let json = match serde_json::to_string(&request) {
-            Ok(j) => j,
-            Err(e) => {
-                eprintln!("Failed to serialize request: {}", e);
-                continue;
+        // Build request
+        let request = match cmd.as_str() {
+            "CREATEDB" => {
+                if arg.is_empty() {
+                    eprintln!("Usage: CREATEDB <database_path>");
+                    return CommandResult::Continue;
+                }
+                Request::Create(arg.to_string())
+            }
+            "OPENDB" => {
+                if arg.is_empty() {
+                    eprintln!("Usage: OPENDB <database_path>");
+                    return CommandResult::Continue;
+                }
+                Request::Open(arg.to_string())
+            }
+            "CLOSE" => Request::Close,
+            "PING" => Request::Ping,
+            "SHUTDOWN" => Request::Shutdown,
+            "EXPLAIN" => {
+                if arg.is_empty() {
+                    eprintln!("Usage: EXPLAIN <sql_query>");
+                    return CommandResult::Continue;
+                }
+                Request::Explain(arg.to_string())
+            }
+            "ANALYZE" => {
+                let (sample_rate, max_rows) = parse_analyze_args(arg);
+                Request::Analyze {
+                    sample_rate,
+                    max_sample_rows: max_rows,
+                }
+            }
+            _ => {
+                // Assume it's SQL
+                Request::Sql(input.to_string())
             }
         };
 
-        if let Err(e) = writer.write_all(format!("{}\n", json).as_bytes()) {
-            eprintln!("Connection lost: {}", e);
-            break;
-        }
-
-        if let Err(e) = writer.flush() {
-            eprintln!("Failed to flush: {}", e);
-            break;
-        }
-
-        // Read response
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => {
-                println!("Server closed connection.");
-                break;
+        // Send request and handle response
+        let start = Instant::now();
+        match self.send(request) {
+            Ok(response) => {
+                let elapsed = start.elapsed();
+                self.print_response(response, elapsed)
             }
-            Ok(_) => {}
             Err(e) => {
-                eprintln!("Connection error: {}", e);
-                break;
+                eprintln!("Error: {}", e);
+                CommandResult::Continue
             }
         }
+    }
 
-        if line.trim().is_empty() {
-            println!("(empty response)");
-            continue;
-        }
-
-        match serde_json::from_str::<SqlResponse>(&line) {
-            Ok(resp) => {
-                if resp.success {
-                    println!("{}", resp.result);
-                    if let Some(rows) = resp.row_count {
-                        println!("({} rows)", rows);
-                    }
-                    if let Some(elapsed) = resp.elapsed_ms {
-                        println!("Time: {:.2}ms", elapsed);
-                    }
+    fn print_response(&self, response: Response, elapsed: std::time::Duration) -> CommandResult {
+        match response {
+            Response::Ok(msg) => {
+                println!("{}", msg);
+                println!("({:.3}s)", elapsed.as_secs_f64());
+            }
+            Response::Error(msg) => {
+                eprintln!("ERROR: {}", msg);
+            }
+            Response::Rows { columns, data } => {
+                if data.is_empty() {
+                    println!("(0 rows)");
                 } else {
-                    println!("ERROR: {}", resp.result);
+                    print_table(&columns, &data);
+                    println!(
+                        "({} row{}, {:.3}s)",
+                        data.len(),
+                        if data.len() == 1 { "" } else { "s" },
+                        elapsed.as_secs_f64()
+                    );
                 }
             }
-            Err(e) => {
-                eprintln!("Invalid response: {}. Raw: {}", e, line.trim());
+            Response::RowsAffected(count) => {
+                println!(
+                    "{} row{} affected ({:.3}s)",
+                    count,
+                    if count == 1 { "" } else { "s" },
+                    elapsed.as_secs_f64()
+                );
+            }
+            Response::Ddl(msg) => {
+                println!("{}", msg);
+                println!("({:.3}s)", elapsed.as_secs_f64());
+            }
+            Response::Explain(plan) => {
+                println!("QUERY PLAN");
+                println!("{}", "-".repeat(60));
+                println!("{}", plan);
+                println!("{}", "-".repeat(60));
+                println!("({:.3}s)", elapsed.as_secs_f64());
+            }
+            Response::Pong => {
+                println!("PONG ({:.3}s)", elapsed.as_secs_f64());
+            }
+            Response::Goodbye => {
+                println!("Connection closed.");
+                return CommandResult::Exit;
+            }
+            Response::ShuttingDown => {
+                return CommandResult::ServerShutdown;
             }
         }
-
-        println!();
+        CommandResult::Continue
     }
 }
 
-fn print_help() {
-    println!(
-        r#"
-AxmosDB Client Commands:
-========================
-  :quit, :exit, \q    Exit the client
-  :help, \h, \?       Show this help
-  :clear, \c          Clear the query buffer
+enum CommandResult {
+    Continue,
+    Exit,
+    ServerShutdown,
+}
 
-SQL Examples:
-  CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);
-  INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30);
-  SELECT * FROM users;
-  SELECT * FROM users WHERE age > 25;
-  UPDATE users SET age = 31 WHERE name = 'Alice';
-  DELETE FROM users WHERE id = 1;
+fn parse_analyze_args(arg: &str) -> (f64, usize) {
+    let parts: Vec<&str> = arg.split_whitespace().collect();
+    let sample_rate = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    let max_rows = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(10000);
+    (sample_rate, max_rows)
+}
 
-Tips:
-  - End queries with semicolon (;)
-  - Multi-line queries are supported
-"#
-    );
+fn print_interactive_help() {
+    println!("Available commands:");
+    println!("  CREATE <path>              Create a new database");
+    println!("  OPEN <path>                Open an existing database");
+    println!("  CLOSE                      Close current database connection");
+    println!("  EXPLAIN <query>            Show query execution plan");
+    println!("  ANALYZE [rate] [max_rows]  Update table statistics");
+    println!("  PING                       Check server health");
+    println!("  QUIT, EXIT, \\q             Disconnect and exit");
+    println!("  HELP, \\?                   Show this help");
+    println!("  SHUTDOWN                   Shutdown the server (admin)");
+    println!();
+    println!("Any other input is treated as a SQL statement.");
+}
+
+fn print_table(columns: &[String], data: &[Vec<String>]) {
+    if columns.is_empty() {
+        return;
+    }
+
+    // Calculate column widths
+    let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
+    for row in data {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(cell.len());
+            }
+        }
+    }
+
+    // Print header
+    print_row(columns, &widths);
+    print_separator(&widths);
+
+    // Print data rows
+    for row in data {
+        print_row(row, &widths);
+    }
+}
+
+fn print_row(cells: &[String], widths: &[usize]) {
+    print!("|");
+    for (i, cell) in cells.iter().enumerate() {
+        let width = widths.get(i).copied().unwrap_or(cell.len());
+        print!(" {:width$} |", cell, width = width);
+    }
+    println!();
+}
+
+fn print_separator(widths: &[usize]) {
+    print!("+");
+    for width in widths {
+        print!("{:-<width$}--+", "", width = width);
+    }
+    println!();
+}
+
+fn main() {
+    let config = match ClientConfig::from_args() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            eprintln!();
+            print_usage();
+            process::exit(1);
+        }
+    };
+
+    println!("AxmosDB Client v0.1.0");
+    println!("Connecting to {}...", config.address());
+
+    let mut client = match Client::connect(&config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{}", e);
+            process::exit(1);
+        }
+    };
+
+    println!("Connected. Type 'HELP' for available commands.");
+    println!();
+
+    client.run_interactive();
+
+    println!("Goodbye!");
 }

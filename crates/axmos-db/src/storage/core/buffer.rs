@@ -760,10 +760,6 @@ where
 
         let offset = self.free_space_pointer() - cell.total_size() as u32;
 
-        println!(
-            "Inserting cell size: {}, at offset: {}",
-            cell_total_size, offset
-        );
         // REVIEW
         if !(cell_total_size as usize).is_multiple_of(CELL_ALIGNMENT as usize)
             || !(offset as usize).is_multiple_of(CELL_ALIGNMENT as usize)

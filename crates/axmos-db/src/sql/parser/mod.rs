@@ -36,13 +36,13 @@ pub type ParseResult<T> = Result<T, ParserError>;
 
 /// Main parser implementation.
 /// Uses a pratt parsing approach to parse sql expressions into AST nodes.
-pub(crate) struct Parser {
+pub struct Parser {
     lexer: Lexer,
     current_token: Token,
 }
 
 impl Parser {
-    pub(crate) fn new(sql: &str) -> Self {
+    pub fn new(sql: &str) -> Self {
         let mut lexer = Lexer::new(sql);
         let current_token = lexer.next_token();
         Parser {

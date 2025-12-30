@@ -5,7 +5,7 @@ use crate::{
             buffer::{Payload, PayloadMut, PayloadRef},
             traits::WritableLayout,
         },
-        tuple::{OwnedTupleAccessor, Tuple},
+        tuple::Tuple,
     },
     types::PageId,
 };

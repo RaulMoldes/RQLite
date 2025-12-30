@@ -1273,7 +1273,7 @@ fn test_optimize_limit_offset() {
 #[test]
 fn test_optimize_order_by_limit() {
     let plan = optimize_sql("SELECT name FROM users ORDER BY age LIMIT 5");
-
+    println!("{}", plan.explain());
     assert!(has_operator(&plan, "Sort"));
     assert!(has_operator(&plan, "Limit"));
 }
