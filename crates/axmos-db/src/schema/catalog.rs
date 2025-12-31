@@ -689,7 +689,7 @@ mod analyze_tests {
         DBConfig,
         io::pager::{Pager, SharedPager},
         multithreading::coordinator::TransactionCoordinator,
-        schema::base::{Column, Schema},
+        schema::base::Column,
         snapshot,
         storage::page::BtreePage,
         types::DataTypeKind,

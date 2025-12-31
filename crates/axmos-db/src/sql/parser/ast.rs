@@ -290,7 +290,7 @@ pub struct WhenClause {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum BinaryOperator {
+pub enum BinaryOperator {
     // Arithmetic
     Plus,
     Minus,
@@ -325,7 +325,7 @@ pub(crate) enum BinaryOperator {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum UnaryOperator {
+pub enum UnaryOperator {
     Plus,
     Minus,
     Not,
@@ -421,7 +421,7 @@ impl Simplify for TableReference {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum JoinType {
+pub enum JoinType {
     Inner,
     Left,
     Right,

@@ -88,7 +88,7 @@ pub enum PhysicalOperator {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct PhysMaterializeOp {
+pub struct PhysMaterializeOp {
     pub(crate) schema: Schema,
 }
 

@@ -1,11 +1,10 @@
-//! Plan builder - converts bound statements to logical plans in the memo.
+//! Plan builder
 //!
 //! This module translates the output of the binder (`BoundStatement`) into
 //! logical operators that can be optimized by the Cascades optimizer.
 
 use crate::{
-    io::pager::BtreeBuilder,
-    multithreading::coordinator::Snapshot,
+
     schema::{
         Schema,
         catalog::{CatalogTrait, StatisticsProvider},

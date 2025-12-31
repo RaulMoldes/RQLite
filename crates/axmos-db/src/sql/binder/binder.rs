@@ -14,7 +14,7 @@ use crate::{
         TableReference, TransactionStatement, UnaryOperator, UpdateStatement, Values,
         WithStatement,
     },
-    types::{DataType, DataTypeKind, ObjectId},
+    types::{DataType, DataTypeKind},
 };
 
 use std::{
@@ -24,7 +24,7 @@ use std::{
 };
 
 use super::bounds::*;
-use super::{QueryScope, ResolvedColumn, ScopeEntry, ScopeError, ScopeStack};
+use super::{ScopeEntry, ScopeError, ScopeStack};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinderError {

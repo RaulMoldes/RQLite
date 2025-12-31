@@ -1,5 +1,5 @@
 use crate::{
-    schema::base::{Column, Relation, Schema},
+    schema::base::Schema,
     types::{DataTypeKind, ObjectId},
 };
 

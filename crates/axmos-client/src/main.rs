@@ -171,8 +171,8 @@ impl Client {
     }
 
     fn execute_command(&mut self, input: &str) -> CommandResult {
-        let upper = input.to_uppercase();
-        let parts: Vec<&str> = upper.splitn(2, char::is_whitespace).collect();
+        //let upper = input.to_uppercase();
+        let parts: Vec<&str> = input.splitn(2, char::is_whitespace).collect();
         let cmd = parts[0].to_uppercase();
         let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
 

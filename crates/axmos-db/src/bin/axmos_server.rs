@@ -20,10 +20,9 @@ use axmosdb::{
     common::DBConfig,
     io::pager::BtreeBuilder,
     runtime::QueryResult,
-    schema::SharedCatalog,
     sql::{binder::binder::Binder, parser::Parser, planner::CascadesOptimizer},
     tcp::{Request, Response, TcpError, recv_request, send_response},
-    types::DataType,
+
 };
 
 use std::{
