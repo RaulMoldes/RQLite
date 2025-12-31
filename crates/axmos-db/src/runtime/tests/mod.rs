@@ -950,7 +950,7 @@ fn test_insert_single_row() {
     handle.commit().expect("Failed to commit");
 
     let results =
-        harness.execute_sql("INSERT INTO users VALUES (1, 'Alice', 'alice@test.com', 25)");
+        harness.execute_sql("INSERT INTO users VALUES ('Alice', 'alice@test.com', 25)");
 
     assert_eq!(results.len(), 1);
     match &results[0][0] {
@@ -970,9 +970,9 @@ fn test_insert_multiple_rows() {
     harness.create_table("users", 1, users_columns(), handle.id());
     handle.commit().expect("Failed to commit");
 
-    harness.execute_sql("INSERT INTO users VALUES (1, 'Alice', 'alice@test.com', 25)");
-    harness.execute_sql("INSERT INTO users VALUES (2, 'Bob', 'bob@test.com', 30)");
-    harness.execute_sql("INSERT INTO users VALUES (3, 'Charlie', 'charlie@test.com', 35)");
+    harness.execute_sql("INSERT INTO users VALUES ('Alice', 'alice@test.com', 25)");
+    harness.execute_sql("INSERT INTO users VALUES ('Bob', 'bob@test.com', 30)");
+    harness.execute_sql("INSERT INTO users VALUES ('Charlie', 'charlie@test.com', 35)");
 
     let count = harness.execute_sql_count("SELECT COUNT(*) FROM users");
     assert_eq!(count, 3);
@@ -1317,4 +1317,84 @@ fn test_empty_result_aggregation() {
 
     let results = harness.execute_sql("SELECT SUM(age) FROM users");
     assert!(matches!(&results[0][0], DataType::Null));
+}
+
+#[test]
+fn test_insert_multiple_rows_single_statement() {
+    let harness = TestHarness::new();
+
+    let handle = harness.begin_transaction();
+    harness.create_table("users", 1, users_columns(), handle.id());
+    handle.commit().expect("Failed to commit");
+
+    // Insert multiple rows in a single INSERT statement
+    let results = harness.execute_sql(
+        "INSERT INTO users VALUES
+            ('Alice', 'alice@test.com', 25),
+            ('Bob', 'bob@test.com', 30),
+            ('Charlie', 'charlie@test.com', 35),
+            ('Diana', 'diana@test.com', 28),
+            ('Eve', 'eve@test.com', 22)",
+    );
+
+    // Should return count of inserted rows
+    assert_eq!(results.len(), 1);
+    match &results[0][0] {
+        DataType::BigUInt(v) => assert_eq!(v.value(), 5),
+        other => panic!("Expected BigUInt, got {:?}", other),
+    }
+
+    // Verify all rows were inserted
+    let count = harness.execute_sql_count("SELECT COUNT(*) FROM users");
+    assert_eq!(count, 5);
+
+    // Verify data integrity
+    let rows = harness.execute_sql("SELECT id, name, age FROM users ORDER BY id");
+    assert_eq!(rows.len(), 5);
+
+    // Check first and last row
+    match &rows[0][0] {
+        DataType::BigUInt(v) => assert_eq!(v.value(), 0),
+        other => panic!("Expected BigUInt for id, got {:?}", other),
+    }
+    match &rows[4][0] {
+        DataType::BigUInt(v) => assert_eq!(v.value(), 4),
+        other => panic!("Expected BigUInt for id, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_update_int_column_with_literal() {
+    let harness = TestHarness::new();
+
+    let handle = harness.begin_transaction();
+
+    // Create table with INT column (not BIGINT)
+    let columns = vec![
+        Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+        Column::new_with_defaults(DataTypeKind::Int, "value"),
+    ];
+    harness.create_table("test_table", 1, columns, handle.id());
+
+    harness.insert_row_direct(
+        1,
+        vec![DataType::BigUInt(UInt64(1)), DataType::Int(100.into())],
+        &handle,
+    );
+    handle.commit().expect("Failed to commit");
+
+    // This should work (updating INT column with a literal)
+    let results = harness.execute_sql("UPDATE test_table SET value = 150 WHERE id = 1");
+
+    match &results[0][0] {
+        DataType::BigUInt(v) => assert_eq!(v.value(), 1),
+        other => panic!("Expected BigUInt, got {:?}", other),
+    }
+
+    // Verify the update
+    let rows = harness.execute_sql("SELECT value FROM test_table WHERE id = 1");
+    match &rows[0][0] {
+        DataType::Int(v) => assert_eq!(v.value(), 150),
+        other => panic!("Expected Int, got {:?}", other),
+    }
 }

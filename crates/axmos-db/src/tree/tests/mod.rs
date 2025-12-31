@@ -5,9 +5,9 @@ use crate::{param_tests, param2_tests};
 
 #[allow(unused_imports)]
 use tests::{
-    test_delete, test_insert_delete_reinsert, test_interleaved_insert, test_random_delete,
-    test_random_insert, test_reverse_insert, test_sequential_insert, test_upsert,
-    test_zigzag_insert,
+    test_dealloc, test_dealloc_with_overflow, test_delete, test_insert_delete_reinsert,
+    test_interleaved_insert, test_random_delete, test_random_insert, test_reverse_insert,
+    test_sequential_insert, test_upsert, test_zigzag_insert,
 };
 
 // Sequential insertion tests
@@ -54,3 +54,9 @@ param2_tests!(test_delete, count, delete_count => [
     (500, 250),
     (500, 450)
 ]);
+
+// Dealloc tests
+param_tests!(test_dealloc, count => [10, 50, 100, 500]);
+
+// Dealloc with overflow tests (smaller counts due to larger tuples)
+param_tests!(test_dealloc_with_overflow, count => [10, 30, 50]);

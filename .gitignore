@@ -1,1 +1,3 @@
 /target
+*.axm
+.vscode

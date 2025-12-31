@@ -3,18 +3,15 @@ use crate::{
     io::pager::{Pager, SharedPager},
     multithreading::coordinator::Snapshot,
     schema::{Column, Schema},
-    storage::{
-        page::BtreePage,
-        tuple::{Row, Tuple, TupleBuilder, TupleReader, TupleRef},
-    },
+    storage::tuple::{Row, Tuple, TupleBuilder},
     tree::{
-        accessor::{BtreeWriteAccessor, TreeReader},
+        accessor::TreeReader,
         bplustree::{Btree, BtreeError, BtreeResult, SearchResult},
     },
     types::{Blob, DataType, DataTypeKind, UInt64},
 };
 
-use rand::{Rng, SeedableRng, seq::SliceRandom};
+use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha20Rng;
 
 use std::{
@@ -69,7 +66,7 @@ impl Default for TestConfig {
             page_size: 4096,
             min_keys: 3,
             siblings: 1,
-            cache_size: 64,
+            cache_size: 200,
         }
     }
 }

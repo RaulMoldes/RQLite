@@ -59,6 +59,7 @@ where
         self.log_operation(Commit)?;
         self.handle.commit()?;
         self.log_operation(End)?;
+        self.pager().write().flush_wal()?;
         Ok(())
     }
 
@@ -66,6 +67,7 @@ where
         self.log_operation(Abort)?;
         self.handle.abort()?;
         self.log_operation(End)?;
+        self.pager().write().flush_wal()?;
         Ok(())
     }
 

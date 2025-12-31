@@ -32,7 +32,7 @@ use std::{
 /// Implementation of a pager.
 pub struct Pager {
     file: DBFile,
-    wal: WriteAheadLog, // TODO: Implement recoverability from the [WAL].
+    wal: WriteAheadLog,
     cache: PageCache,
     db_header: Option<PageZeroHeader>, // Page zero header is always in memory
 }
@@ -102,25 +102,26 @@ impl<'a> FileOperations for Pager {
     }
 }
 
-impl Pager {
-    /// Runs the recovery and truncates the write ahead log
-    pub(crate) fn run_recovery(
-        &mut self,
-        context: &mut TransactionContext<BtreeWriteAccessor>,
-    ) -> RuntimeResult<()> {
-        let analysis = self.wal.run_analysis()?;
-        self.run_undo(&analysis, context)?;
-        self.run_redo(&analysis, context)?;
-        self.wal.truncate()?;
+pub struct WalRecuperator {
+    ctx: TransactionContext<BtreeWriteAccessor>,
+}
+
+impl WalRecuperator {
+    pub(crate) fn new_with_context(ctx: TransactionContext<BtreeWriteAccessor>) -> Self {
+        Self { ctx }
+    }
+
+    /// Runs the recovery
+    pub(crate) fn run_recovery(&mut self, analysis: &AnalysisResult) -> RuntimeResult<()> {
+        // let analysis = wal.run_analysis()?;
+        self.run_undo(&analysis)?;
+        self.run_redo(&analysis)?;
+        //  wal.truncate()?;
         Ok(())
     }
 
     /// Run all the undo.
-    pub(crate) fn run_undo(
-        &mut self,
-        analysis: &AnalysisResult,
-        ctx: &mut TransactionContext<BtreeWriteAccessor>,
-    ) -> RuntimeResult<()> {
+    pub(crate) fn run_undo(&mut self, analysis: &AnalysisResult) -> RuntimeResult<()> {
         for redo_transaction in analysis.needs_undo.iter() {
             // Reapply all the operations of this transaction
             for lsn in analysis.try_iter_lsn(redo_transaction).ok_or(IoError::new(
@@ -133,11 +134,14 @@ impl Pager {
                         .ok_or(RuntimeError::InvalidState)?;
 
                     // Get builder and snapshot
-                    let builder = ctx.tree_builder();
-                    let snapshot = ctx.snapshot();
+                    let builder = self.ctx.tree_builder();
+                    let snapshot = self.ctx.snapshot();
 
                     // Locate the table
-                    let table = ctx.catalog().get_relation(table_id, &builder, &snapshot)?;
+                    let table = self
+                        .ctx
+                        .catalog()
+                        .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
 
@@ -153,11 +157,14 @@ impl Pager {
                         .ok_or(RuntimeError::InvalidState)?;
 
                     // Get builder and snapshot
-                    let builder = ctx.tree_builder();
-                    let snapshot = ctx.snapshot();
+                    let builder = self.ctx.tree_builder();
+                    let snapshot = self.ctx.snapshot();
 
                     // Locate the table
-                    let table = ctx.catalog().get_relation(table_id, &builder, &snapshot)?;
+                    let table = self
+                        .ctx
+                        .catalog()
+                        .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
 
@@ -180,11 +187,14 @@ impl Pager {
                         .serialize()?;
 
                     // Get builder and snapshot
-                    let builder = ctx.tree_builder();
-                    let snapshot = ctx.snapshot();
+                    let builder = self.ctx.tree_builder();
+                    let snapshot = self.ctx.snapshot();
 
                     // Locate the table
-                    let table = ctx.catalog().get_relation(table_id, &builder, &snapshot)?;
+                    let table = self
+                        .ctx
+                        .catalog()
+                        .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
 
@@ -196,8 +206,8 @@ impl Pager {
 
                     let tuple = btree.with_cell_at(position, |bytes| {
                         let mut tuple = Tuple::from_slice_unchecked(bytes)?;
-                        tuple.delete(ctx.tid())?;
-                        tuple.vacuum_with_schema(ctx.snapshot().xmin(), schema)?;
+                        tuple.delete(self.ctx.tid())?;
+              //          tuple.vacuum_with_schema(self.ctx.snapshot().xmin(), schema)?;
 
                         Ok::<Tuple, TupleError>(tuple)
                     })??;
@@ -211,11 +221,7 @@ impl Pager {
     }
 
     /// Run all the redo.
-    pub(crate) fn run_redo(
-        &mut self,
-        analysis: &AnalysisResult,
-        ctx: &mut TransactionContext<BtreeWriteAccessor>,
-    ) -> RuntimeResult<()> {
+    pub(crate) fn run_redo(&mut self, analysis: &AnalysisResult) -> RuntimeResult<()> {
         for redo_transaction in analysis.needs_redo.iter() {
             // Reapply all the operations of this transaction
             for lsn in analysis.try_iter_lsn(redo_transaction).ok_or(IoError::new(
@@ -234,11 +240,14 @@ impl Pager {
                         .serialize()?;
 
                     // Get builder and snapshot
-                    let builder = ctx.tree_builder();
-                    let snapshot = ctx.snapshot();
+                    let builder = self.ctx.tree_builder();
+                    let snapshot = self.ctx.snapshot();
 
                     // Locate the table
-                    let table = ctx.catalog().get_relation(table_id, &builder, &snapshot)?;
+                    let table = self
+                        .ctx
+                        .catalog()
+                        .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
 
@@ -250,8 +259,8 @@ impl Pager {
 
                     let tuple = btree.with_cell_at(position, |bytes| {
                         let mut tuple = Tuple::from_slice_unchecked(bytes)?;
-                        tuple.delete(ctx.tid())?;
-                        tuple.vacuum_with_schema(ctx.snapshot().xmin(), schema)?;
+                        tuple.delete(self.ctx.tid())?;
+               //         tuple.vacuum_with_schema(self.ctx.snapshot().xmin(), schema)?;
 
                         Ok::<Tuple, TupleError>(tuple)
                     })??;
@@ -265,11 +274,14 @@ impl Pager {
                         .ok_or(RuntimeError::InvalidState)?;
 
                     // Get builder and snapshot
-                    let builder = ctx.tree_builder();
-                    let snapshot = ctx.snapshot();
+                    let builder = self.ctx.tree_builder();
+                    let snapshot = self.ctx.snapshot();
 
                     // Locate the table
-                    let table = ctx.catalog().get_relation(table_id, &builder, &snapshot)?;
+                    let table = self
+                        .ctx
+                        .catalog()
+                        .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
 
@@ -286,11 +298,14 @@ impl Pager {
                         .ok_or(RuntimeError::InvalidState)?;
 
                     // Get builder and snapshot
-                    let builder = ctx.tree_builder();
-                    let snapshot = ctx.snapshot();
+                    let builder = self.ctx.tree_builder();
+                    let snapshot = self.ctx.snapshot();
 
                     // Locate the table
-                    let table = ctx.catalog().get_relation(table_id, &builder, &snapshot)?;
+                    let table = self
+                        .ctx
+                        .catalog()
+                        .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
 
@@ -305,7 +320,8 @@ impl Pager {
 
         Ok(())
     }
-
+}
+impl Pager {
     /// Compute the offset at which a page is placed given the database header size and the page id.
     /// [`PAGEZERO`] contains the header.
     ///
@@ -686,6 +702,18 @@ impl Pager {
         };
 
         Ok(())
+    }
+
+    pub fn run_analysis(&mut self) -> io::Result<AnalysisResult> {
+        self.wal.run_analysis()
+    }
+
+    pub fn truncate_wal(&mut self) -> io::Result<()> {
+        self.wal.truncate()
+    }
+
+    pub fn flush_wal(&mut self) -> io::Result<()> {
+        self.wal.flush()
     }
 }
 

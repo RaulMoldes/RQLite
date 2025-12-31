@@ -4,8 +4,11 @@ use super::utils::{
 };
 
 use crate::{
+    schema::{Column, Schema},
     storage::page::BtreePage,
+    storage::tuple::{Row, TupleBuilder},
     tree::{accessor::BtreeWriteAccessor, bplustree::Btree},
+    types::{Blob, DataType, DataTypeKind, UInt64},
 };
 
 macro_rules! test_btree {
@@ -61,13 +64,14 @@ pub fn test_random_insert(count: usize, seed: u64) {
     let shuffled = shuffle(&keys, seed);
 
     // Insert in random order
-    for key in &shuffled {
+    for (i, key) in shuffled.iter().enumerate() {
         let tuple = make_tuple(&schema, *key, 1);
+
         tree.insert(root, tuple, &schema).expect("Insert failed");
     }
 
     // Verify all keys exist (in original order)
-    for key in &keys {
+    for (i, key) in keys.iter().enumerate() {
         assert_key_exists(&mut tree, *key, &schema).expect(&format!("Key {} not found", key));
     }
 
@@ -282,4 +286,57 @@ pub fn test_insert_delete_reinsert(count: usize) {
     for key in &keys {
         assert_key_exists(&mut tree, *key, &schema).expect("Key not found after reinsert");
     }
+}
+
+/// Test tree deallocation.
+pub fn test_dealloc(count: usize) {
+    let config = TestConfig::default();
+    let db = TestDb::new("dealloc", &config).expect("Failed to create test db");
+    let schema = test_schema();
+
+    let mut tree = test_btree!(&db, &config);
+    let root = tree.get_root();
+    let keys = seq(count);
+
+    // Insert all keys to create a multi-level tree
+    for key in &keys {
+        let tuple = make_tuple(&schema, *key, 1);
+        tree.insert(root, tuple, &schema).expect("Insert failed");
+    }
+
+    // Verify data exists
+    assert_count(&mut tree, count).expect("Count mismatch before dealloc");
+
+    // Deallocate the tree
+    tree.dealloc().expect("Dealloc failed");
+}
+
+/// Test deallocation of tree with overflow pages.
+pub fn test_dealloc_with_overflow(count: usize) {
+    let config = TestConfig::default().with_page_size(512); // Smaller pages to force overflow
+    let db = TestDb::new("dealloc_overflow", &config).expect("Failed to create test db");
+
+    // Schema with larger data to create overflow cells
+    let schema = Schema::new_table(vec![
+        Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+        Column::new_with_defaults(DataTypeKind::Blob, "data"),
+    ]);
+
+    let mut tree = test_btree!(&db, &config);
+    let root = tree.get_root();
+
+    // Insert with large values to create overflow pages
+    for i in 0..count as u64 {
+        let large_data = format!("{:0>500}", i); // 500-char string to force overflow
+        let row = Row::new(Box::new([
+            DataType::BigUInt(UInt64(i)),
+            DataType::Blob(Blob::from(large_data)),
+        ]));
+        let builder = TupleBuilder::from_schema(&schema);
+        let tuple = builder.build(row, 1).expect("Failed to build tuple");
+        tree.insert(root, tuple, &schema).expect("Insert failed");
+    }
+
+    // Deallocate the tree (should also deallocate overflow chains)
+    tree.dealloc().expect("Dealloc with overflow failed");
 }

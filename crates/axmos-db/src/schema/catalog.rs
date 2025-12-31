@@ -374,8 +374,7 @@ impl CatalogTrait for Catalog {
         // Will replace existing relation if it exists.
         tree.upsert(self.meta_table, tuple, &schema)?;
 
-        self.last_stored_object
-            .store(relation.object_id(), Ordering::Relaxed);
+
 
         Ok(())
     }

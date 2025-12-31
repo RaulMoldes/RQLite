@@ -47,14 +47,13 @@ use crate::{
     DBConfig,
     io::{
         disk::FileOperations,
-        pager::{BtreeBuilder, Pager, SharedPager},
+        pager::{BtreeBuilder, Pager, SharedPager, WalRecuperator},
     },
     multithreading::{
         coordinator::TransactionCoordinator,
         runner::{BoxError, TaskError, TaskRunner},
     },
-    runtime::context::TransactionContext,
-    runtime::{QueryError, QueryResult, QueryRunner},
+    runtime::{QueryError, QueryResult, QueryRunner, context::TransactionContext},
     schema::catalog::{Catalog, CatalogTrait, SharedCatalog},
     storage::page::BtreePage,
     tree::accessor::BtreeWriteAccessor,
@@ -279,11 +278,16 @@ impl Database {
             )
             .map_err(box_err)?;
 
-            // Run recovery through pager
-            pager
-                .write()
-                .run_recovery(&mut tx_ctx.clone())
-                .map_err(box_err)?;
+            let mut recuperator = WalRecuperator::new_with_context(tx_ctx);
+
+            // Run analysis INSIDE the closure using the cloned pager
+            let analysis = pager.write().run_analysis().map_err(box_err)?;
+
+            // Run recovery through recuperator
+            recuperator.run_recovery(&analysis).map_err(box_err)?;
+
+            // Truncate WAL
+            pager.write().truncate_wal().map_err(box_err)?;
 
             // Commit recovery transaction
             handle.commit().map_err(box_err)?;
@@ -352,8 +356,10 @@ impl Database {
 
             // Execute all statements
             let mut results = Vec::with_capacity(statements.len());
-            for sql in &statements {
+            for (i,sql) in statements.iter().enumerate() {
+                println!("Ejecutando: {sql}");
                 let result = runner.execute(sql).map_err(box_err)?;
+
                 results.push(result);
             }
 
@@ -570,5 +576,357 @@ mod database_tests {
             "Analyze with sampling failed: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_recovery_after_clean_shutdown() {
+        let (_dir, path) = temp_db_path();
+
+        // Create database and insert data
+        {
+            let db =
+                Database::create(&path, DBConfig::default()).expect("Failed to create database");
+
+            db.execute("CREATE TABLE users (id BIGINT, name TEXT, age INT)")
+                .expect("Failed to create table");
+
+            db.execute("INSERT INTO users VALUES (1, 'Alice', 30)")
+                .unwrap();
+            db.execute("INSERT INTO users VALUES (2, 'Bob', 25)")
+                .unwrap();
+            db.execute("INSERT INTO users VALUES (3, 'Charlie', 35)")
+                .unwrap();
+
+            db.flush().expect("Failed to flush");
+        }
+
+        // Reopen database - recovery should run
+        {
+            let db = Database::open(&path, DBConfig::default())
+                .expect("Failed to open database after shutdown");
+
+            // Verify data persisted
+            let result = db.execute("SELECT COUNT(*) FROM users").unwrap();
+            let rows = result.into_rows().expect("Expected rows result");
+            assert_eq!(rows.len(), 1, "Expected 1 row from COUNT(*)");
+        }
+    }
+
+    #[test]
+    fn test_recovery_preserves_inserts() {
+        let (_dir, path) = temp_db_path();
+
+        // Create database with data
+        {
+            let db =
+                Database::create(&path, DBConfig::default()).expect("Failed to create database");
+
+            db.execute("CREATE TABLE items (id BIGINT, value INT)")
+                .expect("Failed to create table");
+
+            for i in 0..50 {
+                db.execute(&format!("INSERT INTO items VALUES ({}, {})", i, i * 10))
+                    .unwrap();
+            }
+
+            db.flush().expect("Failed to flush");
+        }
+
+        // Reopen and verify
+        {
+            let db = Database::open(&path, DBConfig::default()).expect("Failed to open database");
+
+            let result = db.execute("SELECT COUNT(*) FROM items").unwrap();
+            let rows = result.into_rows().expect("Expected rows result");
+            assert_eq!(rows.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_recovery_preserves_updates() {
+        let (_dir, path) = temp_db_path();
+
+        // Create database, insert, then update
+        {
+            let db =
+                Database::create(&path, DBConfig::default()).expect("Failed to create database");
+
+            db.execute("CREATE TABLE users (id BIGINT, name TEXT, age INT)")
+                .expect("Failed to create table");
+
+            db.execute("INSERT INTO users VALUES (1, 'Alice', 30)")
+                .unwrap();
+            db.execute("UPDATE users SET age = 31 WHERE id = 1")
+                .unwrap();
+
+            db.flush().expect("Failed to flush");
+        }
+
+        // Reopen and verify update persisted
+        {
+            let db = Database::open(&path, DBConfig::default()).expect("Failed to open database");
+
+            let result = db.execute("SELECT age FROM users WHERE id = 1").unwrap();
+            let rows = result.into_rows().expect("Expected rows result");
+            assert_eq!(rows.len(), 1, "Expected 1 row");
+        }
+    }
+
+    #[test]
+    fn test_recovery_preserves_deletes() {
+        let (_dir, path) = temp_db_path();
+
+        // Create database, insert, then delete
+        {
+            let db =
+                Database::create(&path, DBConfig::default()).expect("Failed to create database");
+
+            db.execute("CREATE TABLE users (id BIGINT, name TEXT, age INT)")
+                .expect("Failed to create table");
+
+            db.execute("INSERT INTO users VALUES (1, 'Alice', 30)")
+                .unwrap();
+            db.execute("INSERT INTO users VALUES (2, 'Bob', 25)")
+                .unwrap();
+            db.execute("INSERT INTO users VALUES (3, 'Charlie', 35)")
+                .unwrap();
+            db.execute("DELETE FROM users WHERE id = 2").unwrap();
+
+            db.flush().expect("Failed to flush");
+        }
+
+        // Reopen and verify delete persisted
+        {
+            let db = Database::open(&path, DBConfig::default()).expect("Failed to open database");
+
+            let result = db.execute("SELECT COUNT(*) FROM users").unwrap();
+            let rows = result.into_rows().expect("Expected rows result");
+            assert_eq!(rows.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_recovery_multiple_tables() {
+        let (_dir, path) = temp_db_path();
+
+        // Create multiple tables with data
+        {
+            let db =
+                Database::create(&path, DBConfig::default()).expect("Failed to create database");
+
+            db.execute("CREATE TABLE users (id BIGINT, name TEXT)")
+                .expect("Failed to create users table");
+            db.execute("CREATE TABLE orders (id BIGINT, user_id BIGINT, amount DOUBLE)")
+                .expect("Failed to create orders table");
+
+            db.execute("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+            println!("Se ejecuta consulta 1 correctmente");
+            db.execute("INSERT INTO users VALUES (2, 'Bob')").unwrap();
+            println!("Se ejecuta consulta 2 correctmente");
+            db.execute("INSERT INTO orders VALUES (100, 1, 99.99)")
+                .unwrap();
+            println!("Se ejecuta consulta 3 correctmente");
+            db.execute("INSERT INTO orders VALUES (101, 1, 149.99)")
+                .unwrap();
+            println!("Se ejecuta consulta 4 correctmente");
+            db.execute("INSERT INTO orders VALUES (102, 2, 49.99)")
+                .unwrap();
+            println!("Se ejecuta consulta 5 correctmente");
+
+            db.flush().expect("Failed to flush");
+        }
+
+        // Reopen and verify both tables
+        {
+            let db = Database::open(&path, DBConfig::default()).expect("Failed to open database");
+
+            let users_result = db.execute("SELECT COUNT(*) FROM users").unwrap();
+            let users_rows = users_result.into_rows().expect("Expected rows");
+            assert_eq!(users_rows.len(), 1);
+
+            let orders_result = db.execute("SELECT COUNT(*) FROM orders").unwrap();
+            let orders_rows = orders_result.into_rows().expect("Expected rows");
+            assert_eq!(orders_rows.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_recovery_after_multiple_sessions() {
+        let (_dir, path) = temp_db_path();
+
+        // Session 1: Create table and insert initial data
+        {
+            let db =
+                Database::create(&path, DBConfig::default()).expect("Failed to create database");
+
+            db.execute("CREATE TABLE counter (id BIGINT, value INT)")
+                .expect("Failed to create table");
+
+            db.execute("INSERT INTO counter VALUES (1, 100)").unwrap();
+
+            db.flush().expect("Failed to flush");
+        }
+
+        // Session 2: Update data
+        {
+            let db = Database::open(&path, DBConfig::default()).expect("Failed to open database");
+
+            db.execute("UPDATE counter SET value = 200 WHERE id = 1")
+                .unwrap();
+            db.execute("INSERT INTO counter VALUES (2, 300)").unwrap();
+
+            db.flush().expect("Failed to flush");
+        }
+
+        // Session 3: More updates
+        {
+            let db = Database::open(&path, DBConfig::default()).expect("Failed to open database");
+
+            db.execute("UPDATE counter SET value = 250 WHERE id = 1")
+                .unwrap();
+            db.execute("DELETE FROM counter WHERE id = 2").unwrap();
+
+            db.flush().expect("Failed to flush");
+        }
+
+        // Session 4: Verify final state
+        {
+            let db = Database::open(&path, DBConfig::default()).expect("Failed to open database");
+
+            let result = db.execute("SELECT COUNT(*) FROM counter").unwrap();
+            let rows = result.into_rows().expect("Expected rows");
+            assert_eq!(rows.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_recovery_large_transaction() {
+        let (_dir, path) = temp_db_path();
+
+        // Create database with large batch insert
+        {
+            let db =
+                Database::create(&path, DBConfig::default()).expect("Failed to create database");
+
+            db.execute("CREATE TABLE large_table (id BIGINT, data TEXT)")
+                .expect("Failed to create table");
+
+            // Insert many rows to test recovery with larger WAL
+            for i in 0..200 {
+                db.execute(&format!(
+                    "INSERT INTO large_table VALUES ({}, 'data_item_{}')",
+                    i, i
+                ))
+                .unwrap();
+            }
+
+            db.flush().expect("Failed to flush");
+        }
+
+        // Reopen and verify
+        {
+            let db = Database::open(&path, DBConfig::default()).expect("Failed to open database");
+
+            let result = db.execute("SELECT COUNT(*) FROM large_table").unwrap();
+            let rows = result.into_rows().expect("Expected rows");
+            assert_eq!(rows.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_recovery_batch_operations() {
+        let (_dir, path) = temp_db_path();
+
+        // Use batch execution
+        {
+            let db =
+                Database::create(&path, DBConfig::default()).expect("Failed to create database");
+
+            db.execute_batch(&[
+                "CREATE TABLE batch_test (id BIGINT, name TEXT)",
+                "INSERT INTO batch_test VALUES (1, 'first')",
+                "INSERT INTO batch_test VALUES (2, 'second')",
+                "INSERT INTO batch_test VALUES (3, 'third')",
+                "UPDATE batch_test SET name = 'updated_first' WHERE id = 1",
+                "DELETE FROM batch_test WHERE id = 2",
+            ])
+            .expect("Batch execution failed");
+
+            db.flush().expect("Failed to flush");
+        }
+
+        // Verify batch operations persisted
+        {
+            let db = Database::open(&path, DBConfig::default()).expect("Failed to open database");
+
+            let result = db.execute("SELECT COUNT(*) FROM batch_test").unwrap();
+            let rows = result.into_rows().expect("Expected rows");
+            assert_eq!(rows.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_recovery_empty_wal() {
+        let (_dir, path) = temp_db_path();
+
+        // Create database without any DML operations
+        {
+            let db =
+                Database::create(&path, DBConfig::default()).expect("Failed to create database");
+
+            // Only DDL, no data
+            db.execute("CREATE TABLE empty_table (id BIGINT)")
+                .expect("Failed to create table");
+
+            db.flush().expect("Failed to flush");
+        }
+
+        // Recovery with minimal WAL should succeed
+        {
+            let db = Database::open(&path, DBConfig::default())
+                .expect("Failed to open database with empty WAL");
+
+            // Table should exist
+            let result = db.execute("SELECT COUNT(*) FROM empty_table").unwrap();
+            let rows = result.into_rows().expect("Expected rows");
+            assert_eq!(rows.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_recovery_maintains_transaction_isolation() {
+        let (_dir, path) = temp_db_path();
+
+        // Create database with committed transactions
+        {
+            let db =
+                Database::create(&path, DBConfig::default()).expect("Failed to create database");
+
+            db.execute("CREATE TABLE isolation_test (id BIGINT, value INT)")
+                .expect("Failed to create table");
+
+            // Transaction 1
+            db.execute("INSERT INTO isolation_test VALUES (1, 100)")
+                .unwrap();
+
+            // Transaction 2
+            db.execute("INSERT INTO isolation_test VALUES (2, 200)")
+                .unwrap();
+
+            // Transaction 3: update
+            db.execute("UPDATE isolation_test SET value = 150 WHERE id = 1")
+                .unwrap();
+
+            db.flush().expect("Failed to flush");
+        }
+
+        // Verify all committed transactions recovered
+        {
+            let db = Database::open(&path, DBConfig::default()).expect("Failed to open database");
+
+            let result = db.execute("SELECT COUNT(*) FROM isolation_test").unwrap();
+            let rows = result.into_rows().expect("Expected rows");
+            assert_eq!(rows.len(), 1);
+        }
     }
 }

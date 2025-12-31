@@ -189,12 +189,14 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
             )));
         }
 
-        // Build columns from bound definitions
-        let columns: Vec<Column> = stmt
-            .columns
-            .iter()
-            .map(|c| self.bound_column_to_column(c))
-            .collect();
+        // Build columns from bound definitions, prepending the internal row_id column
+        let mut columns: Vec<Column> = Vec::with_capacity(stmt.columns.len() + 1);
+
+        // Add internal row_id column as the first column (primary key)
+        columns.push(Column::new_with_defaults(DataTypeKind::BigUInt, "row_id"));
+
+        // Add user-defined columns
+        columns.extend(stmt.columns.iter().map(|c| self.bound_column_to_column(c)));
 
         // Allocate resources
         let object_id = self.catalog.get_next_object_id();
@@ -203,9 +205,10 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
         // Create the relation
         let mut relation = Relation::table(object_id, &stmt.table_name, root_page, columns);
 
-        // Apply table-level constraints
+        // Apply table-level constraints (indices need to be adjusted by +1 for row_id)
         for constraint in &stmt.constraints {
-            self.apply_table_constraint(relation.schema_mut(), constraint)?;
+            let adjusted = self.adjust_constraint_indices(constraint);
+            self.apply_table_constraint(relation.schema_mut(), &adjusted)?;
         }
 
         // Store in catalog
@@ -216,6 +219,27 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
             name: stmt.table_name.clone(),
             object_id,
         })
+    }
+
+    /// Adjusts constraint column indices by +1 to account for the internal row_id column.
+    fn adjust_constraint_indices(&self, constraint: &BoundTableConstraint) -> BoundTableConstraint {
+        match constraint {
+            BoundTableConstraint::PrimaryKey(indices) => {
+                BoundTableConstraint::PrimaryKey(indices.iter().map(|i| i + 1).collect())
+            }
+            BoundTableConstraint::Unique(indices) => {
+                BoundTableConstraint::Unique(indices.iter().map(|i| i + 1).collect())
+            }
+            BoundTableConstraint::ForeignKey {
+                columns,
+                ref_table_id,
+                ref_columns,
+            } => BoundTableConstraint::ForeignKey {
+                columns: columns.iter().map(|i| i + 1).collect(),
+                ref_table_id: *ref_table_id,
+                ref_columns: ref_columns.clone(), // ref_columns don't need adjustment
+            },
+        }
     }
 
     fn execute_create_index(&mut self, stmt: &BoundCreateIndex) -> DdlResult<DdlOutcome> {

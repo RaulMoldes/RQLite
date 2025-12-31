@@ -394,6 +394,8 @@ impl<C: CatalogTrait> Binder<C> {
         let table_schema = relation.schema().clone();
 
         // Resolve column indices
+        // If user specifies columns, use those indices
+        // If not, use all columns EXCEPT the internal row_id (column 0)
         let column_indices: Vec<usize> = if let Some(cols) = &stmt.columns {
             cols.iter()
                 .map(|name| {
@@ -405,7 +407,8 @@ impl<C: CatalogTrait> Binder<C> {
                 })
                 .collect::<BinderResult<_>>()?
         } else {
-            (0..table_schema.num_columns()).collect()
+            // Skip column 0 (internal row_id) when user doesn't specify columns
+            (1..table_schema.num_columns()).collect()
         };
 
         // Bind values

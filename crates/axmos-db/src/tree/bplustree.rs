@@ -23,7 +23,7 @@ use std::{
     cmp::{Ordering, Reverse},
     collections::{BTreeMap, BinaryHeap, HashSet, VecDeque},
     error::Error,
-    fmt::{Display, Formatter, Result as FmtResult},
+    fmt::{Display, Formatter, Result as FmtResult, Write},
     fs,
     io::{self, Error as IoError, ErrorKind},
     path::Path,
@@ -1216,7 +1216,10 @@ where
             // If we are not the last sibling we can safely link with the next in the chain.
             // If we are the last sibling we use the right frontier.
             // If there is no right frontier we are the parent's right most and there is no [next].
-            let next_sibling = siblings.get(i + 1).map(|s| s.entry());
+            let next_sibling = siblings
+                .get(i + 1)
+                .map(|s| s.entry())
+                .or(right_frontier_in_parent.map(|f| f.entry()));
 
             // If the right child is different from None and the next sibling too,
             // extract the first cell of the first child on our next sibling and allocate a new cell.
@@ -1754,14 +1757,12 @@ where
 }
 
 pub(crate) struct BtreePrinter<'a> {
-    buffer: BTreeMap<PageId, BtreePage>,
     tree: Btree<BtreeReadAccessor>,
     schema: &'a Schema,
     snapshot: &'a Snapshot,
 }
 
 impl<'a> BtreePrinter<'a> {
-    /// Create a new btree displayer for the provided root node.
     pub(crate) fn new(
         mut tree: Btree<BtreeReadAccessor>,
         schema: &'a Schema,
@@ -1769,103 +1770,84 @@ impl<'a> BtreePrinter<'a> {
     ) -> Self {
         if !tree.is_initialized() {
             tree = tree.with_accessor(BtreeReadAccessor::default());
-        };
-
+        }
         Self {
-            buffer: BTreeMap::new(),
             tree,
             schema,
             snapshot,
         }
     }
 
-    /// Reads a node into memory
-    ///
-    /// Calls itself recursively to also load the children into memory
-    fn read_into_mem(&mut self, page_id: PageId) -> BtreeResult<()> {
-        let page = self.tree.get_page(page_id)?;
-        let children = page.iter_children().collect::<Vec<_>>();
-        self.buffer.insert(page_id, page.clone());
-        for page_id in children {
-            self.read_into_mem(page_id)?;
+    /// Utility to print a bplustree as json.
+    pub(crate) fn as_json(mut self) -> BtreeResult<String> {
+        let mut output = String::from('[');
+        let mut first = true;
+
+        self.write_subtree(&mut output, self.tree.get_root(), &mut first)?;
+
+        output.push(']');
+        Ok(output)
+    }
+
+    /// Writes a node and its children recursively to the output string.
+    fn write_subtree(
+        &mut self,
+        output: &mut String,
+        page_id: PageId,
+        first: &mut bool,
+    ) -> BtreeResult<()> {
+        let children: Vec<PageId> = self.tree.get_page(page_id)?.iter_children().collect();
+
+        // Write this node
+        if !*first {
+            output.push(',');
+        }
+        *first = false;
+        self.write_node_json(output, page_id)?;
+
+        // Recurse into children (page already dropped after this scope)
+        for child_id in children {
+            self.write_subtree(output, child_id, first)?;
         }
 
         Ok(())
     }
 
-    /// Utility to print a bplustree as json.
-    pub(crate) fn as_json(mut self) -> BtreeResult<String> {
-        self.read_into_mem(self.tree.get_root())?;
+    /// Writes the content of a single page as json directly to output.
+    fn write_node_json(&mut self, output: &mut String, page_id: PageId) -> BtreeResult<()> {
+        let page = self.tree.get_page(page_id)?;
 
-        let mut string = String::from('[');
+        write!(output, "{{\"page\":\"{page_id}\",\"entries\":[").unwrap();
 
-        for (i, page_num) in self.buffer.keys().enumerate() {
-            if i > 0 {
-                string.push(',');
-            };
+        let reader = TupleReader::from_schema(self.schema);
+        let mut first_entry = true;
 
-            string.push_str(&self.node_json(*page_num)?);
-        }
+        for i in 0..page.num_slots() {
+            let cell = page.cell(i);
+            if let Some(layout) = reader.parse_for_snapshot(cell.effective_data(), self.snapshot)? {
+                if !first_entry {
+                    output.push(',');
+                }
+                first_entry = false;
 
-        string.push(']');
-
-        Ok(string)
-    }
-
-    /// Prints the content of a single page as a json string.
-    fn node_json(&self, number: PageId) -> BtreeResult<String> {
-        let page = self
-            .buffer
-            .get(&number)
-            .ok_or(BtreeError::BtreePageNotFound(number))?;
-
-        let mut string = format!("{{\"page\":\"{number}\",\"entries\":[");
-
-        if !page.is_empty() {
-            let cell = page.cell(0);
-
-            let reader = TupleReader::from_schema(&self.schema);
-            if let Some(layout) =
-                reader.parse_for_snapshot(cell.effective_data(), &self.snapshot)?
-            {
                 let tuple = TupleRef::new(cell.effective_data(), layout);
-                string.push_str(&format!(
-                    "{}",
-                    tuple.display_with(&self.schema, &self.snapshot)
-                ));
-
-                for i in 1..page.num_slots() {
-                    if let Some(layout) =
-                        reader.parse_for_snapshot(page.cell(i).effective_data(), &self.snapshot)?
-                    {
-                        let cell = page.cell(i);
-                        let tuple = TupleRef::new(cell.effective_data(), layout);
-                        string.push(',');
-                        string.push_str(&format!(
-                            "{}",
-                            tuple.display_with(&self.schema, &self.snapshot)
-                        ));
-                    }
-                }
-            }
-
-            string.push_str("],\"children\":[");
-
-            if page.right_child().is_some() {
-                for (i, child) in page.iter_children().enumerate() {
-                    if i == 0 {
-                        string.push_str(&format!("\"{child}\""));
-                    } else {
-                        string.push_str(&format!(",\"{child}\""));
-                    };
-                }
+                write!(output, "{}", tuple.display_with(self.schema, self.snapshot)).unwrap();
             }
         }
 
-        string.push(']');
-        string.push('}');
+        output.push_str("],\"children\":[");
 
-        Ok(string)
+        if page.right_child().is_some() {
+            for (i, child) in page.iter_children().enumerate() {
+                if i > 0 {
+                    output.push(',');
+                }
+                write!(output, "\"{child}\"").unwrap();
+            }
+        }
+
+        output.push_str("]}");
+        Ok(())
     }
 }
 
