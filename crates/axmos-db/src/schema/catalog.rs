@@ -729,7 +729,6 @@ mod analyze_tests {
 
         // Analyze on empty catalog should succeed
         let result = catalog.analyze(&tree_builder, &snapshot, 1.0, 10000);
-        dbg!(&result);
         assert!(result.is_ok());
     }
 

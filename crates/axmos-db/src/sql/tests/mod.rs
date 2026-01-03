@@ -401,7 +401,7 @@ fn test_analyzer_update_with_expression() {
 #[test]
 fn test_analyzer_update_invalid_column_fails() {
     let result = analyzer_test("UPDATE users SET invalid_col = 1");
-    dbg!(&result);
+
     assert!(matches!(
         result,
         Err(AnalyzerError::Scope(ScopeError::NotFound(_)))
@@ -610,7 +610,7 @@ fn test_analyzer_complex_query_with_joins_subqueries_and_aggregates() {
             ORDER BY total_spent DESC
             LIMIT 10",
     );
-    dbg!(&result);
+   
     assert!(result.is_ok());
 }
 

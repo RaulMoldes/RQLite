@@ -206,9 +206,7 @@ impl DelegateAttr {
         self.call_args.as_ref()
     }
 
-    pub fn wrap_variant(&self) -> Option<&WrapVariant> {
-        self.wrap_variant.as_ref()
-    }
+   
 
     // Obtain the generated name.
     // If rename is None, will use the standard name by default.

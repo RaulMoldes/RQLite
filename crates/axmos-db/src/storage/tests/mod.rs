@@ -284,8 +284,6 @@ test_suite!(cell_misc {
     write_to => {
         use super::test_helpers::*;
         let c = OwnedCell::new(&[1, 2, 3, 4]);
-        println!("Cell:");
-        dbg!(&c);
         let mut buf = vec![0u8; c.total_size()];
         assert_eq!(c.write_to(&mut buf), c.total_size());
     },

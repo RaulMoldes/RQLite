@@ -45,6 +45,11 @@ pub struct PhysicalPlan {
 }
 
 impl PhysicalPlan {
+
+    pub fn output_schema(&self) -> &Schema {
+        self.op.output_schema()
+    }
+    
     pub fn total_cost(&self) -> f64 {
         self.cost
     }

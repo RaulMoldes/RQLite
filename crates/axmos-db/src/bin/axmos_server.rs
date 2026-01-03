@@ -365,11 +365,11 @@ fn query_result_to_response(result: QueryResult) -> Response {
             let columns = if rows.is_empty() {
                 vec![]
             } else {
-                (0..rows[0].len()).map(|i| format!("col{}", i)).collect()
+                (0..rows.num_columns()).map(|i| rows.column(i).expect("Column not found").to_string()).collect()
             };
 
             let data: Vec<Vec<String>> = rows
-                .iter()
+                .iterrows()
                 .map(|row| row.iter().map(|v| v.to_string()).collect())
                 .collect();
 

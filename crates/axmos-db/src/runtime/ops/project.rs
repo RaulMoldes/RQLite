@@ -68,18 +68,15 @@ impl<Child: RunningExecutor> RunningExecutor for OpenProject<Child> {
 
                 for (i, proj_expr) in self.expressions.iter().enumerate() {
                     let value = evaluator.evaluate(&proj_expr.expr)?;
-                    println!("Column {i}: got value {:?}", value);
+
                     // Cast to the expected output type from the schema
                     let expected_type = self
                         .output_schema
                         .column(i)
                         .ok_or(RuntimeError::ColumnNotFound(i))?
                         .datatype();
-                    println!("Column {i}: expected type {:?}", expected_type);
-                    println!("Trying to cast column {i}");
-                    println!("Expected type {}", expected_type);
+
                     let casted = value.try_cast(expected_type)?;
-                    println!("Cast suceessful");
                     projected.push(casted);
                 }
 

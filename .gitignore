@@ -1,3 +1,4 @@
 /target
 *.axm
 .vscode
+*.log

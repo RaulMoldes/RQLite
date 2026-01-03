@@ -4,32 +4,28 @@ use std::{
     io::Error as IoError,
 };
 
-use libc::DIR;
+
 
 use crate::{
-    SerializationError, TypeSystemError,
-    io::pager::{BtreeBuilder, SharedPager},
-    multithreading::coordinator::{Snapshot, TransactionError, TransactionHandle},
-    runtime::{
+     SerializationError, TypeSystemError, io::pager::{BtreeBuilder, SharedPager}, multithreading::coordinator::{Snapshot, TransactionError, TransactionHandle}, runtime::{
         builder::{BoxedExecutor, MutableExecutorBuilder, ReadOnlyExecutorBuilder},
         context::TransactionContext,
         ddl::{DdlError, DdlExecutor, DdlOutcome},
         eval::EvaluationError,
-    },
-    schema::catalog::{CatalogError, SharedCatalog},
-    sql::{
+    }, schema::{
+        Schema,
+        catalog::{CatalogError, SharedCatalog}
+    }, sql::{
         binder::{
             binder::{Binder, BinderError},
             bounds::BoundStatement,
         },
         parser::{Parser, ParserError, ast::Statement},
         planner::{CascadesOptimizer, PhysicalPlan, PlannerError},
-    },
-    storage::tuple::{Row, TupleError},
-    tree::{
+    }, storage::tuple::{Row, TupleError}, tree::{
         accessor::{BtreeReadAccessor, BtreeWriteAccessor},
         bplustree::BtreeError,
-    },
+    }
 };
 
 mod builder;
@@ -144,7 +140,7 @@ pub(crate) trait RunningExecutor {
 
 /// Execution statistics for profiling
 #[derive(Debug, Default, Clone)]
-pub struct ExecutionStats {
+pub(crate) struct ExecutionStats {
     pub rows_produced: u64,
     pub rows_scanned: u64,
     pub pages_read: u64,
@@ -156,14 +152,55 @@ pub enum QueryResult {
     /// DDL operation completed
     Ddl(DdlOutcome),
     /// Query returned rows
-    Rows(Vec<Row>),
+    Rows(RowsResult),
     /// DML operation affected N rows
     RowsAffected(u64),
 }
 
+#[derive(Debug, Clone)]
+pub struct RowsResult {
+    data: Vec<Row>,
+    out_schema: Schema
+}
+
+impl RowsResult {
+
+    pub fn first(&self) -> Option<&Row> {
+        self.data.first()
+    }
+
+
+    pub fn last(&self) -> Option<&Row> {
+        self.data.last()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+
+    pub fn num_columns(&self) -> usize {
+        self.out_schema.num_columns()
+    }
+
+
+    pub fn column(&self, index: usize) -> Option<&str> {
+        self.out_schema.column(index).map(|c| c.name.as_str())
+    }
+
+    pub fn iterrows(&self) -> std::slice::Iter<'_, Row> {
+        self.data.iter()
+    }
+}
+
 impl QueryResult {
     /// Returns the rows if this is a Rows result.
-    pub fn into_rows(self) -> Option<Vec<Row>> {
+    pub fn into_rows(self) -> Option<RowsResult> {
         match self {
             Self::Rows(rows) => Some(rows),
             _ => None,
@@ -333,14 +370,14 @@ fn extract_affected_count(rows: &[Row]) -> u64 {
         .unwrap_or(0)
 }
 
-pub struct QueryRunnerBuilder {
+pub(crate) struct QueryRunnerBuilder {
     catalog: SharedCatalog,
     pager: SharedPager,
     tree_builder: BtreeBuilder,
     handle: TransactionHandle,
 }
 
-pub struct QueryPreparator {
+pub(crate) struct QueryPreparator {
     catalog: SharedCatalog,
     pager: SharedPager,
     tree_builder: BtreeBuilder,
@@ -430,7 +467,7 @@ impl QueryPreparator {
         }
     }
 
-    pub fn build_and_run(&self, sql: &str, autocommit: bool) -> QueryRunnerResult<CommitHandle> {
+    pub(crate) fn build_and_run(&self, sql: &str, autocommit: bool) -> QueryRunnerResult<CommitHandle> {
         let bound = self.prepare(sql)?;
         if Self::is_ddl(&bound) {
             let built = self.ddl(autocommit)?;
@@ -445,7 +482,7 @@ impl QueryPreparator {
     }
 }
 
-pub enum CommitHandle {
+pub(crate) enum CommitHandle {
     Write {
         result: QueryResult,
         ctx: TransactionContext<BtreeWriteAccessor>,
@@ -516,17 +553,17 @@ impl CommitHandle {
     }
 }
 
-pub trait QueryRunner {
+pub(crate) trait QueryRunner {
     /// Executes a prepared statement
     fn execute(self, stmt: BoundStatement) -> QueryRunnerResult<CommitHandle>;
 }
 
-pub struct WriteQueryRunner {
+pub(crate) struct WriteQueryRunner {
     ctx: TransactionContext<BtreeWriteAccessor>,
     autocommit: bool,
 }
 
-pub enum StatementRunner {
+pub(crate) enum StatementRunner {
     Ddl(DdlQueryRunner),
     Dml(WriteQueryRunner),
     Query(ReadQueryRunner),
@@ -591,19 +628,21 @@ impl QueryRunner for WriteQueryRunner {
     }
 }
 
-pub struct ReadQueryRunner {
+pub(crate) struct ReadQueryRunner {
     ctx: TransactionContext<BtreeReadAccessor>,
     autocommit: bool,
 }
 
 impl QueryRunner for ReadQueryRunner {
     fn execute(self, stmt: BoundStatement) -> QueryRunnerResult<CommitHandle> {
-        let plan = optimize(
+        let plan: PhysicalPlan = optimize(
             &stmt,
             &self.ctx.catalog(),
             &self.ctx.tree_builder(),
             self.ctx.snapshot(),
         )?;
+
+
 
         let builder = ReadOnlyExecutorBuilder::new(self.ctx.clone());
         let mut executor = builder.build(&plan)?;
@@ -620,13 +659,13 @@ impl QueryRunner for ReadQueryRunner {
         }
 
         Ok(CommitHandle::Read {
-            result: QueryResult::Rows(rows),
+            result: QueryResult::Rows(RowsResult { data: rows, out_schema: plan.output_schema().clone() }),
             ctx: self.ctx,
         })
     }
 }
 
-pub struct DdlQueryRunner {
+pub(crate) struct DdlQueryRunner {
     ctx: TransactionContext<BtreeWriteAccessor>,
     autocommit: bool,
 }

@@ -68,6 +68,7 @@ pub struct Schema {
 /// A handle representing an index.
 ///
 /// Contains the index object id and the list of indexed columns.
+#[derive(Debug)]
 pub struct IndexHandle {
     id: ObjectId,
     indexed_columns: Vec<usize>,

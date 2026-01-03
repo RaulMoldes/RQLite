@@ -36,12 +36,12 @@ pub use common::*;
 #[cfg(not(miri))]
 use jemallocator::Jemalloc;
 pub use types::*;
-pub(crate) use types::*;
+
 
 #[cfg(not(miri))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
-pub use common::*;
+
 
 use crate::{
     DBConfig,
@@ -54,17 +54,17 @@ use crate::{
         runner::{BoxError, TaskError, TaskRunner},
     },
     runtime::{
-        QueryError, QueryPreparator, QueryResult, QueryRunner, QueryRunnerBuilder,
+        QueryError, QueryPreparator, QueryResult,
         context::TransactionContext,
     },
     schema::catalog::{Catalog, CatalogTrait, SharedCatalog},
     storage::page::BtreePage,
     tree::accessor::BtreeWriteAccessor,
-    types::{ObjectId, PageId, TransactionId},
+
 };
 
 use std::{
-    collections::HashMap,
+
     error::Error,
     fmt::{Display, Formatter, Result as FmtResult},
     io::{Error as IoError, Write},
@@ -286,7 +286,7 @@ impl Database {
 
             // Run analysis INSIDE the closure using the cloned pager
             let analysis = pager.write().run_analysis().map_err(box_err)?;
-            println!("Analysis result: {:?}", analysis);
+
             // Run recovery through recuperator
             recuperator.run_recovery(&analysis).map_err(box_err)?;
 
@@ -643,7 +643,7 @@ mod database_tests {
             let rows = result.into_rows().expect("Expected rows result");
 
             assert_eq!(rows.len(), 1);
-            let value = rows[0][0].as_big_int().unwrap();
+            let value = rows.first().expect("No rows at all")[0].as_big_int().unwrap();
             assert_eq!(value.value(), count);
         }
     }

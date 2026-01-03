@@ -5,11 +5,9 @@
 //! and are executed directly against the catalog.
 
 use crate::{
-    io::pager::{BtreeBuilder, SharedPager},
-    multithreading::coordinator::Snapshot,
+
     runtime::context::TransactionContext,
     schema::{
-        SharedCatalog,
         base::{Column, ForeignKeyInfo, Relation, Schema, SchemaError, TableConstraint},
         catalog::{CatalogError, CatalogTrait},
     },
@@ -190,6 +188,7 @@ impl DdlExecutor {
 
         // Allocate resources
         let object_id = self.ctx.catalog().get_next_object_id();
+
         let root_page = self.ctx.pager().write().allocate_page::<BtreePage>()?;
 
         // Create the relation
@@ -281,6 +280,7 @@ impl DdlExecutor {
 
         // Allocate resources
         let object_id = self.ctx.catalog().read().get_next_object_id();
+      
         let root_page = self.ctx.pager().write().allocate_page::<BtreePage>()?;
 
         // Create the index relation

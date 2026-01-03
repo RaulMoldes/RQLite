@@ -129,6 +129,8 @@ SELECT * FROM users WHERE age > 26
 
 UPDATE users SET name = 'Pablo' WHERE id = 4
 
+CREATE INDEX idx_users_name ON users(name) // Indexes are only UNIQUE indexes. The keyword UNIQUE is supported but does not do anything in practice since indexes are unique anyway.
+
 SELECT * FROM users
 
 DELETE FROM users WHERE id = 4

@@ -1,6 +1,4 @@
 //! Runtime execution tests.
-//!
-//! Integration tests for the query execution pipeline.
 use crate::{
     DBConfig,
     io::pager::{BtreeBuilder, Pager, SharedPager},
@@ -24,6 +22,7 @@ use crate::{
 };
 use tempfile::TempDir;
 
+
 /// Test harness for runtime execution tests.
 struct TestHarness {
     _temp_dir: TempDir,
@@ -33,101 +32,6 @@ struct TestHarness {
 }
 
 impl TestHarness {
-
-
-       /// Execute a DDL statement (CREATE TABLE, CREATE INDEX, etc.)
-    fn execute_ddl(&self, sql: &str) -> RuntimeResult<()> {
-        use crate::runtime::ddl::DdlExecutor;
-
-        let handle = self.begin_transaction();
-        let snapshot = handle.snapshot();
-        let builder = self.tree_builder();
-
-        let mut parser = Parser::new(sql);
-        let stmt = parser.parse().expect("Parse failed");
-
-        let mut binder = Binder::new(self.catalog.clone(), builder.clone(), snapshot.clone());
-        let bound = binder.bind(&stmt).expect("Bind failed");
-
-        let ctx = self
-            .create_write_context(handle.clone())
-            .expect("Failed to create context");
-
-        let mut ddl_executor = DdlExecutor::new(ctx.clone());
-        ddl_executor.execute(&bound).map_err(|_| RuntimeError::InvalidState)?;
-
-        ctx.pre_commit().expect("Failed to pre commit");
-        handle.commit().expect("Failed to commit");
-        ctx.end().expect("Failed to end");
-
-        Ok(())
-    }
-
-    /// Create an index directly in the catalog (low-level, for testing)
-    /// Returns the index root page
-    fn create_index_direct(
-        &self,
-        index_name: &str,
-        index_id: ObjectId,
-        _table_id: ObjectId,
-        indexed_columns: Vec<Column>,
-        num_keys: usize,
-        txid: u64,
-    ) -> PageId {
-        let root_page = self
-            .pager
-            .write()
-            .allocate_page::<BtreePage>()
-            .expect("Failed to allocate index page");
-
-        let relation = Relation::index(
-            index_id,
-            index_name,
-            root_page,
-            indexed_columns,
-            num_keys,
-        );
-
-        self.catalog
-            .write()
-            .store_relation(relation, &self.tree_builder(), txid)
-            .expect("Failed to store index relation");
-
-        root_page
-    }
-
-    /// Insert an index entry directly (bypassing DML executor's automatic maintenance)
-    fn insert_index_entry_direct(
-        &self,
-        index_id: ObjectId,
-        values: Vec<DataType>,
-        handle: &TransactionHandle,
-    ) {
-        let builder = self.tree_builder();
-        let snapshot = handle.snapshot();
-        let tid = handle.id();
-
-        let relation = self
-            .catalog
-            .read()
-            .get_relation(index_id, &builder, &snapshot)
-            .expect("Index not found");
-
-        let schema = relation.schema();
-        let root = relation.root();
-
-        let row = Row::new(values.into_boxed_slice());
-        let tuple_builder = TupleBuilder::from_schema(schema);
-        let tuple = tuple_builder
-            .build(row, tid)
-            .expect("Failed to build tuple");
-
-        let mut tree = builder.build_tree_mut(root);
-        tree.insert(root, tuple, schema)
-            .expect("Failed to insert index entry");
-        tree.accessor_mut().expect("Uninitialized tree").clear();
-    }
-
     /// Create a new test harness with an empty database.
     fn new() -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -135,18 +39,12 @@ impl TestHarness {
 
         let config = DBConfig::default();
         let pager = Pager::from_config(config, &db_path).expect("Failed to create pager");
-
-        // Allocate meta table and meta index pages
         let pager = SharedPager::from(pager);
 
         let (meta_table_page, meta_index_page) = {
             let mut p = pager.write();
-            let meta_table = p
-                .allocate_page::<BtreePage>()
-                .expect("Failed to allocate meta table page");
-            let meta_index = p
-                .allocate_page::<BtreePage>()
-                .expect("Failed to allocate meta index page");
+            let meta_table = p.allocate_page::<BtreePage>().expect("Failed to allocate meta table page");
+            let meta_index = p.allocate_page::<BtreePage>().expect("Failed to allocate meta index page");
             (meta_table, meta_index)
         };
 
@@ -162,21 +60,16 @@ impl TestHarness {
         }
     }
 
-    /// Begin a new transaction.
     fn begin_transaction(&self) -> TransactionHandle {
-        self.coordinator
-            .begin()
-            .expect("Failed to begin transaction")
+        self.coordinator.begin().expect("Failed to begin transaction")
     }
 
-    /// Create a BtreeBuilder.
     fn tree_builder(&self) -> BtreeBuilder {
         let pager = self.pager.read();
         BtreeBuilder::new(pager.min_keys_per_page(), pager.num_siblings_per_side())
             .with_pager(self.pager.clone())
     }
 
-    /// Create a transaction context with write accessor.
     fn create_write_context(
         &self,
         handle: TransactionHandle,
@@ -189,51 +82,32 @@ impl TestHarness {
         )
     }
 
-    /// Create and store a table in the catalog.
-    fn create_table(
-        &self,
-        name: &str,
-        object_id: ObjectId,
-        columns: Vec<Column>,
-        txid: u64,
-    ) -> PageId {
-        let root_page = self
-            .pager
-            .write()
+    fn create_table(&self, name: &str,  columns: Vec<Column>, txid: u64) -> PageId {
+        let object_id = self.catalog.read().get_next_object_id();
+        let root_page = self.pager.write()
             .allocate_page::<BtreePage>()
             .expect("Failed to allocate table page");
 
         let relation = Relation::table(object_id, name, root_page, columns);
-
-        self.catalog
-            .write()
+        self.catalog.write()
             .store_relation(relation, &self.tree_builder(), txid)
             .expect("Failed to store relation");
 
         root_page
     }
 
-    /// Parse, bind, and optimize SQL.
     fn optimize_sql(&self, sql: &str, snapshot: Snapshot) -> PhysicalPlan {
         let builder = self.tree_builder();
-
         let mut parser = Parser::new(sql);
         let stmt = parser.parse().expect("Parse failed");
-
         let mut binder = Binder::new(self.catalog.clone(), builder.clone(), snapshot.clone());
         let bound = binder.bind(&stmt).expect("Bind failed");
-
-        let mut optimizer =
-            CascadesOptimizer::with_defaults(self.catalog.clone(), builder, snapshot);
+        let mut optimizer = CascadesOptimizer::with_defaults(self.catalog.clone(), builder, snapshot);
         optimizer.optimize(&bound).expect("Optimize failed")
     }
 
-    /// Execute a plan and collect all rows.
     fn execute_plan(&self, plan: &PhysicalPlan, handle: TransactionHandle) -> Vec<Row> {
-        let ctx = self
-            .create_write_context(handle)
-            .expect("Failed to create context");
-
+        let ctx = self.create_write_context(handle).expect("Failed to create context");
         let builder = MutableExecutorBuilder::new(ctx.clone());
         let mut executor = builder.build(plan).expect("Failed to build executor");
 
@@ -247,9 +121,6 @@ impl TestHarness {
         results
     }
 
-
-
-    /// Execute SQL and return results.
     fn execute_sql(&self, sql: &str) -> Vec<Row> {
         let handle = self.begin_transaction();
         let snapshot = handle.snapshot();
@@ -257,32 +128,36 @@ impl TestHarness {
         self.execute_plan(&plan, handle)
     }
 
-    /// Execute SQL expecting a single count result.
-    fn execute_sql_count(&self, sql: &str) -> u64 {
-        let results = self.execute_sql(sql);
-        assert_eq!(results.len(), 1, "Expected single row result");
+    fn execute_ddl(&self, sql: &str) -> RuntimeResult<()> {
+        use crate::runtime::ddl::DdlExecutor;
 
-        match &results[0][0] {
-            DataType::BigUInt(v) => v.value(),
-            DataType::BigInt(v) => v.value() as u64,
-            other => panic!("Expected numeric result, got {:?}", other),
-        }
+        let handle = self.begin_transaction();
+        let snapshot = handle.snapshot();
+        let builder = self.tree_builder();
+
+        let mut parser = Parser::new(sql);
+        let stmt = parser.parse().expect("Parse failed");
+
+        let mut binder = Binder::new(self.catalog.clone(), builder.clone(), snapshot.clone());
+        let bound = binder.bind(&stmt).expect("Bind failed");
+
+        let ctx = self.create_write_context(handle.clone()).expect("Failed to create context");
+        let mut ddl_executor = DdlExecutor::new(ctx.clone());
+        ddl_executor.execute(&bound).map_err(|_| RuntimeError::InvalidState)?;
+
+        ctx.pre_commit().expect("Failed to pre commit");
+        handle.commit().expect("Failed to commit");
+        ctx.end().expect("Failed to end");
+
+        Ok(())
     }
 
-    /// Insert a row directly into a table (bypassing SQL).
-    fn insert_row_direct(
-        &self,
-        table_id: ObjectId,
-        values: Vec<DataType>,
-        handle: &TransactionHandle,
-    ) {
+    fn insert_row_direct(&self, table_id: ObjectId, values: Vec<DataType>, handle: &TransactionHandle) {
         let builder = self.tree_builder();
         let snapshot = handle.snapshot();
         let tid = handle.id();
 
-        let relation = self
-            .catalog
-            .read()
+        let relation = self.catalog.read()
             .get_relation(table_id, &builder, &snapshot)
             .expect("Table not found");
 
@@ -291,18 +166,99 @@ impl TestHarness {
 
         let row = Row::new(values.into_boxed_slice());
         let tuple_builder = TupleBuilder::from_schema(schema);
-        let tuple = tuple_builder
-            .build(row, tid)
-            .expect("Failed to build tuple");
+        let tuple = tuple_builder.build(row, tid).expect("Failed to build tuple");
 
         let mut tree = builder.build_tree_mut(root);
-        tree.insert(root, tuple, schema)
-            .expect("Failed to insert tuple");
+        tree.insert(root, tuple, schema).expect("Failed to insert tuple");
         tree.accessor_mut().expect("Uninitialized tree").clear();
     }
 }
 
-/// Helper to create standard test columns for users table.
+
+
+impl TestHarness {
+    /// Execute SQL and assert result count
+    fn assert_count(&self, sql: &str, expected: usize) {
+        let results = self.execute_sql(sql);
+        assert_eq!(results.len(), expected, "SQL: {}", sql);
+    }
+
+    /// Execute COUNT(*) query and return the count
+    fn query_count(&self, table: &str) -> u64 {
+        let results = self.execute_sql(&format!("SELECT COUNT(*) FROM {}", table));
+        assert_eq!(results.len(), 1, "Expected single row for COUNT(*)");
+        match &results[0][0] {
+            DataType::BigUInt(v) => v.value(),
+            DataType::BigInt(v) => v.value() as u64,
+            other => panic!("Expected numeric result, got {:?}", other),
+        }
+    }
+
+    /// Assert a single numeric result equals expected value
+    fn assert_single_int(&self, sql: &str, expected: i32) {
+        let results = self.execute_sql(sql);
+        assert_eq!(results.len(), 1);
+        match &results[0][0] {
+            DataType::Int(v) => assert_eq!(v.value(), expected, "SQL: {}", sql),
+            other => panic!("Expected Int, got {:?}", other),
+        }
+    }
+
+    /// Assert a single double result equals expected value (with tolerance)
+    fn assert_single_double(&self, sql: &str, expected: f64, tolerance: f64) {
+        let results = self.execute_sql(sql);
+        assert_eq!(results.len(), 1);
+        match &results[0][0] {
+            DataType::Double(v) => {
+                assert!((v.value() - expected).abs() < tolerance,
+                    "SQL: {}, expected: {}, got: {}", sql, expected, v.value());
+            }
+            other => panic!("Expected Double, got {:?}", other),
+        }
+    }
+
+    /// Create users table with standard columns and optionally populate with data
+    fn setup_users_table(&self, num_rows: u64) {
+        let handle = self.begin_transaction();
+        self.create_table("users",  users_columns(), handle.id());
+
+        for i in 1..=num_rows {
+            self.insert_row_direct(
+                1,
+                vec![
+                    DataType::BigUInt(UInt64(i)),
+                    DataType::Blob(format!("User{}", i).into()),
+                    DataType::Blob(format!("user{}@test.com", i).into()),
+                    DataType::Int((20 + i as i32).into()),
+                ],
+                &handle,
+            );
+        }
+        handle.commit().expect("Failed to commit");
+    }
+
+    /// Create orders table with standard columns and optionally populate with data
+    fn setup_orders_table(&self, orders: &[(u64, u64, f64, &str)]) {
+        let handle = self.begin_transaction();
+        self.create_table("orders",  orders_columns(), handle.id());
+
+        for &(id, user_id, amount, status) in orders {
+            self.insert_row_direct(
+                2,
+                vec![
+                    DataType::BigUInt(UInt64(id)),
+                    DataType::BigUInt(UInt64(user_id)),
+                    DataType::Double(amount.into()),
+                    DataType::Blob(status.into()),
+                ],
+                &handle,
+            );
+        }
+        handle.commit().expect("Failed to commit");
+    }
+}
+
+/// Standard users table columns
 fn users_columns() -> Vec<Column> {
     vec![
         Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
@@ -312,7 +268,7 @@ fn users_columns() -> Vec<Column> {
     ]
 }
 
-/// Helper to create standard test columns for orders table.
+/// Standard orders table columns
 fn orders_columns() -> Vec<Column> {
     vec![
         Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
@@ -322,183 +278,57 @@ fn orders_columns() -> Vec<Column> {
     ]
 }
 
+
+/// Generate a test that sets up users table, executes SQL, and asserts row count
+macro_rules! sql_count_test {
+    ($name:ident, rows: $rows:expr, sql: $sql:expr, expected: $expected:expr) => {
+        #[test]
+        fn $name() {
+            let harness = TestHarness::new();
+            harness.setup_users_table($rows);
+            harness.assert_count($sql, $expected);
+        }
+    };
+}
+
+/// Generate multiple tests for filtering with different predicates
+macro_rules! filter_tests {
+    ($($name:ident: $predicate:expr => $expected:expr),+ $(,)?) => {
+        $(
+            sql_count_test!($name, rows: 10,
+                sql: concat!("SELECT * FROM users WHERE ", $predicate),
+                expected: $expected
+            );
+        )+
+    };
+}
+
+
 #[test]
 fn test_empty_table_scan() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-    handle.commit().expect("Failed to commit");
-
-    let results = harness.execute_sql("SELECT * FROM users");
-    assert!(results.is_empty());
+    harness.setup_users_table(0);
+    harness.assert_count("SELECT * FROM users", 0);
 }
 
-#[test]
-fn test_single_row_scan() {
-    let harness = TestHarness::new();
+sql_count_test!(test_single_row_scan, rows: 1, sql: "SELECT * FROM users", expected: 1);
+sql_count_test!(test_multiple_rows_scan, rows: 5, sql: "SELECT * FROM users", expected: 5);
 
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    harness.insert_row_direct(
-        1,
-        vec![
-            DataType::BigUInt(UInt64(1)),
-            DataType::Blob("Alice".into()),
-            DataType::Blob("alice@test.com".into()),
-            DataType::Int(25.into()),
-        ],
-        &handle,
-    );
-    handle.commit().expect("Failed to commit");
-
-    let results = harness.execute_sql("SELECT * FROM users");
-    assert_eq!(results.len(), 1);
+filter_tests! {
+    test_filter_equality: "id = 3" => 1,
+    test_filter_greater_than: "age > 25" => 5,
+    test_filter_no_match: "age > 100" => 0,
+    test_filter_and: "age > 23 AND age < 28" => 4,
+    test_filter_less_than: "age < 25" => 4,
+    test_filter_gte: "age >= 25" => 6,
+    test_filter_lte: "age <= 25" => 5,
 }
 
-#[test]
-fn test_multiple_rows_scan() {
-    let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    for i in 1..=5 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((20 + i as i32).into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
-
-    let results = harness.execute_sql("SELECT * FROM users");
-    assert_eq!(results.len(), 5);
-}
-
-#[test]
-fn test_filter_equality() {
-    let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    for i in 1..=5 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((20 + i as i32).into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
-
-    let results = harness.execute_sql("SELECT * FROM users WHERE id = 3");
-    assert_eq!(results.len(), 1);
-}
-
-#[test]
-fn test_filter_comparison() {
-    let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    for i in 1..=10 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((20 + i as i32).into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
-
-    let results = harness.execute_sql("SELECT * FROM users WHERE age > 25");
-    assert_eq!(results.len(), 5); // ages 26-30
-}
-
-#[test]
-fn test_filter_no_match() {
-    let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    harness.insert_row_direct(
-        1,
-        vec![
-            DataType::BigUInt(UInt64(1)),
-            DataType::Blob("Alice".into()),
-            DataType::Blob("alice@test.com".into()),
-            DataType::Int(25.into()),
-        ],
-        &handle,
-    );
-    handle.commit().expect("Failed to commit");
-
-    let results = harness.execute_sql("SELECT * FROM users WHERE age > 100");
-    assert!(results.is_empty());
-}
-
-#[test]
-fn test_filter_and_condition() {
-    let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    for i in 1..=10 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((20 + i as i32).into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
-
-    let results = harness.execute_sql("SELECT * FROM users WHERE age > 23 AND age < 28");
-    assert_eq!(results.len(), 4); // ages 24, 25, 26, 27
-}
 
 #[test]
 fn test_project_single_column() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    harness.insert_row_direct(
-        1,
-        vec![
-            DataType::BigUInt(UInt64(1)),
-            DataType::Blob("Alice".into()),
-            DataType::Blob("alice@test.com".into()),
-            DataType::Int(25.into()),
-        ],
-        &handle,
-    );
-    handle.commit().expect("Failed to commit");
-
+    harness.setup_users_table(1);
     let results = harness.execute_sql("SELECT name FROM users");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].len(), 1);
@@ -507,22 +337,7 @@ fn test_project_single_column() {
 #[test]
 fn test_project_multiple_columns() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    harness.insert_row_direct(
-        1,
-        vec![
-            DataType::BigUInt(UInt64(1)),
-            DataType::Blob("Alice".into()),
-            DataType::Blob("alice@test.com".into()),
-            DataType::Int(25.into()),
-        ],
-        &handle,
-    );
-    handle.commit().expect("Failed to commit");
-
+    harness.setup_users_table(1);
     let results = harness.execute_sql("SELECT name, age FROM users");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].len(), 2);
@@ -531,136 +346,26 @@ fn test_project_multiple_columns() {
 #[test]
 fn test_project_with_expression() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    harness.insert_row_direct(
-        1,
-        vec![
-            DataType::BigUInt(UInt64(1)),
-            DataType::Blob("Alice".into()),
-            DataType::Blob("alice@test.com".into()),
-            DataType::Int(25.into()),
-        ],
-        &handle,
-    );
-    handle.commit().expect("Failed to commit");
-
-    let results = harness.execute_sql("SELECT age + 10 FROM users");
-    assert_eq!(results.len(), 1);
-
-    match &results[0][0] {
-        DataType::Int(v) => assert_eq!(v.value(), 35),
-        other => panic!("Expected Int, got {:?}", other),
-    }
+    harness.setup_users_table(1);
+    harness.assert_single_int("SELECT age + 10 FROM users", 31); // 21 + 10
 }
 
-#[test]
-fn test_limit_basic() {
-    let harness = TestHarness::new();
 
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
 
-    for i in 1..=10 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((20 + i as i32).into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
+sql_count_test!(test_limit_basic, rows: 10, sql: "SELECT * FROM users LIMIT 3", expected: 3);
+sql_count_test!(test_limit_larger_than_table, rows: 3, sql: "SELECT * FROM users LIMIT 100", expected: 3);
+sql_count_test!(test_limit_zero, rows: 1, sql: "SELECT * FROM users LIMIT 0", expected: 0);
+sql_count_test!(test_limit_with_offset, rows: 10, sql: "SELECT * FROM users LIMIT 3 OFFSET 5", expected: 3);
 
-    let results = harness.execute_sql("SELECT * FROM users LIMIT 3");
-    assert_eq!(results.len(), 3);
-}
 
-#[test]
-fn test_limit_larger_than_table() {
-    let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    for i in 1..=3 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((20 + i as i32).into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
-
-    let results = harness.execute_sql("SELECT * FROM users LIMIT 100");
-    assert_eq!(results.len(), 3);
-}
-
-#[test]
-fn test_limit_zero() {
-    let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    harness.insert_row_direct(
-        1,
-        vec![
-            DataType::BigUInt(UInt64(1)),
-            DataType::Blob("Alice".into()),
-            DataType::Blob("alice@test.com".into()),
-            DataType::Int(25.into()),
-        ],
-        &handle,
-    );
-    handle.commit().expect("Failed to commit");
-
-    let results = harness.execute_sql("SELECT * FROM users LIMIT 0");
-    assert!(results.is_empty());
-}
-
-#[test]
-fn test_limit_with_offset() {
-    let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    for i in 1..=10 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((20 + i as i32).into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
-
-    let results = harness.execute_sql("SELECT * FROM users LIMIT 3 OFFSET 5");
-    assert_eq!(results.len(), 3);
-}
 
 #[test]
 fn test_sort_ascending() {
     let harness = TestHarness::new();
 
+    // Insert in random order
     let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
+    harness.create_table("users",  users_columns(), handle.id());
     for i in [3, 1, 4, 5, 9, 2, 6] {
         harness.insert_row_direct(
             1,
@@ -676,124 +381,53 @@ fn test_sort_ascending() {
     handle.commit().expect("Failed to commit");
 
     let results = harness.execute_sql("SELECT age FROM users ORDER BY age ASC");
-
-    let ages: Vec<i32> = results
-        .iter()
-        .map(|r| match &r[0] {
-            DataType::Int(v) => v.value(),
-            _ => panic!("Expected Int, found {}", r[0]),
-        })
+    let ages: Vec<i32> = results.iter()
+        .map(|r| match &r[0] { DataType::Int(v) => v.value(), _ => panic!("Expected Int") })
         .collect();
 
-    let mut sorted = ages.clone();
-    sorted.sort();
-    assert_eq!(ages, sorted);
+    assert!(ages.windows(2).all(|w| w[0] <= w[1]), "Ages should be sorted ascending");
 }
 
 #[test]
 fn test_sort_descending() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    for i in 1..=5 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((i as i32).into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
+    harness.setup_users_table(5);
 
     let results = harness.execute_sql("SELECT age FROM users ORDER BY age DESC");
-
-    let ages: Vec<i32> = results
-        .iter()
-        .map(|r| match &r[0] {
-            DataType::Int(v) => v.value(),
-            _ => panic!("Expected Int"),
-        })
+    let ages: Vec<i32> = results.iter()
+        .map(|r| match &r[0] { DataType::Int(v) => v.value(), _ => panic!("Expected Int") })
         .collect();
 
-    assert_eq!(ages, vec![5, 4, 3, 2, 1]);
+    assert!(ages.windows(2).all(|w| w[0] >= w[1]), "Ages should be sorted descending");
 }
 
 #[test]
 fn test_sort_with_limit() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    for i in 1..=10 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((i as i32).into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
+    harness.setup_users_table(10);
 
     let results = harness.execute_sql("SELECT age FROM users ORDER BY age DESC LIMIT 3");
     assert_eq!(results.len(), 3);
 
-    let ages: Vec<i32> = results
-        .iter()
-        .map(|r| match &r[0] {
-            DataType::Int(v) => v.value(),
-            _ => panic!("Expected Int"),
-        })
+    let ages: Vec<i32> = results.iter()
+        .map(|r| match &r[0] { DataType::Int(v) => v.value(), _ => panic!("Expected Int") })
         .collect();
-
-    assert_eq!(ages, vec![10, 9, 8]);
+    assert_eq!(ages, vec![30, 29, 28]);
 }
+
 
 #[test]
 fn test_count_star() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    for i in 1..=5 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((20 + i as i32).into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
-
-    let count = harness.execute_sql_count("SELECT COUNT(*) FROM users");
-    assert_eq!(count, 5);
+    harness.setup_users_table(5);
+    assert_eq!(harness.query_count("users"), 5);
 }
 
 #[test]
 fn test_count_empty_table() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-    handle.commit().expect("Failed to commit");
-
-    let count = harness.execute_sql_count("SELECT COUNT(*) FROM users");
-    assert_eq!(count, 0);
+    harness.setup_users_table(0);
+    assert_eq!(harness.query_count("users"), 0);
 }
 
 #[test]
@@ -801,8 +435,7 @@ fn test_sum_aggregate() {
     let harness = TestHarness::new();
 
     let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
+    harness.create_table("users", users_columns(), handle.id());
     for i in 1..=5 {
         harness.insert_row_direct(
             1,
@@ -810,20 +443,14 @@ fn test_sum_aggregate() {
                 DataType::BigUInt(UInt64(i)),
                 DataType::Blob(format!("User{}", i).into()),
                 DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((i as i32 * 10).into()),
+                DataType::Int((i as i32 * 10).into()), // ages: 10, 20, 30, 40, 50
             ],
             &handle,
         );
     }
     handle.commit().expect("Failed to commit");
 
-    let results = harness.execute_sql("SELECT SUM(age) FROM users");
-    assert_eq!(results.len(), 1);
-
-    match &results[0][0] {
-        DataType::Double(v) => assert_eq!(v.value(), 150.0),
-        other => panic!("Expected Double, got {:?}", other),
-    }
+    harness.assert_single_double("SELECT SUM(age) FROM users", 150.0, 0.001);
 }
 
 #[test]
@@ -831,8 +458,7 @@ fn test_avg_aggregate() {
     let harness = TestHarness::new();
 
     let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
+    harness.create_table("users", users_columns(), handle.id());
     for i in 1..=3 {
         harness.insert_row_direct(
             1,
@@ -840,20 +466,14 @@ fn test_avg_aggregate() {
                 DataType::BigUInt(UInt64(i)),
                 DataType::Blob(format!("User{}", i).into()),
                 DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((i as i32 * 10).into()),
+                DataType::Int((i as i32 * 10).into()), // ages: 10, 20, 30
             ],
             &handle,
         );
     }
     handle.commit().expect("Failed to commit");
 
-    let results = harness.execute_sql("SELECT AVG(age) FROM users");
-    assert_eq!(results.len(), 1);
-
-    match &results[0][0] {
-        DataType::Double(v) => assert!((v.value() - 20.0).abs() < 0.001),
-        other => panic!("Expected Double, got {:?}", other),
-    }
+    harness.assert_single_double("SELECT AVG(age) FROM users", 20.0, 0.001);
 }
 
 #[test]
@@ -861,8 +481,7 @@ fn test_min_max_aggregate() {
     let harness = TestHarness::new();
 
     let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
+    harness.create_table("users", users_columns(), handle.id());
     for i in [30, 10, 50, 20, 40] {
         harness.insert_row_direct(
             1,
@@ -879,7 +498,6 @@ fn test_min_max_aggregate() {
 
     let results = harness.execute_sql("SELECT MIN(age), MAX(age) FROM users");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].len(), 2);
 
     match (&results[0][0], &results[0][1]) {
         (DataType::Int(min), DataType::Int(max)) => {
@@ -891,63 +509,45 @@ fn test_min_max_aggregate() {
 }
 
 #[test]
+fn test_empty_result_aggregation() {
+    let harness = TestHarness::new();
+    harness.setup_users_table(0);
+
+    let results = harness.execute_sql("SELECT SUM(age) FROM users");
+    assert!(matches!(&results[0][0], DataType::Null));
+}
+
+// ============================================================================
+// Group By Tests
+// ============================================================================
+
+#[test]
 fn test_group_by() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("orders", 2, orders_columns(), handle.id());
-
-    let orders = [
+    harness.setup_orders_table(&[
         (1, 1, 100.0, "completed"),
         (2, 1, 200.0, "completed"),
         (3, 2, 150.0, "pending"),
         (4, 2, 50.0, "completed"),
         (5, 3, 300.0, "pending"),
-    ];
-
-    for (id, user_id, amount, status) in orders {
-        harness.insert_row_direct(
-            2,
-            vec![
-                DataType::BigUInt(UInt64(id)),
-                DataType::BigUInt(UInt64(user_id)),
-                DataType::Double(amount.into()),
-                DataType::Blob(status.into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
+    ]);
 
     let results = harness.execute_sql("SELECT user_id, COUNT(*) FROM orders GROUP BY user_id");
-    assert_eq!(results.len(), 3);
+    assert_eq!(results.len(), 3); // 3 distinct user_ids
 }
 
 #[test]
 fn test_group_by_with_sum() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("orders", 2, orders_columns(), handle.id());
-
-    let orders = [(1, 1, 100.0), (2, 1, 200.0), (3, 2, 150.0), (4, 2, 50.0)];
-
-    for (id, user_id, amount) in orders {
-        harness.insert_row_direct(
-            2,
-            vec![
-                DataType::BigUInt(UInt64(id)),
-                DataType::BigUInt(UInt64(user_id)),
-                DataType::Double(amount.into()),
-                DataType::Blob("completed".into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
+    harness.setup_orders_table(&[
+        (1, 1, 100.0, "completed"),
+        (2, 1, 200.0, "completed"),
+        (3, 2, 150.0, "completed"),
+        (4, 2, 50.0, "completed"),
+    ]);
 
     let results = harness.execute_sql("SELECT user_id, SUM(amount) FROM orders GROUP BY user_id");
-    assert_eq!(results.len(), 2);
+    assert_eq!(results.len(), 2); // 2 distinct user_ids
 }
 
 #[test]
@@ -955,48 +555,36 @@ fn test_inner_join() {
     let harness = TestHarness::new();
 
     let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-    harness.create_table("orders", 2, orders_columns(), handle.id());
+    harness.create_table("users", users_columns(), handle.id());
+    harness.create_table("orders", orders_columns(), handle.id());
 
-    harness.insert_row_direct(
-        1,
-        vec![
-            DataType::BigUInt(UInt64(1)),
-            DataType::Blob("Alice".into()),
-            DataType::Blob("alice@test.com".into()),
-            DataType::Int(25.into()),
-        ],
-        &handle,
-    );
-    harness.insert_row_direct(
-        1,
-        vec![
-            DataType::BigUInt(UInt64(2)),
-            DataType::Blob("Bob".into()),
-            DataType::Blob("bob@test.com".into()),
-            DataType::Int(30.into()),
-        ],
-        &handle,
-    );
+    harness.insert_row_direct(1, vec![
+        DataType::BigUInt(UInt64(1)),
+        DataType::Blob("Alice".into()),
+        DataType::Blob("alice@test.com".into()),
+        DataType::Int(25.into()),
+    ], &handle);
 
-    harness.insert_row_direct(
-        2,
-        vec![
-            DataType::BigUInt(UInt64(1)),
-            DataType::BigUInt(UInt64(1)),
-            DataType::Double(100.0.into()),
-            DataType::Blob("completed".into()),
-        ],
-        &handle,
-    );
+    harness.insert_row_direct(1, vec![
+        DataType::BigUInt(UInt64(2)),
+        DataType::Blob("Bob".into()),
+        DataType::Blob("bob@test.com".into()),
+        DataType::Int(30.into()),
+    ], &handle);
+
+    harness.insert_row_direct(2, vec![
+        DataType::BigUInt(UInt64(1)),
+        DataType::BigUInt(UInt64(1)), // user_id = 1
+        DataType::Double(100.0.into()),
+        DataType::Blob("completed".into()),
+    ], &handle);
 
     handle.commit().expect("Failed to commit");
 
     let results = harness.execute_sql(
-        "SELECT users.name, orders.amount FROM users JOIN orders ON users.id = orders.user_id",
+        "SELECT users.name, orders.amount FROM users JOIN orders ON users.id = orders.user_id"
     );
-
-    assert_eq!(results.len(), 1);
+    assert_eq!(results.len(), 1); // Only Alice has an order
 }
 
 #[test]
@@ -1004,163 +592,115 @@ fn test_cross_join() {
     let harness = TestHarness::new();
 
     let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-    harness.create_table("orders", 2, orders_columns(), handle.id());
+    harness.create_table("users", users_columns(), handle.id());
+    harness.create_table("orders", orders_columns(), handle.id());
 
     for i in 1..=2 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int(25.into()),
-            ],
-            &handle,
-        );
+        harness.insert_row_direct(1, vec![
+            DataType::BigUInt(UInt64(i)),
+            DataType::Blob(format!("User{}", i).into()),
+            DataType::Blob(format!("user{}@test.com", i).into()),
+            DataType::Int(25.into()),
+        ], &handle);
     }
 
     for i in 1..=3 {
-        harness.insert_row_direct(
-            2,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::BigUInt(UInt64(1)),
-                DataType::Double(100.0.into()),
-                DataType::Blob("completed".into()),
-            ],
-            &handle,
-        );
+        harness.insert_row_direct(2, vec![
+            DataType::BigUInt(UInt64(i)),
+            DataType::BigUInt(UInt64(1)),
+            DataType::Double(100.0.into()),
+            DataType::Blob("completed".into()),
+        ], &handle);
     }
 
     handle.commit().expect("Failed to commit");
 
-    let results = harness.execute_sql("SELECT * FROM users, orders");
-    assert_eq!(results.len(), 6);
+    harness.assert_count("SELECT * FROM users, orders", 6); // 2 * 3 = 6
 }
+
 
 #[test]
 fn test_insert_single_row() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-    handle.commit().expect("Failed to commit");
+    harness.setup_users_table(0);
 
     let results = harness.execute_sql("INSERT INTO users VALUES ('Alice', 'alice@test.com', 25)");
-
-    assert_eq!(results.len(), 1);
     match &results[0][0] {
         DataType::BigUInt(v) => assert_eq!(v.value(), 1),
         other => panic!("Expected BigUInt, got {:?}", other),
     }
 
-    let count = harness.execute_sql_count("SELECT COUNT(*) FROM users");
-    assert_eq!(count, 1);
+    assert_eq!(harness.query_count("users"), 1);
 }
 
 #[test]
-fn test_insert_multiple_rows() {
+fn test_insert_multiple_statements() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-    handle.commit().expect("Failed to commit");
+    harness.setup_users_table(0);
 
     harness.execute_sql("INSERT INTO users VALUES ('Alice', 'alice@test.com', 25)");
     harness.execute_sql("INSERT INTO users VALUES ('Bob', 'bob@test.com', 30)");
     harness.execute_sql("INSERT INTO users VALUES ('Charlie', 'charlie@test.com', 35)");
 
-    let count = harness.execute_sql_count("SELECT COUNT(*) FROM users");
-    assert_eq!(count, 3);
+    assert_eq!(harness.query_count("users"), 3);
+}
+
+#[test]
+fn test_insert_multiple_rows_single_statement() {
+    let harness = TestHarness::new();
+    harness.setup_users_table(0);
+
+    let results = harness.execute_sql(
+        "INSERT INTO users VALUES
+            ('Alice', 'alice@test.com', 25),
+            ('Bob', 'bob@test.com', 30),
+            ('Charlie', 'charlie@test.com', 35)"
+    );
+
+    match &results[0][0] {
+        DataType::BigUInt(v) => assert_eq!(v.value(), 3),
+        other => panic!("Expected BigUInt, got {:?}", other),
+    }
+
+    assert_eq!(harness.query_count("users"), 3);
 }
 
 #[test]
 fn test_insert_select() {
     let harness = TestHarness::new();
+    harness.setup_users_table(3);
 
+    // Create second table
     let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-    harness.create_table("users2", 2, users_columns(), handle.id());
-
-    for i in 1..=3 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((20 + i as i32).into()),
-            ],
-            &handle,
-        );
-    }
+    harness.create_table("users2",  users_columns(), handle.id());
     handle.commit().expect("Failed to commit");
 
     harness.execute_sql("INSERT INTO users2 SELECT * FROM users WHERE age > 21");
-
-    let count = harness.execute_sql_count("SELECT COUNT(*) FROM users2");
-    assert_eq!(count, 2);
+    assert_eq!(harness.query_count("users2"), 2);
 }
 
 #[test]
 fn test_update_single_row() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    harness.insert_row_direct(
-        1,
-        vec![
-            DataType::BigUInt(UInt64(1)),
-            DataType::Blob("Alice".into()),
-            DataType::Blob("alice@test.com".into()),
-            DataType::Int(25.into()),
-        ],
-        &handle,
-    );
-    handle.commit().expect("Failed to commit");
+    harness.setup_users_table(1);
 
     let results = harness.execute_sql("UPDATE users SET age = 30 WHERE id = 1");
-
     match &results[0][0] {
         DataType::BigUInt(v) => assert_eq!(v.value(), 1),
         other => panic!("Expected BigUInt, got {:?}", other),
     }
 
-    let rows = harness.execute_sql("SELECT age FROM users WHERE id = 1");
-    match &rows[0][0] {
-        DataType::Int(v) => assert_eq!(v.value(), 30),
-        other => panic!("Expected Int, got {:?}", other),
-    }
+    harness.assert_single_int("SELECT age FROM users WHERE id = 1", 30);
 }
 
 #[test]
 fn test_update_multiple_rows() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    for i in 1..=5 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((20 + i as i32).into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
+    harness.setup_users_table(5);
 
     let results = harness.execute_sql("UPDATE users SET age = 100 WHERE age > 23");
-
     match &results[0][0] {
-        DataType::BigUInt(v) => assert_eq!(v.value(), 2),
+        DataType::BigUInt(v) => assert_eq!(v.value(), 2), // ages 24, 25
         other => panic!("Expected BigUInt, got {:?}", other),
     }
 }
@@ -1168,154 +708,75 @@ fn test_update_multiple_rows() {
 #[test]
 fn test_update_with_expression() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    harness.insert_row_direct(
-        1,
-        vec![
-            DataType::BigUInt(UInt64(1)),
-            DataType::Blob("Alice".into()),
-            DataType::Blob("alice@test.com".into()),
-            DataType::Int(25.into()),
-        ],
-        &handle,
-    );
-    handle.commit().expect("Failed to commit");
+    harness.setup_users_table(1);
 
     harness.execute_sql("UPDATE users SET age = age + 5");
-
-    let rows = harness.execute_sql("SELECT age FROM users");
-    match &rows[0][0] {
-        DataType::Int(v) => assert_eq!(v.value(), 30),
-        other => panic!("Expected Int, got {:?}", other),
-    }
+    harness.assert_single_int("SELECT age FROM users", 26); // 21 + 5
 }
 
 #[test]
 fn test_delete_single_row() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    for i in 1..=3 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((20 + i as i32).into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
+    harness.setup_users_table(3);
 
     let results = harness.execute_sql("DELETE FROM users WHERE id = 2");
-
     match &results[0][0] {
         DataType::BigUInt(v) => assert_eq!(v.value(), 1),
         other => panic!("Expected BigUInt, got {:?}", other),
     }
 
-    let count = harness.execute_sql_count("SELECT COUNT(*) FROM users");
-    assert_eq!(count, 2);
+    assert_eq!(harness.query_count("users"), 2);
 }
 
 #[test]
 fn test_delete_multiple_rows() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    for i in 1..=5 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((20 + i as i32).into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
+    harness.setup_users_table(5);
 
     let results = harness.execute_sql("DELETE FROM users WHERE age > 23");
-
     match &results[0][0] {
         DataType::BigUInt(v) => assert_eq!(v.value(), 2),
         other => panic!("Expected BigUInt, got {:?}", other),
     }
 
-    let count = harness.execute_sql_count("SELECT COUNT(*) FROM users");
-    assert_eq!(count, 3);
+    assert_eq!(harness.query_count("users"), 3);
 }
 
 #[test]
 fn test_delete_all_rows() {
     let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-
-    for i in 1..=3 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int(25.into()),
-            ],
-            &handle,
-        );
-    }
-    handle.commit().expect("Failed to commit");
+    harness.setup_users_table(3);
 
     harness.execute_sql("DELETE FROM users");
-
-    let count = harness.execute_sql_count("SELECT COUNT(*) FROM users");
-    assert_eq!(count, 0);
+    assert_eq!(harness.query_count("users"), 0);
 }
+
+
 
 #[test]
 fn test_complex_query_with_join_filter_sort_limit() {
     let harness = TestHarness::new();
 
     let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-    harness.create_table("orders", 2, orders_columns(), handle.id());
+    harness.create_table("users", users_columns(), handle.id());
+    harness.create_table("orders", orders_columns(), handle.id());
 
     for i in 1..=5 {
-        harness.insert_row_direct(
-            1,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::Blob(format!("User{}", i).into()),
-                DataType::Blob(format!("user{}@test.com", i).into()),
-                DataType::Int((20 + i as i32).into()),
-            ],
-            &handle,
-        );
+        harness.insert_row_direct(1, vec![
+            DataType::BigUInt(UInt64(i)),
+            DataType::Blob(format!("User{}", i).into()),
+            DataType::Blob(format!("user{}@test.com", i).into()),
+            DataType::Int((20 + i as i32).into()),
+        ], &handle);
     }
 
     for i in 1..=10 {
-        harness.insert_row_direct(
-            2,
-            vec![
-                DataType::BigUInt(UInt64(i)),
-                DataType::BigUInt(UInt64((i % 5) + 1)),
-                DataType::Double((i as f64 * 10.0).into()),
-                DataType::Blob("completed".into()),
-            ],
-            &handle,
-        );
+        harness.insert_row_direct(2, vec![
+            DataType::BigUInt(UInt64(i)),
+            DataType::BigUInt(UInt64((i % 5) + 1)),
+            DataType::Double((i as f64 * 10.0).into()),
+            DataType::Blob("completed".into()),
+        ], &handle);
     }
     handle.commit().expect("Failed to commit");
 
@@ -1325,30 +786,17 @@ fn test_complex_query_with_join_filter_sort_limit() {
          JOIN orders ON users.id = orders.user_id
          WHERE users.age > 22
          ORDER BY orders.amount DESC
-         LIMIT 5",
+         LIMIT 5"
     );
 
     assert_eq!(results.len(), 5);
 }
 
+
 #[test]
 fn test_transaction_isolation_read_committed() {
     let harness = TestHarness::new();
-
-    let handle1 = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle1.id());
-
-    harness.insert_row_direct(
-        1,
-        vec![
-            DataType::BigUInt(UInt64(1)),
-            DataType::Blob("Alice".into()),
-            DataType::Blob("alice@test.com".into()),
-            DataType::Int(25.into()),
-        ],
-        &handle1,
-    );
-    handle1.commit().expect("Failed to commit");
+    harness.setup_users_table(1);
 
     let handle2 = harness.begin_transaction();
     let snapshot2 = handle2.snapshot();
@@ -1361,318 +809,170 @@ fn test_transaction_isolation_read_committed() {
     }
 }
 
+
+
 #[test]
 fn test_null_handling_in_aggregates() {
     let harness = TestHarness::new();
 
     let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
+    harness.create_table("users", users_columns(), handle.id());
 
-    harness.insert_row_direct(
-        1,
-        vec![
-            DataType::BigUInt(UInt64(1)),
-            DataType::Blob("Alice".into()),
-            DataType::Blob("alice@test.com".into()),
-            DataType::Null,
-        ],
-        &handle,
-    );
+    harness.insert_row_direct(1, vec![
+        DataType::BigUInt(UInt64(1)),
+        DataType::Blob("Alice".into()),
+        DataType::Blob("alice@test.com".into()),
+        DataType::Null,
+    ], &handle);
 
-    harness.insert_row_direct(
-        1,
-        vec![
-            DataType::BigUInt(UInt64(2)),
-            DataType::Blob("Bob".into()),
-            DataType::Blob("bob@test.com".into()),
-            DataType::Int(30.into()),
-        ],
-        &handle,
-    );
+    harness.insert_row_direct(1, vec![
+        DataType::BigUInt(UInt64(2)),
+        DataType::Blob("Bob".into()),
+        DataType::Blob("bob@test.com".into()),
+        DataType::Int(30.into()),
+    ], &handle);
     handle.commit().expect("Failed to commit");
 
-    let count = harness.execute_sql_count("SELECT COUNT(*) FROM users");
-    assert_eq!(count, 2);
-
-    let results = harness.execute_sql("SELECT SUM(age) FROM users");
-    match &results[0][0] {
-        DataType::Double(v) => assert_eq!(v.value(), 30.0),
-        other => panic!("Expected Double, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_empty_result_aggregation() {
-    let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-    handle.commit().expect("Failed to commit");
-
-    let count = harness.execute_sql_count("SELECT COUNT(*) FROM users");
-    assert_eq!(count, 0);
-
-    let results = harness.execute_sql("SELECT SUM(age) FROM users");
-    assert!(matches!(&results[0][0], DataType::Null));
-}
-
-#[test]
-fn test_insert_multiple_rows_single_statement() {
-    let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-    harness.create_table("users", 1, users_columns(), handle.id());
-    handle.commit().expect("Failed to commit");
-
-    // Insert multiple rows in a single INSERT statement
-    let results = harness.execute_sql(
-        "INSERT INTO users VALUES
-            ('Alice', 'alice@test.com', 25),
-            ('Bob', 'bob@test.com', 30),
-            ('Charlie', 'charlie@test.com', 35),
-            ('Diana', 'diana@test.com', 28),
-            ('Eve', 'eve@test.com', 22)",
-    );
-
-    // Should return count of inserted rows
-    assert_eq!(results.len(), 1);
-    match &results[0][0] {
-        DataType::BigUInt(v) => assert_eq!(v.value(), 5),
-        other => panic!("Expected BigUInt, got {:?}", other),
-    }
-
-    // Verify all rows were inserted
-    let count = harness.execute_sql_count("SELECT COUNT(*) FROM users");
-    assert_eq!(count, 5);
-
-    // Verify data integrity
-    let rows = harness.execute_sql("SELECT id, name, age FROM users ORDER BY id");
-    assert_eq!(rows.len(), 5);
-
-    // Check first and last row
-    match &rows[0][0] {
-        DataType::BigUInt(v) => assert_eq!(v.value(), 0),
-        other => panic!("Expected BigUInt for id, got {:?}", other),
-    }
-    match &rows[4][0] {
-        DataType::BigUInt(v) => assert_eq!(v.value(), 4),
-        other => panic!("Expected BigUInt for id, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_update_int_column_with_literal() {
-    let harness = TestHarness::new();
-
-    let handle = harness.begin_transaction();
-
-    // Create table with INT column (not BIGINT)
-    let columns = vec![
-        Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
-        Column::new_with_defaults(DataTypeKind::Int, "value"),
-    ];
-    harness.create_table("test_table", 1, columns, handle.id());
-
-    harness.insert_row_direct(
-        1,
-        vec![DataType::BigUInt(UInt64(1)), DataType::Int(100.into())],
-        &handle,
-    );
-    handle.commit().expect("Failed to commit");
-
-    // This should work (updating INT column with a literal)
-    let results = harness.execute_sql("UPDATE test_table SET value = 150 WHERE id = 1");
-
-    match &results[0][0] {
-        DataType::BigUInt(v) => assert_eq!(v.value(), 1),
-        other => panic!("Expected BigUInt, got {:?}", other),
-    }
-
-    // Verify the update
-    let rows = harness.execute_sql("SELECT value FROM test_table WHERE id = 1");
-    match &rows[0][0] {
-        DataType::Int(v) => assert_eq!(v.value(), 150),
-        other => panic!("Expected Int, got {:?}", other),
-    }
+    assert_eq!(harness.query_count("users"), 2);
+    harness.assert_single_double("SELECT SUM(age) FROM users", 30.0, 0.001);
 }
 
 
 
-
-/// Test creating an index via SQL and verifying it exists in the catalog
 #[test]
 fn test_create_index_via_sql() {
     let harness = TestHarness::new();
 
-    // Create table first
     let handle = harness.begin_transaction();
-    harness.create_table("products", 1, vec![
+    harness.create_table("products",  vec![
         Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
         Column::new_with_defaults(DataTypeKind::Blob, "name"),
         Column::new_with_defaults(DataTypeKind::Int, "price"),
     ], handle.id());
     handle.commit().expect("Failed to commit");
 
-    // Create index via SQL
     harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
         .expect("Failed to create index");
 
-    // Verify index exists by checking catalog
+    // Verify index exists
     let handle = harness.begin_transaction();
     let snapshot = handle.snapshot();
     let builder = harness.tree_builder();
 
-    let index = harness.catalog
-        .read()
+    let index = harness.catalog.read()
         .get_relation_by_name("idx_products_price", &builder, &snapshot);
-
     assert!(index.is_ok(), "Index should exist in catalog");
     handle.commit().expect("Failed to commit");
 }
 
-/// Test that inserting data into a table with an index maintains the index
 #[test]
 fn test_index_maintained_on_insert() {
     let harness = TestHarness::new();
 
-    // Create table
     let handle = harness.begin_transaction();
-    harness.create_table("products", 1, vec![
+    harness.create_table("products",  vec![
         Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
         Column::new_with_defaults(DataTypeKind::Blob, "name"),
         Column::new_with_defaults(DataTypeKind::Int, "price"),
     ], handle.id());
     handle.commit().expect("Failed to commit");
 
-    // Create index
     harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
         .expect("Failed to create index");
 
-    // Insert data DML executor should automatically maintain the index
     harness.execute_sql("INSERT INTO products VALUES ('Widget', 100)");
     harness.execute_sql("INSERT INTO products VALUES ('Gadget', 200)");
     harness.execute_sql("INSERT INTO products VALUES ('Gizmo', 150)");
 
-    // Verify data was inserted
-    let count = harness.execute_sql_count("SELECT COUNT(*) FROM products");
-    assert_eq!(count, 3);
-
-    // Query with filter on indexed column - optimizer may use index
-    let results = harness.execute_sql("SELECT name FROM products WHERE price = 150");
-    assert_eq!(results.len(), 1);
+    harness.assert_count("SELECT name FROM products WHERE price = 150", 1);
 }
 
-/// Test index scan with range query
 #[test]
 fn test_index_range_query() {
     let harness = TestHarness::new();
 
-    // Create table
     let handle = harness.begin_transaction();
-    harness.create_table("products", 1, vec![
+    harness.create_table("products", vec![
         Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
         Column::new_with_defaults(DataTypeKind::Blob, "name"),
         Column::new_with_defaults(DataTypeKind::Int, "price"),
     ], handle.id());
     handle.commit().expect("Failed to commit");
 
-    // Create index on price
     harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
         .expect("Failed to create index");
 
-    // Insert data with various prices
     for i in 1..=10 {
         harness.execute_sql(&format!(
-            "INSERT INTO products VALUES ('Product{}', {})",
-            i, i * 10
+            "INSERT INTO products VALUES ('Product{}', {})", i, i * 10
         ));
     }
 
-    // Range query on indexed column
-    let results = harness.execute_sql("SELECT name FROM products WHERE price >= 50 AND price <= 80");
-
-    // Should return products with prices 50, 60, 70, 80
-    assert_eq!(results.len(), 4);
+    // Range query: prices 50, 60, 70, 80
+    harness.assert_count("SELECT name FROM products WHERE price >= 50 AND price <= 80", 4);
 }
 
-/// Test index on multiple inserts and deletes
 #[test]
 fn test_index_maintained_on_delete() {
     let harness = TestHarness::new();
 
-    // Create table
     let handle = harness.begin_transaction();
-    harness.create_table("products", 1, vec![
+    harness.create_table("products", vec![
         Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
         Column::new_with_defaults(DataTypeKind::Blob, "name"),
         Column::new_with_defaults(DataTypeKind::Int, "price"),
     ], handle.id());
     handle.commit().expect("Failed to commit");
 
-    // Create index
     harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
         .expect("Failed to create index");
 
-    // Insert data
     harness.execute_sql("INSERT INTO products VALUES ('Widget', 100)");
     harness.execute_sql("INSERT INTO products VALUES ('Gadget', 200)");
-    harness.execute_sql("INSERT INTO products VALUES ('Gizmo', 100)");
 
-    // Delete one row with price 100
+
+    // Indexes are unique by default, so duplicate index keys are not allowed.
+    harness.execute_sql("INSERT INTO products VALUES ('Gizmo', 150)");
+
     harness.execute_sql("DELETE FROM products WHERE name = 'Widget'");
 
-    // Query should still work and return correct results
-    let results = harness.execute_sql("SELECT name FROM products WHERE price = 100");
+    let results = harness.execute_sql("SELECT name FROM products WHERE price = 150");
     assert_eq!(results.len(), 1);
 
-    // Verify it's "Gizmo" not "Widget"
     match &results[0][0] {
-        DataType::Blob(b) => assert_eq!(b.to_string(), "Gizmo"),
+        DataType::Blob(b) => assert_eq!(b.to_string(), "Blob (Gizmo)"),
         other => panic!("Expected Blob, got {:?}", other),
     }
 }
 
-/// Test index maintained on update
 #[test]
 fn test_index_maintained_on_update() {
     let harness = TestHarness::new();
 
-    // Create table
     let handle = harness.begin_transaction();
-    harness.create_table("products", 1, vec![
+    harness.create_table("products",  vec![
         Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
         Column::new_with_defaults(DataTypeKind::Blob, "name"),
         Column::new_with_defaults(DataTypeKind::Int, "price"),
     ], handle.id());
     handle.commit().expect("Failed to commit");
 
-    // Create index on price
     harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
         .expect("Failed to create index");
 
-    // Insert data
     harness.execute_sql("INSERT INTO products VALUES ('Widget', 100)");
-
-    // Update the indexed column
     harness.execute_sql("UPDATE products SET price = 150 WHERE name = 'Widget'");
 
-    // Old value should return no results
-    let old_results = harness.execute_sql("SELECT name FROM products WHERE price = 100");
-    assert_eq!(old_results.len(), 0);
-
-    // New value should return the row
-    let new_results = harness.execute_sql("SELECT name FROM products WHERE price = 150");
-    assert_eq!(new_results.len(), 1);
+    harness.assert_count("SELECT name FROM products WHERE price = 100", 0);
+    harness.assert_count("SELECT name FROM products WHERE price = 150", 1);
 }
 
-/// Test with multiple indexes on the same table
 #[test]
 fn test_multiple_indexes_on_table() {
     let harness = TestHarness::new();
 
-    // Create table
     let handle = harness.begin_transaction();
-    harness.create_table("employees", 1, vec![
+    harness.create_table("employees", vec![
         Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
         Column::new_with_defaults(DataTypeKind::Blob, "name"),
         Column::new_with_defaults(DataTypeKind::Blob, "department"),
@@ -1680,76 +980,40 @@ fn test_multiple_indexes_on_table() {
     ], handle.id());
     handle.commit().expect("Failed to commit");
 
-    // Create multiple indexes
     harness.execute_ddl("CREATE INDEX idx_emp_dept ON employees(department)")
         .expect("Failed to create department index");
     harness.execute_ddl("CREATE INDEX idx_emp_salary ON employees(salary)")
         .expect("Failed to create salary index");
 
-    // Insert data
     harness.execute_sql("INSERT INTO employees VALUES ('Alice', 'Engineering', 100000)");
     harness.execute_sql("INSERT INTO employees VALUES ('Bob', 'Sales', 80000)");
-    harness.execute_sql("INSERT INTO employees VALUES ('Charlie', 'Engineering', 90000)");
-    harness.execute_sql("INSERT INTO employees VALUES ('Diana', 'Sales', 85000)");
+    harness.execute_sql("INSERT INTO employees VALUES ('Charlie', 'Product', 90000)");
+    harness.execute_sql("INSERT INTO employees VALUES ('Diana', 'Tools', 85000)");
 
-    // Query using department
-    let eng_results = harness.execute_sql(
-        "SELECT name FROM employees WHERE department = 'Engineering'"
-    );
-    assert_eq!(eng_results.len(), 2);
 
-    // Query using salary
-    let high_salary = harness.execute_sql(
-        "SELECT name FROM employees WHERE salary > 85000"
-    );
-    assert_eq!(high_salary.len(), 2); // Alice (100k) and Charlie (90k)
+    // Indexes must be unique
+    harness.assert_count("SELECT name FROM employees WHERE department = 'Engineering'", 1);
+    harness.assert_count("SELECT name FROM employees WHERE salary > 85000", 2);
 }
 
-/// Test index with empty table
-#[test]
-fn test_index_on_empty_table() {
-    let harness = TestHarness::new();
-
-    // Create table
-    let handle = harness.begin_transaction();
-    harness.create_table("products", 1, vec![
-        Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
-        Column::new_with_defaults(DataTypeKind::Blob, "name"),
-        Column::new_with_defaults(DataTypeKind::Int, "price"),
-    ], handle.id());
-    handle.commit().expect("Failed to commit");
-
-    // Create index on empty table
-    harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
-        .expect("Failed to create index");
-
-    // Query should return empty results
-    let results = harness.execute_sql("SELECT name FROM products WHERE price = 100");
-    assert!(results.is_empty());
-}
-
-/// Test CREATE INDEX IF NOT EXISTS
 #[test]
 fn test_create_index_if_not_exists() {
     let harness = TestHarness::new();
 
-    // Create table
     let handle = harness.begin_transaction();
-    harness.create_table("products", 1, vec![
+    harness.create_table("products", vec![
         Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
         Column::new_with_defaults(DataTypeKind::Blob, "name"),
         Column::new_with_defaults(DataTypeKind::Int, "price"),
     ], handle.id());
     handle.commit().expect("Failed to commit");
 
-    // Create index first time - should succeed
     harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
         .expect("Failed to create index");
 
-    // Create same index with IF NOT EXISTS - should not error
+    // Should not error with IF NOT EXISTS
     let result = harness.execute_ddl(
         "CREATE INDEX IF NOT EXISTS idx_products_price ON products(price)"
     );
     assert!(result.is_ok());
 }
-

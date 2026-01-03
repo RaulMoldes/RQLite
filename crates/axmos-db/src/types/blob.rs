@@ -101,7 +101,7 @@ impl Blob {
 
 impl Display for Blob {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "Blob ({})", self.to_string_lossy_unchecked())
+        write!(f, "{}", self.to_string_lossy_unchecked())
     }
 }
 

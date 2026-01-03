@@ -73,6 +73,7 @@ where
         columns: &[usize],
         values: &Row,
     ) -> RuntimeResult<InsertResult> {
+
         let tree_builder = self.ctx.tree_builder();
         let snapshot = self.ctx.snapshot();
         let tid = self.ctx.tid();
@@ -334,6 +335,8 @@ where
         values: &[DataType],
         row_id: RowId,
     ) -> RuntimeResult<()> {
+
+
         let tree_builder = self.ctx.tree_builder();
         let snapshot = self.ctx.snapshot();
         let tid = self.ctx.tid();

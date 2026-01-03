@@ -162,10 +162,7 @@ impl WriteAheadLog {
             let tid = record.tid();
             let lsn = record.lsn();
             let record_type = record.log_type();
-            println!(
-                "Se encuentra log de tipo: {:?}, lsn: {:?}, tid: {:?}",
-                record_type, lsn, tid
-            );
+           
 
             // Track the last LSN for each transaction
             result

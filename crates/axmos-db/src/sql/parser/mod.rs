@@ -1129,7 +1129,7 @@ impl Parser {
         };
 
         let mut ctes = Vec::new();
-        dbg!(&self.current_token);
+    
         loop {
             let name = if let Token::Identifier(id) = &self.current_token {
                 let id = id.clone();
