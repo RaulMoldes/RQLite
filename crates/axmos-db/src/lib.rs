@@ -37,11 +37,9 @@ pub use common::*;
 use jemallocator::Jemalloc;
 pub use types::*;
 
-
 #[cfg(not(miri))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
-
 
 use crate::{
     DBConfig,
@@ -53,18 +51,13 @@ use crate::{
         coordinator::TransactionCoordinator,
         runner::{BoxError, TaskError, TaskRunner},
     },
-    runtime::{
-        QueryError, QueryPreparator, QueryResult,
-        context::TransactionContext,
-    },
+    runtime::{QueryError, QueryPreparator, QueryResult, context::TransactionContext},
     schema::catalog::{Catalog, CatalogTrait, SharedCatalog},
     storage::page::BtreePage,
     tree::accessor::BtreeWriteAccessor,
-
 };
 
 use std::{
-
     error::Error,
     fmt::{Display, Formatter, Result as FmtResult},
     io::{Error as IoError, Write},
@@ -643,7 +636,9 @@ mod database_tests {
             let rows = result.into_rows().expect("Expected rows result");
 
             assert_eq!(rows.len(), 1);
-            let value = rows.first().expect("No rows at all")[0].as_big_int().unwrap();
+            let value = rows.first().expect("No rows at all")[0]
+                .as_big_int()
+                .unwrap();
             assert_eq!(value.value(), count);
         }
     }

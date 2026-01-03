@@ -1,7 +1,7 @@
 // src/sql/executor/context.rs
 use crate::{
     io::{
-        logger::{ Begin, Commit, Delete, End, Insert, Operation, Update},
+        logger::{Begin, Commit, Delete, End, Insert, Operation, Update},
         pager::{BtreeBuilder, SharedPager},
     },
     multithreading::coordinator::{Snapshot, TransactionHandle},

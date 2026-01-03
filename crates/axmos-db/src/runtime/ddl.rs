@@ -5,7 +5,6 @@
 //! and are executed directly against the catalog.
 
 use crate::{
-
     runtime::context::TransactionContext,
     schema::{
         base::{Column, ForeignKeyInfo, Relation, Schema, SchemaError, TableConstraint},
@@ -197,7 +196,7 @@ impl DdlExecutor {
         // Apply table-level constraints (indices need to be adjusted by +1 for row_id)
         for constraint in &stmt.constraints {
             let adjusted = self.adjust_constraint_indices(constraint);
-            self.apply_table_constraint(relation.schema_mut(), &adjusted)?;
+            self.apply_table_constraint(relation.schema_mut(), object_id, &stmt.table_name, &adjusted)?;
         }
         let snapshot = self.ctx.snapshot();
         let tree_builder = self.ctx.tree_builder();
@@ -280,7 +279,7 @@ impl DdlExecutor {
 
         // Allocate resources
         let object_id = self.ctx.catalog().read().get_next_object_id();
-      
+
         let root_page = self.ctx.pager().write().allocate_page::<BtreePage>()?;
 
         // Create the index relation
@@ -303,12 +302,73 @@ impl DdlExecutor {
         // Update the table schema to reference this index
         // It is important that the order of the columns is kept.
         let indexed_column_ids: Vec<usize> = stmt.columns.iter().map(|c| c.column_idx).collect();
+        self.add_unique_constraint_for_index(stmt.table_id, &indexed_column_ids)?;
         self.add_index_to_table(stmt.table_id, object_id, indexed_column_ids)?;
 
         Ok(DdlOutcome::IndexCreated {
             name: stmt.index_name.clone(),
             object_id,
         })
+    }
+
+    /// Creates an index to back a constraint (PRIMARY KEY or UNIQUE).
+    fn create_index_for_constraint(
+        &mut self,
+        table_id: ObjectId,
+        index_name: &str,
+        col_indices: &[usize],
+        unique: bool,
+    ) -> DdlResult<ObjectId> {
+        let snapshot = self.ctx.snapshot();
+        let tree_builder = self.ctx.tree_builder();
+
+        // Get table schema to build index columns
+        let table_relation =
+            self.ctx
+                .catalog()
+                .read()
+                .get_relation(table_id, &tree_builder, &snapshot)?;
+
+        let table_schema = table_relation.schema();
+
+        // Build index columns from the constraint columns + row_id
+        let mut index_columns: Vec<Column> = Vec::with_capacity(col_indices.len() + 1);
+
+        for &col_idx in col_indices {
+            if let Some(table_col) = table_schema.column(col_idx) {
+                index_columns.push(Column::new_with_defaults(
+                    table_col.datatype(),
+                    table_col.name(),
+                ));
+            }
+        }
+
+        // Add row_id as the value column
+        index_columns.push(Column::new_with_defaults(DataTypeKind::BigUInt, "row_id"));
+
+        // Allocate resources
+        let object_id = self.ctx.catalog().read().get_next_object_id();
+        let root_page = self.ctx.pager().write().allocate_page::<BtreePage>()?;
+
+        // Create the index relation
+        let relation = Relation::index(
+            object_id,
+            index_name,
+            root_page,
+            index_columns,
+            col_indices.len(), // num_keys
+        );
+
+        // Store in catalog
+        self.ctx
+            .catalog()
+            .write()
+            .store_relation(relation, &tree_builder, snapshot.xid())?;
+
+        // Register the index with the table
+        self.add_index_to_table(table_id, object_id, col_indices.to_vec())?;
+
+        Ok(object_id)
     }
 
     /// Adds an index reference to a table's schema.
@@ -331,6 +391,51 @@ impl DdlExecutor {
         // Add the index to the schema's index map
         if let Some(indexes) = schema.table_indexes.as_mut() {
             indexes.insert(index_id, columns);
+        }
+
+        self.ctx
+            .catalog()
+            .write()
+            .update_relation(relation, &tree_builder, &snapshot)?;
+
+        Ok(())
+    }
+
+    /// Adds a unique constraint to a table for the given columns.
+    /// Called when creating a UNIQUE index.
+    fn add_unique_constraint_for_index(
+        &mut self,
+        table_id: ObjectId,
+        columns: &[usize],
+    ) -> DdlResult<()> {
+        let snapshot = self.ctx.snapshot();
+        let tree_builder = self.ctx.tree_builder();
+
+        let mut relation =
+            self.ctx
+                .catalog()
+                .write()
+                .get_relation(table_id, &tree_builder, &snapshot)?;
+
+        let schema = relation.schema_mut();
+
+        // Mark individual columns as unique
+        for &col_idx in columns {
+            if let Some(col) = schema.columns.get_mut(col_idx) {
+                col.is_unique = true;
+            }
+        }
+
+        // Add table-level unique constraint
+        if let Some(constraints) = schema.table_constraints.as_mut() {
+            // Check if this constraint already exists
+            let already_exists = constraints
+                .iter()
+                .any(|c| matches!(c, TableConstraint::Unique(cols) if cols == columns));
+
+            if !already_exists {
+                constraints.push(TableConstraint::Unique(columns.to_vec()));
+            }
         }
 
         self.ctx
@@ -505,18 +610,23 @@ impl DdlExecutor {
     }
 
     fn alter_add_constraint(
-        &self,
+        &mut self,
         relation: &mut Relation,
         constraint: &BoundTableConstraint,
     ) -> DdlResult<String> {
+        let id = relation.object_id();
+        let name = relation.name().to_string();
         let schema = relation.schema_mut();
-        self.apply_table_constraint(schema, constraint)
+
+        self.apply_table_constraint(schema, id, &name, constraint)
     }
 
     /// Applies a bound table constraint to the schema.
     fn apply_table_constraint(
-        &self,
+        &mut self,
         schema: &mut Schema,
+         table_id: ObjectId,
+        table_name: &str,
         constraint: &BoundTableConstraint,
     ) -> DdlResult<String> {
         match constraint {
@@ -543,6 +653,14 @@ impl DdlExecutor {
                     schema.num_keys = first_pk + 1;
                 }
 
+                let index_name = format!("{}_pkey_idx", table_name);
+                self.create_index_for_constraint(
+                    table_id,
+                    &index_name,
+                    col_indices,
+                    true, // unique
+                )?;
+
                 Ok(format!("ADD CONSTRAINT {}", constraint_name))
             }
 
@@ -565,6 +683,15 @@ impl DdlExecutor {
                 if let Some(constraints) = schema.table_constraints.as_mut() {
                     constraints.push(TableConstraint::Unique(col_indices.clone()));
                 }
+
+
+                let index_name = format!("{}_uniq_idx", table_name);
+                self.create_index_for_constraint(
+                    table_id,
+                    &index_name,
+                    col_indices,
+                    true, // unique
+                )?;
 
                 Ok(format!("ADD CONSTRAINT {}", constraint_name))
             }

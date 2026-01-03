@@ -162,7 +162,6 @@ impl WriteAheadLog {
             let tid = record.tid();
             let lsn = record.lsn();
             let record_type = record.log_type();
-           
 
             // Track the last LSN for each transaction
             result

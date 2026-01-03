@@ -4,28 +4,33 @@ use std::{
     io::Error as IoError,
 };
 
-
-
 use crate::{
-     SerializationError, TypeSystemError, io::pager::{BtreeBuilder, SharedPager}, multithreading::coordinator::{Snapshot, TransactionError, TransactionHandle}, runtime::{
+    SerializationError, TypeSystemError,
+    io::pager::{BtreeBuilder, SharedPager},
+    multithreading::coordinator::{Snapshot, TransactionError, TransactionHandle},
+    runtime::{
         builder::{BoxedExecutor, MutableExecutorBuilder, ReadOnlyExecutorBuilder},
         context::TransactionContext,
         ddl::{DdlError, DdlExecutor, DdlOutcome},
         eval::EvaluationError,
-    }, schema::{
+    },
+    schema::{
         Schema,
-        catalog::{CatalogError, SharedCatalog}
-    }, sql::{
+        catalog::{CatalogError, SharedCatalog},
+    },
+    sql::{
         binder::{
             binder::{Binder, BinderError},
             bounds::BoundStatement,
         },
         parser::{Parser, ParserError, ast::Statement},
         planner::{CascadesOptimizer, PhysicalPlan, PlannerError},
-    }, storage::tuple::{Row, TupleError}, tree::{
+    },
+    storage::tuple::{Row, TupleError},
+    tree::{
         accessor::{BtreeReadAccessor, BtreeWriteAccessor},
         bplustree::BtreeError,
-    }
+    },
 };
 
 mod builder;
@@ -160,15 +165,13 @@ pub enum QueryResult {
 #[derive(Debug, Clone)]
 pub struct RowsResult {
     data: Vec<Row>,
-    out_schema: Schema
+    out_schema: Schema,
 }
 
 impl RowsResult {
-
     pub fn first(&self) -> Option<&Row> {
         self.data.first()
     }
-
 
     pub fn last(&self) -> Option<&Row> {
         self.data.last()
@@ -178,16 +181,13 @@ impl RowsResult {
         self.data.is_empty()
     }
 
-
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
-
     pub fn num_columns(&self) -> usize {
         self.out_schema.num_columns()
     }
-
 
     pub fn column(&self, index: usize) -> Option<&str> {
         self.out_schema.column(index).map(|c| c.name.as_str())
@@ -467,7 +467,11 @@ impl QueryPreparator {
         }
     }
 
-    pub(crate) fn build_and_run(&self, sql: &str, autocommit: bool) -> QueryRunnerResult<CommitHandle> {
+    pub(crate) fn build_and_run(
+        &self,
+        sql: &str,
+        autocommit: bool,
+    ) -> QueryRunnerResult<CommitHandle> {
         let bound = self.prepare(sql)?;
         if Self::is_ddl(&bound) {
             let built = self.ddl(autocommit)?;
@@ -642,8 +646,6 @@ impl QueryRunner for ReadQueryRunner {
             self.ctx.snapshot(),
         )?;
 
-
-
         let builder = ReadOnlyExecutorBuilder::new(self.ctx.clone());
         let mut executor = builder.build(&plan)?;
 
@@ -659,7 +661,10 @@ impl QueryRunner for ReadQueryRunner {
         }
 
         Ok(CommitHandle::Read {
-            result: QueryResult::Rows(RowsResult { data: rows, out_schema: plan.output_schema().clone() }),
+            result: QueryResult::Rows(RowsResult {
+                data: rows,
+                out_schema: plan.output_schema().clone(),
+            }),
             ctx: self.ctx,
         })
     }

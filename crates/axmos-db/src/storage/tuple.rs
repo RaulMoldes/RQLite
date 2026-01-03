@@ -1159,10 +1159,8 @@ impl Tuple {
         oldest_active_xid: TransactionId,
         schema: &Schema,
     ) -> TupleResult<usize> {
-
         let reader = TupleReader::from_schema(schema);
         let layout = reader.parse_last_version(self.data.effective_data())?;
-
 
         if layout.delta_start() >= self.data.len() {
             return Ok(0);
@@ -1176,8 +1174,6 @@ impl Tuple {
         while cursor < self.data.len() {
             let (delta_header, header_end) =
                 DeltaHeader::read_from(self.data.effective_data(), cursor);
-
-
 
             if delta_header.xmin() >= oldest_active_xid {
                 // Read num_changes and skip this delta
@@ -1724,7 +1720,6 @@ mod tuple_tests {
 
         let data = tuple.effective_data();
         let offset = Tuple::keys_offset(schema.num_values());
-      
 
         let (key_value, _) = DataTypeKind::BigUInt
             .deserialize(data, offset)

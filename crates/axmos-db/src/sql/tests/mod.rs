@@ -610,7 +610,7 @@ fn test_analyzer_complex_query_with_joins_subqueries_and_aggregates() {
             ORDER BY total_spent DESC
             LIMIT 10",
     );
-   
+
     assert!(result.is_ok());
 }
 

@@ -171,6 +171,14 @@ AxmosDB uses a Cascades-style optimizer, enabling:
 
 ## Pending Features
 
+### Constraint checking at analyze time
+
+Currently we are not able to check for unique constraints at runtime. We are only able to check for non null constraints. We should be able to do this with Bloom Filters.
+
+### TRANSACTIONAL OPERATORS.
+
+Currently transactions are implemented but they are coupled with queries. Meaning that every query runs in a single atomic transaction with Read Committed guarantees, but no further than that. We should be able to allow the user to perform transaction management statements (ROLLBACK, BEGIN, COMMIT) on a procedural way. Currently they are No-Ops.
+
 ### Join operators:
 
 * Merge Join
