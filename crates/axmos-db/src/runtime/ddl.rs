@@ -196,7 +196,12 @@ impl DdlExecutor {
         // Apply table-level constraints (indices need to be adjusted by +1 for row_id)
         for constraint in &stmt.constraints {
             let adjusted = self.adjust_constraint_indices(constraint);
-            self.apply_table_constraint(relation.schema_mut(), object_id, &stmt.table_name, &adjusted)?;
+            self.apply_table_constraint(
+                relation.schema_mut(),
+                object_id,
+                &stmt.table_name,
+                &adjusted,
+            )?;
         }
         let snapshot = self.ctx.snapshot();
         let tree_builder = self.ctx.tree_builder();
@@ -392,11 +397,16 @@ impl DdlExecutor {
         if let Some(indexes) = schema.table_indexes.as_mut() {
             indexes.insert(index_id, columns);
         }
+        let id = relation.object_id();
 
-        self.ctx
-            .catalog()
-            .write()
-            .update_relation(relation, &tree_builder, &snapshot)?;
+        self.ctx.catalog().write().update_relation(
+            id,
+            None,
+            Some(relation.into_schema()),
+            None,
+            &tree_builder,
+            &snapshot,
+        )?;
 
         Ok(())
     }
@@ -438,10 +448,16 @@ impl DdlExecutor {
             }
         }
 
-        self.ctx
-            .catalog()
-            .write()
-            .update_relation(relation, &tree_builder, &snapshot)?;
+        let id = relation.object_id();
+
+        self.ctx.catalog().write().update_relation(
+            id,
+            None,
+            Some(relation.into_schema()),
+            None,
+            &tree_builder,
+            &snapshot,
+        )?;
 
         Ok(())
     }
@@ -491,11 +507,16 @@ impl DdlExecutor {
             }
         };
 
+        let id = relation.object_id();
         // Update the relation in catalog
-        self.ctx
-            .catalog()
-            .write()
-            .update_relation(relation, &tree_builder, &snapshot)?;
+        self.ctx.catalog().write().update_relation(
+            id,
+            None,
+            Some(relation.into_schema()),
+            None,
+            &tree_builder,
+            &snapshot,
+        )?;
 
         Ok(DdlOutcome::TableAltered {
             name: table_name,
@@ -625,7 +646,7 @@ impl DdlExecutor {
     fn apply_table_constraint(
         &mut self,
         schema: &mut Schema,
-         table_id: ObjectId,
+        table_id: ObjectId,
         table_name: &str,
         constraint: &BoundTableConstraint,
     ) -> DdlResult<String> {
@@ -683,7 +704,6 @@ impl DdlExecutor {
                 if let Some(constraints) = schema.table_constraints.as_mut() {
                     constraints.push(TableConstraint::Unique(col_indices.clone()));
                 }
-
 
                 let index_name = format!("{}_uniq_idx", table_name);
                 self.create_index_for_constraint(

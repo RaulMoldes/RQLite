@@ -57,6 +57,7 @@ macro_rules! snapshot {
             $crate::types::TransactionId::from($xmin as u64),
             Some($crate::types::TransactionId::from($xmax as u64)),
             std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
         )
     }};
 
@@ -66,6 +67,7 @@ macro_rules! snapshot {
             $crate::types::TransactionId::from($xid as u64),
             $crate::types::TransactionId::from($xmin as u64),
             None,
+            std::collections::HashSet::new(),
             std::collections::HashSet::new(),
         )
     }};
@@ -78,6 +80,7 @@ macro_rules! snapshot {
             $crate::types::TransactionId::from($xmin as u64),
             Some($crate::types::TransactionId::from($xmax as u64)),
             active_set,
+            std::collections::HashSet::new(),
         )
     }};
 }
@@ -94,6 +97,8 @@ pub struct Snapshot {
     xmax: Option<TransactionId>,
     /// Set of transaction IDs that were active (uncommitted) at snapshot time
     active_txs: HashSet<TransactionId>,
+    /// Set of transaction IDs that were aborted (uncommitted) at snapshot time
+    aborted_txs: HashSet<TransactionId>,
 }
 
 impl Snapshot {
@@ -102,12 +107,14 @@ impl Snapshot {
         xmin: TransactionId,
         xmax: Option<TransactionId>,
         active: HashSet<TransactionId>,
+        aborted: HashSet<TransactionId>,
     ) -> Self {
         Self {
             xid,
             xmin,
             xmax,
             active_txs: active,
+            aborted_txs: aborted,
         }
     }
     #[inline]
@@ -167,7 +174,7 @@ impl Snapshot {
         };
 
         // Transaction was active when we took snapshot (had not commited)
-        if self.active_txs.contains(&txid) {
+        if self.active_txs.contains(&txid) || self.aborted_txs.contains(&txid) {
             return false;
         };
 
@@ -256,12 +263,10 @@ impl Clone for TransactionCoordinator {
         Self {
             transactions: Arc::clone(&self.transactions),
             pager: self.pager.clone(),
-            last_committed: self.last_committed,
+            last_committed: Arc::clone(&self.last_committed),
             commit_counter: Arc::clone(&self.commit_counter),
             tuple_commits: Arc::clone(&self.tuple_commits),
-            last_created_transaction: AtomicU64::new(
-                self.last_created_transaction.load(Ordering::Relaxed),
-            ),
+            last_created_transaction: Arc::clone(&self.last_created_transaction),
         }
     }
 }
@@ -274,13 +279,13 @@ pub struct TransactionCoordinator {
     /// Shared pager for I/O operations
     pager: SharedPager,
     /// Last committed transaction to create snapshots
-    last_committed: Option<TransactionId>,
+    last_committed: Arc<RwLock<Option<TransactionId>>>,
     /// Global commit timestamp counter
     commit_counter: Arc<AtomicU64>,
     /// Last commit timestamp per tuple - tracks when each tuple was last modified
     tuple_commits: TupleCommitLog,
     /// Last created transaction id:
-    last_created_transaction: AtomicU64,
+    last_created_transaction: Arc<AtomicU64>,
 }
 
 enum ValidationResult {
@@ -293,10 +298,10 @@ impl TransactionCoordinator {
         Self {
             transactions: Arc::new(RwLock::new(HashMap::new())),
             pager,
-            last_committed: None,
+            last_committed: Arc::new(RwLock::new(None)),
             commit_counter: Arc::new(AtomicU64::new(1)),
             tuple_commits: Arc::new(RwLock::new(HashMap::new())),
-            last_created_transaction: AtomicU64::new(0),
+            last_created_transaction: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -306,13 +311,13 @@ impl TransactionCoordinator {
         self
     }
 
-    pub fn with_last_committed_transaction(mut self, last_id: TransactionId) -> Self {
-        self.last_committed = Some(last_id);
-        self
+    pub fn get_last_committed(&self) -> TransactionId {
+        self.last_committed.read().unwrap_or(0)
     }
 
-    pub fn get_last_committed(&self) -> TransactionId {
-        self.last_committed.unwrap_or(0)
+    pub fn with_last_committed_transaction(self, last_id: TransactionId) -> Self {
+        *self.last_committed.write() = Some(last_id);
+        self
     }
 
     pub fn get_next_transaction(&self) -> TransactionId {
@@ -331,13 +336,22 @@ impl TransactionCoordinator {
             .map(|(id, _)| *id)
             .collect();
 
+        let aborted: HashSet<TransactionId> = txs
+            .iter()
+            .filter(|(_, entry)| entry.state == TransactionState::Aborted)
+            .map(|(id, _)| *id)
+            .collect();
+
+        dbg!(&aborted);
         // xmin is the smallest active transaction ID (or our ID if none active)
         let xmin = active.iter().min().copied().unwrap_or(txid);
 
         // xmax is the next transaction ID to be assigned
-        let xmax = self.last_committed;
+        let xmax = *self.last_committed.read();
 
-        Ok(Snapshot::new(txid, xmin, xmax, active))
+        dbg!(&xmax);
+
+        Ok(Snapshot::new(txid, xmin, xmax, active, aborted))
     }
 
     /// Begin a new transaction.
@@ -376,6 +390,10 @@ impl TransactionCoordinator {
         match self.validate_write_set(txid)? {
             ValidationResult::Allowed => {
                 self.set_transaction_state(txid, TransactionState::Committed)?;
+                let mut last = self.last_committed.write();
+                if last.map_or(true, |l| txid > l) {
+                    *last = Some(txid);
+                }
                 Ok(())
             }
 

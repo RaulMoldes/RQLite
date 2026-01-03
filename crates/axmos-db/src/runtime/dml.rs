@@ -110,10 +110,14 @@ where
         self.insert_index_entries(&relation.get_indexes(), &full_values, row_id.value())?;
 
         // Update relation metadata
-        self.ctx
-            .catalog()
-            .write()
-            .update_relation(relation, &tree_builder, &snapshot)?;
+        self.ctx.catalog().write().update_relation(
+            relation.object_id(),
+            Some(relation.next_row_id().value()),
+            None,
+            None,
+            &tree_builder,
+            &snapshot,
+        )?;
 
         Ok(InsertResult {
             row_id: row_id.value(),

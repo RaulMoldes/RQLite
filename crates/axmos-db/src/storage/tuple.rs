@@ -651,6 +651,8 @@ impl<'a> TupleReader<'a> {
         let mut layout = self.parse_last_version(data)?;
 
         if let Some(xmax) = layout.version_xmax {
+            println!("Se encontro xmax en la tupla y por eso no se evuelve nada");
+            println!("{xmax}");
             if snapshot.is_committed_before_snapshot(xmax) {
                 return Ok(None);
             }
@@ -732,6 +734,8 @@ impl TupleLayout {
 
     fn is_valid_for_snapshot(&self, snapshot: &Snapshot) -> bool {
         let created_before = snapshot.is_committed_before_snapshot(self.version_xmin);
+        println!("{}", self.version_xmin);
+        println!("La tupla se creo antes del snapshot {created_before}");
 
         if let Some(xmax) = self.version_xmax {
             return created_before && !snapshot.is_committed_before_snapshot(xmax);

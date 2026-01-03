@@ -51,7 +51,9 @@ use crate::{
         coordinator::TransactionCoordinator,
         runner::{BoxError, TaskError, TaskRunner},
     },
-    runtime::{QueryError, QueryPreparator, QueryResult, context::TransactionContext},
+    runtime::{
+        BatchQueryRunner, QueryError, QueryPreparator, QueryResult, context::TransactionContext,
+    },
     schema::catalog::{Catalog, CatalogTrait, SharedCatalog},
     storage::page::BtreePage,
     tree::accessor::BtreeWriteAccessor,
@@ -316,7 +318,7 @@ impl Database {
             let preparator =
                 QueryPreparator::new(catalog.clone(), pager.clone(), tree_builder, handle.clone());
 
-            let handle = preparator.build_and_run(&sql, false).map_err(box_err)?;
+            let mut handle = preparator.build_and_run(&sql, false).map_err(box_err)?;
             handle.commit().map_err(box_err)?;
             Ok(handle.into())
         })?;
@@ -333,7 +335,7 @@ impl Database {
 
         let results = self.task_runner.run_with_result(move |_ctx| {
             // Begin transaction
-            let global_handle = coordinator.begin().map_err(box_err)?;
+            let handle = coordinator.begin().map_err(box_err)?;
 
             // Create tree builder
             let tree_builder = {
@@ -342,26 +344,11 @@ impl Database {
                     .with_pager(pager.clone())
             };
 
-            let preparator = QueryPreparator::new(
-                catalog.clone(),
-                pager.clone(),
-                tree_builder,
-                global_handle.clone(),
-            );
+            // Use BatchQueryRunner for atomic execution
+            let runner =
+                BatchQueryRunner::new(catalog.clone(), pager.clone(), tree_builder, handle);
 
-            // Execute all statements
-            let mut handles = Vec::with_capacity(statements.len());
-
-            for sql in statements {
-                let result = preparator.build_and_run(&sql, false).map_err(box_err)?;
-                handles.push(result);
-            }
-
-            if let Some(last_handle) = handles.last() {
-                last_handle.commit().map_err(box_err)?;
-            }
-            let query_results: Vec<QueryResult> = handles.into_iter().map(|c| c.into()).collect();
-            Ok(query_results)
+            runner.execute_all(&statements).map_err(box_err)
         })?;
 
         Ok(results)
@@ -933,5 +920,35 @@ mod database_tests {
             let rows = result.into_rows().expect("Expected rows");
             assert_eq!(rows.len(), 1);
         }
+    }
+
+    #[test]
+    fn test_batch_rollback_on_failure() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).expect("Failed to create database");
+
+        db.execute("CREATE TABLE items (id BIGINT, value INT)")
+            .expect("Failed to create table");
+
+        // Insertar datos iniciales
+        db.execute("INSERT INTO items VALUES (1, 100)").unwrap();
+
+        // Intentar un batch donde el último statement falla
+        let result = db.execute_batch(&[
+            "INSERT INTO items VALUES (2, 200)",
+            "INSERT INTO items VALUES (3, 300)",
+            "INSERT INTO nonexistent VALUES (4, 400)", // Esto falla
+        ]);
+
+        assert!(result.is_err(), "Batch should fail");
+
+        // Verificar que ninguno de los inserts del batch persistió
+        let result = db.execute("SELECT COUNT(*) FROM items").unwrap();
+        let rows = result.into_rows().expect("Expected rows");
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(
+            count, 1,
+            "Should only have the original row, batch was rolled back"
+        );
     }
 }

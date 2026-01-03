@@ -169,6 +169,12 @@ pub struct RowsResult {
 }
 
 impl RowsResult {
+    pub fn new(rows: Vec<Row>, schema: Schema) -> Self {
+        Self {
+            data: rows,
+            out_schema: schema,
+        }
+    }
     pub fn first(&self) -> Option<&Row> {
         self.data.first()
     }
@@ -471,7 +477,7 @@ impl QueryPreparator {
         &self,
         sql: &str,
         autocommit: bool,
-    ) -> QueryRunnerResult<CommitHandle> {
+    ) -> QueryRunnerResult<ResultGuard> {
         let bound = self.prepare(sql)?;
         if Self::is_ddl(&bound) {
             let built = self.ddl(autocommit)?;
@@ -486,80 +492,124 @@ impl QueryPreparator {
     }
 }
 
-pub(crate) enum CommitHandle {
-    Write {
-        result: QueryResult,
-        ctx: TransactionContext<BtreeWriteAccessor>,
-    },
-    Read {
-        result: QueryResult,
-        ctx: TransactionContext<BtreeReadAccessor>,
-    },
+pub struct ResultGuard {
+    handle: CommitHandle,
+    result: QueryResult,
 }
 
-impl From<CommitHandle> for QueryResult {
-    fn from(value: CommitHandle) -> Self {
-        match value {
-            CommitHandle::Read { result, .. } => result,
-            CommitHandle::Write { result, .. } => result,
+impl ResultGuard {
+    pub(crate) fn write(ctx: TransactionContext<BtreeWriteAccessor>, result: QueryResult) -> Self {
+        Self {
+            handle: CommitHandle::Write { ctx: Some(ctx) },
+            result,
         }
     }
+
+    pub(crate) fn read(ctx: TransactionContext<BtreeReadAccessor>, result: QueryResult) -> Self {
+        Self {
+            handle: CommitHandle::Read { ctx: Some(ctx) },
+            result,
+        }
+    }
+
+    pub(crate) fn take_handle(&mut self) {
+        self.handle.invalidate();
+    }
+
+    pub(crate) fn commit(&mut self) -> QueryRunnerResult<()> {
+        self.handle.commit()
+    }
+
+    pub(crate) fn abort(&mut self) -> QueryRunnerResult<()> {
+        self.handle.abort()
+    }
+}
+
+impl From<ResultGuard> for QueryResult {
+    fn from(value: ResultGuard) -> Self {
+        value.result
+    }
+}
+pub(crate) enum CommitHandle {
+    Write {
+        ctx: Option<TransactionContext<BtreeWriteAccessor>>,
+    },
+    Read {
+        ctx: Option<TransactionContext<BtreeReadAccessor>>,
+    },
 }
 
 impl CommitHandle {
-    fn get_result(&self) -> QueryRunnerResult<&QueryResult> {
-        match self {
-            Self::Read { result, .. } => Ok(result),
-            Self::Write { result, .. } => Ok(result),
-        }
-    }
-
-    pub fn commit(&self) -> QueryRunnerResult<()> {
+    pub(crate) fn invalidate(&mut self) {
         match self {
             Self::Read { ctx, .. } => {
-                ctx.pre_commit()?;
-                ctx.handle()
-                    .commit()
-                    .map_err(|_| RuntimeError::InvalidState)?;
-                ctx.end()?;
-                Ok(())
+                let _ = ctx.take();
             }
             Self::Write { ctx, .. } => {
-                ctx.pre_commit()?;
-                ctx.handle()
-                    .commit()
-                    .map_err(|_| RuntimeError::InvalidState)?;
-                ctx.end()?;
-                Ok(())
+                let _ = ctx.take();
             }
         }
     }
 
-    pub fn abort(&self) -> QueryRunnerResult<()> {
+    pub fn commit(&mut self) -> QueryRunnerResult<()> {
         match self {
             Self::Read { ctx, .. } => {
-                ctx.pre_abort()?;
-                ctx.handle()
-                    .abort()
-                    .map_err(|_| RuntimeError::InvalidState)?;
-                ctx.end()?;
+                if let Some(ctx) = ctx.take() {
+                    ctx.pre_commit()?;
+                    ctx.handle()
+                        .commit()
+                        .map_err(|_| RuntimeError::InvalidState)?;
+                    ctx.end()?;
+                }
                 Ok(())
             }
             Self::Write { ctx, .. } => {
-                ctx.pre_abort()?;
-                ctx.handle()
-                    .abort()
-                    .map_err(|_| RuntimeError::InvalidState)?;
-                ctx.end()?;
+                if let Some(ctx) = ctx.take() {
+                    ctx.pre_commit()?;
+                    ctx.handle()
+                        .commit()
+                        .map_err(|_| RuntimeError::InvalidState)?;
+                    ctx.end()?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub fn abort(&mut self) -> QueryRunnerResult<()> {
+        match self {
+            Self::Read { ctx, .. } => {
+                if let Some(ctx) = ctx.take() {
+                    ctx.pre_abort()?;
+                    ctx.handle()
+                        .commit()
+                        .map_err(|_| RuntimeError::InvalidState)?;
+                    ctx.end()?;
+                }
+                Ok(())
+            }
+            Self::Write { ctx, .. } => {
+                if let Some(ctx) = ctx.take() {
+                    ctx.pre_abort()?;
+                    ctx.handle()
+                        .abort()
+                        .map_err(|_| RuntimeError::InvalidState)?;
+                    ctx.end()?;
+                }
                 Ok(())
             }
         }
     }
 }
 
+impl Drop for CommitHandle {
+    fn drop(&mut self) {
+        let _ = self.abort();
+    }
+}
 pub(crate) trait QueryRunner {
     /// Executes a prepared statement
-    fn execute(self, stmt: BoundStatement) -> QueryRunnerResult<CommitHandle>;
+    fn execute(self, stmt: BoundStatement) -> QueryRunnerResult<ResultGuard>;
 }
 
 pub(crate) struct WriteQueryRunner {
@@ -574,7 +624,7 @@ pub(crate) enum StatementRunner {
 }
 
 impl QueryRunner for StatementRunner {
-    fn execute(self, stmt: BoundStatement) -> QueryRunnerResult<CommitHandle> {
+    fn execute(self, stmt: BoundStatement) -> QueryRunnerResult<ResultGuard> {
         match self {
             Self::Ddl(d) => d.execute(stmt),
             Self::Dml(d) => d.execute(stmt),
@@ -602,7 +652,7 @@ impl StatementRunner {
 }
 
 impl QueryRunner for WriteQueryRunner {
-    fn execute(self, stmt: BoundStatement) -> QueryRunnerResult<CommitHandle> {
+    fn execute(self, stmt: BoundStatement) -> QueryRunnerResult<ResultGuard> {
         let plan = optimize(
             &stmt,
             &self.ctx.catalog(),
@@ -625,10 +675,10 @@ impl QueryRunner for WriteQueryRunner {
             self.ctx.end()?;
         }
 
-        Ok(CommitHandle::Write {
-            result: QueryResult::RowsAffected(affected),
-            ctx: self.ctx,
-        })
+        Ok(ResultGuard::write(
+            self.ctx,
+            QueryResult::Rows(RowsResult::new(rows, plan.output_schema().clone())),
+        ))
     }
 }
 
@@ -638,7 +688,7 @@ pub(crate) struct ReadQueryRunner {
 }
 
 impl QueryRunner for ReadQueryRunner {
-    fn execute(self, stmt: BoundStatement) -> QueryRunnerResult<CommitHandle> {
+    fn execute(self, stmt: BoundStatement) -> QueryRunnerResult<ResultGuard> {
         let plan: PhysicalPlan = optimize(
             &stmt,
             &self.ctx.catalog(),
@@ -660,13 +710,10 @@ impl QueryRunner for ReadQueryRunner {
             self.ctx.end()?;
         }
 
-        Ok(CommitHandle::Read {
-            result: QueryResult::Rows(RowsResult {
-                data: rows,
-                out_schema: plan.output_schema().clone(),
-            }),
-            ctx: self.ctx,
-        })
+        Ok(ResultGuard::read(
+            self.ctx,
+            QueryResult::Rows(RowsResult::new(rows, plan.output_schema().clone())),
+        ))
     }
 }
 
@@ -676,7 +723,7 @@ pub(crate) struct DdlQueryRunner {
 }
 
 impl QueryRunner for DdlQueryRunner {
-    fn execute(self, stmt: BoundStatement) -> QueryRunnerResult<CommitHandle> {
+    fn execute(self, stmt: BoundStatement) -> QueryRunnerResult<ResultGuard> {
         let mut executor = DdlExecutor::new(self.ctx.clone());
 
         let outcome = executor.execute(&stmt)?;
@@ -690,9 +737,126 @@ impl QueryRunner for DdlQueryRunner {
             self.ctx.end()?;
         }
 
-        Ok(CommitHandle::Write {
-            result: QueryResult::Ddl(outcome),
-            ctx: self.ctx,
-        })
+        Ok(ResultGuard::write(self.ctx, QueryResult::Ddl(outcome)))
+    }
+}
+
+/// Executes multiple statements in a single transaction with atomic commit/rollback.
+pub(crate) struct BatchQueryRunner {
+    catalog: SharedCatalog,
+    pager: SharedPager,
+    tree_builder: BtreeBuilder,
+    handle: TransactionHandle,
+}
+
+impl BatchQueryRunner {
+    pub fn new(
+        catalog: SharedCatalog,
+        pager: SharedPager,
+        tree_builder: BtreeBuilder,
+        handle: TransactionHandle,
+    ) -> Self {
+        Self {
+            catalog,
+            pager,
+            tree_builder,
+            handle,
+        }
+    }
+
+    /// Execute all statements atomically. If any fails, all are rolled back.
+    pub fn execute_all(self, statements: &[String]) -> QueryRunnerResult<Vec<QueryResult>> {
+        // Create a single write context for the entire batch
+        let ctx = TransactionContext::new(
+            BtreeWriteAccessor::new(),
+            self.pager.clone(),
+            self.catalog.clone(),
+            self.handle.clone(),
+        )?;
+
+        let mut results = Vec::with_capacity(statements.len());
+
+        // Execute all statements, collecting results or failing fast
+        let execution_result: QueryRunnerResult<()> = (|| {
+            for sql in statements {
+                let result = self.execute_single(&ctx, sql)?;
+                results.push(result);
+            }
+            Ok(())
+        })();
+
+        // Commit or abort based on execution result
+        match execution_result {
+            Ok(()) => {
+                ctx.pre_commit()?;
+                self.handle
+                    .commit()
+                    .map_err(|_| RuntimeError::InvalidState)?;
+                ctx.end()?;
+                Ok(results)
+            }
+            Err(e) => {
+                // Abort the transaction
+                let _ = self.handle.abort();
+                Err(e)
+            }
+        }
+    }
+
+    fn execute_single(
+        &self,
+        ctx: &TransactionContext<BtreeWriteAccessor>,
+        sql: &str,
+    ) -> QueryRunnerResult<QueryResult> {
+        // Parse and bind
+        let ast = parse(sql)?;
+        let bound = bind(
+            &ast,
+            &self.catalog,
+            &self.tree_builder,
+            self.handle.snapshot(),
+        )?;
+
+        // Execute based on statement type
+        if is_ddl(&bound) {
+            let mut executor = DdlExecutor::new(ctx.clone());
+            let outcome = executor.execute(&bound)?;
+            Ok(QueryResult::Ddl(outcome))
+        } else if is_dml(&bound) {
+            let plan = optimize(
+                &bound,
+                &self.catalog,
+                &self.tree_builder,
+                self.handle.snapshot(),
+            )?;
+            let builder = MutableExecutorBuilder::new(ctx.clone());
+            let mut executor = builder.build(&plan)?;
+            let rows = collect_rows(&mut executor)?;
+            Ok(QueryResult::Rows(RowsResult::new(
+                rows,
+                plan.output_schema().clone(),
+            )))
+        } else {
+            // SELECT queries use read accessor but share the transaction
+            let plan = optimize(
+                &bound,
+                &self.catalog,
+                &self.tree_builder,
+                self.handle.snapshot(),
+            )?;
+            let read_ctx = TransactionContext::new(
+                BtreeReadAccessor::new(),
+                self.pager.clone(),
+                self.catalog.clone(),
+                self.handle.clone(),
+            )?;
+            let builder = ReadOnlyExecutorBuilder::new(read_ctx);
+            let mut executor = builder.build(&plan)?;
+            let rows = collect_rows(&mut executor)?;
+            Ok(QueryResult::Rows(RowsResult::new(
+                rows,
+                plan.output_schema().clone(),
+            )))
+        }
     }
 }

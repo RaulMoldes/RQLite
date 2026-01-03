@@ -245,6 +245,14 @@ impl Schema {
             .copied()
     }
 
+    /// Returns the binding (index) of a column by its name
+    pub(crate) fn bind_value(&self, name: &str) -> SchemaResult<usize> {
+        self.column_index
+            .get(name)
+            .map(|c| *c - self.num_keys())
+            .ok_or(SchemaError::ColumnNotFound(name.to_string()))
+    }
+
     /// Validate column indexes when adding constraints to the schema.
     ///
     /// Checks that all indexes in [list] are lower than [max].
@@ -460,6 +468,10 @@ impl Relation {
             next_row_id: Some(0),
             stats: None, // Initially set to none, will be set later when computed.
         }
+    }
+
+    pub(crate) fn into_schema(self) -> Schema {
+        self.schema
     }
 
     /// Creates an index relation

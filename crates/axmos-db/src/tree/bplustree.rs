@@ -479,6 +479,7 @@ where
     ) -> BtreeResult<Option<Row>> {
         self.with_cell_at(pos, |bytes| {
             let reader = TupleReader::from_schema(&schema);
+
             if let Some(layout) = reader.parse_for_snapshot(bytes, &snapshot)? {
                 let tuple = TupleRef::new(bytes, layout);
                 let accessor = RefTupleAccessor::new(tuple, &schema);

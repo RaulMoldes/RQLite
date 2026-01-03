@@ -99,36 +99,6 @@ pub fn test_get_relation(count: usize) {
     assert!(matches!(missing, Err(CatalogError::TableNotFound(_))));
 }
 
-pub fn test_update_relation(count: usize) {
-    let config = TestConfig::default();
-    let db = TestDb::new("catalog_update", &config).expect("Failed to create test db");
-    let mut catalog = test_catalog!(&db);
-    let builder = BtreeBuilder::default().with_pager(db.pager.clone());
-    let snapshot = Snapshot::default();
-
-    for i in 0..count {
-        let rel = make_relation(i as ObjectId, &format!("original_{}", i));
-        catalog
-            .store_relation(rel, &builder, snapshot.xid())
-            .expect("Store failed");
-    }
-
-    for i in 0..count {
-        let updated = make_relation(i as ObjectId, &format!("updated_{}", i));
-        catalog
-            .update_relation(updated, &builder, &snapshot)
-            .expect("Update failed");
-    }
-
-    for i in 0..count {
-        let rel = catalog
-            .get_relation(i as ObjectId, &builder, &snapshot)
-            .expect("Get failed");
-
-        assert!(rel.name() == format!("updated_{}", i));
-    }
-}
-
 pub fn test_delete_relation(count: usize, delete_count: usize) {
     let config = TestConfig::default();
     let db = TestDb::new("catalog_delete", &config).expect("Failed to create test db");

@@ -4,6 +4,7 @@ use crate::{
     io::pager::BtreeBuilder,
     make_shared,
     multithreading::coordinator::Snapshot,
+    schema::{Schema, base::SchemaError},
     storage::tuple::{RefTupleAccessor, Tuple, TupleBuilder, TupleError, TupleReader, TupleRef},
     tree::{
         accessor::BtreePagePosition,
@@ -33,6 +34,7 @@ pub enum CatalogError {
     BtreeError(BtreeError),
     TupleError(TupleError),
     Serialization(SerializationError),
+    Schema(SchemaError),
     Other(String),
 }
 
@@ -44,8 +46,15 @@ impl Display for CatalogError {
             Self::BtreeError(err) => write!(f, "Btree error: {err}"),
             Self::TupleError(err) => write!(f, "Tuple error {err}"),
             Self::Serialization(err) => write!(f, "serialization error {err}"),
+            Self::Schema(err) => write!(f, "schema error {err}"),
             Self::Other(string) => write!(f, "{string}"),
         }
+    }
+}
+
+impl From<SchemaError> for CatalogError {
+    fn from(value: SchemaError) -> Self {
+        Self::Schema(value)
     }
 }
 
@@ -283,8 +292,7 @@ impl Catalog {
                 continue;
             };
 
-            let updated_relation = relation.with_stats(stats);
-            self.update_relation(updated_relation, &builder, &snapshot)?;
+            self.update_relation(id, None, None, Some(stats), &builder, &snapshot)?;
         }
 
         Ok(())
@@ -297,14 +305,59 @@ impl CatalogTrait for Catalog {
     /// Updates the metadata of a given relation using the provided RcPageAccessor.
     fn update_relation(
         &mut self,
-        relation: Relation,
+        relation_id: ObjectId,
+        new_row_id: Option<u64>,
+        new_schema: Option<Schema>,
+        new_stats: Option<Stats>,
         builder: &BtreeBuilder,
         snapshot: &Snapshot,
     ) -> CatalogResult<()> {
         let schema = meta_table_schema();
         let mut meta_table = builder.build_tree_mut(self.meta_table);
+        let relation_id_bytes = UInt64(relation_id).serialize()?;
+        let mut changes = std::collections::HashMap::new();
 
-        let tuple = Self::relation_as_meta_table_tuple(&relation, snapshot.xid())?;
+        if let Some(id) = new_row_id {
+            let col_id = schema.bind_value("next_row_id")?;
+            changes.insert(col_id, DataType::BigUInt(UInt64::from(id)));
+        }
+
+        if let Some(table_schema) = new_schema {
+            let col_id = schema.bind_value("schema")?;
+            changes.insert(col_id, DataType::Blob(table_schema.to_blob()?));
+        }
+
+        if let Some(table_stats) = new_stats {
+            let col_id = schema.bind_value("stats")?;
+            changes.insert(col_id, DataType::Blob(table_stats.to_blob()?));
+        }
+
+        let position = match meta_table.search(&relation_id_bytes, &schema)? {
+            SearchResult::Found(pos) => pos,
+            SearchResult::NotFound(_) => return Ok(()),
+        };
+
+        // Read the existing tuple
+        let tuple_reader = TupleReader::from_schema(&schema);
+        let existing_tuple = meta_table.with_cell_at(position, |bytes| {
+            tuple_reader.parse_for_snapshot(bytes, &snapshot).ok()??;
+            Tuple::from_slice_unchecked(bytes).ok()
+        })?;
+
+        let Some(tuple) = existing_tuple else {
+            return Ok(());
+        };
+
+        // Get the old row for index maintenance
+        let old_row = meta_table
+            .get_row_at(position, &schema, &snapshot)?
+            .expect("Tuple should exist");
+
+        // Apply the update
+        let mut updated_tuple = tuple.clone();
+
+        updated_tuple.add_version_with_schema(&changes, snapshot.xid(), &schema)?;
+        updated_tuple.vacuum_with_schema(snapshot.xmin(), &schema)?;
 
         let result = meta_table.update(self.meta_table, tuple, &schema)?;
 
@@ -331,16 +384,71 @@ impl CatalogTrait for Catalog {
             }
         };
 
-        let table_schema = meta_table_schema();
+        // Obtain the relation metadata
+        let relation_id = rel.object_id();
+        let relation_name = rel.name();
+        let relation_id_bytes = UInt64(relation_id).serialize()?;
+        let relation_name_bytes = Blob::from(relation_name).serialize()?;
+
+        // First remove the relation from the meta table
+        let schema = meta_table_schema();
         let mut meta_table = builder.build_tree_mut(self.meta_table);
 
+        let position = match meta_table.search(&relation_id_bytes, &schema)? {
+            SearchResult::Found(pos) => pos,
+            SearchResult::NotFound(_) => return Ok(()),
+        };
+
+        // Read the existing tuple
+        let tuple_reader = TupleReader::from_schema(&schema);
+        let existing_tuple = meta_table.with_cell_at(position, |bytes| {
+            tuple_reader.parse_for_snapshot(bytes, &snapshot).ok()??;
+            Tuple::from_slice_unchecked(bytes).ok()
+        })?;
+
+        let Some(mut tuple) = existing_tuple else {
+            return Ok(());
+        };
+
+        // Get the old row for index maintenance
+        let old_row = meta_table
+            .get_row_at(position, &schema, &snapshot)?
+            .expect("Tuple should exist");
+
+        // Apply the update
+        tuple.delete(snapshot.xid())?;
+        tuple.vacuum_with_schema(snapshot.xmin(), &schema)?;
+        let result = meta_table.update(self.meta_table, tuple, &schema)?;
+
+        // Now do the same with the meta index.
         let index_schema = meta_index_schema();
         let mut meta_index = builder.build_tree_mut(self.meta_index);
 
-        let blob = Blob::from(rel.name());
-        let row_id = UInt64::from(rel.object_id());
-        meta_index.remove(self.meta_index, blob.as_ref(), &index_schema)?;
-        meta_table.remove(self.meta_table, &row_id.serialize()?, &table_schema)?;
+        let position = match meta_index.search(&relation_id_bytes, &index_schema)? {
+            SearchResult::Found(pos) => pos,
+            SearchResult::NotFound(_) => return Ok(()),
+        };
+
+        // Read the existing tuple
+        let tuple_reader = TupleReader::from_schema(&index_schema);
+        let existing_tuple = meta_table.with_cell_at(position, |bytes| {
+            tuple_reader.parse_for_snapshot(bytes, &snapshot).ok()??;
+            Tuple::from_slice_unchecked(bytes).ok()
+        })?;
+
+        let Some(mut tuple) = existing_tuple else {
+            return Ok(());
+        };
+
+        // Get the old row for index maintenance
+        let old_row = meta_index
+            .get_row_at(position, &index_schema, &snapshot)?
+            .expect("Tuple should exist");
+
+        // Apply the update
+        tuple.delete(snapshot.xid())?;
+        tuple.vacuum_with_schema(snapshot.xmin(), &index_schema)?;
+        meta_index.update(self.meta_index, tuple, &index_schema)?;
 
         Ok(())
     }
@@ -423,6 +531,10 @@ impl CatalogTrait for Catalog {
         let mut meta_table = builder.build_tree(self.meta_table);
 
         let row_id = UInt64(id).serialize()?;
+        println!("Buscando tabla {:?}", id);
+        println!("Snapshot");
+        dbg!(&snapshot);
+
         let result = meta_table.search(row_id.as_ref(), &schema)?;
 
         match result {
@@ -463,11 +575,21 @@ impl CatalogTrait for SharedCatalog {
 
     fn update_relation(
         &mut self,
-        relation: Relation,
+        relation_id: ObjectId,
+        new_row_id: Option<u64>,
+        new_schema: Option<Schema>,
+        new_stats: Option<Stats>,
         builder: &BtreeBuilder,
         snapshot: &Snapshot,
     ) -> CatalogResult<()> {
-        self.write().update_relation(relation, builder, snapshot)
+        self.write().update_relation(
+            relation_id,
+            new_row_id,
+            new_schema,
+            new_stats,
+            builder,
+            snapshot,
+        )
     }
     fn get_relation(
         &self,
@@ -516,7 +638,10 @@ pub trait CatalogTrait {
 
     fn update_relation(
         &mut self,
-        relation: Relation,
+        relation_id: ObjectId,
+        new_row_id: Option<u64>,
+        new_schema: Option<Schema>,
+        new_stats: Option<Stats>,
         builder: &BtreeBuilder,
         snapshot: &Snapshot,
     ) -> CatalogResult<()>;
@@ -613,11 +738,15 @@ impl CatalogTrait for MemCatalog {
 
     fn update_relation(
         &mut self,
-        relation: Relation,
+        relation_id: ObjectId,
+        new_row_id: Option<u64>,
+        new_schema: Option<Schema>,
+        new_stats: Option<Stats>,
         builder: &BtreeBuilder,
         snapshot: &Snapshot,
     ) -> CatalogResult<()> {
-        self.store_relation(relation, builder, snapshot.xid())
+        Ok(())
+        //self.store_relation(relation, builder, snapshot.xid())
     }
 
     fn remove_relation(
