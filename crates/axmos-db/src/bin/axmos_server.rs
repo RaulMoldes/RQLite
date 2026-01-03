@@ -22,7 +22,6 @@ use axmosdb::{
     runtime::QueryResult,
     sql::{binder::binder::Binder, parser::Parser, planner::CascadesOptimizer},
     tcp::{Request, Response, TcpError, recv_request, send_response},
-
 };
 
 use std::{

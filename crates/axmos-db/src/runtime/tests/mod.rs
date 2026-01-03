@@ -5,7 +5,7 @@ use crate::{
     DBConfig,
     io::pager::{BtreeBuilder, Pager, SharedPager},
     multithreading::coordinator::{Snapshot, TransactionCoordinator, TransactionHandle},
-    runtime::{RuntimeResult, builder::MutableExecutorBuilder, context::TransactionContext},
+    runtime::{RuntimeError, RuntimeResult, builder::MutableExecutorBuilder, context::TransactionContext},
     schema::{
         base::{Column, Relation},
         catalog::{Catalog, CatalogTrait, SharedCatalog},
@@ -33,6 +33,101 @@ struct TestHarness {
 }
 
 impl TestHarness {
+
+
+       /// Execute a DDL statement (CREATE TABLE, CREATE INDEX, etc.)
+    fn execute_ddl(&self, sql: &str) -> RuntimeResult<()> {
+        use crate::runtime::ddl::DdlExecutor;
+
+        let handle = self.begin_transaction();
+        let snapshot = handle.snapshot();
+        let builder = self.tree_builder();
+
+        let mut parser = Parser::new(sql);
+        let stmt = parser.parse().expect("Parse failed");
+
+        let mut binder = Binder::new(self.catalog.clone(), builder.clone(), snapshot.clone());
+        let bound = binder.bind(&stmt).expect("Bind failed");
+
+        let ctx = self
+            .create_write_context(handle.clone())
+            .expect("Failed to create context");
+
+        let mut ddl_executor = DdlExecutor::new(ctx.clone());
+        ddl_executor.execute(&bound).map_err(|_| RuntimeError::InvalidState)?;
+
+        ctx.pre_commit().expect("Failed to pre commit");
+        handle.commit().expect("Failed to commit");
+        ctx.end().expect("Failed to end");
+
+        Ok(())
+    }
+
+    /// Create an index directly in the catalog (low-level, for testing)
+    /// Returns the index root page
+    fn create_index_direct(
+        &self,
+        index_name: &str,
+        index_id: ObjectId,
+        _table_id: ObjectId,
+        indexed_columns: Vec<Column>,
+        num_keys: usize,
+        txid: u64,
+    ) -> PageId {
+        let root_page = self
+            .pager
+            .write()
+            .allocate_page::<BtreePage>()
+            .expect("Failed to allocate index page");
+
+        let relation = Relation::index(
+            index_id,
+            index_name,
+            root_page,
+            indexed_columns,
+            num_keys,
+        );
+
+        self.catalog
+            .write()
+            .store_relation(relation, &self.tree_builder(), txid)
+            .expect("Failed to store index relation");
+
+        root_page
+    }
+
+    /// Insert an index entry directly (bypassing DML executor's automatic maintenance)
+    fn insert_index_entry_direct(
+        &self,
+        index_id: ObjectId,
+        values: Vec<DataType>,
+        handle: &TransactionHandle,
+    ) {
+        let builder = self.tree_builder();
+        let snapshot = handle.snapshot();
+        let tid = handle.id();
+
+        let relation = self
+            .catalog
+            .read()
+            .get_relation(index_id, &builder, &snapshot)
+            .expect("Index not found");
+
+        let schema = relation.schema();
+        let root = relation.root();
+
+        let row = Row::new(values.into_boxed_slice());
+        let tuple_builder = TupleBuilder::from_schema(schema);
+        let tuple = tuple_builder
+            .build(row, tid)
+            .expect("Failed to build tuple");
+
+        let mut tree = builder.build_tree_mut(root);
+        tree.insert(root, tuple, schema)
+            .expect("Failed to insert index entry");
+        tree.accessor_mut().expect("Uninitialized tree").clear();
+    }
+
     /// Create a new test harness with an empty database.
     fn new() -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -146,10 +241,13 @@ impl TestHarness {
         while let Some(row) = executor.next().expect("Execution failed") {
             results.push(row);
         }
-
-        ctx.commit().expect("Failed to commit");
+        ctx.pre_commit().expect("Failed to pre commit");
+        ctx.handle().commit().expect("Failed to commit");
+        ctx.end().expect("Failed to end");
         results
     }
+
+
 
     /// Execute SQL and return results.
     fn execute_sql(&self, sql: &str) -> Vec<Row> {
@@ -949,8 +1047,7 @@ fn test_insert_single_row() {
     harness.create_table("users", 1, users_columns(), handle.id());
     handle.commit().expect("Failed to commit");
 
-    let results =
-        harness.execute_sql("INSERT INTO users VALUES ('Alice', 'alice@test.com', 25)");
+    let results = harness.execute_sql("INSERT INTO users VALUES ('Alice', 'alice@test.com', 25)");
 
     assert_eq!(results.len(), 1);
     match &results[0][0] {
@@ -1398,3 +1495,261 @@ fn test_update_int_column_with_literal() {
         other => panic!("Expected Int, got {:?}", other),
     }
 }
+
+
+
+
+/// Test creating an index via SQL and verifying it exists in the catalog
+#[test]
+fn test_create_index_via_sql() {
+    let harness = TestHarness::new();
+
+    // Create table first
+    let handle = harness.begin_transaction();
+    harness.create_table("products", 1, vec![
+        Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+        Column::new_with_defaults(DataTypeKind::Blob, "name"),
+        Column::new_with_defaults(DataTypeKind::Int, "price"),
+    ], handle.id());
+    handle.commit().expect("Failed to commit");
+
+    // Create index via SQL
+    harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    // Verify index exists by checking catalog
+    let handle = harness.begin_transaction();
+    let snapshot = handle.snapshot();
+    let builder = harness.tree_builder();
+
+    let index = harness.catalog
+        .read()
+        .get_relation_by_name("idx_products_price", &builder, &snapshot);
+
+    assert!(index.is_ok(), "Index should exist in catalog");
+    handle.commit().expect("Failed to commit");
+}
+
+/// Test that inserting data into a table with an index maintains the index
+#[test]
+fn test_index_maintained_on_insert() {
+    let harness = TestHarness::new();
+
+    // Create table
+    let handle = harness.begin_transaction();
+    harness.create_table("products", 1, vec![
+        Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+        Column::new_with_defaults(DataTypeKind::Blob, "name"),
+        Column::new_with_defaults(DataTypeKind::Int, "price"),
+    ], handle.id());
+    handle.commit().expect("Failed to commit");
+
+    // Create index
+    harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    // Insert data DML executor should automatically maintain the index
+    harness.execute_sql("INSERT INTO products VALUES ('Widget', 100)");
+    harness.execute_sql("INSERT INTO products VALUES ('Gadget', 200)");
+    harness.execute_sql("INSERT INTO products VALUES ('Gizmo', 150)");
+
+    // Verify data was inserted
+    let count = harness.execute_sql_count("SELECT COUNT(*) FROM products");
+    assert_eq!(count, 3);
+
+    // Query with filter on indexed column - optimizer may use index
+    let results = harness.execute_sql("SELECT name FROM products WHERE price = 150");
+    assert_eq!(results.len(), 1);
+}
+
+/// Test index scan with range query
+#[test]
+fn test_index_range_query() {
+    let harness = TestHarness::new();
+
+    // Create table
+    let handle = harness.begin_transaction();
+    harness.create_table("products", 1, vec![
+        Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+        Column::new_with_defaults(DataTypeKind::Blob, "name"),
+        Column::new_with_defaults(DataTypeKind::Int, "price"),
+    ], handle.id());
+    handle.commit().expect("Failed to commit");
+
+    // Create index on price
+    harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    // Insert data with various prices
+    for i in 1..=10 {
+        harness.execute_sql(&format!(
+            "INSERT INTO products VALUES ('Product{}', {})",
+            i, i * 10
+        ));
+    }
+
+    // Range query on indexed column
+    let results = harness.execute_sql("SELECT name FROM products WHERE price >= 50 AND price <= 80");
+
+    // Should return products with prices 50, 60, 70, 80
+    assert_eq!(results.len(), 4);
+}
+
+/// Test index on multiple inserts and deletes
+#[test]
+fn test_index_maintained_on_delete() {
+    let harness = TestHarness::new();
+
+    // Create table
+    let handle = harness.begin_transaction();
+    harness.create_table("products", 1, vec![
+        Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+        Column::new_with_defaults(DataTypeKind::Blob, "name"),
+        Column::new_with_defaults(DataTypeKind::Int, "price"),
+    ], handle.id());
+    handle.commit().expect("Failed to commit");
+
+    // Create index
+    harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    // Insert data
+    harness.execute_sql("INSERT INTO products VALUES ('Widget', 100)");
+    harness.execute_sql("INSERT INTO products VALUES ('Gadget', 200)");
+    harness.execute_sql("INSERT INTO products VALUES ('Gizmo', 100)");
+
+    // Delete one row with price 100
+    harness.execute_sql("DELETE FROM products WHERE name = 'Widget'");
+
+    // Query should still work and return correct results
+    let results = harness.execute_sql("SELECT name FROM products WHERE price = 100");
+    assert_eq!(results.len(), 1);
+
+    // Verify it's "Gizmo" not "Widget"
+    match &results[0][0] {
+        DataType::Blob(b) => assert_eq!(b.to_string(), "Gizmo"),
+        other => panic!("Expected Blob, got {:?}", other),
+    }
+}
+
+/// Test index maintained on update
+#[test]
+fn test_index_maintained_on_update() {
+    let harness = TestHarness::new();
+
+    // Create table
+    let handle = harness.begin_transaction();
+    harness.create_table("products", 1, vec![
+        Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+        Column::new_with_defaults(DataTypeKind::Blob, "name"),
+        Column::new_with_defaults(DataTypeKind::Int, "price"),
+    ], handle.id());
+    handle.commit().expect("Failed to commit");
+
+    // Create index on price
+    harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    // Insert data
+    harness.execute_sql("INSERT INTO products VALUES ('Widget', 100)");
+
+    // Update the indexed column
+    harness.execute_sql("UPDATE products SET price = 150 WHERE name = 'Widget'");
+
+    // Old value should return no results
+    let old_results = harness.execute_sql("SELECT name FROM products WHERE price = 100");
+    assert_eq!(old_results.len(), 0);
+
+    // New value should return the row
+    let new_results = harness.execute_sql("SELECT name FROM products WHERE price = 150");
+    assert_eq!(new_results.len(), 1);
+}
+
+/// Test with multiple indexes on the same table
+#[test]
+fn test_multiple_indexes_on_table() {
+    let harness = TestHarness::new();
+
+    // Create table
+    let handle = harness.begin_transaction();
+    harness.create_table("employees", 1, vec![
+        Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+        Column::new_with_defaults(DataTypeKind::Blob, "name"),
+        Column::new_with_defaults(DataTypeKind::Blob, "department"),
+        Column::new_with_defaults(DataTypeKind::Int, "salary"),
+    ], handle.id());
+    handle.commit().expect("Failed to commit");
+
+    // Create multiple indexes
+    harness.execute_ddl("CREATE INDEX idx_emp_dept ON employees(department)")
+        .expect("Failed to create department index");
+    harness.execute_ddl("CREATE INDEX idx_emp_salary ON employees(salary)")
+        .expect("Failed to create salary index");
+
+    // Insert data
+    harness.execute_sql("INSERT INTO employees VALUES ('Alice', 'Engineering', 100000)");
+    harness.execute_sql("INSERT INTO employees VALUES ('Bob', 'Sales', 80000)");
+    harness.execute_sql("INSERT INTO employees VALUES ('Charlie', 'Engineering', 90000)");
+    harness.execute_sql("INSERT INTO employees VALUES ('Diana', 'Sales', 85000)");
+
+    // Query using department
+    let eng_results = harness.execute_sql(
+        "SELECT name FROM employees WHERE department = 'Engineering'"
+    );
+    assert_eq!(eng_results.len(), 2);
+
+    // Query using salary
+    let high_salary = harness.execute_sql(
+        "SELECT name FROM employees WHERE salary > 85000"
+    );
+    assert_eq!(high_salary.len(), 2); // Alice (100k) and Charlie (90k)
+}
+
+/// Test index with empty table
+#[test]
+fn test_index_on_empty_table() {
+    let harness = TestHarness::new();
+
+    // Create table
+    let handle = harness.begin_transaction();
+    harness.create_table("products", 1, vec![
+        Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+        Column::new_with_defaults(DataTypeKind::Blob, "name"),
+        Column::new_with_defaults(DataTypeKind::Int, "price"),
+    ], handle.id());
+    handle.commit().expect("Failed to commit");
+
+    // Create index on empty table
+    harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    // Query should return empty results
+    let results = harness.execute_sql("SELECT name FROM products WHERE price = 100");
+    assert!(results.is_empty());
+}
+
+/// Test CREATE INDEX IF NOT EXISTS
+#[test]
+fn test_create_index_if_not_exists() {
+    let harness = TestHarness::new();
+
+    // Create table
+    let handle = harness.begin_transaction();
+    harness.create_table("products", 1, vec![
+        Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
+        Column::new_with_defaults(DataTypeKind::Blob, "name"),
+        Column::new_with_defaults(DataTypeKind::Int, "price"),
+    ], handle.id());
+    handle.commit().expect("Failed to commit");
+
+    // Create index first time - should succeed
+    harness.execute_ddl("CREATE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    // Create same index with IF NOT EXISTS - should not error
+    let result = harness.execute_ddl(
+        "CREATE INDEX IF NOT EXISTS idx_products_price ON products(price)"
+    );
+    assert!(result.is_ok());
+}
+

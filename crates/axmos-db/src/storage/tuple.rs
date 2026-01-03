@@ -290,6 +290,20 @@ pub(crate) struct TupleLayout {
     version: u8,
 }
 
+impl Display for TupleLayout {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        writeln!(f, "TupleLayout {{")?;
+        writeln!(f, "  version: {}", self.version)?;
+        writeln!(f, "  version_xmin: {:?}", self.version_xmin)?;
+        writeln!(f, "  version_xmax: {:?}", self.version_xmax)?;
+        writeln!(f, "  null_bitmap_start: {}", self.null_bitmap_start)?;
+        writeln!(f, "  key_offsets: {:?}", self.key_offsets)?;
+        writeln!(f, "  value_offsets: {:?}", self.value_offsets)?;
+        writeln!(f, "  data_end: {}", self.data_end)?;
+        write!(f, "}}")
+    }
+}
+
 // Tuple builder and tuple reader structs allow to avoid storing the schema reference inside the tuple which is annoying
 pub struct TupleReader<'a> {
     schema: &'a Schema,
@@ -703,7 +717,7 @@ impl TupleLayout {
 
     #[inline]
     fn delta_start(&self) -> usize {
-        self.data_end
+        DeltaHeader::aligned_offset(self.data_end)
     }
 
     #[inline]
@@ -872,6 +886,16 @@ impl<'a> TupleRef<'a> {
     }
 }
 
+impl Display for DeltaHeader {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(
+            f,
+            "DeltaHeader {{ xmin: {}, version: {} }}",
+            self.xmin, self.version
+        )
+    }
+}
+
 /// Layout: [Header][Null Bitmap][Keys][Values][Delta0][Delta1]...[DeltaN]
 /// Delta: [DeltaHeader][num_changes: u8][bitmap][changes...]
 /// Change: [field_idx: u8][value (aligned)]
@@ -985,13 +1009,12 @@ impl Tuple {
 
         let reader = TupleReader::from_schema(schema);
         let layout = reader.parse_last_version(self.data.effective_data())?;
-        let tuple_reference = TupleRef::new(self.data.effective_data(), layout);
-        let layout = tuple_reference.layout.clone();
+        let tuple_reference = TupleRef::new(self.data.effective_data(), layout.clone());
 
         let old_version = tuple_reference.current_version();
         let old_xmin = tuple_reference.version_xmin();
-        let current_end = self.data.len();
         let num_values = schema.num_values();
+        let num_keys = schema.num_keys();
         let bitmap_size = null_bitmap_size(num_values);
 
         // Collect old values for delta
@@ -1001,27 +1024,86 @@ impl Tuple {
             old_values.push((*i as u8, val_ref.to_owned().unwrap_or(DataType::Null)));
         }
 
-        // Calculate delta size
-        // Layout: [DeltaHeader (aligned)][num_changes: u8][bitmap][changes...]
-        let delta_header_start = DeltaHeader::aligned_offset(current_end);
+        // Read all keys (immutable, just copy references for size calculation)
+        let mut keys: Vec<DataType> = Vec::with_capacity(num_keys);
+        for i in 0..num_keys {
+            let key_ref = tuple_reference.key_with_schema(i, schema)?;
+            keys.push(key_ref.to_owned().unwrap_or(DataType::Null));
+        }
+
+        // Read all values, applying modifications for new values
+        let mut new_values: Vec<DataType> = Vec::with_capacity(num_values);
+        for i in 0..num_values {
+            if let Some(new_val) = modified.get(&i) {
+                new_values.push(new_val.clone());
+            } else {
+                let val_ref = tuple_reference.value_with_schema(i, schema)?;
+                new_values.push(val_ref.to_owned().unwrap_or(DataType::Null));
+            }
+        }
+
+        // Calculate total size needed
+        // 1. Header + bitmap + keys + new values
+        let mut data_size = TupleHeader::SIZE + bitmap_size;
+        for key in &keys {
+            data_size = aligned_offset(data_size, key.align());
+            data_size += key.runtime_size();
+        }
+        for val in &new_values {
+            if !val.is_null() {
+                data_size = aligned_offset(data_size, val.align());
+                data_size += val.runtime_size();
+            }
+        }
+
+        // 2. Delta: [DeltaHeader][num_changes][bitmap][changes...]
+        let delta_header_start = DeltaHeader::aligned_offset(data_size);
         let header_end = delta_header_start + DeltaHeader::SIZE;
         let num_changes_offset = header_end;
-        let bitmap_start = num_changes_offset + 1;
-        let changes_start = bitmap_start + bitmap_size;
+        let delta_bitmap_start = num_changes_offset + 1;
+        let changes_start = delta_bitmap_start + bitmap_size;
 
-        // Calculate changes size with alignment
-        let mut cursor = changes_start;
-        for (_, dt) in &old_values {
-            cursor += 1; // field index byte
-            cursor = aligned_offset(cursor, dt.align());
-            cursor += dt.runtime_size();
+        let mut delta_cursor = changes_start;
+        for (_, old_val) in &old_values {
+            delta_cursor += 1; // field index
+            delta_cursor = aligned_offset(delta_cursor, old_val.align());
+            delta_cursor += old_val.runtime_size();
         }
-        let delta_end = cursor;
-        let new_size = delta_end;
+        let total_size = delta_cursor;
 
-        // Reallocate buffer
-        self.data.realloc(new_size)?;
-        let buffer = self.data.effective_data_mut();
+        // Allocate new buffer
+        let mut new_data = Payload::alloc_aligned(total_size)?;
+        let buffer = new_data.effective_data_mut();
+
+        // Write new header
+        let new_header = TupleHeader::new(old_version + 1, new_xmin, None);
+        let mut cursor = new_header.write_to(buffer, 0);
+
+        // Write null bitmap for new values
+        let new_bitmap_start = cursor;
+        buffer[cursor..cursor + bitmap_size].fill(0);
+        for (i, val) in new_values.iter().enumerate() {
+            if val.is_null() {
+                TupleBuilder::set_null_bit(
+                    &mut buffer[new_bitmap_start..new_bitmap_start + bitmap_size],
+                    i,
+                    true,
+                );
+            }
+        }
+        cursor += bitmap_size;
+
+        // Write keys
+        for key in &keys {
+            cursor = key.write_to(buffer, cursor)?;
+        }
+
+        // Write new values
+        for val in &new_values {
+            if !val.is_null() {
+                cursor = val.write_to(buffer, cursor)?;
+            }
+        }
 
         // Write delta header
         let delta_header = DeltaHeader::new(old_version, old_xmin);
@@ -1030,54 +1112,28 @@ impl Tuple {
         // Write number of changes
         buffer[num_changes_offset] = old_values.len() as u8;
 
-        // Copy current null bitmap to delta
-        let current_bitmap_start = layout.null_bitmap_start;
-        buffer.copy_within(
-            current_bitmap_start..current_bitmap_start + bitmap_size,
-            bitmap_start,
-        );
-
-        // Write changes
-        let mut cursor = changes_start;
-        for (idx, old_value) in &old_values {
-            // Update delta bitmap for old null state
-            if old_value.is_null() {
+        // Write delta bitmap (old null states)
+        buffer[delta_bitmap_start..delta_bitmap_start + bitmap_size].fill(0);
+        for (idx, old_val) in &old_values {
+            if old_val.is_null() {
                 TupleBuilder::set_null_bit(
-                    &mut buffer[bitmap_start..bitmap_start + bitmap_size],
+                    &mut buffer[delta_bitmap_start..delta_bitmap_start + bitmap_size],
                     *idx as usize,
                     true,
                 );
             }
-
-            // Write field index
-            buffer[cursor] = *idx;
-            cursor += 1;
-
-            // Write old value (write_to handles alignment)
-            cursor = old_value.write_to(buffer, cursor)?;
         }
 
-        // Update current values in-place
-        for (i, new_value) in modified {
-            let new_null = new_value.is_null();
-
-            TupleBuilder::set_null_bit(
-                &mut buffer[current_bitmap_start..current_bitmap_start + bitmap_size],
-                *i,
-                new_null,
-            );
-
-            if new_null {
-                continue;
-            }
-
-            let offset = layout.value_offsets[*i];
-            new_value.write_to(buffer, offset)?;
+        // Write delta changes (old values)
+        let mut delta_cursor = changes_start;
+        for (idx, old_val) in &old_values {
+            buffer[delta_cursor] = *idx;
+            delta_cursor += 1;
+            delta_cursor = old_val.write_to(buffer, delta_cursor)?;
         }
 
-        // Update header
-        let new_header = TupleHeader::new(old_version + 1, new_xmin, None);
-        new_header.write_to(buffer, 0);
+        // Replace old data with new
+        self.data = new_data;
 
         Ok(())
     }
@@ -1103,8 +1159,12 @@ impl Tuple {
         oldest_active_xid: TransactionId,
         schema: &Schema,
     ) -> TupleResult<usize> {
+        println!("VACUUM DE LA TUPLA");
         let reader = TupleReader::from_schema(schema);
         let layout = reader.parse_last_version(self.data.effective_data())?;
+        println!("LAYOUT LEIDO {}", layout);
+        println!("delta start {}", layout.delta_start());
+        println!("data len {}", self.data.len());
 
         if layout.delta_start() >= self.data.len() {
             return Ok(0);
@@ -1118,6 +1178,10 @@ impl Tuple {
         while cursor < self.data.len() {
             let (delta_header, header_end) =
                 DeltaHeader::read_from(self.data.effective_data(), cursor);
+
+            println!("DELTA HEADER {}", delta_header);
+            println!("hader_end {}", header_end);
+            println!("Oldest active xid {}", oldest_active_xid);
 
             if delta_header.xmin() >= oldest_active_xid {
                 // Read num_changes and skip this delta

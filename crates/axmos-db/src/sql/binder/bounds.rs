@@ -6,8 +6,6 @@ use crate::{
     types::{DataType, DataTypeKind, ObjectId},
 };
 
-
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BoundColumnRef {
     pub table_id: Option<ObjectId>,

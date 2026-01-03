@@ -374,8 +374,6 @@ impl CatalogTrait for Catalog {
         // Will replace existing relation if it exists.
         tree.upsert(self.meta_table, tuple, &schema)?;
 
-
-
         Ok(())
     }
 

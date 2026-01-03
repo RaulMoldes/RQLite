@@ -23,7 +23,7 @@ pub(crate) struct TransactionContext<Acc: TreeReader> {
     pager: SharedPager,
     catalog: SharedCatalog,
     handle: TransactionHandle,
-    last_lsn: Cell<Option<Lsn>>,
+    pub last_lsn: Cell<Option<Lsn>>,
 }
 
 impl<Acc> TransactionContext<Acc>
@@ -55,17 +55,27 @@ where
         self.handle.snapshot()
     }
 
-    pub(crate) fn commit(self) -> RuntimeResult<()> {
+    pub(crate) fn handle(&self) -> &TransactionHandle {
+        &self.handle
+    }
+
+    pub(crate) fn pre_commit(&self) -> RuntimeResult<()> {
         self.log_operation(Commit)?;
-        self.handle.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn pre_abort(&self) -> RuntimeResult<()> {
+        self.log_operation(Commit)?;
+        Ok(())
+    }
+
+    pub(crate) fn post_commit(&self) -> RuntimeResult<()> {
         self.log_operation(End)?;
         self.pager().write().flush_wal()?;
         Ok(())
     }
 
-    pub(crate) fn abort(self) -> RuntimeResult<()> {
-        self.log_operation(Abort)?;
-        self.handle.abort()?;
+    pub(crate) fn end(&self) -> RuntimeResult<()> {
         self.log_operation(End)?;
         self.pager().write().flush_wal()?;
         Ok(())

@@ -207,7 +207,7 @@ impl WalRecuperator {
                     let tuple = btree.with_cell_at(position, |bytes| {
                         let mut tuple = Tuple::from_slice_unchecked(bytes)?;
                         tuple.delete(self.ctx.tid())?;
-              //          tuple.vacuum_with_schema(self.ctx.snapshot().xmin(), schema)?;
+                        //          tuple.vacuum_with_schema(self.ctx.snapshot().xmin(), schema)?;
 
                         Ok::<Tuple, TupleError>(tuple)
                     })??;
@@ -260,7 +260,7 @@ impl WalRecuperator {
                     let tuple = btree.with_cell_at(position, |bytes| {
                         let mut tuple = Tuple::from_slice_unchecked(bytes)?;
                         tuple.delete(self.ctx.tid())?;
-               //         tuple.vacuum_with_schema(self.ctx.snapshot().xmin(), schema)?;
+                        //         tuple.vacuum_with_schema(self.ctx.snapshot().xmin(), schema)?;
 
                         Ok::<Tuple, TupleError>(tuple)
                     })??;

@@ -53,7 +53,10 @@ use crate::{
         coordinator::TransactionCoordinator,
         runner::{BoxError, TaskError, TaskRunner},
     },
-    runtime::{QueryError, QueryResult, QueryRunner, context::TransactionContext},
+    runtime::{
+        QueryError, QueryPreparator, QueryResult, QueryRunner, QueryRunnerBuilder,
+        context::TransactionContext,
+    },
     schema::catalog::{Catalog, CatalogTrait, SharedCatalog},
     storage::page::BtreePage,
     tree::accessor::BtreeWriteAccessor,
@@ -61,6 +64,7 @@ use crate::{
 };
 
 use std::{
+    collections::HashMap,
     error::Error,
     fmt::{Display, Formatter, Result as FmtResult},
     io::{Error as IoError, Write},
@@ -282,7 +286,7 @@ impl Database {
 
             // Run analysis INSIDE the closure using the cloned pager
             let analysis = pager.write().run_analysis().map_err(box_err)?;
-
+            println!("Analysis result: {:?}", analysis);
             // Run recovery through recuperator
             recuperator.run_recovery(&analysis).map_err(box_err)?;
 
@@ -316,17 +320,12 @@ impl Database {
                     .with_pager(pager.clone())
             };
 
-            // Create query runner
-            let mut runner =
-                QueryRunner::new(catalog.clone(), pager.clone(), tree_builder, handle.clone());
+            let preparator =
+                QueryPreparator::new(catalog.clone(), pager.clone(), tree_builder, handle.clone());
 
-            // Execute query
-            let result = runner.execute(&sql).map_err(box_err)?;
-
-            // Commit transaction
-            runner.commit().map_err(box_err)?;
-
-            Ok(result)
+            let handle = preparator.build_and_run(&sql, false).map_err(box_err)?;
+            handle.commit().map_err(box_err)?;
+            Ok(handle.into())
         })?;
 
         Ok(result)
@@ -341,7 +340,7 @@ impl Database {
 
         let results = self.task_runner.run_with_result(move |_ctx| {
             // Begin transaction
-            let handle = coordinator.begin().map_err(box_err)?;
+            let global_handle = coordinator.begin().map_err(box_err)?;
 
             // Create tree builder
             let tree_builder = {
@@ -350,23 +349,26 @@ impl Database {
                     .with_pager(pager.clone())
             };
 
-            // Create query runner
-            let mut runner =
-                QueryRunner::new(catalog.clone(), pager.clone(), tree_builder, handle.clone());
+            let preparator = QueryPreparator::new(
+                catalog.clone(),
+                pager.clone(),
+                tree_builder,
+                global_handle.clone(),
+            );
 
             // Execute all statements
-            let mut results = Vec::with_capacity(statements.len());
-            for (i,sql) in statements.iter().enumerate() {
-                println!("Ejecutando: {sql}");
-                let result = runner.execute(sql).map_err(box_err)?;
+            let mut handles = Vec::with_capacity(statements.len());
 
-                results.push(result);
+            for sql in statements {
+                let result = preparator.build_and_run(&sql, false).map_err(box_err)?;
+                handles.push(result);
             }
 
-            // Commit transaction
-            runner.commit().map_err(box_err)?;
-
-            Ok(results)
+            if let Some(last_handle) = handles.last() {
+                last_handle.commit().map_err(box_err)?;
+            }
+            let query_results: Vec<QueryResult> = handles.into_iter().map(|c| c.into()).collect();
+            Ok(query_results)
         })?;
 
         Ok(results)
@@ -615,6 +617,7 @@ mod database_tests {
     #[test]
     fn test_recovery_preserves_inserts() {
         let (_dir, path) = temp_db_path();
+        let count = 50;
 
         // Create database with data
         {
@@ -624,7 +627,7 @@ mod database_tests {
             db.execute("CREATE TABLE items (id BIGINT, value INT)")
                 .expect("Failed to create table");
 
-            for i in 0..50 {
+            for i in 0..count {
                 db.execute(&format!("INSERT INTO items VALUES ({}, {})", i, i * 10))
                     .unwrap();
             }
@@ -638,7 +641,10 @@ mod database_tests {
 
             let result = db.execute("SELECT COUNT(*) FROM items").unwrap();
             let rows = result.into_rows().expect("Expected rows result");
+
             assert_eq!(rows.len(), 1);
+            let value = rows[0][0].as_big_int().unwrap();
+            assert_eq!(value.value(), count);
         }
     }
 
@@ -659,6 +665,11 @@ mod database_tests {
             db.execute("UPDATE users SET age = 31 WHERE id = 1")
                 .unwrap();
 
+            let result = db.execute("SELECT age FROM users WHERE id = 1").unwrap();
+            let rows = result.into_rows().expect("Expected rows result");
+
+            assert_eq!(rows.len(), 1, "Expected 1 row before flush");
+
             db.flush().expect("Failed to flush");
         }
 
@@ -666,7 +677,7 @@ mod database_tests {
         {
             let db = Database::open(&path, DBConfig::default()).expect("Failed to open database");
 
-            let result = db.execute("SELECT age FROM users WHERE id = 1").unwrap();
+            let result = db.execute("SELECT * FROM users").unwrap();
             let rows = result.into_rows().expect("Expected rows result");
             assert_eq!(rows.len(), 1, "Expected 1 row");
         }
@@ -720,18 +731,17 @@ mod database_tests {
                 .expect("Failed to create orders table");
 
             db.execute("INSERT INTO users VALUES (1, 'Alice')").unwrap();
-            println!("Se ejecuta consulta 1 correctmente");
+
             db.execute("INSERT INTO users VALUES (2, 'Bob')").unwrap();
-            println!("Se ejecuta consulta 2 correctmente");
+
             db.execute("INSERT INTO orders VALUES (100, 1, 99.99)")
                 .unwrap();
-            println!("Se ejecuta consulta 3 correctmente");
+
             db.execute("INSERT INTO orders VALUES (101, 1, 149.99)")
                 .unwrap();
-            println!("Se ejecuta consulta 4 correctmente");
+
             db.execute("INSERT INTO orders VALUES (102, 2, 49.99)")
                 .unwrap();
-            println!("Se ejecuta consulta 5 correctmente");
 
             db.flush().expect("Failed to flush");
         }

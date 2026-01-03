@@ -4,7 +4,6 @@
 //! logical operators that can be optimized by the Cascades optimizer.
 
 use crate::{
-
     schema::{
         Schema,
         catalog::{CatalogTrait, StatisticsProvider},

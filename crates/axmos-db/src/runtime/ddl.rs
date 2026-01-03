@@ -7,12 +7,15 @@
 use crate::{
     io::pager::{BtreeBuilder, SharedPager},
     multithreading::coordinator::Snapshot,
+    runtime::context::TransactionContext,
     schema::{
+        SharedCatalog,
         base::{Column, ForeignKeyInfo, Relation, Schema, SchemaError, TableConstraint},
         catalog::{CatalogError, CatalogTrait},
     },
     sql::binder::{DatabaseItem, bounds::*},
     storage::page::BtreePage,
+    tree::accessor::BtreeWriteAccessor,
     types::{Blob, DataType, DataTypeKind, ObjectId},
 };
 
@@ -131,27 +134,14 @@ impl DdlOutcome {
 /// DDL statements modify the database schema and don't go through
 /// the query optimizer. They are executed immediately and affect
 /// the catalog metadata.
-pub struct DdlExecutor<'a, C: CatalogTrait> {
-    catalog: &'a mut C,
-    tree_builder: &'a BtreeBuilder,
-    snapshot: &'a Snapshot,
-    pager: SharedPager,
+pub struct DdlExecutor {
+    ctx: TransactionContext<BtreeWriteAccessor>,
 }
 
-impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
+impl DdlExecutor {
     /// Creates a new DDL executor.
-    pub(crate) fn new(
-        catalog: &'a mut C,
-        tree_builder: &'a BtreeBuilder,
-        snapshot: &'a Snapshot,
-        pager: SharedPager,
-    ) -> Self {
-        Self {
-            catalog,
-            tree_builder,
-            snapshot,
-            pager,
-        }
+    pub(crate) fn new(ctx: TransactionContext<BtreeWriteAccessor>) -> Self {
+        Self { ctx }
     }
 
     /// Check if a statement is a DDL statement.
@@ -199,8 +189,8 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
         columns.extend(stmt.columns.iter().map(|c| self.bound_column_to_column(c)));
 
         // Allocate resources
-        let object_id = self.catalog.get_next_object_id();
-        let root_page = self.pager.write().allocate_page::<BtreePage>()?;
+        let object_id = self.ctx.catalog().get_next_object_id();
+        let root_page = self.ctx.pager().write().allocate_page::<BtreePage>()?;
 
         // Create the relation
         let mut relation = Relation::table(object_id, &stmt.table_name, root_page, columns);
@@ -210,10 +200,13 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
             let adjusted = self.adjust_constraint_indices(constraint);
             self.apply_table_constraint(relation.schema_mut(), &adjusted)?;
         }
-
+        let snapshot = self.ctx.snapshot();
+        let tree_builder = self.ctx.tree_builder();
         // Store in catalog
-        self.catalog
-            .store_relation(relation, self.tree_builder, self.snapshot.xid())?;
+        self.ctx
+            .catalog()
+            .write()
+            .store_relation(relation, &tree_builder, snapshot.xid())?;
 
         Ok(DdlOutcome::TableCreated {
             name: stmt.table_name.clone(),
@@ -253,10 +246,15 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
             )));
         }
 
+        let snapshot = self.ctx.snapshot();
+        let tree_builder = self.ctx.tree_builder();
+
         // Get the table to find column types
         let table_relation =
-            self.catalog
-                .get_relation(stmt.table_id, self.tree_builder, self.snapshot)?;
+            self.ctx
+                .catalog()
+                .read()
+                .get_relation(stmt.table_id, &tree_builder, &snapshot)?;
 
         let table_schema = table_relation.schema();
 
@@ -282,8 +280,8 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
         index_columns.push(Column::new_with_defaults(DataTypeKind::BigUInt, "row_id"));
 
         // Allocate resources
-        let object_id = self.catalog.get_next_object_id();
-        let root_page = self.pager.write().allocate_page::<BtreePage>()?;
+        let object_id = self.ctx.catalog().read().get_next_object_id();
+        let root_page = self.ctx.pager().write().allocate_page::<BtreePage>()?;
 
         // Create the index relation
         let relation = Relation::index(
@@ -293,10 +291,14 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
             index_columns,
             stmt.columns.len(), // num_keys = number of indexed columns
         );
+        let snapshot = self.ctx.snapshot();
+        let tree_builder = self.ctx.tree_builder();
 
         // Store in catalog
-        self.catalog
-            .store_relation(relation, self.tree_builder, self.snapshot.xid())?;
+        self.ctx
+            .catalog()
+            .write()
+            .store_relation(relation, &tree_builder, snapshot.xid())?;
 
         // Update the table schema to reference this index
         // It is important that the order of the columns is kept.
@@ -316,9 +318,13 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
         index_id: ObjectId,
         columns: Vec<usize>,
     ) -> DdlResult<()> {
-        let mut relation = self
-            .catalog
-            .get_relation(table_id, self.tree_builder, self.snapshot)?;
+        let snapshot = self.ctx.snapshot();
+        let tree_builder = self.ctx.tree_builder();
+        let mut relation =
+            self.ctx
+                .catalog()
+                .write()
+                .get_relation(table_id, &tree_builder, &snapshot)?;
 
         let schema = relation.schema_mut();
 
@@ -327,16 +333,22 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
             indexes.insert(index_id, columns);
         }
 
-        self.catalog
-            .update_relation(relation, self.tree_builder, self.snapshot)?;
+        self.ctx
+            .catalog()
+            .write()
+            .update_relation(relation, &tree_builder, &snapshot)?;
 
         Ok(())
     }
 
     fn execute_alter_table(&mut self, stmt: &BoundAlterTable) -> DdlResult<DdlOutcome> {
+        let snapshot = self.ctx.snapshot();
+        let tree_builder = self.ctx.tree_builder();
         let mut relation =
-            self.catalog
-                .get_relation(stmt.table_id, self.tree_builder, self.snapshot)?;
+            self.ctx
+                .catalog()
+                .read()
+                .get_relation(stmt.table_id, &tree_builder, &snapshot)?;
 
         let table_name = relation.name().to_string();
 
@@ -375,8 +387,10 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
         };
 
         // Update the relation in catalog
-        self.catalog
-            .update_relation(relation, self.tree_builder, self.snapshot)?;
+        self.ctx
+            .catalog()
+            .write()
+            .update_relation(relation, &tree_builder, &snapshot)?;
 
         Ok(DdlOutcome::TableAltered {
             name: table_name,
@@ -560,10 +574,14 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
                 ref_table_id,
                 ref_columns,
             } => {
+                let snapshot = self.ctx.snapshot();
+                let tree_builder = self.ctx.tree_builder();
                 // Get referenced table name for constraint naming
                 let ref_table_name = self
-                    .catalog
-                    .get_relation(*ref_table_id, self.tree_builder, self.snapshot)
+                    .ctx
+                    .catalog()
+                    .read()
+                    .get_relation(*ref_table_id, &tree_builder, &snapshot)
                     .map(|r| r.name().to_string())
                     .unwrap_or_else(|_| "unknown".to_string());
 
@@ -601,17 +619,26 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
             )));
         };
 
+        let snapshot = self.ctx.snapshot();
+        let tree_builder = self.ctx.tree_builder();
+
         // Get the relation
         let relation = self
-            .catalog
-            .get_relation(table_id, self.tree_builder, self.snapshot)
+            .ctx
+            .catalog()
+            .read()
+            .get_relation(table_id, &tree_builder, &snapshot)
             .map_err(|_| DdlError::NotFound(DatabaseItem::Table(stmt.table_name.clone())))?;
 
         let table_name = relation.name().to_string();
 
         // Remove the relation (cascade handled by catalog)
-        self.catalog
-            .remove_relation(relation, self.tree_builder, self.snapshot, stmt.cascade)?;
+        self.ctx.catalog().write().remove_relation(
+            relation,
+            &tree_builder,
+            &snapshot,
+            stmt.cascade,
+        )?;
 
         Ok(DdlOutcome::TableDropped { name: table_name })
     }
@@ -628,8 +655,12 @@ impl<'a, C: CatalogTrait> DdlExecutor<'a, C> {
 
     /// Check if any relation exists by name.
     fn relation_exists(&self, name: &str) -> bool {
-        self.catalog
-            .get_relation_by_name(name, self.tree_builder, self.snapshot)
+        let snapshot = self.ctx.snapshot();
+        let tree_builder = self.ctx.tree_builder();
+        self.ctx
+            .catalog()
+            .read()
+            .get_relation_by_name(name, &tree_builder, &snapshot)
             .is_ok()
     }
 

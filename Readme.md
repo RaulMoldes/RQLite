@@ -124,9 +124,26 @@ INSERT INTO users VALUES (4, 'Alice', 25)
 INSERT INTO users VALUES (5, 'Bob', 45)
 
 SELECT * FROM users
+
 SELECT * FROM users WHERE age > 26
 
-EXPLAIN SELECT * FROM users WHERE age > 26
+UPDATE users SET name = 'Pablo' WHERE id = 4
+
+SELECT * FROM users
+
+DELETE FROM users WHERE id = 4
+
+SELECT * FROM users
+
+CREATE TABLE orders (userid BIGINT, product_name TEXT)
+
+INSERT INTO orders VALUES (4, 'Car')
+
+INSERT INTO orders VALUES (5, 'House')
+
+SELECT * FROM users JOIN orders ON users.id = orders.userid
+
+EXPLAIN SELECT * FROM users JOIN orders ON users.id = orders.userid
 
 ANALYZE
 
@@ -149,10 +166,6 @@ AxmosDB uses a Cascades-style optimizer, enabling:
 * Future extensibility for advanced operators
 
 # Known Limitations & TODOs
-
-## Known Bugs
-
-Tuple vacuuming is currently not working as expected, Requires fixing garbage collection of obsolete tuples
 
 ## Pending Features
 
