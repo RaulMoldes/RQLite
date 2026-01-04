@@ -7,6 +7,8 @@ use std::{
     io::{self, Read, Write},
 };
 
+pub mod session;
+
 /// Protocol version for compatibility checks.
 pub const PROTOCOL_VERSION: u8 = 1;
 

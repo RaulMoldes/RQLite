@@ -482,6 +482,7 @@ where
 
             if let Some(layout) = reader.parse_for_snapshot(bytes, &snapshot)? {
                 let tuple = TupleRef::new(bytes, layout);
+
                 let accessor = RefTupleAccessor::new(tuple, &schema);
                 let row = accessor.to_row()?;
                 Ok(Some(row))

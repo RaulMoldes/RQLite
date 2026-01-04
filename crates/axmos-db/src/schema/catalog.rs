@@ -359,7 +359,7 @@ impl CatalogTrait for Catalog {
         updated_tuple.add_version_with_schema(&changes, snapshot.xid(), &schema)?;
         updated_tuple.vacuum_with_schema(snapshot.xmin(), &schema)?;
 
-        let result = meta_table.update(self.meta_table, tuple, &schema)?;
+        let result = meta_table.update(self.meta_table, updated_tuple, &schema)?;
 
         Ok(())
     }
@@ -476,7 +476,7 @@ impl CatalogTrait for Catalog {
 
         // Store the relation in the meta-table
         let mut tree = builder.build_tree_mut(self.meta_table);
-
+        println!("Se crea tabla con tid {transaction_id}");
         let tuple = Self::relation_as_meta_table_tuple(&relation, transaction_id)?;
 
         // Will replace existing relation if it exists.
@@ -531,9 +531,6 @@ impl CatalogTrait for Catalog {
         let mut meta_table = builder.build_tree(self.meta_table);
 
         let row_id = UInt64(id).serialize()?;
-        println!("Buscando tabla {:?}", id);
-        println!("Snapshot");
-        dbg!(&snapshot);
 
         let result = meta_table.search(row_id.as_ref(), &schema)?;
 

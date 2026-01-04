@@ -18,10 +18,12 @@ use std::{
 #[derive(Debug)]
 pub enum TransactionError {
     Aborted(TransactionId),
-    NotActive(TransactionId),
     WriteWriteConflict(TransactionId, LogicalId),
     NotFound(TransactionId),
     TupleNotVisible(TransactionId, LogicalId),
+    TransactionAlreadyStarted,
+    TransactionNotStarted,
+    InvalidTransactionState(TransactionState),
     Other(String),
 }
 
@@ -29,7 +31,7 @@ impl Display for TransactionError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             Self::Aborted(id) => write!(f, "Transaction {} aborted", id),
-            Self::NotActive(id) => write!(f, "Transaction {} not active", id),
+
             Self::WriteWriteConflict(txid, tuple) => {
                 write!(f, "Transaction {} conflict on tuple {}", txid, tuple)
             }
@@ -37,6 +39,9 @@ impl Display for TransactionError {
             Self::TupleNotVisible(id, logical) => {
                 write!(f, "Tuple {} not visible to transaction {}", logical, id)
             }
+            Self::TransactionAlreadyStarted => f.write_str("transaction already in progress"),
+            Self::TransactionNotStarted => f.write_str("transaction has not started yet"),
+            Self::InvalidTransactionState(st) => write!(f, "invalid transaction state {st}"),
             Self::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -165,6 +170,7 @@ impl Snapshot {
 
     /// Check if a transaction was committed before this snapshot was taken
     pub fn is_committed_before_snapshot(&self, txid: TransactionId) -> bool {
+
         // Transaction started after our snapshot,
         // Then it is impossible it committed before the snapshot was taken
         if let Some(max_tx) = self.xmax
@@ -195,6 +201,17 @@ pub enum TransactionState {
     Committed,
     /// Transaction has been aborted
     Aborted,
+}
+
+impl Display for TransactionState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Aborted => f.write_str("ABORTED"),
+            Self::Active => f.write_str("ACTIVE"),
+            Self::Committed => f.write_str("COMMITTED"),
+            Self::Committing => f.write_str("COMMITTING"),
+        }
+    }
 }
 
 /// Metadata for a single transaction
@@ -342,14 +359,11 @@ impl TransactionCoordinator {
             .map(|(id, _)| *id)
             .collect();
 
-        dbg!(&aborted);
         // xmin is the smallest active transaction ID (or our ID if none active)
         let xmin = active.iter().min().copied().unwrap_or(txid);
 
         // xmax is the next transaction ID to be assigned
         let xmax = *self.last_committed.read();
-
-        dbg!(&xmax);
 
         Ok(Snapshot::new(txid, xmin, xmax, active, aborted))
     }

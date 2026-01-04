@@ -6,10 +6,7 @@ use crate::{
     },
     multithreading::coordinator::{Snapshot, TransactionHandle},
     schema::catalog::SharedCatalog,
-    tree::{
-        accessor::{BtreeReadAccessor, BtreeWriteAccessor, TreeReader},
-        bplustree::Btree,
-    },
+    tree::{accessor::TreeReader, bplustree::Btree},
     types::{Lsn, ObjectId, PageId, RowId, TransactionId},
 };
 use std::cell::Cell;
@@ -157,9 +154,27 @@ where
         BtreeBuilder::new(pager.min_keys_per_page(), pager.num_siblings_per_side())
             .with_pager(self.pager.clone())
     }
-}
 
-pub(crate) enum RuntimeContext {
-    Read(TransactionContext<BtreeReadAccessor>),
-    Write(TransactionContext<BtreeWriteAccessor>),
+    /// Commits the transaction: log commit, commit handle, end.
+    pub(crate) fn commit_transaction(&self) -> RuntimeResult<()> {
+        self.pre_commit()?;
+        self.handle().commit()?;
+        self.end()?;
+        Ok(())
+    }
+
+    /// Aborts the transaction: log abort, abort handle, end.
+    pub(crate) fn abort_transaction(&self) -> RuntimeResult<()> {
+        self.pre_abort()?;
+        self.handle().abort()?;
+        self.end()?;
+        Ok(())
+    }
+
+    /// Aborts silently, ignoring errors (for cleanup in Drop, error paths)
+    pub(crate) fn abort_silent(&self) {
+        let _ = self.pre_abort();
+        let _ = self.handle().abort();
+        let _ = self.end();
+    }
 }

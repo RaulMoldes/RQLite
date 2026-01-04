@@ -49,13 +49,14 @@ use crate::{
     },
     multithreading::{
         coordinator::TransactionCoordinator,
-        runner::{BoxError, TaskError, TaskRunner},
+        runner::{BoxError, SharedTaskRunner, TaskError},
     },
     runtime::{
         BatchQueryRunner, QueryError, QueryPreparator, QueryResult, context::TransactionContext,
     },
     schema::catalog::{Catalog, CatalogTrait, SharedCatalog},
     storage::page::BtreePage,
+    tcp::session::Session,
     tree::accessor::BtreeWriteAccessor,
 };
 
@@ -137,7 +138,7 @@ pub struct Database {
     /// Transaction coordinator for MVCC.
     coordinator: TransactionCoordinator,
     /// Task runner for parallel query execution.
-    task_runner: TaskRunner,
+    task_runner: SharedTaskRunner,
     /// Database configuration.
     config: DBConfig,
 }
@@ -175,7 +176,8 @@ impl Database {
         let coordinator = TransactionCoordinator::new(pager.clone());
 
         // Create task runner
-        let task_runner = TaskRunner::new(config.pool_size, pager.clone(), coordinator.clone());
+        let task_runner =
+            SharedTaskRunner::new(config.pool_size, pager.clone(), coordinator.clone());
 
         Ok(Self {
             path,
@@ -223,7 +225,8 @@ impl Database {
             .with_last_committed_transaction(last_committed);
 
         // Create task runner
-        let task_runner = TaskRunner::new(config.pool_size, pager.clone(), coordinator.clone());
+        let task_runner =
+            SharedTaskRunner::new(config.pool_size, pager.clone(), coordinator.clone());
 
         let db = Self {
             path,
@@ -238,6 +241,19 @@ impl Database {
         db.run_recovery()?;
 
         Ok(db)
+    }
+
+    /// Creates a new session for this database.
+    ///
+    /// Each client/connection should have its own session.
+    /// Sessions can have independent transactions with BEGIN/COMMIT/ROLLBACK.
+    pub fn session(&self) -> Session {
+        Session::new(
+            self.pager.clone(),
+            self.catalog.clone(),
+            self.coordinator.clone(),
+            self.task_runner.clone(),
+        )
     }
 
     /// Opens or creates a database at the specified path.
@@ -951,4 +967,147 @@ mod database_tests {
             "Should only have the original row, batch was rolled back"
         );
     }
+
+    #[test]
+    fn test_session_autocommit_insert() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        let mut session = db.session();
+
+        session
+            .execute("CREATE TABLE test (id BIGINT, value INT)")
+            .unwrap();
+        session.execute("INSERT INTO test VALUES (1, 100)").unwrap();
+        session.execute("INSERT INTO test VALUES (2, 200)").unwrap();
+
+        // Verify data persisted (autocommit)
+        let result = session.execute("SELECT COUNT(*) FROM test").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_session_autocommit_visible_to_other_sessions() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        let mut session1 = db.session();
+        let mut session2 = db.session();
+
+        session1
+            .execute("CREATE TABLE test (id BIGINT, value INT)")
+            .unwrap();
+        session1
+            .execute("INSERT INTO test VALUES (1, 100)")
+            .unwrap();
+
+        // Session2 should see session1's committed data
+        let result = session2.execute("SELECT COUNT(*) FROM test").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_session_begin_commit() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        db.execute("CREATE TABLE test (id BIGINT, value INT)")
+            .unwrap();
+
+        let mut session = db.session();
+
+        session.execute("BEGIN").unwrap();
+        assert!(session.in_transaction());
+        println!("Sesion started");
+        session.execute("INSERT INTO test VALUES (1, 100)").unwrap();
+        println!("Sesion inserted data");
+        session.execute("INSERT INTO test VALUES (2, 200)").unwrap();
+        println!("Sesion inserted more data");
+        assert!(session.in_transaction());
+        session.execute("COMMIT").unwrap();
+        assert!(!session.in_transaction());
+
+        // Verify data persisted
+        let result = db.execute("SELECT COUNT(*) FROM test").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 2);
+    }
+
+
+
+        #[test]
+    fn test_session_begin_commit_with_updates() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        db.execute("CREATE TABLE test (id BIGINT, value INT)").unwrap();
+        db.execute("INSERT INTO test VALUES (1, 100)").unwrap();
+
+        let mut session = db.session();
+
+        session.execute("BEGIN").unwrap();
+        session.execute("UPDATE test SET value = 200 WHERE id = 1").unwrap();
+        session.execute("INSERT INTO test VALUES (2, 300)").unwrap();
+        session.execute("COMMIT").unwrap();
+
+        // Verify changes persisted
+        let result = db.execute("SELECT COUNT(*) FROM test").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_session_begin_commit_with_deletes() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        db.execute("CREATE TABLE test (id BIGINT, value INT)").unwrap();
+        db.execute("INSERT INTO test VALUES (1, 100)").unwrap();
+        db.execute("INSERT INTO test VALUES (2, 200)").unwrap();
+        db.execute("INSERT INTO test VALUES (3, 300)").unwrap();
+
+        let mut session = db.session();
+
+        session.execute("BEGIN").unwrap();
+        session.execute("DELETE FROM test WHERE id = 2").unwrap();
+        session.execute("COMMIT").unwrap();
+
+        let result = db.execute("SELECT COUNT(*) FROM test").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 2);
+    }
+
+
+
+    #[test]
+    fn test_session_begin_rollback() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        db.execute("CREATE TABLE test (id BIGINT, value INT)").unwrap();
+        db.execute("INSERT INTO test VALUES (1, 100)").unwrap();
+
+        let mut session = db.session();
+
+        session.execute("BEGIN").unwrap();
+        session.execute("INSERT INTO test VALUES (2, 200)").unwrap();
+        session.execute("INSERT INTO test VALUES (3, 300)").unwrap();
+        session.execute("ROLLBACK").unwrap();
+
+        assert!(!session.in_transaction());
+
+        // Verify inserts were rolled back
+        let result = db.execute("SELECT COUNT(*) FROM test").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 1, "Should only have the original row");
+    }
+
 }

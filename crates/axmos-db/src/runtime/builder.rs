@@ -219,17 +219,17 @@ fn build_readonly_operator<Acc: TreeReader + Clone + Default + 'static>(
 }
 
 /// Builds executor trees that support DML operations.
-pub struct MutableExecutorBuilder {
+pub(crate) struct MutableExecutorBuilder {
     ctx: TransactionContext<BtreeWriteAccessor>,
 }
 
 impl MutableExecutorBuilder {
-    pub fn new(ctx: TransactionContext<BtreeWriteAccessor>) -> Self {
+    pub(crate) fn new(ctx: TransactionContext<BtreeWriteAccessor>) -> Self {
         Self { ctx }
     }
 
     /// Build and open an executor from a physical plan.
-    pub fn build(&self, plan: &PhysicalPlan) -> RuntimeResult<BoxedExecutor> {
+    pub(crate) fn build(&self, plan: &PhysicalPlan) -> RuntimeResult<BoxedExecutor> {
         self.build_operator(&plan.op, &plan.children)
     }
 
@@ -280,17 +280,17 @@ impl MutableExecutorBuilder {
 }
 
 /// Builds executor trees for read-only queries.
-pub struct ReadOnlyExecutorBuilder {
+pub(crate) struct ReadOnlyExecutorBuilder {
     ctx: TransactionContext<BtreeReadAccessor>,
 }
 
 impl ReadOnlyExecutorBuilder {
-    pub fn new(ctx: TransactionContext<BtreeReadAccessor>) -> Self {
+    pub(crate) fn new(ctx: TransactionContext<BtreeReadAccessor>) -> Self {
         Self { ctx }
     }
 
     /// Build and open an executor from a physical plan.
-    pub fn build(&self, plan: &PhysicalPlan) -> RuntimeResult<BoxedExecutor> {
+    pub(crate) fn build(&self, plan: &PhysicalPlan) -> RuntimeResult<BoxedExecutor> {
         self.build_operator(&plan.op, &plan.children)
     }
 

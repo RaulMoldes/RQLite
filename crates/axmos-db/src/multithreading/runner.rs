@@ -2,7 +2,7 @@ use std::{
     error::Error,
     fmt::{Display, Formatter, Result as FmtResult},
     io::{Error as IoError, ErrorKind},
-    sync::mpsc,
+    sync::{Arc, mpsc},
 };
 
 use crate::{
@@ -68,20 +68,29 @@ impl TaskContext {
     }
 }
 
-/// Handles task execution on a thread pool with per-task accessors.
-pub struct TaskRunner {
+/// Inner state shared across all TaskRunner clones
+struct TaskRunner {
     pool: ThreadPool,
     pager: SharedPager,
     coordinator: TransactionCoordinator,
 }
 
-impl TaskRunner {
+/// Handles task execution on a thread pool with per-task accessors.
+///
+/// This struct is cheaply cloneable - all clones share the same thread pool.
+#[derive(Clone)]
+pub struct SharedTaskRunner {
+    inner: Arc<TaskRunner>,
+}
+
+impl SharedTaskRunner {
     pub fn new(pool_size: usize, pager: SharedPager, coordinator: TransactionCoordinator) -> Self {
         Self {
-            pool: ThreadPool::new(pool_size),
-            pager,
-
-            coordinator,
+            inner: Arc::new(TaskRunner {
+                pool: ThreadPool::new(pool_size),
+                pager,
+                coordinator,
+            }),
         }
     }
 
@@ -90,10 +99,10 @@ impl TaskRunner {
     where
         F: FnOnce(&TaskContext) -> Result<(), Box<dyn Error>> + Send + 'static,
     {
-        let pager = self.pager.clone();
-        let coordinator = self.coordinator.clone();
+        let pager = self.inner.pager.clone();
+        let coordinator = self.inner.coordinator.clone();
 
-        self.pool.execute(move || {
+        self.inner.pool.execute(move || {
             let ctx = TaskContext::new(pager, coordinator);
             task(&ctx)
         })?;
@@ -107,11 +116,10 @@ impl TaskRunner {
         F: FnOnce(&TaskContext) -> Result<(), BoxError> + Send + Sync + 'static,
     {
         let (tx, rx) = mpsc::channel();
-        let pager = self.pager.clone();
+        let pager = self.inner.pager.clone();
+        let coordinator = self.inner.coordinator.clone();
 
-        let coordinator = self.coordinator.clone();
-
-        self.pool.execute(move || {
+        self.inner.pool.execute(move || {
             let ctx = TaskContext::new(pager, coordinator);
             let result = task(&ctx);
             let _ = tx.send(result);
@@ -135,11 +143,10 @@ impl TaskRunner {
         T: Send + 'static,
     {
         let (tx, rx) = mpsc::channel::<Result<T, BoxError>>();
-        let pager = self.pager.clone();
+        let pager = self.inner.pager.clone();
+        let coordinator = self.inner.coordinator.clone();
 
-        let coordinator = self.coordinator.clone();
-
-        self.pool.execute(move || {
+        self.inner.pool.execute(move || {
             let ctx = TaskContext::new(pager, coordinator);
             let result = task(&ctx);
             let _ = tx.send(result);
@@ -166,11 +173,10 @@ impl TaskRunner {
 
         for task in tasks {
             let tx = tx.clone();
-            let pager = self.pager.clone();
+            let pager = self.inner.pager.clone();
+            let coordinator = self.inner.coordinator.clone();
 
-            let coordinator = self.coordinator.clone();
-
-            self.pool.execute(move || {
+            self.inner.pool.execute(move || {
                 let ctx = TaskContext::new(pager, coordinator);
                 let result = task(&ctx);
                 let _ = tx.send(result);
@@ -205,10 +211,10 @@ impl TaskRunner {
 
         for (idx, task) in tasks.into_iter().enumerate() {
             let tx = tx.clone();
-            let pager = self.pager.clone();
-            let coordinator = self.coordinator.clone();
+            let pager = self.inner.pager.clone();
+            let coordinator = self.inner.coordinator.clone();
 
-            self.pool.execute(move || {
+            self.inner.pool.execute(move || {
                 let ctx = TaskContext::new(pager, coordinator);
                 let result = task(&ctx);
                 let _ = tx.send((idx, result));
