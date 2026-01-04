@@ -132,6 +132,13 @@ pub type SerializationResult<T> = Result<T, SerializationError>;
     default = "0"
 )]
 #[delegate(
+    trait = "crate::types::core::RuntimeSized",
+    method = "runtime_size",
+    return_type = "usize",
+    target = "ref",
+    default = "0"
+)]
+#[delegate(
     trait = "crate::types::core::TypeClass",
     const = "SIZE",
     target = "kind",

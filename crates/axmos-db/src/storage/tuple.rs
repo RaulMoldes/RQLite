@@ -475,7 +475,7 @@ impl<'a> OwnedTupleAccessor<'a> {
     }
 
     fn vaccum_for_snapshot(&mut self, snapshot: &Snapshot) -> TupleResult<usize> {
-        self.tuple.vacuum_with_schema(snapshot.xmin(), self.schema)
+        self.tuple.vaccum_with_schema(snapshot.xmin(), self.schema)
     }
 
     fn has_history(&self) -> bool {
@@ -555,19 +555,20 @@ impl<'a> TupleReader<'a> {
         for key_col in self.schema.iter_keys() {
             let dtype = key_col.datatype();
             key_offsets.push(cursor);
-            let (_, new_cursor) = dtype.deserialize(data, cursor)?;
+            let (dt, new_cursor) = dtype.deserialize(data, cursor)?;
             cursor = new_cursor;
         }
 
         // Parse values
         let mut value_offsets = Vec::with_capacity(num_values);
+
         for (i, val_col) in self.schema.iter_values().enumerate() {
             if Self::check_null(null_bitmap, i) {
                 value_offsets.push(cursor); // Placeholder for null
             } else {
                 let dtype = val_col.datatype();
                 value_offsets.push(cursor);
-                let (_, new_cursor) = dtype.deserialize(data, cursor)?;
+                let (dt, new_cursor) = dtype.deserialize(data, cursor)?;
                 cursor = new_cursor;
             }
         }
@@ -599,7 +600,7 @@ impl<'a> TupleReader<'a> {
         let bitmap_size = null_bitmap_size(num_values);
         let mut cursor = layout.delta_start();
 
-        // Delta layout: [DeltaHeader][num_changes: u8][bitmap][changes...]
+        // Delta layout: [DeltaHeader][num_changes: u8][full_bitmap][changes...]
         while cursor < data.len() {
             let (delta_header, header_end) = DeltaHeader::read_from(data, cursor);
             cursor = header_end;
@@ -612,24 +613,31 @@ impl<'a> TupleReader<'a> {
             let num_changes = data[cursor] as usize;
             cursor += 1;
 
-            // Delta's null bitmap
+            // Delta's FULL null bitmap
             layout.null_bitmap_start = cursor;
+            let delta_bitmap = &data[cursor..cursor + bitmap_size];
             cursor += bitmap_size;
 
-            // Parse changes
+            // Parse changes - only non-null values have data
             for _ in 0..num_changes {
                 let field_idx = data[cursor] as usize;
                 cursor += 1;
 
-                let dtype = self
-                    .schema
-                    .value(field_idx)
-                    .ok_or(TupleError::ValueError(field_idx))?
-                    .datatype();
+                // Check if this field is null using the delta's full bitmap
+                let is_null = Self::check_null(delta_bitmap, field_idx);
 
-                layout.value_offsets[field_idx] = cursor;
-                let (_, new_cursor) = dtype.deserialize(data, cursor)?;
-                cursor = new_cursor;
+                if !is_null {
+                    let dtype = self
+                        .schema
+                        .value(field_idx)
+                        .ok_or(TupleError::ValueError(field_idx))?
+                        .datatype();
+
+                    layout.value_offsets[field_idx] = cursor;
+                    let (_, new_cursor) = dtype.deserialize(data, cursor)?;
+                    cursor = new_cursor;
+                }
+                // If null offset does not matter.
             }
 
             if layout.current_version() == target_version {
@@ -641,8 +649,6 @@ impl<'a> TupleReader<'a> {
     }
 
     /// Parses a byte array for a specific snapshot.
-    ///
-    /// See [crate::multithreading::Snapshot]
     pub fn parse_for_snapshot(
         &self,
         data: &[u8],
@@ -650,12 +656,14 @@ impl<'a> TupleReader<'a> {
     ) -> TupleResult<Option<TupleLayout>> {
         let mut layout = self.parse_last_version(data)?;
 
+        // Check if tuple was deleted before our snapshot
         if let Some(xmax) = layout.version_xmax {
             if snapshot.is_committed_before_snapshot(xmax) {
                 return Ok(None);
             }
         }
 
+        // If current version is valid, return it
         if layout.is_valid_for_snapshot(snapshot) {
             return Ok(Some(layout));
         }
@@ -675,22 +683,31 @@ impl<'a> TupleReader<'a> {
             let num_changes = data[cursor] as usize;
             cursor += 1;
 
+            // Delta's FULL null bitmap - valid for ALL values
             layout.null_bitmap_start = cursor;
+            let delta_bitmap = &data[cursor..cursor + bitmap_size];
             cursor += bitmap_size;
 
+            // Parse changes and update value_offsets for non-null changed values
             for _ in 0..num_changes {
                 let field_idx = data[cursor] as usize;
                 cursor += 1;
 
-                let dtype = self
-                    .schema
-                    .value(field_idx)
-                    .ok_or(TupleError::ValueError(field_idx))?
-                    .datatype();
+                // Check if this field is null using the delta's full bitmap
+                let is_null = Self::check_null(delta_bitmap, field_idx);
 
-                layout.value_offsets[field_idx] = cursor;
-                let (_, new_cursor) = dtype.deserialize(data, cursor)?;
-                cursor = new_cursor;
+                if !is_null {
+                    let dtype = self
+                        .schema
+                        .value(field_idx)
+                        .ok_or(TupleError::ValueError(field_idx))?
+                        .datatype();
+
+                    layout.value_offsets[field_idx] = cursor;
+                    let (_, new_cursor) = dtype.deserialize(data, cursor)?;
+                    cursor = new_cursor;
+                }
+                // If null, the offset doesn't matter - null check happens first
             }
 
             if snapshot.is_committed_before_snapshot(layout.version_xmin) {
@@ -731,13 +748,14 @@ impl TupleLayout {
     }
 
     fn is_valid_for_snapshot(&self, snapshot: &Snapshot) -> bool {
-
         let created_by_snapshot = snapshot.xid() == self.version_xmin;
-        let created_before = snapshot.is_committed_before_snapshot(self.version_xmin) || created_by_snapshot;
+        let created_before =
+            snapshot.is_committed_before_snapshot(self.version_xmin) || created_by_snapshot;
 
         if let Some(xmax) = self.version_xmax {
             let deleted_by_snapshot = snapshot.xid() == xmax;
-            return created_before && !(snapshot.is_committed_before_snapshot(xmax) || deleted_by_snapshot);
+            return created_before
+                && !(snapshot.is_committed_before_snapshot(xmax) || deleted_by_snapshot);
         }
         created_before
     }
@@ -965,8 +983,12 @@ impl Tuple {
     }
 
     // Utility to vacuum the tuple after each operation
-    fn vaccum_for_snapshot(&mut self, schema: &Schema, snapshot: &Snapshot) -> TupleResult<usize> {
-        self.vacuum_with_schema(snapshot.xmin(), schema)
+    pub fn vaccum_for_snapshot(
+        &mut self,
+        schema: &Schema,
+        snapshot: &Snapshot,
+    ) -> TupleResult<usize> {
+        self.vaccum_with_schema(snapshot.xmin(), schema)
     }
 
     pub(crate) fn xmin(&self) -> TransactionId {
@@ -994,101 +1016,297 @@ impl Tuple {
 
     /// Add a new version with modifications.
     ///
-    /// Delta layout: [DeltaHeader][num_changes: u8][bitmap][changes...]
-    /// Each change: [field_idx: u8][value (aligned)]
+    /// Creates a new version of the tuple with the specified modifications,
+    /// preserving all existing delta history for MVCC visibility.
+    ///
+    /// # Layout
+    /// ```text
+    /// [Header][Null Bitmap][Keys][Values][Delta_n][Delta_n-1]...[Delta_0]
+    /// ```
+    ///
+    /// Each delta contains:
+    /// ```text
+    /// [DeltaHeader][num_changes: u8][full_null_bitmap][changes...]
+    /// ```
+    ///
+    /// Where each change is:
+    /// ```text
+    /// [field_idx: u8][value_bytes (if not null)]
+    /// ```
     pub(crate) fn add_version_with_schema(
         &mut self,
         modified: &HashMap<usize, DataType>,
         new_xmin: TransactionId,
         schema: &Schema,
     ) -> TupleResult<()> {
-        // Validate modifications
-        for (i, value) in modified {
-            let col = schema.value(*i).ok_or(TupleError::ValueError(*i))?;
-            if !value.is_null() && col.datatype() != value.kind() {
-                return Err(TupleError::DataTypeMismatch((*i, col.datatype())));
-            }
+        if modified.is_empty() {
+            return Ok(());
         }
+
+        self.validate_modifications(modified, schema)?;
 
         let reader = TupleReader::from_schema(schema);
         let layout = reader.parse_last_version(self.data.effective_data())?;
-        let tuple_reference = TupleRef::new(self.data.effective_data(), layout.clone());
+        let current = TupleRef::new(self.data.effective_data(), layout.clone());
 
-        let old_version = tuple_reference.current_version();
-        let old_xmin = tuple_reference.version_xmin();
         let num_values = schema.num_values();
-        let num_keys = schema.num_keys();
         let bitmap_size = null_bitmap_size(num_values);
 
-        // Collect old values for delta
-        let mut old_values: Vec<(u8, DataType)> = Vec::with_capacity(modified.len());
-        for (i, _) in modified {
-            let val_ref = tuple_reference.value_with_schema(*i, schema)?;
-            old_values.push((*i as u8, val_ref.to_owned().unwrap_or(DataType::Null)));
-        }
+        // Extract current state
+        let old_version = current.current_version();
+        let old_xmin = current.version_xmin();
+        let keys = self.extract_keys(&current, schema)?;
+        let (new_values, changed_values, all_old_values) =
+            self.compute_values(&current, modified, schema)?;
 
-        // Read all keys (immutable, just copy references for size calculation)
-        let mut keys: Vec<DataType> = Vec::with_capacity(num_keys);
-        for i in 0..num_keys {
-            let key_ref = tuple_reference.key_with_schema(i, schema)?;
-            keys.push(key_ref.to_owned().unwrap_or(DataType::Null));
-        }
+        // Calculate existing deltas info
+        let existing_deltas_start = layout.delta_start();
+        let existing_deltas_size = self.data.len().saturating_sub(existing_deltas_start);
 
-        // Read all values, applying modifications for new values
-        let mut new_values: Vec<DataType> = Vec::with_capacity(num_values);
-        for i in 0..num_values {
-            if let Some(new_val) = modified.get(&i) {
-                new_values.push(new_val.clone());
-            } else {
-                let val_ref = tuple_reference.value_with_schema(i, schema)?;
-                new_values.push(val_ref.to_owned().unwrap_or(DataType::Null));
-            }
-        }
+        // === PHASE 1: Calculate total size ===
+        let total_size = Self::calculate_new_tuple_size(
+            &keys,
+            &new_values,
+            &changed_values,
+            existing_deltas_size,
+            bitmap_size,
+        );
 
-        // Calculate total size needed
-        // 1. Header + bitmap + keys + new values
-        let mut data_size = TupleHeader::SIZE + bitmap_size;
-        for key in &keys {
-            data_size = aligned_offset(data_size, key.align());
-            data_size += key.runtime_size();
-        }
-        for val in &new_values {
-            if !val.is_null() {
-                data_size = aligned_offset(data_size, val.align());
-                data_size += val.runtime_size();
-            }
-        }
-
-        // 2. Delta: [DeltaHeader][num_changes][bitmap][changes...]
-        let delta_header_start = DeltaHeader::aligned_offset(data_size);
-        let header_end = delta_header_start + DeltaHeader::SIZE;
-        let num_changes_offset = header_end;
-        let delta_bitmap_start = num_changes_offset + 1;
-        let changes_start = delta_bitmap_start + bitmap_size;
-
-        let mut delta_cursor = changes_start;
-        for (_, old_val) in &old_values {
-            delta_cursor += 1; // field index
-            delta_cursor = aligned_offset(delta_cursor, old_val.align());
-            delta_cursor += old_val.runtime_size();
-        }
-        let total_size = delta_cursor;
-
-        // Allocate new buffer
+        // === PHASE 2: Allocate and write ===
         let mut new_data = Payload::alloc_aligned(total_size)?;
         let buffer = new_data.effective_data_mut();
 
-        // Write new header
-        let new_header = TupleHeader::new(old_version + 1, new_xmin, None);
-        let mut cursor = new_header.write_to(buffer, 0);
+        let mut cursor = 0;
+
+        // Write header
+        let header = TupleHeader::new(old_version + 1, new_xmin, None);
+        cursor = header.write_to(buffer, cursor);
 
         // Write null bitmap for new values
-        let new_bitmap_start = cursor;
-        buffer[cursor..cursor + bitmap_size].fill(0);
-        for (i, val) in new_values.iter().enumerate() {
+        cursor = Self::write_null_bitmap(buffer, cursor, &new_values, bitmap_size);
+
+        // Write keys
+        cursor = Self::write_data_items(buffer, cursor, &keys)?;
+
+        // Write non-null values
+        cursor = Self::write_non_null_items(buffer, cursor, &new_values)?;
+
+        // Write new delta with FULL null bitmap of old version
+        cursor = Self::write_delta(
+            buffer,
+            cursor,
+            old_version,
+            old_xmin,
+            &changed_values,
+            &all_old_values,
+            bitmap_size,
+        )?;
+
+        // Copy existing deltas
+        if existing_deltas_size > 0 {
+            let existing_deltas = &self.data.effective_data()[existing_deltas_start..];
+            buffer[cursor..cursor + existing_deltas_size].copy_from_slice(existing_deltas);
+        }
+
+        self.data = new_data;
+        Ok(())
+    }
+
+    // === Private helper methods ===
+
+    fn validate_modifications(
+        &self,
+        modified: &HashMap<usize, DataType>,
+        schema: &Schema,
+    ) -> TupleResult<()> {
+        for (&idx, value) in modified {
+            let col = schema.value(idx).ok_or(TupleError::ValueError(idx))?;
+            if !value.is_null() && col.datatype() != value.kind() {
+                return Err(TupleError::DataTypeMismatch((idx, col.datatype())));
+            }
+        }
+        Ok(())
+    }
+
+    fn extract_keys(&self, current: &TupleRef<'_>, schema: &Schema) -> TupleResult<Vec<DataType>> {
+        let num_keys = schema.num_keys();
+        let mut keys = Vec::with_capacity(num_keys);
+
+        for i in 0..num_keys {
+            let key_ref = current.key_with_schema(i, schema)?;
+            keys.push(key_ref.to_owned().unwrap_or(DataType::Null));
+        }
+
+        Ok(keys)
+    }
+
+    /// Computes new values, changed old values, and all old values.
+    ///
+    /// Returns:
+    /// - `new_values`: All values for the new version
+    /// - `changed_values`: Only the (index, old_value) pairs that were modified
+    /// - `all_old_values`: All values from the old version (for full null bitmap)
+    fn compute_values(
+        &self,
+        current: &TupleRef<'_>,
+        modified: &HashMap<usize, DataType>,
+        schema: &Schema,
+    ) -> TupleResult<(Vec<DataType>, Vec<(u8, DataType)>, Vec<DataType>)> {
+        let num_values = schema.num_values();
+        let mut new_values = Vec::with_capacity(num_values);
+        let mut changed_values = Vec::with_capacity(modified.len());
+        let mut all_old_values = Vec::with_capacity(num_values);
+
+        for i in 0..num_values {
+            let current_val = current
+                .value_with_schema(i, schema)?
+                .to_owned()
+                .unwrap_or(DataType::Null);
+
+            all_old_values.push(current_val.clone());
+
+            if let Some(new_val) = modified.get(&i) {
+                changed_values.push((i as u8, current_val));
+                new_values.push(new_val.clone());
+            } else {
+                new_values.push(current_val);
+            }
+        }
+
+        Ok((new_values, changed_values, all_old_values))
+    }
+
+    /// Calculate total size needed for new tuple.
+    ///
+    /// This must match exactly what the write functions produce.
+    fn calculate_new_tuple_size(
+        keys: &[DataType],
+        new_values: &[DataType],
+        changed_values: &[(u8, DataType)],
+        existing_deltas_size: usize,
+        bitmap_size: usize,
+    ) -> usize {
+        let mut size = 0;
+
+        // Header
+        size += TupleHeader::SIZE;
+
+        // Null bitmap
+        size += bitmap_size;
+
+        // Keys (write_to handles alignment)
+        for key in keys {
+            size = aligned_offset(size, key.align());
+            size += key.runtime_size();
+        }
+
+        // Values - non-null only
+        for val in new_values {
+            if !val.is_null() {
+                size = aligned_offset(size, val.align());
+                size += val.runtime_size();
+            }
+        }
+
+        // New delta
+        size = DeltaHeader::aligned_offset(size);
+        size += DeltaHeader::SIZE;
+        size += 1; // num_changes byte
+        size += bitmap_size; // FULL null bitmap for old version
+
+        // Delta changes - only store non-null old values
+        for (_, old_val) in changed_values {
+            size += 1; // field_idx byte
+            if !old_val.is_null() {
+                size = aligned_offset(size, old_val.align());
+                size += old_val.runtime_size();
+            }
+        }
+
+        // Existing deltas
+        size += existing_deltas_size;
+
+        size
+    }
+
+    fn write_null_bitmap(
+        buffer: &mut [u8],
+        offset: usize,
+        values: &[DataType],
+        bitmap_size: usize,
+    ) -> usize {
+        buffer[offset..offset + bitmap_size].fill(0);
+
+        for (i, val) in values.iter().enumerate() {
+            if val.is_null() {
+                TupleBuilder::set_null_bit(&mut buffer[offset..offset + bitmap_size], i, true);
+            }
+        }
+
+        offset + bitmap_size
+    }
+
+    fn write_data_items(
+        buffer: &mut [u8],
+        mut cursor: usize,
+        items: &[DataType],
+    ) -> TupleResult<usize> {
+        for item in items {
+            cursor = item.write_to(buffer, cursor)?;
+        }
+        Ok(cursor)
+    }
+
+    fn write_non_null_items(
+        buffer: &mut [u8],
+        mut cursor: usize,
+        items: &[DataType],
+    ) -> TupleResult<usize> {
+        for item in items {
+            if !item.is_null() {
+                cursor = item.write_to(buffer, cursor)?;
+            }
+        }
+        Ok(cursor)
+    }
+
+    /// Write delta with full null bitmap for the old version.
+    ///
+    /// Delta layout:
+    /// ```text
+    /// [DeltaHeader][num_changes: u8][full_null_bitmap][changes...]
+    /// ```
+    ///
+    /// The full_null_bitmap contains null status for ALL values in the old version,
+    /// not just the changed ones. This is necessary for correct visibility checks.
+    fn write_delta(
+        buffer: &mut [u8],
+        offset: usize,
+        version: u8,
+        xmin: TransactionId,
+        changed_values: &[(u8, DataType)],
+        all_old_values: &[DataType],
+        bitmap_size: usize,
+    ) -> TupleResult<usize> {
+        // Align to DeltaHeader
+        let delta_start = DeltaHeader::aligned_offset(offset);
+
+        // Write delta header
+        let delta_header = DeltaHeader::new(version, xmin);
+        let mut cursor = delta_header.write_to(buffer, delta_start);
+
+        // Write number of changes
+        buffer[cursor] = changed_values.len() as u8;
+        cursor += 1;
+
+        // Write FULL null bitmap for ALL values in old version
+        let bitmap_start = cursor;
+        buffer[bitmap_start..bitmap_start + bitmap_size].fill(0);
+
+        for (i, val) in all_old_values.iter().enumerate() {
             if val.is_null() {
                 TupleBuilder::set_null_bit(
-                    &mut buffer[new_bitmap_start..new_bitmap_start + bitmap_size],
+                    &mut buffer[bitmap_start..bitmap_start + bitmap_size],
                     i,
                     true,
                 );
@@ -1096,49 +1314,16 @@ impl Tuple {
         }
         cursor += bitmap_size;
 
-        // Write keys
-        for key in &keys {
-            cursor = key.write_to(buffer, cursor)?;
-        }
-
-        // Write new values
-        for val in &new_values {
+        // Write changes: [field_idx][value (if not null)]
+        for &(idx, ref val) in changed_values {
+            buffer[cursor] = idx;
+            cursor += 1;
             if !val.is_null() {
                 cursor = val.write_to(buffer, cursor)?;
             }
         }
 
-        // Write delta header
-        let delta_header = DeltaHeader::new(old_version, old_xmin);
-        delta_header.write_to(buffer, delta_header_start);
-
-        // Write number of changes
-        buffer[num_changes_offset] = old_values.len() as u8;
-
-        // Write delta bitmap (old null states)
-        buffer[delta_bitmap_start..delta_bitmap_start + bitmap_size].fill(0);
-        for (idx, old_val) in &old_values {
-            if old_val.is_null() {
-                TupleBuilder::set_null_bit(
-                    &mut buffer[delta_bitmap_start..delta_bitmap_start + bitmap_size],
-                    *idx as usize,
-                    true,
-                );
-            }
-        }
-
-        // Write delta changes (old values)
-        let mut delta_cursor = changes_start;
-        for (idx, old_val) in &old_values {
-            buffer[delta_cursor] = *idx;
-            delta_cursor += 1;
-            delta_cursor = old_val.write_to(buffer, delta_cursor)?;
-        }
-
-        // Replace old data with new
-        self.data = new_data;
-
-        Ok(())
+        Ok(cursor)
     }
 
     pub(crate) fn delete(&mut self, xid: TransactionId) -> TupleResult<()> {
@@ -1154,10 +1339,14 @@ impl Tuple {
         Ok(())
     }
 
-    /// Vaccums the tuple by deleting all versions that are not visible by the oldest [TransactionId].
+    /// Vacuums the tuple by removing all delta versions that are no longer needed
+    /// by any active transaction.
     ///
-    /// Truncates the delta directory removing older versions.
-    pub(crate) fn vacuum_with_schema(
+    /// A delta is no longer needed if its xmin is less than the oldest active
+    /// transaction ID, meaning no transaction can ever need to see that version.
+    ///
+    /// Returns the number of bytes freed.
+    pub(crate) fn vaccum_with_schema(
         &mut self,
         oldest_active_xid: TransactionId,
         schema: &Schema,
@@ -1165,6 +1354,7 @@ impl Tuple {
         let reader = TupleReader::from_schema(schema);
         let layout = reader.parse_last_version(self.data.effective_data())?;
 
+        // No deltas to vacuum
         if layout.delta_start() >= self.data.len() {
             return Ok(0);
         }
@@ -1178,28 +1368,41 @@ impl Tuple {
             let (delta_header, header_end) =
                 DeltaHeader::read_from(self.data.effective_data(), cursor);
 
+            // If this delta's xmin >= oldest_active_xid, some transaction might still need it
             if delta_header.xmin() >= oldest_active_xid {
-                // Read num_changes and skip this delta
                 let num_changes = self.data.effective_data()[header_end] as usize;
-                let mut skip_cursor = header_end + 1 + bitmap_size;
 
+                // Skip: num_changes byte + full bitmap
+                let delta_bitmap_start = header_end + 1;
+                let delta_bitmap = &self.data.effective_data()
+                    [delta_bitmap_start..delta_bitmap_start + bitmap_size];
+                let mut skip_cursor = delta_bitmap_start + bitmap_size;
+
+                // Skip each change entry
                 for _ in 0..num_changes {
                     let field_idx = self.data.effective_data()[skip_cursor] as usize;
                     skip_cursor += 1;
 
-                    let dtype = schema
-                        .value(field_idx)
-                        .ok_or(TupleError::ValueError(field_idx))?
-                        .datatype();
+                    // Check if this field is NULL using the delta's bitmap
+                    let is_null = TupleReader::check_null(delta_bitmap, field_idx);
 
-                    let (_, new_cursor) =
-                        dtype.deserialize(self.data.effective_data(), skip_cursor)?;
-                    skip_cursor = new_cursor;
+                    if !is_null {
+                        let dtype = schema
+                            .value(field_idx)
+                            .ok_or(TupleError::ValueError(field_idx))?
+                            .datatype();
+
+                        let (_, new_cursor) =
+                            dtype.deserialize(self.data.effective_data(), skip_cursor)?;
+                        skip_cursor = new_cursor;
+                    }
+                    // If null, no data was written, so don't advance cursor
                 }
 
                 last_needed_end = skip_cursor;
                 cursor = skip_cursor;
             } else {
+                // This delta and all subsequent ones are too old - stop here
                 break;
             }
         }

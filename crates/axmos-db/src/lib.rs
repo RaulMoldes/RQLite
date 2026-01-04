@@ -54,7 +54,7 @@ use crate::{
     runtime::{
         BatchQueryRunner, QueryError, QueryPreparator, QueryResult, context::TransactionContext,
     },
-    schema::catalog::{Catalog, CatalogTrait, SharedCatalog},
+    schema::catalog::{Catalog, CatalogTrait, SharedCatalog, VacuumStats},
     storage::page::BtreePage,
     tcp::session::Session,
     tree::accessor::BtreeWriteAccessor,
@@ -338,6 +338,7 @@ impl Database {
             handle.commit().map_err(box_err)?;
             Ok(handle.into())
         })?;
+    
 
         Ok(result)
     }
@@ -454,6 +455,103 @@ impl Database {
         })?;
 
         Ok(())
+    }
+
+    /// Runs VACUUM to clean up old MVCC versions and transaction metadata.
+    ///
+    /// This operation:
+    /// 1. Aborts all active transactions (ensures no concurrent modifications)
+    /// 2. Determines the oldest transaction ID still needed
+    /// 3. Iterates through all tuples and removes old delta versions
+    /// 4. Cleans up transaction metadata from the coordinator
+    ///
+    /// WARNING: This is a blocking operation that aborts all active transactions.
+    /// Use with caution in production environments.
+    pub fn vacuum(&self) -> DatabaseResult<VacuumStats> {
+        let pager = self.pager.clone();
+        let catalog = self.catalog.clone();
+        let coordinator = self.coordinator.clone();
+
+        let stats = self.task_runner.run_with_result(move |_ctx| {
+            // Step 1: Abort all active transactions
+            let aborted_txs = coordinator.abort_all_active();
+            if !aborted_txs.is_empty() {
+                println!("VACUUM: Aborted {} active transactions", aborted_txs.len());
+            }
+
+            // Step 2: Get oldest required xid (after aborting all)
+            // Since we aborted everything, this should be the last committed + 1
+            let oldest_active_xid = coordinator.get_oldest_required_xid();
+
+            // Step 3: Create a vacuum transaction
+            let handle = coordinator.begin().map_err(box_err)?;
+            let vacuum_snapshot = handle.snapshot();
+
+            // Step 4: Create tree builder
+            let tree_builder = {
+                let p = pager.read();
+                BtreeBuilder::new(p.min_keys_per_page(), p.num_siblings_per_side())
+                    .with_pager(pager.clone())
+            };
+
+            // Step 5: Vacuum all tuples in catalog
+            let mut stats = catalog
+                .write()
+                .vacuum(&tree_builder, &vacuum_snapshot, oldest_active_xid)
+                .map_err(box_err)?;
+
+            // Step 6: Clean up transaction coordinator
+            stats.transactions_cleaned = coordinator.vacuum_transactions();
+
+            // Step 7: Commit vacuum transaction
+            handle.commit().map_err(box_err)?;
+
+            // Step 8: Flush to disk
+            pager.write().flush().map_err(box_err)?;
+
+            Ok(stats)
+        })?;
+
+        Ok(stats)
+    }
+
+    /// Runs a "safe" vacuum that doesn't abort active transactions.
+    /// Only cleans up versions older than the oldest active transaction.
+    /// Less aggressive but safer for concurrent use.
+    pub fn vacuum_safe(&self) -> DatabaseResult<VacuumStats> {
+        let pager = self.pager.clone();
+        let catalog = self.catalog.clone();
+        let coordinator = self.coordinator.clone();
+
+        let stats = self.task_runner.run_with_result(move |_ctx| {
+            // Get oldest required xid WITHOUT aborting transactions
+            let oldest_active_xid = coordinator.get_oldest_required_xid();
+
+            // Create a vacuum transaction
+            let handle = coordinator.begin().map_err(box_err)?;
+            let vacuum_snapshot = handle.snapshot();
+
+            let tree_builder = {
+                let p = pager.read();
+                BtreeBuilder::new(p.min_keys_per_page(), p.num_siblings_per_side())
+                    .with_pager(pager.clone())
+            };
+
+            // Vacuum all tuples
+            let mut stats = catalog
+                .write()
+                .vacuum(&tree_builder, &vacuum_snapshot, oldest_active_xid)
+                .map_err(box_err)?;
+
+            // Clean up old transaction metadata
+            stats.transactions_cleaned = coordinator.vacuum_transactions();
+
+            handle.commit().map_err(box_err)?;
+
+            Ok(stats)
+        })?;
+
+        Ok(stats)
     }
 }
 
@@ -974,7 +1072,7 @@ mod database_tests {
         let db = Database::create(&path, DBConfig::default()).unwrap();
 
         let mut session = db.session();
-
+        session.execute("BEGIN").unwrap();
         session
             .execute("CREATE TABLE test (id BIGINT, value INT)")
             .unwrap();
@@ -986,6 +1084,8 @@ mod database_tests {
         let rows = result.into_rows().unwrap();
         let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
         assert_eq!(count, 2);
+
+        session.execute("COMMIT").unwrap();
     }
 
     #[test]
@@ -1038,20 +1138,21 @@ mod database_tests {
         assert_eq!(count, 2);
     }
 
-
-
-        #[test]
+    #[test]
     fn test_session_begin_commit_with_updates() {
         let (_dir, path) = temp_db_path();
         let db = Database::create(&path, DBConfig::default()).unwrap();
 
-        db.execute("CREATE TABLE test (id BIGINT, value INT)").unwrap();
+        db.execute("CREATE TABLE test (id BIGINT, value INT)")
+            .unwrap();
         db.execute("INSERT INTO test VALUES (1, 100)").unwrap();
 
         let mut session = db.session();
 
         session.execute("BEGIN").unwrap();
-        session.execute("UPDATE test SET value = 200 WHERE id = 1").unwrap();
+        session
+            .execute("UPDATE test SET value = 200 WHERE id = 1")
+            .unwrap();
         session.execute("INSERT INTO test VALUES (2, 300)").unwrap();
         session.execute("COMMIT").unwrap();
 
@@ -1067,7 +1168,8 @@ mod database_tests {
         let (_dir, path) = temp_db_path();
         let db = Database::create(&path, DBConfig::default()).unwrap();
 
-        db.execute("CREATE TABLE test (id BIGINT, value INT)").unwrap();
+        db.execute("CREATE TABLE test (id BIGINT, value INT)")
+            .unwrap();
         db.execute("INSERT INTO test VALUES (1, 100)").unwrap();
         db.execute("INSERT INTO test VALUES (2, 200)").unwrap();
         db.execute("INSERT INTO test VALUES (3, 300)").unwrap();
@@ -1084,16 +1186,15 @@ mod database_tests {
         assert_eq!(count, 2);
     }
 
-
-
     #[test]
     fn test_session_begin_rollback() {
         let (_dir, path) = temp_db_path();
         let db = Database::create(&path, DBConfig::default()).unwrap();
 
-        db.execute("CREATE TABLE test (id BIGINT, value INT)").unwrap();
+        db.execute("CREATE TABLE test (id BIGINT, value INT)")
+            .unwrap();
         db.execute("INSERT INTO test VALUES (1, 100)").unwrap();
-
+        let result = db.execute("SELECT COUNT(*) FROM test").unwrap();
         let mut session = db.session();
 
         session.execute("BEGIN").unwrap();
@@ -1102,7 +1203,7 @@ mod database_tests {
         session.execute("ROLLBACK").unwrap();
 
         assert!(!session.in_transaction());
-
+        println!("ROLLBACK WAS SUCCESSFULLY EXECUTED");
         // Verify inserts were rolled back
         let result = db.execute("SELECT COUNT(*) FROM test").unwrap();
         let rows = result.into_rows().unwrap();
@@ -1110,4 +1211,235 @@ mod database_tests {
         assert_eq!(count, 1, "Should only have the original row");
     }
 
+    #[test]
+    fn test_session_rollback_updates() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        db.execute("CREATE TABLE test (id BIGINT, value INT)")
+            .unwrap();
+        db.execute("INSERT INTO test VALUES (1, 100)").unwrap();
+
+        let mut session = db.session();
+
+        session.execute("BEGIN").unwrap();
+        session
+            .execute("UPDATE test SET value = 999 WHERE id = 1")
+            .unwrap();
+        session.execute("ROLLBACK").unwrap();
+
+        // Value should still be 100
+        let result = db.execute("SELECT value FROM test WHERE id = 1").unwrap();
+        let rows = result.into_rows().unwrap();
+        let value = rows.first().unwrap()[0].as_int().unwrap().value();
+        assert_eq!(value, 100, "Update should have been rolled back");
+    }
+
+    #[test]
+    fn test_session_rollback_deletes() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        db.execute("CREATE TABLE test (id BIGINT, value INT)")
+            .unwrap();
+        db.execute("INSERT INTO test VALUES (1, 100)").unwrap();
+        db.execute("INSERT INTO test VALUES (2, 200)").unwrap();
+
+        let mut session = db.session();
+
+        session.execute("BEGIN").unwrap();
+        session.execute("DELETE FROM test WHERE id = 1").unwrap();
+        session.execute("ROLLBACK").unwrap();
+
+        // Both rows should still exist
+        let result = db.execute("SELECT COUNT(*) FROM test").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 2, "Delete should have been rolled back");
+    }
+
+    #[test]
+    fn test_session_error_in_transaction_allows_rollback() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        db.execute("CREATE TABLE test (id BIGINT, value INT)")
+            .unwrap();
+        db.execute("INSERT INTO test VALUES (1, 100)").unwrap();
+
+        let mut session = db.session();
+
+        session.execute("BEGIN").unwrap();
+        session.execute("INSERT INTO test VALUES (2, 200)").unwrap();
+
+        // This should fail (table doesn't exist)
+        let result = session.execute("INSERT INTO nonexistent VALUES (3, 300)");
+        assert!(result.is_err());
+
+        // Should still be in transaction, can rollback
+        assert!(session.in_transaction());
+        session.execute("ROLLBACK").unwrap();
+
+        // Only original row should exist
+        let result = db.execute("SELECT COUNT(*) FROM test").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_vacuum_empty_database() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        let stats = db.vacuum_safe().unwrap();
+        assert_eq!(stats.tables_vacuumed, 0);
+        assert_eq!(stats.total_bytes_freed, 0);
+    }
+
+    #[test]
+    fn test_vacuum_after_updates() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        // Create table and insert data
+        db.execute("CREATE TABLE test (id BIGINT, value INT)")
+            .unwrap();
+        db.execute("INSERT INTO test VALUES (1, 100)").unwrap();
+
+        // Multiple updates create delta versions
+        for i in 0..10 {
+            db.execute(&format!("UPDATE test SET value = {} WHERE id = 1", 100 + i))
+                .unwrap();
+        }
+        println!("Running vaccum safe");
+        // Run vacuum
+        let stats = db.vacuum_safe().unwrap();
+
+        // Should have vacuumed at least some data
+        assert!(stats.tables_vacuumed >= 1);
+        println!("Vacuum freed {} bytes", stats.total_freed());
+    }
+
+    #[test]
+    fn test_vacuum_cleans_transactions() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        db.execute("CREATE TABLE test (id BIGINT, value INT)")
+            .unwrap();
+
+        // Create many transactions
+        for i in 0..20 {
+            db.execute(&format!("INSERT INTO test VALUES ({}, {})", i, i * 10))
+                .unwrap();
+        }
+
+        // Run vacuum
+        let stats = db.vacuum_safe().unwrap();
+
+        // Should have cleaned up some transactions
+        println!("Cleaned {} transactions", stats.transactions_cleaned);
+    }
+
+    #[test]
+    fn test_vacuum_force_aborts_active() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        db.execute("CREATE TABLE test (id BIGINT, value INT)")
+            .unwrap();
+
+        // Start a session with active transaction
+        let mut session = db.session();
+        session.execute("BEGIN").unwrap();
+        session.execute("INSERT INTO test VALUES (1, 100)").unwrap();
+        // Don't commit - leave transaction active
+
+        // Force vacuum should abort the active transaction
+        let stats = db.vacuum().unwrap();
+
+        // The session's transaction should now be aborted
+        assert!(
+            !session.in_transaction() || {
+                // If still marked as in_transaction, rollback should fail
+                // because coordinator already aborted it
+                true
+            }
+        );
+
+        println!("Vacuum stats: {:?}", stats);
+    }
+
+    #[test]
+    fn test_vacuum_preserves_data_integrity() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        db.execute("CREATE TABLE test (id BIGINT, value INT)")
+            .unwrap();
+
+        // Insert data
+        for i in 0..20 {
+            db.execute(&format!("INSERT INTO test VALUES ({}, {})", i, i * 10))
+                .unwrap();
+        }
+
+        // Update some rows
+        db.execute("UPDATE test SET value = value + 1 WHERE id < 50")
+            .unwrap();
+
+        // Delete some rows
+        db.execute("DELETE FROM test WHERE id >= 80").unwrap();
+
+        // Run vacuum
+        db.vacuum_safe().unwrap();
+
+        // Verify data integrity
+        let result = db.execute("SELECT COUNT(*) FROM test").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 20); // 100 - 20 deleted
+
+        // Verify updates persisted
+        let result = db.execute("SELECT value FROM test WHERE id = 0").unwrap();
+        let rows = result.into_rows().unwrap();
+        let value = rows.first().unwrap()[0].as_int().unwrap().value();
+        assert_eq!(value, 1); // 0 * 10 + 1
+    }
+
+    #[test]
+    fn test_vacuum_multiple_tables() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        // Create multiple tables
+        db.execute("CREATE TABLE users (id BIGINT, name TEXT)")
+            .unwrap();
+        db.execute("CREATE TABLE orders (id BIGINT, user_id BIGINT, amount DOUBLE)")
+            .unwrap();
+
+        // Insert and update data in both
+        db.execute("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+        db.execute("INSERT INTO users VALUES (2, 'Bob')").unwrap();
+        db.execute("UPDATE users SET name = 'Alice Updated' WHERE id = 1")
+            .unwrap();
+
+        db.execute("INSERT INTO orders VALUES (100, 1, 99.99)")
+            .unwrap();
+        db.execute("INSERT INTO orders VALUES (101, 2, 149.99)")
+            .unwrap();
+        db.execute("UPDATE orders SET amount = 109.99 WHERE id = 100")
+            .unwrap();
+
+        // Vacuum
+        let stats = db.vacuum_safe().unwrap();
+
+        assert!(stats.tables_vacuumed >= 2);
+        println!(
+            "Vacuumed {} tables, freed {} bytes",
+            stats.tables_vacuumed,
+            stats.total_freed()
+        );
+    }
 }

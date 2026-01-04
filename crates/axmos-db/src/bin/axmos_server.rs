@@ -1,19 +1,4 @@
 //! AxmosDB Server Binary
-//!
-//! TCP server that accepts client connections and executes database operations.
-//!
-//! Usage:
-//!   axmos-server -p <port> -f <database_file>
-//!
-//! Commands:
-//!   CREATE  - Create a new database
-//!   OPEN    - Open an existing database
-//!   SQL     - Execute a SQL query
-//!   EXPLAIN - Show query execution plan
-//!   ANALYZE - Update table statistics
-//!   CLOSE   - Close current database
-//!   PING    - Health check
-//!   SHUTDOWN - Stop the server
 
 use axmosdb::{
     Database,
@@ -21,7 +6,7 @@ use axmosdb::{
     io::pager::BtreeBuilder,
     runtime::QueryResult,
     sql::{binder::binder::Binder, parser::Parser, planner::CascadesOptimizer},
-    tcp::{Request, Response, TcpError, recv_request, send_response},
+    tcp::{Request, Response, TcpError, recv_request, send_response, session::Session},
 };
 
 use std::{
@@ -88,10 +73,6 @@ fn print_usage() {
     eprintln!("  -p, --port <PORT>    Port to listen on (default: 5432)");
     eprintln!("  -f, --file <PATH>    Database file to open on startup");
     eprintln!("  -h, --help           Show this help message");
-    eprintln!();
-    eprintln!("Examples:");
-    eprintln!("  axmos-server -p 5433 -f mydb.axm");
-    eprintln!("  axmos-server --port 8080");
 }
 
 struct Server {
@@ -121,7 +102,6 @@ impl Server {
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
-        // Open database if specified
         if let Some(path) = config.db_path {
             println!("Opening database: {}", path.display());
             match Database::open_or_create(&path, server.db_config) {
@@ -140,6 +120,7 @@ impl Server {
         println!();
         Ok(server)
     }
+
     fn run(&mut self) {
         println!("Ready to accept connections. Use SHUTDOWN command or Ctrl+C to stop.");
         println!();
@@ -166,7 +147,6 @@ impl Server {
             }
         }
 
-        // Cleanup
         if let Some(db) = self.db.take() {
             println!("Closing database...");
             drop(db);
@@ -176,7 +156,6 @@ impl Server {
     }
 
     fn handle_client(&mut self, stream: TcpStream) -> Result<(), TcpError> {
-        // Set reasonable timeouts
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(300)))
             .ok();
@@ -187,8 +166,10 @@ impl Server {
         let mut reader = BufReader::new(stream.try_clone()?);
         let mut writer = BufWriter::new(stream);
 
+        // Create a session for this client connection
+        let mut client_session: Option<Session> = self.db.as_ref().map(|db| db.session());
+
         loop {
-            // Read request
             let request = match recv_request(&mut reader) {
                 Ok(req) => req,
                 Err(TcpError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
@@ -204,26 +185,26 @@ impl Server {
                 }
             };
 
-            // Log request type
             let request_type = match &request {
                 Request::Create(_) => "CREATE",
                 Request::Open(_) => "OPEN",
                 Request::Sql(_) => "SQL",
+                Request::SessionSql(_) => "SESSION SQL",
                 Request::Explain(_) => "EXPLAIN",
                 Request::Analyze { .. } => "ANALYZE",
+                Request::Vacuum { force } => {
+                    if *force { "VACUUM FORCE" } else { "VACUUM" }
+                }
                 Request::Close => "CLOSE",
                 Request::Ping => "PING",
                 Request::Shutdown => "SHUTDOWN",
             };
             println!("  -> {}", request_type);
 
-            // Process request
-            let response = self.process_request(request);
+            let response = self.process_request(request, &mut client_session);
 
-            // Check for shutdown or goodbye
             let should_close = matches!(response, Response::Goodbye | Response::ShuttingDown);
 
-            // Send response
             send_response(&mut writer, &response)?;
 
             if should_close {
@@ -231,25 +212,73 @@ impl Server {
             }
         }
 
+        // Session dropped here - any uncommitted transaction is rolled back
         Ok(())
     }
 
-    fn process_request(&mut self, request: Request) -> Response {
+    fn process_request(
+        &mut self,
+        request: Request,
+        client_session: &mut Option<Session>,
+    ) -> Response {
         match request {
-            Request::Create(path) => self.handle_create(path),
-            Request::Open(path) => self.handle_open(path),
+            Request::Create(path) => {
+                let response = self.handle_create(path);
+                // Recreate session for new database
+                *client_session = self.db.as_ref().map(|db| db.session());
+                response
+            }
+            Request::Open(path) => {
+                let response = self.handle_open(path);
+                // Recreate session for opened database
+                *client_session = self.db.as_ref().map(|db| db.session());
+                response
+            }
             Request::Sql(sql) => self.handle_sql(sql),
+            Request::SessionSql(sql) => self.handle_session_sql(sql, client_session),
             Request::Explain(sql) => self.handle_explain(sql),
             Request::Analyze {
                 sample_rate,
                 max_sample_rows,
             } => self.handle_analyze(sample_rate, max_sample_rows),
-            Request::Close => self.handle_close(),
+            Request::Vacuum { force } => self.handle_vacuum(force),
+            Request::Close => {
+                *client_session = None;
+                self.handle_close()
+            }
             Request::Ping => Response::Pong,
             Request::Shutdown => {
                 self.shutdown.store(true, Ordering::Relaxed);
                 Response::ShuttingDown
             }
+        }
+    }
+
+    fn handle_session_sql(&mut self, sql: String, session: &mut Option<Session>) -> Response {
+        let Some(session) = session.as_mut() else {
+            return Response::Error("No database open. Use OPEN or CREATE first.".into());
+        };
+
+        match session.execute(&sql) {
+            Ok(result) => query_result_to_response(result),
+            Err(e) => Response::Error(format!("Query failed: {}", e)),
+        }
+    }
+
+    fn handle_vacuum(&mut self, force: bool) -> Response {
+        let Some(db) = &self.db else {
+            return Response::Error("No database open. Use OPEN or CREATE first.".into());
+        };
+
+        let result = if force { db.vacuum() } else { db.vacuum_safe() };
+
+        match result {
+            Ok(stats) => Response::VacuumComplete {
+                tables_vacuumed: stats.tables_vacuumed,
+                bytes_freed: stats.total_freed(),
+                transactions_cleaned: stats.transactions_cleaned,
+            },
+            Err(e) => Response::Error(format!("VACUUM failed: {}", e)),
         }
     }
 
@@ -293,14 +322,12 @@ impl Server {
             return Response::Error("No database open. Use OPEN or CREATE first.".into());
         };
 
-        // Parse
         let mut parser = Parser::new(&sql);
         let stmt = match parser.parse() {
             Ok(s) => s,
             Err(e) => return Response::Error(format!("Parse error: {}", e)),
         };
 
-        // Get transaction for binding
         let handle = match db.coordinator().begin() {
             Ok(h) => h,
             Err(e) => return Response::Error(format!("Transaction error: {}", e)),
@@ -308,21 +335,18 @@ impl Server {
 
         let snapshot = handle.snapshot();
 
-        // Create tree builder
         let tree_builder = {
             let p = db.pager().read();
             BtreeBuilder::new(p.min_keys_per_page(), p.num_siblings_per_side())
                 .with_pager(db.pager().clone())
         };
 
-        // Bind
         let mut binder = Binder::new(db.catalog().clone(), tree_builder.clone(), snapshot.clone());
         let bound = match binder.bind(&stmt) {
             Ok(b) => b,
             Err(e) => return Response::Error(format!("Bind error: {}", e)),
         };
 
-        // Optimize
         let mut optimizer =
             CascadesOptimizer::with_defaults(db.catalog().clone(), tree_builder, snapshot);
 
@@ -331,10 +355,8 @@ impl Server {
             Err(e) => return Response::Error(format!("Planner error: {}", e)),
         };
 
-        // Abort transaction (we didn't execute anything)
         let _ = handle.abort();
 
-        // Return explanation
         Response::Explain(plan.explain())
     }
 
@@ -358,10 +380,12 @@ impl Server {
     }
 }
 
-/// Convert QueryResult to Response.
 fn query_result_to_response(result: QueryResult) -> Response {
     match result {
+
         QueryResult::Rows(rows) => {
+
+          
             let columns = if rows.is_empty() {
                 vec![]
             } else {

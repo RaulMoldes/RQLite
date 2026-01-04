@@ -1,6 +1,4 @@
 //! Protocol for client-server communication.
-//!
-//! Defines the message format for communication between axmos-client and axmos-server.
 use std::{
     error::Error,
     fmt::{Display, Formatter, Result as FmtResult},
@@ -9,50 +7,31 @@ use std::{
 
 pub mod session;
 
-/// Protocol version for compatibility checks.
 pub const PROTOCOL_VERSION: u8 = 1;
-
-/// Maximum message size (16 MB).
 pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
-/// Commands that can be sent from client to server.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
-    /// Create a new database.
-    /// Payload: database file path
     Create(String),
-
-    /// Open an existing database.
-    /// Payload: database file path
     Open(String),
-
-    /// Execute a SQL query.
-    /// Payload: SQL string
+    /// Execute SQL (stateless, autocommit via Database::execute)
     Sql(String),
-
-    /// Explain a query plan without executing.
-    /// Payload: SQL string
+    /// Execute SQL in session context (supports BEGIN/COMMIT/ROLLBACK)
+    SessionSql(String),
     Explain(String),
-
-    /// Run ANALYZE to update statistics.
-    /// Payload: (sample_rate, max_sample_rows)
     Analyze {
         sample_rate: f64,
         max_sample_rows: usize,
     },
-
-    /// Close the current database connection.
+    Vacuum {
+        force: bool,
+    },
     Close,
-
-    /// Ping to check server health.
     Ping,
-
-    /// Shutdown the server (admin only).
     Shutdown,
 }
 
 impl Request {
-    /// Serialize request to bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.push(PROTOCOL_VERSION);
@@ -88,6 +67,14 @@ impl Request {
             Self::Ping => {
                 buf.push(0x07);
             }
+            Self::Vacuum { force } => {
+                buf.push(0x09);
+                buf.push(if *force { 1 } else { 0 });
+            }
+            Self::SessionSql(sql) => {
+                buf.push(0x0A);
+                write_string(&mut buf, sql);
+            }
             Self::Shutdown => {
                 buf.push(0xFF);
             }
@@ -96,7 +83,6 @@ impl Request {
         buf
     }
 
-    /// Deserialize request from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self, TcpError> {
         if data.is_empty() {
             return Err(TcpError::InvalidMessage("Empty message".into()));
@@ -148,13 +134,23 @@ impl Request {
             }
             0x06 => Ok(Self::Close),
             0x07 => Ok(Self::Ping),
+            0x09 => {
+                if payload.is_empty() {
+                    return Err(TcpError::InvalidMessage("Vacuum payload too short".into()));
+                }
+                let force = payload[0] != 0;
+                Ok(Self::Vacuum { force })
+            }
+            0x0A => {
+                let sql = read_string(payload)?;
+                Ok(Self::SessionSql(sql))
+            }
             0xFF => Ok(Self::Shutdown),
             _ => Err(TcpError::UnknownCommand(cmd)),
         }
     }
 }
 
-/// Response status codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum StatusCode {
@@ -167,6 +163,7 @@ pub enum StatusCode {
     Pong = 0x06,
     Goodbye = 0x07,
     ShuttingDown = 0x08,
+    VacuumComplete = 0x09,
 }
 
 impl TryFrom<u8> for StatusCode {
@@ -183,48 +180,34 @@ impl TryFrom<u8> for StatusCode {
             0x06 => Ok(Self::Pong),
             0x07 => Ok(Self::Goodbye),
             0x08 => Ok(Self::ShuttingDown),
+            0x09 => Ok(Self::VacuumComplete),
             _ => Err(TcpError::UnknownStatus(value)),
         }
     }
 }
 
-/// Responses sent from server to client.
 #[derive(Debug, Clone)]
 pub enum Response {
-    /// Operation succeeded with a message.
     Ok(String),
-
-    /// Operation failed with an error message.
     Error(String),
-
-    /// Query returned rows.
-    /// Contains column names and serialized row data.
     Rows {
         columns: Vec<String>,
         data: Vec<Vec<String>>,
     },
-
-    /// DML operation affected N rows.
     RowsAffected(u64),
-
-    /// DDL operation completed.
     Ddl(String),
-
-    /// Query plan explanation.
     Explain(String),
-
-    /// Response to Ping.
+    VacuumComplete {
+        tables_vacuumed: usize,
+        bytes_freed: usize,
+        transactions_cleaned: usize,
+    },
     Pong,
-
-    /// Connection closing.
     Goodbye,
-
-    /// Server is shutting down.
     ShuttingDown,
 }
 
 impl Response {
-    /// Serialize response to bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.push(PROTOCOL_VERSION);
@@ -239,16 +222,13 @@ impl Response {
                 write_string(&mut buf, msg);
             }
             Self::Rows { columns, data } => {
+            
                 buf.push(StatusCode::Rows as u8);
-                // Write column count
                 buf.extend_from_slice(&(columns.len() as u32).to_le_bytes());
-                // Write column names
                 for col in columns {
                     write_string(&mut buf, col);
                 }
-                // Write row count
                 buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
-                // Write rows
                 for row in data {
                     for value in row {
                         write_string(&mut buf, value);
@@ -267,6 +247,16 @@ impl Response {
                 buf.push(StatusCode::Explain as u8);
                 write_string(&mut buf, plan);
             }
+            Self::VacuumComplete {
+                tables_vacuumed,
+                bytes_freed,
+                transactions_cleaned,
+            } => {
+                buf.push(StatusCode::VacuumComplete as u8);
+                buf.extend_from_slice(&(*tables_vacuumed as u64).to_le_bytes());
+                buf.extend_from_slice(&(*bytes_freed as u64).to_le_bytes());
+                buf.extend_from_slice(&(*transactions_cleaned as u64).to_le_bytes());
+            }
             Self::Pong => {
                 buf.push(StatusCode::Pong as u8);
             }
@@ -281,7 +271,6 @@ impl Response {
         buf
     }
 
-    /// Deserialize response from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self, TcpError> {
         if data.len() < 2 {
             return Err(TcpError::InvalidMessage("Response too short".into()));
@@ -310,22 +299,20 @@ impl Response {
             StatusCode::Rows => {
                 let mut offset = 0;
 
-                // Read column count
                 if payload.len() < 4 {
                     return Err(TcpError::InvalidMessage("Missing column count".into()));
                 }
                 let col_count = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
                 offset += 4;
 
-                // Read column names
                 let mut columns = Vec::with_capacity(col_count);
+
                 for _ in 0..col_count {
                     let (col, len) = read_string_with_len(&payload[offset..])?;
                     columns.push(col);
                     offset += len;
                 }
 
-                // Read row count
                 if payload.len() < offset + 4 {
                     return Err(TcpError::InvalidMessage("Missing row count".into()));
                 }
@@ -333,7 +320,6 @@ impl Response {
                     u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
                 offset += 4;
 
-                // Read rows
                 let mut data = Vec::with_capacity(row_count);
                 for _ in 0..row_count {
                     let mut row = Vec::with_capacity(col_count);
@@ -362,13 +348,27 @@ impl Response {
                 let plan = read_string(payload)?;
                 Ok(Self::Explain(plan))
             }
+            StatusCode::VacuumComplete => {
+                if payload.len() < 24 {
+                    return Err(TcpError::InvalidMessage("Vacuum payload too short".into()));
+                }
+                let tables_vacuumed =
+                    u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+                let bytes_freed = u64::from_le_bytes(payload[8..16].try_into().unwrap()) as usize;
+                let transactions_cleaned =
+                    u64::from_le_bytes(payload[16..24].try_into().unwrap()) as usize;
+                Ok(Self::VacuumComplete {
+                    tables_vacuumed,
+                    bytes_freed,
+                    transactions_cleaned,
+                })
+            }
             StatusCode::Pong => Ok(Self::Pong),
             StatusCode::Goodbye => Ok(Self::Goodbye),
             StatusCode::ShuttingDown => Ok(Self::ShuttingDown),
         }
     }
 
-    /// Check if this is an error response.
     pub fn is_error(&self) -> bool {
         matches!(self, Self::Error(_))
     }
@@ -388,22 +388,14 @@ impl Display for TcpError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             Self::VersionMismatch { expected, got } => {
-                write!(
-                    f,
-                    "Protocol version mismatch: expected {}, got {}",
-                    expected, got
-                )
+                write!(f, "Protocol version mismatch: expected {}, got {}", expected, got)
             }
             Self::UnknownCommand(cmd) => write!(f, "Unknown command: 0x{:02X}", cmd),
             Self::UnknownStatus(status) => write!(f, "Unknown status: 0x{:02X}", status),
             Self::InvalidMessage(msg) => write!(f, "Invalid message: {}", msg),
             Self::Io(e) => write!(f, "I/O error: {}", e),
             Self::MessageTooLarge(size) => {
-                write!(
-                    f,
-                    "Message too large: {} bytes (max {})",
-                    size, MAX_MESSAGE_SIZE
-                )
+                write!(f, "Message too large: {} bytes (max {})", size, MAX_MESSAGE_SIZE)
             }
         }
     }
@@ -417,20 +409,17 @@ impl From<io::Error> for TcpError {
     }
 }
 
-/// Write a length-prefixed string to buffer.
 fn write_string(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     buf.extend_from_slice(bytes);
 }
 
-/// Read a length-prefixed string from buffer.
 fn read_string(data: &[u8]) -> Result<String, TcpError> {
     let (s, _) = read_string_with_len(data)?;
     Ok(s)
 }
 
-/// Read a length-prefixed string and return bytes consumed.
 fn read_string_with_len(data: &[u8]) -> Result<(String, usize), TcpError> {
     if data.len() < 4 {
         return Err(TcpError::InvalidMessage("String length missing".into()));
@@ -450,58 +439,44 @@ fn read_string_with_len(data: &[u8]) -> Result<(String, usize), TcpError> {
     Ok((s, 4 + len))
 }
 
-/// Read a framed message from a stream.
-/// Format: [4-byte length][payload]
 pub fn read_message<R: Read>(reader: &mut R) -> Result<Vec<u8>, TcpError> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf)?;
-
     let len = u32::from_le_bytes(len_buf) as usize;
-
     if len > MAX_MESSAGE_SIZE {
         return Err(TcpError::MessageTooLarge(len));
     }
-
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
-
     Ok(buf)
 }
 
-/// Write a framed message to a stream.
-/// Format: [4-byte length][payload]
 pub fn write_message<W: Write>(writer: &mut W, data: &[u8]) -> Result<(), TcpError> {
     if data.len() > MAX_MESSAGE_SIZE {
         return Err(TcpError::MessageTooLarge(data.len()));
     }
-
     let len_buf = (data.len() as u32).to_le_bytes();
     writer.write_all(&len_buf)?;
     writer.write_all(data)?;
     writer.flush()?;
-
     Ok(())
 }
 
-/// Send a request over a stream.
 pub fn send_request<W: Write>(writer: &mut W, request: &Request) -> Result<(), TcpError> {
     let data = request.to_bytes();
     write_message(writer, &data)
 }
 
-/// Receive a request from a stream.
 pub fn recv_request<R: Read>(reader: &mut R) -> Result<Request, TcpError> {
     let data = read_message(reader)?;
     Request::from_bytes(&data)
 }
 
-/// Send a response over a stream.
 pub fn send_response<W: Write>(writer: &mut W, response: &Response) -> Result<(), TcpError> {
     let data = response.to_bytes();
     write_message(writer, &data)
 }
 
-/// Receive a response from a stream.
 pub fn recv_response<R: Read>(reader: &mut R) -> Result<Response, TcpError> {
     let data = read_message(reader)?;
     Response::from_bytes(&data)
@@ -517,11 +492,14 @@ mod protocol_tests {
             Request::Create("/tmp/test.db".into()),
             Request::Open("/tmp/test.db".into()),
             Request::Sql("SELECT * FROM users".into()),
+            Request::SessionSql("INSERT INTO users VALUES (1, 'test')".into()),
             Request::Explain("SELECT * FROM users".into()),
             Request::Analyze {
                 sample_rate: 0.1,
                 max_sample_rows: 1000,
             },
+            Request::Vacuum { force: false },
+            Request::Vacuum { force: true },
             Request::Close,
             Request::Ping,
             Request::Shutdown,
@@ -549,6 +527,11 @@ mod protocol_tests {
             Response::RowsAffected(42),
             Response::Ddl("CREATE TABLE users".into()),
             Response::Explain("SeqScan -> Filter -> Project".into()),
+            Response::VacuumComplete {
+                tables_vacuumed: 5,
+                bytes_freed: 1024,
+                transactions_cleaned: 10,
+            },
             Response::Pong,
             Response::Goodbye,
             Response::ShuttingDown,
@@ -557,7 +540,6 @@ mod protocol_tests {
         for resp in responses {
             let bytes = resp.to_bytes();
             let decoded = Response::from_bytes(&bytes).expect("Failed to decode");
-            // Compare debug output since Response doesn't impl PartialEq
             assert_eq!(format!("{:?}", resp), format!("{:?}", decoded));
         }
     }

@@ -316,6 +316,13 @@ impl RuntimeSized for Blob {
     }
 }
 
+/// [Blob] size is only known at runtime.
+impl<'a> RuntimeSized for BlobRef<'a> {
+    fn runtime_size(&self) -> usize {
+        self.total_length()
+    }
+}
+
 /// [str] won't hold a length prefix by itself so we have to append it here.
 impl From<&str> for Blob {
     fn from(value: &str) -> Self {

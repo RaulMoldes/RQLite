@@ -260,6 +260,17 @@ pub trait RefTrait: TypeClass {
     where
         Self: 'a;
 }
+
+impl<'a, T: TypeClass + BytemuckDeserializable> TypeClass for BytemuckRef<'a, T> {
+    const ALIGN: usize = T::ALIGN;
+    const SIZE: Option<usize> = T::SIZE;
+}
+
+impl<'a, T: TypeClass + RuntimeSized + BytemuckDeserializable> RuntimeSized for BytemuckRef<'a, T> where
+    Self: TypeClass
+{
+}
+
 /// Trait for making types deserializable.
 pub trait DeserializableType: RefTrait {
     /// Reinterprets a buffer slice into a  its [Ref] type.
@@ -323,7 +334,7 @@ impl<T: BytemuckDeserializable> DeserializableType for T {
     }
 }
 
-pub trait TypeRef<'a>: Sized + AsRef<[u8]> {
+pub trait TypeRef<'a>: Sized + AsRef<[u8]> + TypeClass {
     type Owned: DeserializableType;
     fn to_owned(&self) -> Self::Owned;
     fn as_slice(&self) -> &[u8];

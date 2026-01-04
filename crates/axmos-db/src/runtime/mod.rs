@@ -675,8 +675,8 @@ impl QueryRunner for WriteQueryRunner {
 
         Ok(ResultGuard::write(
             self.ctx,
-            QueryResult::Rows(RowsResult::new(rows, plan.output_schema().clone())),
-        ))
+            QueryResult::RowsAffected(affected)),
+        )
     }
 }
 
@@ -752,7 +752,6 @@ impl BatchQueryRunner {
         }
     }
 
-
     /// Execute all statements atomically. If any fails, all are rolled back.
     pub fn execute_all(self, statements: &[String]) -> QueryRunnerResult<Vec<QueryResult>> {
         let ctx = self.build_ctx(BtreeReadAccessor::new())?;
@@ -794,14 +793,18 @@ impl BatchQueryRunner {
     }
 }
 
-
-
 pub(crate) trait ContextBuilder {
-    fn build_ctx<Acc: TreeReader + Clone>(&self,  acc: Acc) -> QueryRunnerResult<TransactionContext<Acc>>;
+    fn build_ctx<Acc: TreeReader + Clone>(
+        &self,
+        acc: Acc,
+    ) -> QueryRunnerResult<TransactionContext<Acc>>;
 }
 
 impl ContextBuilder for BatchQueryRunner {
-    fn build_ctx<Acc: TreeReader + Clone>(&self,  acc: Acc) -> QueryRunnerResult<TransactionContext<Acc>> {
+    fn build_ctx<Acc: TreeReader + Clone>(
+        &self,
+        acc: Acc,
+    ) -> QueryRunnerResult<TransactionContext<Acc>> {
         let ctx = TransactionContext::new(
             acc,
             self.pager.clone(),
@@ -812,9 +815,11 @@ impl ContextBuilder for BatchQueryRunner {
     }
 }
 
-
 /// Execute a bound statement with the given context
-pub(crate) fn execute_statement<B: ContextBuilder>(builder: &B, bound: &BoundStatement) -> QueryRunnerResult<QueryResult> {
+pub(crate) fn execute_statement<B: ContextBuilder>(
+    builder: &B,
+    bound: &BoundStatement,
+) -> QueryRunnerResult<QueryResult> {
     if is_ddl(bound) {
         let ctx = builder.build_ctx(BtreeWriteAccessor::new())?;
         let mut executor = DdlExecutor::new(ctx);
@@ -822,15 +827,13 @@ pub(crate) fn execute_statement<B: ContextBuilder>(builder: &B, bound: &BoundSta
         Ok(QueryResult::Ddl(outcome))
     } else if is_dml(bound) {
         let ctx = builder.build_ctx(BtreeWriteAccessor::new())?;
-        
+
         let plan = optimize(bound, &ctx.catalog(), &ctx.tree_builder(), ctx.snapshot())?;
         let builder = MutableExecutorBuilder::new(ctx);
         let mut executor = builder.build(&plan)?;
         let rows = collect_rows(&mut executor)?;
-        Ok(QueryResult::Rows(RowsResult::new(
-            rows,
-            plan.output_schema().clone(),
-        )))
+        let affected = extract_affected_count(&rows);
+        Ok(QueryResult::RowsAffected(affected))
     } else {
         // SELECT
         let ctx = builder.build_ctx(BtreeReadAccessor::new())?;

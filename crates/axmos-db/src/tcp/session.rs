@@ -8,14 +8,15 @@ use crate::{
         runner::SharedTaskRunner,
     },
     runtime::{
-        QueryError, QueryResult,ContextBuilder, execute_statement,  QueryRunnerResult,  RuntimeError, bind,  context::TransactionContext, parse, ddl::DdlOutcome
+        ContextBuilder, QueryError, QueryResult, QueryRunnerResult, RuntimeError, bind,
+        context::TransactionContext, ddl::DdlOutcome, execute_statement, parse,
     },
     schema::catalog::SharedCatalog,
     sql::{
-        binder::bounds::{BoundStatement, },
+        binder::bounds::BoundStatement,
         parser::ast::{Statement, TransactionStatement},
     },
-    tree::accessor::{BtreeReadAccessor,  TreeReader},
+    tree::accessor::{BtreeReadAccessor, TreeReader},
 };
 
 /// A database session with its own transaction state.
@@ -31,14 +32,11 @@ pub struct SessionContext {
     active_handle: Option<TransactionHandle>,
 }
 
-
-
 impl SessionContext {
     pub(crate) fn new(
         pager: SharedPager,
         catalog: SharedCatalog,
         coordinator: TransactionCoordinator,
-
     ) -> Self {
         Self {
             pager,
@@ -53,7 +51,6 @@ impl SessionContext {
     pub fn in_transaction(&self) -> bool {
         self.active_handle.is_some()
     }
-
 
     fn begin(&mut self) -> QueryRunnerResult<QueryResult> {
         if self.active_handle.is_some() {
@@ -74,7 +71,7 @@ impl SessionContext {
                 TransactionError::TransactionNotStarted,
             ))
         })?;
-         let ctx = TransactionContext::new(
+        let ctx = TransactionContext::new(
             BtreeReadAccessor::new(),
             self.pager.clone(),
             self.catalog.clone(),
@@ -115,7 +112,10 @@ impl Session {
         coordinator: TransactionCoordinator,
         task_runner: SharedTaskRunner,
     ) -> Self {
-        Self { ctx: SessionContext::new(pager, catalog, coordinator), task_runner }
+        Self {
+            ctx: SessionContext::new(pager, catalog, coordinator),
+            task_runner,
+        }
     }
 
     /// Check if session is in an explicit transaction
@@ -165,7 +165,8 @@ impl Session {
 
         // At this point it should be safe to unwrap the handle.
         let handle = self
-            .ctx.active_handle
+            .ctx
+            .active_handle
             .as_ref()
             .ok_or(TransactionError::TransactionNotStarted)?;
 
@@ -176,17 +177,11 @@ impl Session {
 
         let tree_builder = BtreeBuilder::new(min_keys, num_siblings).with_pager(pager.clone());
 
-
         let bound = bind(&ast, &catalog, &tree_builder, handle.snapshot())?;
         self.execute_async(bound)
-
     }
 
-    fn execute_async(
-        &self,
-        bound: BoundStatement,
-    ) -> QueryRunnerResult<QueryResult> {
-
+    fn execute_async(&self, bound: BoundStatement) -> QueryRunnerResult<QueryResult> {
         let ctx = self.ctx.clone();
         self.task_runner
             .run_with_result(move |_| {
@@ -195,12 +190,9 @@ impl Session {
             })
             .map_err(|e| QueryError::Runtime(RuntimeError::Other(e.to_string())))
     }
-
 }
 
-
 impl ContextBuilder for SessionContext {
-
     fn build_ctx<Acc: TreeReader + Clone>(
         &self,
         acc: Acc,

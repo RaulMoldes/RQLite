@@ -60,6 +60,19 @@ impl Bool {
 impl BooleanType for Bool {}
 impl FixedSizeType for Bool {}
 
+impl<'a> BooleanType for BoolRef<'a> {}
+impl<'a> FixedSizeType for BoolRef<'a> {}
+
+impl<'a> Display for BoolRef<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        if self.0 == &1 {
+            f.write_str("TRUE")
+        } else {
+            f.write_str("FALSE")
+        }
+    }
+}
+
 impl Display for Bool {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         if self.0 {

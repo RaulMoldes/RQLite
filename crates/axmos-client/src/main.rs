@@ -1,20 +1,4 @@
 //! AxmosDB Client
-//!
-//! Command-line client for connecting to an AxmosDB server.
-//!
-//! Usage:
-//!   axmos-client -h <host> -p <port>
-//!
-//! Interactive commands:
-//!   CREATEDB <path>     - Create a new database
-//!   OPENDB <path>       - Open an existing database
-//!   CLOSE             - Close current database
-//!   EXPLAIN <query>   - Show query execution plan
-//!   ANALYZE [rate] [max_rows] - Update statistics
-//!   PING              - Check server health
-//!   QUIT / EXIT       - Disconnect and exit
-//!   SHUTDOWN          - Shutdown the server
-//!   <sql>             - Execute SQL query
 
 use axmosdb::tcp::{Request, Response, TcpError, recv_response, send_request};
 
@@ -94,22 +78,27 @@ fn print_usage() {
     eprintln!("Interactive Commands:");
     eprintln!("  CREATEDB <path>              Create a new database");
     eprintln!("  OPENDB <path>                Open an existing database");
-    eprintln!("  CLOSE                      Close current database");
-    eprintln!("  EXPLAIN <query>            Show query execution plan");
-    eprintln!("  ANALYZE [rate] [max_rows]  Update table statistics");
-    eprintln!("  PING                       Check server health");
-    eprintln!("  QUIT, EXIT                 Disconnect and exit");
-    eprintln!("  SHUTDOWN                   Shutdown the server");
-    eprintln!("  <sql>                      Execute SQL statement");
+    eprintln!("  CLOSE                        Close current database");
+    eprintln!("  BEGIN                        Start a transaction (use with session mode)");
+    eprintln!("  COMMIT                       Commit transaction");
+    eprintln!("  ROLLBACK                     Rollback transaction");
+    eprintln!("  EXPLAIN <query>              Show query execution plan");
+    eprintln!("  ANALYZE [rate] [max_rows]    Update table statistics");
+    eprintln!("  VACUUM [FORCE]               Clean up old MVCC versions");
+    eprintln!("  PING                         Check server health");
+    eprintln!("  QUIT, EXIT                   Disconnect and exit");
+    eprintln!("  SHUTDOWN                     Shutdown the server");
+    eprintln!("  <sql>                        Execute SQL statement");
     eprintln!();
-    eprintln!("Examples:");
-    eprintln!("  axmos-client -h localhost -p 5433");
-    eprintln!("  axmos-client --port 8080");
+    eprintln!("Session Mode:");
+    eprintln!("  Use BEGIN to start a transaction. All subsequent SQL");
+    eprintln!("  statements run in session context until COMMIT or ROLLBACK.");
 }
 
 struct Client {
     reader: BufReader<TcpStream>,
     writer: BufWriter<TcpStream>,
+    in_transaction: bool,
 }
 
 impl Client {
@@ -121,7 +110,11 @@ impl Client {
         let reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
         let writer = BufWriter::new(stream);
 
-        Ok(Self { reader, writer })
+        Ok(Self {
+            reader,
+            writer,
+            in_transaction: false,
+        })
     }
 
     fn send(&mut self, request: Request) -> Result<Response, TcpError> {
@@ -134,15 +127,17 @@ impl Client {
         let mut stdout = io::stdout();
 
         loop {
-            // Print prompt
-            print!("axmos> ");
+            // Print prompt with transaction indicator
+            if self.in_transaction {
+                print!("axmos*> ");
+            } else {
+                print!("axmos> ");
+            }
             stdout.flush().ok();
 
-            // Read line
             let mut line = String::new();
             match stdin.lock().read_line(&mut line) {
                 Ok(0) => {
-                    // EOF
                     println!();
                     break;
                 }
@@ -158,7 +153,6 @@ impl Client {
                 continue;
             }
 
-            // Parse and execute command
             match self.execute_command(line) {
                 CommandResult::Continue => {}
                 CommandResult::Exit => break,
@@ -171,7 +165,6 @@ impl Client {
     }
 
     fn execute_command(&mut self, input: &str) -> CommandResult {
-        //let upper = input.to_uppercase();
         let parts: Vec<&str> = input.splitn(2, char::is_whitespace).collect();
         let cmd = parts[0].to_uppercase();
         let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
@@ -221,13 +214,21 @@ impl Client {
                     max_sample_rows: max_rows,
                 }
             }
+            "VACUUM" => {
+                let force = arg.to_uppercase() == "FORCE";
+                Request::Vacuum { force }
+            }
             _ => {
-                // Assume it's SQL
-                Request::Sql(input.to_string())
+                // SQL statement - use session context if in transaction or starting one
+                let upper = input.trim().to_uppercase();
+                if upper == "BEGIN" || self.in_transaction {
+                    Request::SessionSql(input.to_string())
+                } else {
+                    Request::Sql(input.to_string())
+                }
             }
         };
 
-        // Send request and handle response
         let start = Instant::now();
         match self.send(request) {
             Ok(response) => {
@@ -241,7 +242,7 @@ impl Client {
         }
     }
 
-    fn print_response(&self, response: Response, elapsed: std::time::Duration) -> CommandResult {
+    fn print_response(&mut self, response: Response, elapsed: std::time::Duration) -> CommandResult {
         match response {
             Response::Ok(msg) => {
                 println!("{}", msg);
@@ -272,7 +273,19 @@ impl Client {
                 );
             }
             Response::Ddl(msg) => {
-                println!("{}", msg);
+                // Detect transaction state changes from DDL response
+                if msg.contains("TransactionStarted") {
+                    self.in_transaction = true;
+                    println!("BEGIN");
+                } else if msg.contains("TransactionCommitted") {
+                    self.in_transaction = false;
+                    println!("COMMIT");
+                } else if msg.contains("TransactionRolledBack") {
+                    self.in_transaction = false;
+                    println!("ROLLBACK");
+                } else {
+                    println!("{}", msg);
+                }
                 println!("({:.3}s)", elapsed.as_secs_f64());
             }
             Response::Explain(plan) => {
@@ -280,6 +293,17 @@ impl Client {
                 println!("{}", "-".repeat(60));
                 println!("{}", plan);
                 println!("{}", "-".repeat(60));
+                println!("({:.3}s)", elapsed.as_secs_f64());
+            }
+            Response::VacuumComplete {
+                tables_vacuumed,
+                bytes_freed,
+                transactions_cleaned,
+            } => {
+                println!("VACUUM completed successfully");
+                println!("  Tables vacuumed: {}", tables_vacuumed);
+                println!("  Bytes freed: {}", bytes_freed);
+                println!("  Transactions cleaned: {}", transactions_cleaned);
                 println!("({:.3}s)", elapsed.as_secs_f64());
             }
             Response::Pong => {
@@ -312,17 +336,25 @@ fn parse_analyze_args(arg: &str) -> (f64, usize) {
 
 fn print_interactive_help() {
     println!("Available commands:");
-    println!("  CREATE <path>              Create a new database");
-    println!("  OPEN <path>                Open an existing database");
-    println!("  CLOSE                      Close current database connection");
-    println!("  EXPLAIN <query>            Show query execution plan");
-    println!("  ANALYZE [rate] [max_rows]  Update table statistics");
-    println!("  PING                       Check server health");
-    println!("  QUIT, EXIT, \\q             Disconnect and exit");
-    println!("  HELP, \\?                   Show this help");
-    println!("  SHUTDOWN                   Shutdown the server (admin)");
+    println!("  CREATEDB <path>              Create a new database");
+    println!("  OPENDB <path>                Open an existing database");
+    println!("  CLOSE                        Close current database connection");
+    println!("  BEGIN                        Start a transaction");
+    println!("  COMMIT                       Commit current transaction");
+    println!("  ROLLBACK                     Rollback current transaction");
+    println!("  EXPLAIN <query>              Show query execution plan");
+    println!("  ANALYZE [rate] [max_rows]    Update table statistics");
+    println!("  VACUUM [FORCE]               Clean up old MVCC versions");
+    println!("  PING                         Check server health");
+    println!("  QUIT, EXIT, \\q               Disconnect and exit");
+    println!("  HELP, \\?                     Show this help");
+    println!("  SHUTDOWN                     Shutdown the server (admin)");
     println!();
     println!("Any other input is treated as a SQL statement.");
+    println!();
+    println!("Session Mode:");
+    println!("  Use BEGIN to start a transaction. The prompt changes to 'axmos*>'");
+    println!("  All SQL runs in the session until COMMIT or ROLLBACK.");
 }
 
 fn print_table(columns: &[String], data: &[Vec<String>]) {
@@ -330,7 +362,6 @@ fn print_table(columns: &[String], data: &[Vec<String>]) {
         return;
     }
 
-    // Calculate column widths
     let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
     for row in data {
         for (i, cell) in row.iter().enumerate() {
@@ -340,11 +371,9 @@ fn print_table(columns: &[String], data: &[Vec<String>]) {
         }
     }
 
-    // Print header
     print_row(columns, &widths);
     print_separator(&widths);
 
-    // Print data rows
     for row in data {
         print_row(row, &widths);
     }

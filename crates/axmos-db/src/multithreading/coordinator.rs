@@ -170,7 +170,6 @@ impl Snapshot {
 
     /// Check if a transaction was committed before this snapshot was taken
     pub fn is_committed_before_snapshot(&self, txid: TransactionId) -> bool {
-
         // Transaction started after our snapshot,
         // Then it is impossible it committed before the snapshot was taken
         if let Some(max_tx) = self.xmax
@@ -559,6 +558,103 @@ impl TransactionCoordinator {
 
     pub fn pager(&self) -> SharedPager {
         self.pager.clone()
+    }
+
+    /// Aborts all currently active transactions.
+    /// Returns the list of transaction IDs that were aborted.
+    pub fn abort_all_active(&self) -> Vec<TransactionId> {
+        let mut txs = self.transactions.write();
+        let mut aborted = Vec::new();
+
+        for (id, entry) in txs.iter_mut() {
+            if entry.state == TransactionState::Active {
+                entry.state = TransactionState::Aborted;
+                aborted.push(*id);
+            }
+        }
+
+        aborted
+    }
+
+    /// Gets the minimum transaction ID that is still needed for visibility.
+    /// This is the minimum of:
+    /// All active transaction IDs
+    /// All active transaction start timestamps (xmin in their snapshots)
+    pub fn get_oldest_required_xid(&self) -> TransactionId {
+        let txs = self.transactions.read();
+
+        let mut oldest = self.last_created_transaction.load(Ordering::Relaxed);
+
+        for (id, entry) in txs.iter() {
+            if entry.state == TransactionState::Active {
+                // Active transaction needs visibility from its snapshot's xmin
+                oldest = oldest.min(entry.snapshot.xmin());
+                oldest = oldest.min(*id);
+            }
+        }
+
+        oldest
+    }
+
+    /// Cleans up all completed (committed or aborted) transactions from memory.
+    /// Only keeps transactions that are still needed for visibility checks.
+    /// Returns the number of transactions cleaned up.
+    pub fn vacuum_transactions(&self) -> usize {
+        let oldest_required = self.get_oldest_required_xid();
+        let mut removed = self.transactions.read().len();
+        {
+            let mut txs = self.transactions.write();
+
+            txs.retain(|id, entry| {
+                // Always keep active transactions
+                if entry.state == TransactionState::Active {
+                    return true;
+                }
+
+                // Keep committed/aborted transactions that might still be needed
+                // for visibility checks by active transactions
+                *id >= oldest_required
+            });
+
+            removed -= txs.len();
+        }
+
+        // Also clean up tuple commits that are no longer needed
+
+        let min_start_ts = self.get_min_active_start_ts();
+        self.cleanup_tuple_commits(min_start_ts);
+
+        removed
+    }
+
+    /// Gets the minimum start timestamp among all active transactions.
+    fn get_min_active_start_ts(&self) -> u64 {
+        let txs = self.transactions.read();
+
+        txs.values()
+            .filter(|entry| entry.state == TransactionState::Active)
+            .map(|entry| entry.start_ts())
+            .min()
+            .unwrap_or(self.commit_counter.load(Ordering::SeqCst))
+    }
+
+    /// Creates a special vacuum snapshot that can see all committed data.
+    /// Used during vacuum operations.
+    pub fn vacuum_snapshot(&self) -> Snapshot {
+        let txid = self
+            .last_created_transaction
+            .fetch_add(1, Ordering::Relaxed);
+        let last_committed = self.last_committed.read().unwrap_or(0);
+
+        // Vacuum snapshot has no active transactions in its view
+        // and xmin = 0 so it can see everything
+        Snapshot::new(
+            txid,
+            0, // xmin = 0 means we can see all committed versions
+            Some(last_committed),
+            HashSet::new(),
+            HashSet::new(),
+        )
     }
 }
 

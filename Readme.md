@@ -145,6 +145,21 @@ INSERT INTO orders VALUES (5, 'House')
 
 SELECT * FROM users JOIN orders ON users.id = orders.userid
 
+BEGIN
+
+DELETE FROM orders WHERE id = 4
+
+SELECT * FROM orders
+
+ROLLBACK
+
+SELECT * FROM orders
+
+
+VACUUM
+
+
+
 EXPLAIN SELECT * FROM users JOIN orders ON users.id = orders.userid
 
 ANALYZE
@@ -173,11 +188,11 @@ AxmosDB uses a Cascades-style optimizer, enabling:
 
 ### Constraint checking at analyze time
 
-Currently we are not able to check for unique constraints at runtime. We are only able to check for non null constraints. We should be able to do this with Bloom Filters.
+Currently we are not able to check for unique constraints at runtime. We are only able to check for non null constraints.
 
-### TRANSACTIONAL OPERATORS.
+## Add proper testing for overflow page handling.
 
-Currently transactions are implemented but they are coupled with queries. Meaning that every query runs in a single atomic transaction with Read Committed guarantees, but no further than that. We should be able to allow the user to perform transaction management statements (ROLLBACK, BEGIN, COMMIT) on a procedural way. Currently they are No-Ops.
+I think there are some bugs on the overflow page logic. Review `cell_ops.rs` module to fix this.
 
 ### Join operators:
 

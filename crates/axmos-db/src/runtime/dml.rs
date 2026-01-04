@@ -180,7 +180,7 @@ where
         // Apply the update
         let mut updated_tuple = tuple.clone();
         updated_tuple.add_version_with_schema(assignments, tid, &schema)?;
-        updated_tuple.vacuum_with_schema(snapshot.xmin(), &schema)?;
+        //    updated_tuple.vaccum_for_snapshot(&schema, &snapshot)?;
 
         // Get the new row for index maintenance
         let new_row = updated_tuple
@@ -261,7 +261,7 @@ where
         // Mark as deleted
         let mut deleted_tuple = tuple.clone();
         deleted_tuple.delete(snapshot.xid())?;
-        deleted_tuple.vacuum_with_schema(snapshot.xmin(), &schema)?;
+        //   deleted_tuple.vaccum_for_snapshot(&schema, &snapshot)?;
 
         // Log the delete
         self.ctx
@@ -420,7 +420,7 @@ where
                     tuple
                         .add_version_with_schema(&index_assignments, snapshot.xid(), index_schema)
                         .ok()?;
-                    let _ = tuple.vacuum_with_schema(snapshot.xmin(), index_schema);
+                    //    let _ = tuple.vaccum_for_snapshot(&index_schema, &snapshot);
                     Some(tuple)
                 })?;
 
@@ -502,7 +502,7 @@ where
                     tuple_reader.parse_for_snapshot(bytes, &snapshot).ok()??;
                     let mut tuple = Tuple::from_slice_unchecked(bytes).ok()?;
                     tuple.delete(tid).ok()?;
-                    let _ = tuple.vacuum_with_schema(snapshot.xmin(), index_schema);
+                    //       let _ = tuple.vaccum_for_snapshot(&index_schema, &snapshot);
                     Some(tuple)
                 })?;
 

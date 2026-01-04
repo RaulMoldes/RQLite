@@ -85,6 +85,27 @@ fn current_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+/// Statistics from a vacuum operation.
+#[derive(Debug, Default, Clone)]
+pub struct VacuumStats {
+    /// Number of user tables vacuumed
+    pub tables_vacuumed: usize,
+    /// Total bytes freed from user table tuples
+    pub total_bytes_freed: usize,
+    /// Bytes freed from meta table
+    pub meta_table_bytes_freed: usize,
+    /// Bytes freed from meta index
+    pub meta_index_bytes_freed: usize,
+    /// Number of transactions cleaned up from coordinator
+    pub transactions_cleaned: usize,
+}
+
+impl VacuumStats {
+    pub fn total_freed(&self) -> usize {
+        self.total_bytes_freed + self.meta_table_bytes_freed + self.meta_index_bytes_freed
+    }
+}
+
 #[derive(Debug)]
 pub struct Catalog {
     meta_table: PageId,
@@ -297,6 +318,126 @@ impl Catalog {
 
         Ok(())
     }
+
+    /// Vacuums all tuples in all relations, removing old MVCC versions
+    /// that are no longer needed by any transaction.
+    ///
+    /// Returns statistics about the vacuum operation.
+    pub fn vacuum(
+        &mut self,
+        builder: &BtreeBuilder,
+        snapshot: &Snapshot,
+        oldest_active_xid: TransactionId,
+    ) -> CatalogResult<VacuumStats> {
+        let mut stats = VacuumStats::default();
+
+        // First, vacuum the meta table itself
+        stats.meta_table_bytes_freed += self.vacuum_btree(
+            self.meta_table,
+            &meta_table_schema(),
+            builder,
+            snapshot,
+            oldest_active_xid,
+        )?;
+
+        // Vacuum the meta index
+        stats.meta_index_bytes_freed += self.vacuum_btree(
+            self.meta_index,
+            &meta_index_schema(),
+            builder,
+            snapshot,
+            oldest_active_xid,
+        )?;
+
+        // Collect all user relations
+        let schema = meta_table_schema();
+        let relations_to_vacuum: Vec<(ObjectId, PageId, Schema)> = {
+            let mut meta_table = builder.build_tree(self.meta_table);
+
+            if meta_table.is_empty()? {
+                return Ok(stats);
+            }
+
+            let mut relations = Vec::new();
+
+            for iter_result in meta_table.iter_forward()? {
+                if let Ok(pos) = iter_result {
+                    meta_table.with_cell_at(pos, |bytes| {
+                        let reader = TupleReader::from_schema(&schema);
+                        if let Some(layout) = reader.parse_for_snapshot(bytes, snapshot)? {
+                            let tuple = TupleRef::new(bytes, layout);
+                            let row = tuple.to_row_with_schema(&schema)?;
+                            let relation = Relation::from_meta_table_row(row);
+
+                            relations.push((
+                                relation.object_id(),
+                                relation.root(),
+                                relation.schema().clone(),
+                            ));
+                        }
+                        Ok::<(), TupleError>(())
+                    })??;
+                }
+            }
+
+            relations
+        };
+
+        // Vacuum each user relation
+        for (object_id, root, relation_schema) in relations_to_vacuum {
+            let bytes_freed =
+                self.vacuum_btree(root, &relation_schema, builder, snapshot, oldest_active_xid)?;
+
+            stats.tables_vacuumed += 1;
+            stats.total_bytes_freed += bytes_freed;
+        }
+
+        Ok(stats)
+    }
+
+    /// Vacuums a single B-tree, iterating through all tuples and removing
+    /// old versions.
+    fn vacuum_btree(
+        &self,
+        root: PageId,
+        schema: &Schema,
+        builder: &BtreeBuilder,
+        snapshot: &Snapshot,
+        oldest_active_xid: TransactionId,
+    ) -> CatalogResult<usize> {
+        let mut tuples_to_vaccum = Vec::new();
+        let mut total_freed = 0;
+        {
+            let mut tree = builder.build_tree(root);
+
+
+            if tree.is_empty()? {
+                return Ok(0);
+            }
+
+            // Vacuum each tuple
+            for position in tree.iter_forward()? {
+                if let Ok(pos) = position {
+                    tree.with_cell_at(pos, |bytes| {
+                        let mut tuple = Tuple::from_slice_unchecked(bytes)?;
+                        let freed = tuple.vaccum_with_schema(oldest_active_xid, schema)?;
+                        total_freed += freed;
+                        if freed > 0 {
+                            tuples_to_vaccum.push(tuple);
+                        };
+                        Ok::<(), TupleError>(())
+                    })??;
+                }
+            }
+        }
+
+        let mut tree = builder.build_tree_mut(root);
+        for tuple in tuples_to_vaccum {
+            tree.update(tree.get_root(), tuple, &schema)?;
+        }
+
+        Ok(total_freed)
+    }
 }
 
 make_shared!(SharedCatalog, Catalog);
@@ -344,22 +485,13 @@ impl CatalogTrait for Catalog {
             Tuple::from_slice_unchecked(bytes).ok()
         })?;
 
-        let Some(tuple) = existing_tuple else {
+        let Some(mut tuple) = existing_tuple else {
             return Ok(());
         };
 
-        // Get the old row for index maintenance
-        let old_row = meta_table
-            .get_row_at(position, &schema, &snapshot)?
-            .expect("Tuple should exist");
+        tuple.add_version_with_schema(&changes, snapshot.xid(), &schema)?;
 
-        // Apply the update
-        let mut updated_tuple = tuple.clone();
-
-        updated_tuple.add_version_with_schema(&changes, snapshot.xid(), &schema)?;
-        updated_tuple.vacuum_with_schema(snapshot.xmin(), &schema)?;
-
-        let result = meta_table.update(self.meta_table, updated_tuple, &schema)?;
+        let result = meta_table.update(self.meta_table, tuple, &schema)?;
 
         Ok(())
     }
@@ -417,8 +549,8 @@ impl CatalogTrait for Catalog {
 
         // Apply the update
         tuple.delete(snapshot.xid())?;
-        tuple.vacuum_with_schema(snapshot.xmin(), &schema)?;
-        let result = meta_table.update(self.meta_table, tuple, &schema)?;
+        //      tuple.vaccum_for_snapshot(&schema, &snapshot)?;
+        meta_table.update(self.meta_table, tuple, &schema)?;
 
         // Now do the same with the meta index.
         let index_schema = meta_index_schema();
@@ -447,7 +579,7 @@ impl CatalogTrait for Catalog {
 
         // Apply the update
         tuple.delete(snapshot.xid())?;
-        tuple.vacuum_with_schema(snapshot.xmin(), &index_schema)?;
+        //    tuple.vaccum_for_snapshot(&index_schema, &snapshot)?;
         meta_index.update(self.meta_index, tuple, &index_schema)?;
 
         Ok(())
