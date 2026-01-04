@@ -410,7 +410,6 @@ impl Catalog {
         {
             let mut tree = builder.build_tree(root);
 
-
             if tree.is_empty()? {
                 return Ok(0);
             }

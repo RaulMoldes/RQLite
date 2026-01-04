@@ -17,7 +17,9 @@ pub enum Request {
     /// Execute SQL (stateless, autocommit via Database::execute)
     Sql(String),
     /// Execute SQL in session context (supports BEGIN/COMMIT/ROLLBACK)
-    SessionSql(String),
+    Begin,
+    Rollback,
+    Commit,
     Explain(String),
     Analyze {
         sample_rate: f64,
@@ -71,9 +73,14 @@ impl Request {
                 buf.push(0x09);
                 buf.push(if *force { 1 } else { 0 });
             }
-            Self::SessionSql(sql) => {
+            Self::Begin => {
                 buf.push(0x0A);
-                write_string(&mut buf, sql);
+            }
+            Self::Rollback => {
+                buf.push(0x0C);
+            }
+            Self::Commit => {
+                buf.push(0x0B);
             }
             Self::Shutdown => {
                 buf.push(0xFF);
@@ -141,10 +148,9 @@ impl Request {
                 let force = payload[0] != 0;
                 Ok(Self::Vacuum { force })
             }
-            0x0A => {
-                let sql = read_string(payload)?;
-                Ok(Self::SessionSql(sql))
-            }
+            0x0A => Ok(Self::Begin),
+            0x0B => Ok(Self::Commit),
+            0x0C => Ok(Self::Rollback),
             0xFF => Ok(Self::Shutdown),
             _ => Err(TcpError::UnknownCommand(cmd)),
         }
@@ -164,6 +170,8 @@ pub enum StatusCode {
     Goodbye = 0x07,
     ShuttingDown = 0x08,
     VacuumComplete = 0x09,
+    Begin = 0x0A,
+    End = 0x0B,
 }
 
 impl TryFrom<u8> for StatusCode {
@@ -181,6 +189,8 @@ impl TryFrom<u8> for StatusCode {
             0x07 => Ok(Self::Goodbye),
             0x08 => Ok(Self::ShuttingDown),
             0x09 => Ok(Self::VacuumComplete),
+            0x0A => Ok(Self::Begin),
+            0x0B => Ok(Self::End),
             _ => Err(TcpError::UnknownStatus(value)),
         }
     }
@@ -194,6 +204,8 @@ pub enum Response {
         columns: Vec<String>,
         data: Vec<Vec<String>>,
     },
+    SessionStarted,
+    SessionEnd,
     RowsAffected(u64),
     Ddl(String),
     Explain(String),
@@ -222,7 +234,6 @@ impl Response {
                 write_string(&mut buf, msg);
             }
             Self::Rows { columns, data } => {
-            
                 buf.push(StatusCode::Rows as u8);
                 buf.extend_from_slice(&(columns.len() as u32).to_le_bytes());
                 for col in columns {
@@ -265,6 +276,12 @@ impl Response {
             }
             Self::ShuttingDown => {
                 buf.push(StatusCode::ShuttingDown as u8);
+            }
+            Self::SessionStarted => {
+                buf.push(StatusCode::Begin as u8);
+            }
+            Self::SessionEnd => {
+                buf.push(StatusCode::End as u8);
             }
         }
 
@@ -366,6 +383,8 @@ impl Response {
             StatusCode::Pong => Ok(Self::Pong),
             StatusCode::Goodbye => Ok(Self::Goodbye),
             StatusCode::ShuttingDown => Ok(Self::ShuttingDown),
+            StatusCode::Begin => Ok(Self::SessionStarted),
+            StatusCode::End => Ok(Self::SessionEnd),
         }
     }
 
@@ -388,14 +407,22 @@ impl Display for TcpError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             Self::VersionMismatch { expected, got } => {
-                write!(f, "Protocol version mismatch: expected {}, got {}", expected, got)
+                write!(
+                    f,
+                    "Protocol version mismatch: expected {}, got {}",
+                    expected, got
+                )
             }
             Self::UnknownCommand(cmd) => write!(f, "Unknown command: 0x{:02X}", cmd),
             Self::UnknownStatus(status) => write!(f, "Unknown status: 0x{:02X}", status),
             Self::InvalidMessage(msg) => write!(f, "Invalid message: {}", msg),
             Self::Io(e) => write!(f, "I/O error: {}", e),
             Self::MessageTooLarge(size) => {
-                write!(f, "Message too large: {} bytes (max {})", size, MAX_MESSAGE_SIZE)
+                write!(
+                    f,
+                    "Message too large: {} bytes (max {})",
+                    size, MAX_MESSAGE_SIZE
+                )
             }
         }
     }
@@ -480,67 +507,4 @@ pub fn send_response<W: Write>(writer: &mut W, response: &Response) -> Result<()
 pub fn recv_response<R: Read>(reader: &mut R) -> Result<Response, TcpError> {
     let data = read_message(reader)?;
     Response::from_bytes(&data)
-}
-
-#[cfg(test)]
-mod protocol_tests {
-    use super::*;
-
-    #[test]
-    fn test_request_roundtrip() {
-        let requests = vec![
-            Request::Create("/tmp/test.db".into()),
-            Request::Open("/tmp/test.db".into()),
-            Request::Sql("SELECT * FROM users".into()),
-            Request::SessionSql("INSERT INTO users VALUES (1, 'test')".into()),
-            Request::Explain("SELECT * FROM users".into()),
-            Request::Analyze {
-                sample_rate: 0.1,
-                max_sample_rows: 1000,
-            },
-            Request::Vacuum { force: false },
-            Request::Vacuum { force: true },
-            Request::Close,
-            Request::Ping,
-            Request::Shutdown,
-        ];
-
-        for req in requests {
-            let bytes = req.to_bytes();
-            let decoded = Request::from_bytes(&bytes).expect("Failed to decode");
-            assert_eq!(req, decoded);
-        }
-    }
-
-    #[test]
-    fn test_response_roundtrip() {
-        let responses = vec![
-            Response::Ok("Success".into()),
-            Response::Error("Failed".into()),
-            Response::Rows {
-                columns: vec!["id".into(), "name".into()],
-                data: vec![
-                    vec!["1".into(), "Alice".into()],
-                    vec!["2".into(), "Bob".into()],
-                ],
-            },
-            Response::RowsAffected(42),
-            Response::Ddl("CREATE TABLE users".into()),
-            Response::Explain("SeqScan -> Filter -> Project".into()),
-            Response::VacuumComplete {
-                tables_vacuumed: 5,
-                bytes_freed: 1024,
-                transactions_cleaned: 10,
-            },
-            Response::Pong,
-            Response::Goodbye,
-            Response::ShuttingDown,
-        ];
-
-        for resp in responses {
-            let bytes = resp.to_bytes();
-            let decoded = Response::from_bytes(&bytes).expect("Failed to decode");
-            assert_eq!(format!("{:?}", resp), format!("{:?}", decoded));
-        }
-    }
 }

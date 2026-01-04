@@ -1,7 +1,7 @@
 //! AxmosDB Server Binary
 
 use axmosdb::{
-    Database,
+    Database, DatabaseError,
     common::DBConfig,
     io::pager::BtreeBuilder,
     runtime::QueryResult,
@@ -10,6 +10,7 @@ use axmosdb::{
 };
 
 use std::{
+    collections::HashMap,
     env,
     io::{BufReader, BufWriter},
     net::{TcpListener, TcpStream},
@@ -17,7 +18,7 @@ use std::{
     process,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -75,6 +76,10 @@ fn print_usage() {
     eprintln!("  -h, --help           Show this help message");
 }
 
+struct ClientContext {
+    session: Option<Session>,
+}
+
 struct Server {
     listener: TcpListener,
     db: Option<Database>,
@@ -83,6 +88,66 @@ struct Server {
 }
 
 impl Server {
+    /// Handle BEGIN statements in the server.
+    fn handle_begin(&mut self, ctx: &mut ClientContext) -> Response {
+        if ctx.session.is_some() {
+            return Response::Error("Transaction already in progress".into());
+        }
+
+        let db = match &self.db {
+            Some(db) => db,
+            None => return Response::Error("No database open".into()),
+        };
+
+        let session = db.session();
+        ctx.session = Some(session);
+
+        match ctx.session.as_mut().unwrap().context_mut().begin() {
+            Ok(_) => Response::SessionStarted,
+            Err(e) => Response::Error(format!("BEGIN failed: {}", e)),
+        }
+    }
+
+    fn handle_commit(&mut self, ctx: &mut ClientContext) -> Response {
+        println!("Se llama a commit");
+        let Some(mut session) = ctx.session.take() else {
+            return Response::Error("No active transaction".into());
+        };
+
+        match session.context_mut().commit() {
+            Ok(_) => Response::SessionEnd,
+            Err(e) => Response::Error(format!("COMMIT failed: {}", e)),
+        }
+    }
+
+    fn handle_rollback(&mut self, ctx: &mut ClientContext) -> Response {
+        let Some(mut session) = ctx.session.take() else {
+            return Response::Error("No active transaction".into());
+        };
+
+        match session.context_mut().rollback() {
+            Ok(_) => Response::SessionEnd,
+            Err(e) => Response::Error(format!("ROLLBACK failed: {}", e)),
+        }
+    }
+
+    fn handle_sql(&mut self, sql: String, ctx: &mut ClientContext) -> Response {
+        let db = match &self.db {
+            Some(db) => db,
+            None => return Response::Error("No database open".into()),
+        };
+
+        let result = match ctx.session.as_mut() {
+            Some(session) => session.execute(&sql).map_err(|e| DatabaseError::from(e)),
+            None => db.execute(&sql),
+        };
+
+        match result {
+            Ok(res) => query_result_to_response(res),
+            Err(e) => Response::Error(format!("Query failed: {}", e)),
+        }
+    }
+
     fn new(config: ServerConfig) -> Result<Self, String> {
         let addr = format!("0.0.0.0:{}", config.port);
         let listener =
@@ -156,6 +221,8 @@ impl Server {
     }
 
     fn handle_client(&mut self, stream: TcpStream) -> Result<(), TcpError> {
+        let mut ctx = ClientContext { session: None };
+
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(300)))
             .ok();
@@ -165,9 +232,6 @@ impl Server {
 
         let mut reader = BufReader::new(stream.try_clone()?);
         let mut writer = BufWriter::new(stream);
-
-        // Create a session for this client connection
-        let mut client_session: Option<Session> = self.db.as_ref().map(|db| db.session());
 
         loop {
             let request = match recv_request(&mut reader) {
@@ -189,11 +253,17 @@ impl Server {
                 Request::Create(_) => "CREATE",
                 Request::Open(_) => "OPEN",
                 Request::Sql(_) => "SQL",
-                Request::SessionSql(_) => "SESSION SQL",
+                Request::Begin => "BEGIN",
+                Request::Commit => "COMMIT",
+                Request::Rollback => "ROLLBACK",
                 Request::Explain(_) => "EXPLAIN",
                 Request::Analyze { .. } => "ANALYZE",
                 Request::Vacuum { force } => {
-                    if *force { "VACUUM FORCE" } else { "VACUUM" }
+                    if *force {
+                        "VACUUM FORCE"
+                    } else {
+                        "VACUUM"
+                    }
                 }
                 Request::Close => "CLOSE",
                 Request::Ping => "PING",
@@ -201,7 +271,7 @@ impl Server {
             };
             println!("  -> {}", request_type);
 
-            let response = self.process_request(request, &mut client_session);
+            let response = self.process_request(request, &mut ctx);
 
             let should_close = matches!(response, Response::Goodbye | Response::ShuttingDown);
 
@@ -211,57 +281,35 @@ impl Server {
                 break;
             }
         }
-
-        // Session dropped here - any uncommitted transaction is rolled back
         Ok(())
     }
 
-    fn process_request(
-        &mut self,
-        request: Request,
-        client_session: &mut Option<Session>,
-    ) -> Response {
+    fn process_request(&mut self, request: Request, ctx: &mut ClientContext) -> Response {
         match request {
             Request::Create(path) => {
                 let response = self.handle_create(path);
-                // Recreate session for new database
-                *client_session = self.db.as_ref().map(|db| db.session());
                 response
             }
             Request::Open(path) => {
                 let response = self.handle_open(path);
-                // Recreate session for opened database
-                *client_session = self.db.as_ref().map(|db| db.session());
                 response
             }
-            Request::Sql(sql) => self.handle_sql(sql),
-            Request::SessionSql(sql) => self.handle_session_sql(sql, client_session),
+            Request::Sql(sql) => self.handle_sql(sql, ctx),
+            Request::Begin => self.handle_begin(ctx),
+            Request::Rollback => self.handle_rollback(ctx),
+            Request::Commit => self.handle_commit(ctx),
             Request::Explain(sql) => self.handle_explain(sql),
             Request::Analyze {
                 sample_rate,
                 max_sample_rows,
             } => self.handle_analyze(sample_rate, max_sample_rows),
             Request::Vacuum { force } => self.handle_vacuum(force),
-            Request::Close => {
-                *client_session = None;
-                self.handle_close()
-            }
+            Request::Close => self.handle_close(),
             Request::Ping => Response::Pong,
             Request::Shutdown => {
                 self.shutdown.store(true, Ordering::Relaxed);
                 Response::ShuttingDown
             }
-        }
-    }
-
-    fn handle_session_sql(&mut self, sql: String, session: &mut Option<Session>) -> Response {
-        let Some(session) = session.as_mut() else {
-            return Response::Error("No database open. Use OPEN or CREATE first.".into());
-        };
-
-        match session.execute(&sql) {
-            Ok(result) => query_result_to_response(result),
-            Err(e) => Response::Error(format!("Query failed: {}", e)),
         }
     }
 
@@ -303,17 +351,6 @@ impl Server {
                 Response::Ok(format!("Database opened: {}", path.display()))
             }
             Err(e) => Response::Error(format!("Failed to open database: {}", e)),
-        }
-    }
-
-    fn handle_sql(&mut self, sql: String) -> Response {
-        let Some(db) = &self.db else {
-            return Response::Error("No database open. Use OPEN or CREATE first.".into());
-        };
-
-        match db.execute(&sql) {
-            Ok(result) => query_result_to_response(result),
-            Err(e) => Response::Error(format!("Query failed: {}", e)),
         }
     }
 
@@ -382,10 +419,7 @@ impl Server {
 
 fn query_result_to_response(result: QueryResult) -> Response {
     match result {
-
         QueryResult::Rows(rows) => {
-
-          
             let columns = if rows.is_empty() {
                 vec![]
             } else {

@@ -52,7 +52,7 @@ impl SessionContext {
         self.active_handle.is_some()
     }
 
-    fn begin(&mut self) -> QueryRunnerResult<QueryResult> {
+    pub fn begin(&mut self) -> QueryRunnerResult<QueryResult> {
         if self.active_handle.is_some() {
             return Err(QueryError::Runtime(RuntimeError::TransactionalError(
                 TransactionError::TransactionAlreadyStarted,
@@ -65,7 +65,7 @@ impl SessionContext {
         Ok(QueryResult::Ddl(DdlOutcome::TransactionStarted))
     }
 
-    fn commit(&mut self) -> QueryRunnerResult<QueryResult> {
+    pub fn commit(&mut self) -> QueryRunnerResult<QueryResult> {
         let handle = self.active_handle.take().ok_or_else(|| {
             QueryError::Runtime(RuntimeError::TransactionalError(
                 TransactionError::TransactionNotStarted,
@@ -81,7 +81,7 @@ impl SessionContext {
         Ok(QueryResult::Ddl(DdlOutcome::TransactionCommitted))
     }
 
-    fn rollback(&mut self) -> QueryRunnerResult<QueryResult> {
+    pub fn rollback(&mut self) -> QueryRunnerResult<QueryResult> {
         let handle = self.active_handle.take().ok_or_else(|| {
             QueryError::Runtime(RuntimeError::TransactionalError(
                 TransactionError::TransactionNotStarted,
@@ -116,6 +116,14 @@ impl Session {
             ctx: SessionContext::new(pager, catalog, coordinator),
             task_runner,
         }
+    }
+
+    pub fn context(&self) -> &SessionContext {
+        &self.ctx
+    }
+
+    pub fn context_mut(&mut self) -> &mut SessionContext {
+        &mut self.ctx
     }
 
     /// Check if session is in an explicit transaction

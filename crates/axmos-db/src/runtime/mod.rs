@@ -675,8 +675,8 @@ impl QueryRunner for WriteQueryRunner {
 
         Ok(ResultGuard::write(
             self.ctx,
-            QueryResult::RowsAffected(affected)),
-        )
+            QueryResult::RowsAffected(affected),
+        ))
     }
 }
 

@@ -218,15 +218,10 @@ impl Client {
                 let force = arg.to_uppercase() == "FORCE";
                 Request::Vacuum { force }
             }
-            _ => {
-                // SQL statement - use session context if in transaction or starting one
-                let upper = input.trim().to_uppercase();
-                if upper == "BEGIN" || self.in_transaction {
-                    Request::SessionSql(input.to_string())
-                } else {
-                    Request::Sql(input.to_string())
-                }
-            }
+            "BEGIN" => Request::Begin,
+            "COMMIT" => Request::Commit,
+            "ROLLBACK" => Request::Rollback,
+            _ => Request::Sql(input.to_string()),
         };
 
         let start = Instant::now();
@@ -242,7 +237,11 @@ impl Client {
         }
     }
 
-    fn print_response(&mut self, response: Response, elapsed: std::time::Duration) -> CommandResult {
+    fn print_response(
+        &mut self,
+        response: Response,
+        elapsed: std::time::Duration,
+    ) -> CommandResult {
         match response {
             Response::Ok(msg) => {
                 println!("{}", msg);
@@ -273,19 +272,7 @@ impl Client {
                 );
             }
             Response::Ddl(msg) => {
-                // Detect transaction state changes from DDL response
-                if msg.contains("TransactionStarted") {
-                    self.in_transaction = true;
-                    println!("BEGIN");
-                } else if msg.contains("TransactionCommitted") {
-                    self.in_transaction = false;
-                    println!("COMMIT");
-                } else if msg.contains("TransactionRolledBack") {
-                    self.in_transaction = false;
-                    println!("ROLLBACK");
-                } else {
-                    println!("{}", msg);
-                }
+                println!("{}", msg);
                 println!("({:.3}s)", elapsed.as_secs_f64());
             }
             Response::Explain(plan) => {
@@ -315,6 +302,16 @@ impl Client {
             }
             Response::ShuttingDown => {
                 return CommandResult::ServerShutdown;
+            }
+            Response::SessionEnd => {
+                println!("END");
+                println!("({:.3}s)", elapsed.as_secs_f64());
+                self.in_transaction = false;
+            }
+            Response::SessionStarted => {
+                println!("BEGIN");
+                println!("({:.3}s)", elapsed.as_secs_f64());
+                self.in_transaction = true;
             }
         }
         CommandResult::Continue

@@ -338,7 +338,6 @@ impl Database {
             handle.commit().map_err(box_err)?;
             Ok(handle.into())
         })?;
-    
 
         Ok(result)
     }
@@ -1249,6 +1248,10 @@ mod database_tests {
 
         session.execute("BEGIN").unwrap();
         session.execute("DELETE FROM test WHERE id = 1").unwrap();
+        let result = session.execute("SELECT COUNT(*) FROM test").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 1, "Delete should not have been rolled back");
         session.execute("ROLLBACK").unwrap();
 
         // Both rows should still exist
