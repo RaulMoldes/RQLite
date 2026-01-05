@@ -10,12 +10,12 @@ use crate::{
     },
     make_shared,
     multithreading::frames::{AsReadLatch, AsWriteLatch, Frame, MemFrame},
-    runtime::{RuntimeError, RuntimeResult, context::TransactionContext},
+    runtime::{RuntimeError, RuntimeResult, context::TransactionContext, dml::DmlExecutor},
     schema::catalog::CatalogTrait,
     storage::{
         core::{buffer::MemBlock, traits::Buffer},
         page::{OverflowPage, PageZero, PageZeroHeader},
-        tuple::{Tuple, TupleError},
+        tuple::{Row, Tuple, TupleError, TupleReader, TupleRef},
     },
     tree::{
         accessor::{BtreeReadAccessor, BtreeWriteAccessor, TreeReader, TreeWriter},
@@ -103,20 +103,21 @@ impl<'a> FileOperations for Pager {
 }
 
 pub struct WalRecuperator {
-    ctx: TransactionContext<BtreeWriteAccessor>,
+    executor: DmlExecutor<BtreeWriteAccessor>,
 }
 
 impl WalRecuperator {
     pub(crate) fn new_with_context(ctx: TransactionContext<BtreeWriteAccessor>) -> Self {
-        Self { ctx }
+        Self {
+            executor: DmlExecutor::new(ctx),
+        }
     }
 
     /// Runs the recovery
     pub(crate) fn run_recovery(&mut self, analysis: &AnalysisResult) -> RuntimeResult<()> {
-        // let analysis = wal.run_analysis()?;
         self.run_undo(&analysis)?;
         self.run_redo(&analysis)?;
-        //  wal.truncate()?;
+
         Ok(())
     }
 
@@ -131,88 +132,94 @@ impl WalRecuperator {
                 if let Some(delete_operation) = analysis.delete_ops.get(&lsn) {
                     let table_id = delete_operation
                         .object_id()
-                        .ok_or(RuntimeError::InvalidState)?;
+                        .expect("Table id must be set for DML logs"); // Sfae to unwrap since all
 
                     // Get builder and snapshot
-                    let builder = self.ctx.tree_builder();
-                    let snapshot = self.ctx.snapshot();
+                    let builder = self.executor.ctx().tree_builder();
+                    let snapshot = self.executor.ctx().snapshot();
 
                     // Locate the table
                     let table = self
-                        .ctx
+                        .executor
+                        .ctx()
                         .catalog()
                         .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
 
-                    let data = Tuple::from_slice_unchecked(delete_operation.undo())?;
-
-                    // Locate the btree
-                    let mut btree = builder.build_tree_mut(table.root());
-                    btree.update(table.root(), data, schema)?;
+                    if let Some(row) = Row::from_bytes_checked_with_snapshot(
+                        delete_operation.undo(),
+                        schema,
+                        &snapshot,
+                    )? {
+                        let columns = schema.column_indexes();
+                        self.executor.insert(table_id, &columns, &row)?;
+                    }
                 }
                 if let Some(update_operation) = analysis.update_ops.get(&lsn) {
                     let table_id = update_operation
                         .object_id()
-                        .ok_or(RuntimeError::InvalidState)?;
+                        .expect("Table id must be set for DML logs");
+                    let row_id = update_operation
+                        .row_id()
+                        .map(|r| UInt64::from(r))
+                        .expect("Row id must be set for DML logs");
 
                     // Get builder and snapshot
-                    let builder = self.ctx.tree_builder();
-                    let snapshot = self.ctx.snapshot();
+                    let builder = self.executor.ctx().tree_builder();
+                    let snapshot = self.executor.ctx().snapshot();
 
                     // Locate the table
                     let table = self
-                        .ctx
+                        .executor
+                        .ctx()
                         .catalog()
                         .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
 
-                    let data = Tuple::from_slice_unchecked(update_operation.undo())?;
-
-                    // Locate the btree
-                    let mut btree = builder.build_tree_mut(table.root());
-                    btree.update(table.root(), data, schema)?;
+                    // Build the rows.
+                    if let Some(undo_row) = Row::from_bytes_checked_with_snapshot(
+                        update_operation.undo(),
+                        schema,
+                        &snapshot,
+                    )? {
+                        if let Some(redo_row) = Row::from_bytes_checked_with_snapshot(
+                            update_operation.undo(),
+                            schema,
+                            &snapshot,
+                        )? {
+                            self.executor
+                                .update_row(table_id, &row_id, &redo_row, &undo_row)?;
+                        }
+                    }
                 }
 
                 if let Some(insert_operation) = analysis.insert_ops.get(&lsn) {
                     let table_id = insert_operation
                         .object_id()
-                        .ok_or(RuntimeError::InvalidState)?;
+                        .expect("Table id must be set for DML logs");
 
                     let row_id = insert_operation
                         .row_id()
                         .map(|r| UInt64::from(r))
-                        .ok_or(RuntimeError::InvalidState)?
-                        .serialize()?;
+                        .expect("Row id must be set for DML logs");
+
+                    let row_id_bytes = row_id.serialize()?;
 
                     // Get builder and snapshot
-                    let builder = self.ctx.tree_builder();
-                    let snapshot = self.ctx.snapshot();
+                    let builder = self.executor.ctx().tree_builder();
+                    let snapshot = self.executor.ctx().snapshot();
 
                     // Locate the table
                     let table = self
-                        .ctx
+                        .executor
+                        .ctx()
                         .catalog()
                         .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
-
-                    // Locate the btree
-                    let mut btree = builder.build_tree_mut(table.root());
-                    let Ok(SearchResult::Found(position)) = btree.search(&row_id, schema) else {
-                        return Err(RuntimeError::InvalidState);
-                    };
-
-                    let tuple = btree.with_cell_at(position, |bytes| {
-                        let mut tuple = Tuple::from_slice_unchecked(bytes)?;
-                        tuple.delete(self.ctx.tid())?;
-                        //          tuple.vacuum_with_schema(self.ctx.snapshot().xmin(), schema)?;
-
-                        Ok::<Tuple, TupleError>(tuple)
-                    })??;
-
-                    btree.update(table.root(), tuple, schema)?;
+                    self.executor.delete(table_id, &row_id)?;
                 }
             }
         }
@@ -231,89 +238,95 @@ impl WalRecuperator {
                 if let Some(delete_operation) = analysis.delete_ops.get(&lsn) {
                     let table_id = delete_operation
                         .object_id()
-                        .ok_or(RuntimeError::InvalidState)?;
+                        .expect("Table id must be set for DML logs");
 
                     let row_id = delete_operation
                         .row_id()
                         .map(|r| UInt64::from(r))
-                        .ok_or(RuntimeError::InvalidState)?
-                        .serialize()?;
+                        .expect("Row id must be set for DML logs");
+
+                    let row_id_bytes = row_id.serialize()?;
 
                     // Get builder and snapshot
-                    let builder = self.ctx.tree_builder();
-                    let snapshot = self.ctx.snapshot();
+                    let builder = self.executor.ctx().tree_builder();
+                    let snapshot = self.executor.ctx().snapshot();
 
                     // Locate the table
                     let table = self
-                        .ctx
+                        .executor
+                        .ctx()
                         .catalog()
                         .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
-
-                    // Locate the btree
-                    let mut btree = builder.build_tree_mut(table.root());
-                    let Ok(SearchResult::Found(position)) = btree.search(&row_id, schema) else {
-                        return Err(RuntimeError::InvalidState);
-                    };
-
-                    let tuple = btree.with_cell_at(position, |bytes| {
-                        let mut tuple = Tuple::from_slice_unchecked(bytes)?;
-                        tuple.delete(self.ctx.tid())?;
-                        //         tuple.vacuum_with_schema(self.ctx.snapshot().xmin(), schema)?;
-
-                        Ok::<Tuple, TupleError>(tuple)
-                    })??;
-
-                    btree.update(table.root(), tuple, schema)?;
+                    self.executor.delete(table_id, &row_id)?;
                 }
 
                 if let Some(update_operation) = analysis.update_ops.get(&lsn) {
                     let table_id = update_operation
                         .object_id()
-                        .ok_or(RuntimeError::InvalidState)?;
+                        .expect("Table id must be set for DML logs");
+                    let row_id = update_operation
+                        .row_id()
+                        .map(|r| UInt64::from(r))
+                        .expect("Row id must be set for DML logs");
 
                     // Get builder and snapshot
-                    let builder = self.ctx.tree_builder();
-                    let snapshot = self.ctx.snapshot();
+                    let builder = self.executor.ctx().tree_builder();
+                    let snapshot = self.executor.ctx().snapshot();
 
                     // Locate the table
                     let table = self
-                        .ctx
+                        .executor
+                        .ctx()
                         .catalog()
                         .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
 
-                    let data = Tuple::from_slice_unchecked(update_operation.redo())?;
-
-                    // Locate the btree
-                    let mut btree = builder.build_tree_mut(table.root());
-                    btree.update(table.root(), data, schema)?;
+                    // Build the rows.
+                    if let Some(undo_row) = Row::from_bytes_checked_with_snapshot(
+                        update_operation.undo(),
+                        schema,
+                        &snapshot,
+                    )? {
+                        if let Some(redo_row) = Row::from_bytes_checked_with_snapshot(
+                            update_operation.undo(),
+                            schema,
+                            &snapshot,
+                        )? {
+                            self.executor
+                                .update_row(table_id, &row_id, &undo_row, &redo_row)?;
+                        }
+                    }
                 }
 
                 if let Some(insert_operation) = analysis.insert_ops.get(&lsn) {
                     let table_id = insert_operation
                         .object_id()
-                        .ok_or(RuntimeError::InvalidState)?;
+                        .expect("Table id must be set for DML logs"); // Sfae to unwrap since all
 
                     // Get builder and snapshot
-                    let builder = self.ctx.tree_builder();
-                    let snapshot = self.ctx.snapshot();
+                    let builder = self.executor.ctx().tree_builder();
+                    let snapshot = self.executor.ctx().snapshot();
 
                     // Locate the table
                     let table = self
-                        .ctx
+                        .executor
+                        .ctx()
                         .catalog()
                         .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
 
-                    let data = Tuple::from_slice_unchecked(insert_operation.redo())?;
-
-                    // Locate the btree
-                    let mut btree = builder.build_tree_mut(table.root());
-                    btree.upsert(table.root(), data, schema)?;
+                    if let Some(row) = Row::from_bytes_checked_with_snapshot(
+                        insert_operation.redo(),
+                        schema,
+                        &snapshot,
+                    )? {
+                        let columns = schema.column_indexes();
+                        self.executor.insert(table_id, &columns, &row)?;
+                    }
                 }
             }
         }

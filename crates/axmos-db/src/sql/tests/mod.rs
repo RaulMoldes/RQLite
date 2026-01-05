@@ -2,12 +2,13 @@ use crate::{
     io::pager::BtreeBuilder,
     multithreading::coordinator::Snapshot,
     schema::{
+        DatabaseItem,
         base::{Column, Relation},
         catalog::{CatalogTrait, MemCatalog},
     },
     sql::{
         binder::{
-            DatabaseItem, ScopeError,
+            ScopeError,
             analyzer::{Analyzer, AnalyzerError, AnalyzerResult},
             binder::{Binder, BinderError, BinderResult},
             bounds::*,
@@ -622,11 +623,11 @@ fn test_binder_select_simple_columns() {
     if let Ok(BoundStatement::Select(select)) = result {
         assert_eq!(select.columns.len(), 2);
         // id is column 0, name is column 1
-        if let BoundExpression::ColumnRef(cr) = &select.columns[0].expr {
+        if let BoundExpression::ColumnBinding(cr) = &select.columns[0].expr {
             assert_eq!(cr.column_idx, 0);
             assert_eq!(cr.data_type, DataTypeKind::Int);
         }
-        if let BoundExpression::ColumnRef(cr) = &select.columns[1].expr {
+        if let BoundExpression::ColumnBinding(cr) = &select.columns[1].expr {
             assert_eq!(cr.column_idx, 1);
             assert_eq!(cr.data_type, DataTypeKind::Blob);
         }
@@ -695,11 +696,11 @@ fn test_binder_join_qualified_resolves_ambiguity() {
 
     if let Ok(BoundStatement::Select(select)) = result {
         // First id from users (scope_index 0), second from orders (scope_index 1)
-        if let BoundExpression::ColumnRef(cr) = &select.columns[0].expr {
+        if let BoundExpression::ColumnBinding(cr) = &select.columns[0].expr {
             assert_eq!(cr.scope_index, 0);
             assert_eq!(cr.column_idx, 0);
         }
-        if let BoundExpression::ColumnRef(cr) = &select.columns[1].expr {
+        if let BoundExpression::ColumnBinding(cr) = &select.columns[1].expr {
             assert_eq!(cr.scope_index, 1);
             assert_eq!(cr.column_idx, 0);
         }
@@ -942,11 +943,27 @@ fn test_binder_create_table_fk_invalid_ref_table_fails() {
 }
 
 #[test]
+fn test_binder_create_table_unique_constraint() {
+    let result = bind_sql(
+        "CREATE TABLE order_items (id INT, order_id INT, UNIQUE (order_id))",
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_binder_create_table_primary_key_constraint() {
+    let result = bind_sql(
+        "CREATE TABLE order_items (id INT, order_id INT, PRIMARY KEY (id))",
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
 fn test_binder_create_table_fk_invalid_ref_column_fails() {
     let result = bind_sql(
         "CREATE TABLE order_items (id INT, order_id INT, FOREIGN KEY (order_id) REFERENCES orders(invalid_col))",
     );
-    assert!(matches!(result, Err(BinderError::ColumnNotFound(_))));
+    assert!(matches!(result, Err(BinderError::Schema(_))));
 }
 
 #[test]
@@ -1009,7 +1026,7 @@ fn test_binder_create_index() {
     if let Ok(BoundStatement::CreateIndex(idx)) = result {
         assert_eq!(idx.table_id, 1);
         assert_eq!(idx.columns.len(), 1);
-        assert_eq!(idx.columns[0].column_idx, 1); // name is index 1
+        assert_eq!(idx.columns[0], 1); // name is index 1
     }
 }
 

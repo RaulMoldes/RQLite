@@ -87,7 +87,7 @@ impl PhysicalProperties {
 
         required.ordering.iter().enumerate().all(|(i, req)| {
             self.ordering.get(i).map_or(false, |(expr, asc)| {
-                matches!(expr, BoundExpression::ColumnRef(c) if c.column_idx == req.column_idx)
+                matches!(expr, BoundExpression::ColumnBinding(c) if c.column_idx == req.column_idx)
                     && *asc == req.ascending
             })
         })
@@ -97,7 +97,7 @@ impl PhysicalProperties {
         self.ordering
             .iter()
             .filter_map(|(expr, asc)| match expr {
-                BoundExpression::ColumnRef(c) => Some(OrderingSpec::new(c.column_idx, *asc)),
+                BoundExpression::ColumnBinding(c) => Some(OrderingSpec::new(c.column_idx, *asc)),
                 _ => None,
             })
             .collect()
@@ -327,7 +327,7 @@ impl<S: StatsProvider> PropertyDeriver<S> {
                 .iter()
                 .enumerate()
                 .filter_map(|(out_idx, pe)| {
-                    if let BoundExpression::ColumnRef(c) = &pe.expr {
+                    if let BoundExpression::ColumnBinding(c) = &pe.expr {
                         if uniq.contains(&c.column_idx) {
                             return Some(out_idx);
                         }
@@ -637,7 +637,7 @@ impl<S: StatsProvider> PropertyDeriver<S> {
 
     fn extract_column_idx(expr: &BoundExpression) -> Option<usize> {
         match expr {
-            BoundExpression::ColumnRef(c) => Some(c.column_idx),
+            BoundExpression::ColumnBinding(c) => Some(c.column_idx),
             _ => None,
         }
     }

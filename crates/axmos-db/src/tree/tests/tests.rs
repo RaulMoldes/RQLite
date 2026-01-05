@@ -333,7 +333,7 @@ pub fn test_dealloc_with_overflow(count: usize) {
             DataType::Blob(Blob::from(large_data)),
         ]));
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 1).expect("Failed to build tuple");
+        let tuple = builder.build(&row, 1).expect("Failed to build tuple");
         tree.insert(root, tuple, &schema).expect("Insert failed");
     }
 

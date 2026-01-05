@@ -9,7 +9,7 @@ use crate::{
     },
     runtime::{
         ContextBuilder, QueryError, QueryResult, QueryRunnerResult, RuntimeError, bind,
-        context::TransactionContext, ddl::DdlOutcome, execute_statement, parse,
+        context::TransactionContext, ddl::DdlResult, execute_statement, parse,
     },
     schema::catalog::SharedCatalog,
     sql::{
@@ -62,7 +62,7 @@ impl SessionContext {
         let handle = self.coordinator.begin()?;
         self.active_handle = Some(handle);
 
-        Ok(QueryResult::Ddl(DdlOutcome::TransactionStarted))
+        Ok(QueryResult::Ddl(DdlResult::TransactionStarted))
     }
 
     pub fn commit(&mut self) -> QueryRunnerResult<QueryResult> {
@@ -78,7 +78,7 @@ impl SessionContext {
             handle,
         )?;
         ctx.commit_transaction()?;
-        Ok(QueryResult::Ddl(DdlOutcome::TransactionCommitted))
+        Ok(QueryResult::Ddl(DdlResult::TransactionCommitted))
     }
 
     pub fn rollback(&mut self) -> QueryRunnerResult<QueryResult> {
@@ -96,7 +96,7 @@ impl SessionContext {
         )?;
         ctx.abort_transaction()?;
 
-        Ok(QueryResult::Ddl(DdlOutcome::TransactionRolledBack))
+        Ok(QueryResult::Ddl(DdlResult::TransactionRolledBack))
     }
 }
 

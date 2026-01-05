@@ -364,7 +364,7 @@ mod cell_comparator_tests {
         ]));
 
         let builder = TupleBuilder::from_schema(schema);
-        let tuple = builder.build(row, 0).unwrap();
+        let tuple = builder.build(&row, 0).unwrap();
         OwnedCell::from_tuple(tuple)
     }
 
@@ -449,7 +449,7 @@ mod cell_comparator_tests {
             DataType::BigUInt(UInt64(1)),
         ]));
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 0).unwrap();
+        let tuple = builder.build(&row, 0).unwrap();
         let cell = OwnedCell::from_tuple(tuple);
 
         let comparator = CellComparator::new(&schema, pager);
@@ -494,7 +494,7 @@ mod cell_comparator_tests {
             DataType::BigUInt(UInt64(200)),
         ]));
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 0).unwrap();
+        let tuple = builder.build(&row, 0).unwrap();
         let cell = OwnedCell::from_tuple(tuple);
 
         let comparator = CellComparator::new(&schema, pager);
@@ -595,7 +595,7 @@ mod reassembler_tests {
         ]));
 
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 0).unwrap();
+        let tuple = builder.build(&row, 0).unwrap();
         let cell = OwnedCell::from_tuple(tuple);
 
         // Reassemble
@@ -631,7 +631,7 @@ mod reassembler_tests {
         ]));
 
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 0).unwrap();
+        let tuple = builder.build(&row, 0).unwrap();
         let cell = OwnedCell::from_tuple(tuple);
 
         // Reassemble
@@ -677,7 +677,7 @@ mod reassembler_tests {
         ]));
 
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 5).unwrap();
+        let tuple = builder.build(&row, 5).unwrap();
 
         // Guardar datos originales
         let original_data = tuple.effective_data().to_vec();

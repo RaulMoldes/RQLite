@@ -4,7 +4,7 @@ use crate::{
     io::pager::BtreeBuilder,
     multithreading::coordinator::Snapshot,
     schema::{
-        base::{Column, Schema},
+        base::{Column, Schema, SchemaError, SchemaResult},
         catalog::CatalogTrait,
     },
     sql::parser::ast::{
@@ -24,13 +24,14 @@ use std::{
 };
 
 use super::bounds::*;
-use super::{ScopeEntry, ScopeError, ScopeStack};
+use super::{ScopeEntry, ScopeError, ScopeStack, calculate_column_offset};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum BinderError {
     Scope(ScopeError),
     TableNotFound(String),
     ColumnNotFound(String),
+    Schema(SchemaError),
     ColumnCountMismatch { expected: usize, found: usize },
     InvalidExpression(String),
     Other(String),
@@ -42,6 +43,7 @@ impl Display for BinderError {
             Self::Scope(e) => write!(f, "scope error: {}", e),
             Self::TableNotFound(name) => write!(f, "table '{}' not found", name),
             Self::ColumnNotFound(name) => write!(f, "column '{}' not found", name),
+            Self::Schema(err) => write!(f, "schema error {err}"),
             Self::ColumnCountMismatch { expected, found } => {
                 write!(
                     f,
@@ -60,6 +62,12 @@ impl Error for BinderError {}
 impl From<ScopeError> for BinderError {
     fn from(e: ScopeError) -> Self {
         Self::Scope(e)
+    }
+}
+
+impl From<SchemaError> for BinderError {
+    fn from(e: SchemaError) -> Self {
+        Self::Schema(e)
     }
 }
 
@@ -181,14 +189,7 @@ impl<C: CatalogTrait> Binder<C> {
 
     fn calculate_column_offset(&self, target_scope_index: usize) -> usize {
         if let Some(scope) = self.scopes.current() {
-            let mut offset = 0;
-            for entry in scope.iter() {
-                if entry.scope_index >= target_scope_index {
-                    break;
-                }
-                offset += entry.schema.num_columns();
-            }
-            offset
+            calculate_column_offset(scope, target_scope_index)
         } else {
             0
         }
@@ -295,7 +296,7 @@ impl<C: CatalogTrait> Binder<C> {
                             let offset = self.calculate_column_offset(entry.scope_index);
 
                             for (col_idx, col) in entry.schema.iter_columns().enumerate() {
-                                let col_ref = BoundColumnRef {
+                                let col_ref = Binding {
                                     table_id: entry.table_id,
                                     scope_index: entry.scope_index,
                                     column_idx: offset + col_idx,
@@ -303,7 +304,7 @@ impl<C: CatalogTrait> Binder<C> {
                                 };
 
                                 result.push(BoundSelectItem {
-                                    expr: BoundExpression::ColumnRef(col_ref),
+                                    expr: BoundExpression::ColumnBinding(col_ref),
                                     output_idx,
                                     output_name: col.name().to_string(),
                                 });
@@ -547,8 +548,8 @@ impl<C: CatalogTrait> Binder<C> {
             .iter()
             .map(|c| Column::new_with_defaults(c.data_type, &c.name))
             .collect();
-        let temp_schema = Schema::new_table(temp_columns);
 
+        let temp_schema = Schema::new_table(temp_columns);
         let columns: Vec<BoundColumnDef> = stmt
             .columns
             .iter()
@@ -581,7 +582,6 @@ impl<C: CatalogTrait> Binder<C> {
             name: col.name.clone(),
             data_type: col.data_type,
             is_non_null: col.is_non_null,
-            is_unique: col.is_unique,
             default,
         })
     }
@@ -635,28 +635,14 @@ impl<C: CatalogTrait> Binder<C> {
         let table_id = relation.object_id();
         let schema = relation.schema();
 
-        let columns: Vec<BoundIndexColumn> = stmt
+        let columns: Vec<usize> = stmt
             .columns
             .iter()
-            .map(|c| {
-                let col_idx = schema
-                    .column_index
-                    .get(&c.name)
-                    .copied()
-                    .ok_or_else(|| BinderError::ColumnNotFound(c.name.clone()))?;
-                Ok(BoundIndexColumn {
-                    column_idx: col_idx,
-                    ascending: c
-                        .order
-                        .as_ref()
-                        .map(|o| matches!(o, crate::sql::parser::ast::OrderDirection::Asc))
-                        .unwrap_or(true),
-                })
-            })
-            .collect::<BinderResult<_>>()?;
+            .map(|c| schema.bind_column(&c.name))
+            .collect::<SchemaResult<Vec<usize>>>()?;
 
         Ok(BoundCreateIndex {
-            index_name: stmt.name.clone(),
+            index_name: stmt.name.to_string(),
             table_id,
             columns,
             if_not_exists: stmt.if_not_exists,
@@ -690,26 +676,19 @@ impl<C: CatalogTrait> Binder<C> {
                     .copied()
                     .ok_or_else(|| BinderError::ColumnNotFound(alter.name.clone()))?;
 
-                let (new_type, set_default, drop_default, set_not_null, drop_not_null) =
-                    match &alter.action {
-                        AlterColumnAction::SetDataType(dt) => {
-                            (Some(*dt), None, false, false, false)
-                        }
-                        AlterColumnAction::SetDefault(e) => {
-                            (None, Some(self.bind_literal_expr(e)?), false, false, false)
-                        }
-                        AlterColumnAction::DropDefault => (None, None, true, false, false),
-                        AlterColumnAction::SetNotNull => (None, None, false, true, false),
-                        AlterColumnAction::DropNotNull => (None, None, false, false, true),
-                    };
+                let action_type = match &alter.action {
+                    AlterColumnAction::SetDataType(dt) => BoundAlterColumnAction::SetDataType(*dt),
+                    AlterColumnAction::SetDefault(e) => {
+                        BoundAlterColumnAction::SetDefault(self.bind_literal_expr(e)?)
+                    }
+                    AlterColumnAction::DropDefault => BoundAlterColumnAction::DropDefault,
+                    AlterColumnAction::SetNotNull => BoundAlterColumnAction::SetNotNull,
+                    AlterColumnAction::DropNotNull => BoundAlterColumnAction::DropNotNull,
+                };
 
                 BoundAlterAction::AlterColumn {
                     column_idx: col_idx,
-                    new_type,
-                    set_default,
-                    drop_default,
-                    set_not_null,
-                    drop_not_null,
+                    action_type,
                 }
             }
             AlterAction::AddConstraint(ct) => {
@@ -765,7 +744,7 @@ impl<C: CatalogTrait> Binder<C> {
 
             Expr::Identifier(name) => {
                 let resolved = self.scopes.resolve_column(name, None)?;
-                Ok(BoundExpression::ColumnRef(BoundColumnRef {
+                Ok(BoundExpression::ColumnBinding(Binding {
                     table_id: resolved.table_id,
                     scope_index: resolved.scope_index,
                     column_idx: resolved.column_idx,
@@ -775,7 +754,7 @@ impl<C: CatalogTrait> Binder<C> {
 
             Expr::QualifiedIdentifier { table, column } => {
                 let resolved = self.scopes.resolve_column(column, Some(table))?;
-                Ok(BoundExpression::ColumnRef(BoundColumnRef {
+                Ok(BoundExpression::ColumnBinding(Binding {
                     table_id: resolved.table_id,
                     scope_index: resolved.scope_index,
                     column_idx: resolved.column_idx,
@@ -1033,9 +1012,7 @@ impl<C: CatalogTrait> Binder<C> {
         BoundExpression::Literal { value }
     }
 
-    // ========================================================================
-    // Type inference helpers
-    // ========================================================================
+
 
     fn try_parse_aggregate(&self, name: &str) -> Option<AggregateFunction> {
         match name {
@@ -1183,16 +1160,13 @@ impl<C: CatalogTrait> Binder<C> {
         names: &[String],
         schema: &Schema,
     ) -> BinderResult<Vec<usize>> {
-        names
+        let col_names = names
             .iter()
             .map(|name| {
-                schema
-                    .column_index
-                    .get(name)
-                    .copied()
-                    .ok_or_else(|| BinderError::ColumnNotFound(name.clone()))
+                schema.bind_column(name).map_err(|e| BinderError::from(e))
             })
-            .collect()
+            .collect::<BinderResult<Vec<usize>>>();
+        col_names
     }
 
     fn infer_output_name(&self, expr: &Expr) -> String {

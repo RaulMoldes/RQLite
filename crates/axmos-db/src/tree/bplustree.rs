@@ -6,7 +6,7 @@ use crate::{
         BtreeMetadata, BtreeOps, Identifiable,
         cell::OwnedCell,
         page::{BtreePage, OverflowPage},
-        tuple::{Row, Tuple, TupleBuilder, TupleError, TupleReader, TupleRef},
+        tuple::{Row, Tuple,  TupleError, TupleReader, TupleRef},
     },
     tree::accessor::{
         Accessor, BtreePagePosition, BtreeReadAccessor, BtreeWriteAccessor, TreeReader, TreeWriter,
@@ -509,8 +509,6 @@ where
         })?
     }
 
-
-
     /// Utility to get a tuple at a specific position in the tree without a visibility check
     pub(crate) fn get_tuple_at_unchecked(
         &mut self,
@@ -518,11 +516,8 @@ where
         schema: &Schema,
     ) -> BtreeResult<Tuple> {
         self.with_cell_at(pos, |bytes| {
-
-
-                let tuple = Tuple::from_slice_unchecked(bytes)?;
-                Ok(tuple)
-
+            let tuple = Tuple::from_slice_unchecked(bytes)?;
+            Ok(tuple)
         })?
     }
 

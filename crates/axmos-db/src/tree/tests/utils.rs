@@ -137,7 +137,7 @@ pub fn make_tuple(schema: &Schema, key: u64, xmin: u64) -> Tuple {
         DataType::Blob(Blob::from(format!("value_{}", key))),
     ]));
     let builder = TupleBuilder::from_schema(schema);
-    builder.build(row, xmin).expect("Failed to build tuple")
+    builder.build(&row, xmin).expect("Failed to build tuple")
 }
 
 /// Extract the key bytes from a tuple for searching.

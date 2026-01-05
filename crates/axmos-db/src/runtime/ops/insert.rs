@@ -107,7 +107,7 @@ where
         while let Some(row) = self.child.next()? {
             self.stats.rows_scanned += 1;
 
-            let mut dml = DmlExecutor::new(&mut self.ctx);
+            let mut dml = DmlExecutor::new(self.ctx.clone());
             dml.insert(self.op.table_id, &self.op.columns, &row)?;
 
             self.stats.rows_produced += 1;

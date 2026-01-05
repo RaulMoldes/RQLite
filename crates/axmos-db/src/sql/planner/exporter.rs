@@ -25,7 +25,7 @@ pub fn summarize_expr(expr: &BoundExpression, max_len: usize) -> String {
 /// Formats a bound expression to a readable string.
 fn format_expr(expr: &BoundExpression) -> String {
     match expr {
-        BoundExpression::ColumnRef(c) => format!("col[{}]", c.column_idx),
+        BoundExpression::ColumnBinding(c) => format!("col[{}]", c.column_idx),
         BoundExpression::Literal { value } => format!("{:?}", value),
         BoundExpression::BinaryOp {
             left, op, right, ..

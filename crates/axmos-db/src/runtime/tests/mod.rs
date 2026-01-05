@@ -3,9 +3,7 @@ use crate::{
     DBConfig,
     io::pager::{BtreeBuilder, Pager, SharedPager},
     multithreading::coordinator::{Snapshot, TransactionCoordinator, TransactionHandle},
-    runtime::{
-        RuntimeError, RuntimeResult, builder::MutableExecutorBuilder, context::TransactionContext,
-    },
+    runtime::{RuntimeResult, builder::MutableExecutorBuilder, context::TransactionContext},
     schema::{
         base::{Column, Relation},
         catalog::{Catalog, CatalogTrait, SharedCatalog},
@@ -158,9 +156,7 @@ impl TestHarness {
             .create_write_context(handle.clone())
             .expect("Failed to create context");
         let mut ddl_executor = DdlExecutor::new(ctx.clone());
-        ddl_executor
-            .execute(&bound)
-            .map_err(|_| RuntimeError::InvalidState)?;
+        ddl_executor.execute(&bound)?;
 
         ctx.pre_commit().expect("Failed to pre commit");
         handle.commit().expect("Failed to commit");
@@ -191,7 +187,7 @@ impl TestHarness {
         let row = Row::new(values.into_boxed_slice());
         let tuple_builder = TupleBuilder::from_schema(schema);
         let tuple = tuple_builder
-            .build(row, tid)
+            .build(&row, tid)
             .expect("Failed to build tuple");
 
         let mut tree = builder.build_tree_mut(root);

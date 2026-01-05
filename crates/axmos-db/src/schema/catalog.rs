@@ -135,7 +135,7 @@ impl Catalog {
     ) -> CatalogResult<Tuple> {
         let schema = meta_table_schema();
         let builder = TupleBuilder::from_schema(&schema);
-        let t = builder.build(relation.to_meta_table_row(), transaction_id)?;
+        let t = builder.build(&relation.to_meta_table_row(), transaction_id)?;
 
         Ok(t)
     }
@@ -147,7 +147,7 @@ impl Catalog {
     ) -> CatalogResult<Tuple> {
         let schema = meta_index_schema();
         let builder = TupleBuilder::from_schema(&schema);
-        let t = builder.build(relation.to_meta_index_row(), transaction_id)?;
+        let t = builder.build(&relation.to_meta_index_row(), transaction_id)?;
 
         Ok(t)
     }
@@ -517,6 +517,13 @@ impl CatalogTrait for Catalog {
                 self.remove_relation(relation, builder, snapshot, cascade)?;
             }
         };
+
+        // First, deallocate the relation.
+        // Deallocate the relation.
+        {
+            let mut tree = builder.build_tree_mut(rel.root());
+            tree.dealloc()?;
+        }
 
         // Obtain the relation metadata
         let relation_id = rel.object_id();

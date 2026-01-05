@@ -587,7 +587,6 @@ pub struct ColumnDefExpr {
     pub(crate) name: String,
     pub(crate) data_type: DataTypeKind,
     pub(crate) is_non_null: bool,
-    pub(crate) is_unique: bool,
     pub(crate) default: Option<Expr>,
 }
 
@@ -597,7 +596,6 @@ impl ColumnDefExpr {
             name,
             data_type,
             is_non_null: false,
-            is_unique: false,
             default: None,
         }
     }
@@ -1014,10 +1012,6 @@ impl Display for ColumnDefExpr {
         write!(f, "{} {}", self.name, self.data_type)?;
         if self.is_non_null {
             write!(f, "NON NULL")?;
-        }
-
-        if self.is_unique {
-            write!(f, "UNIQUE")?;
         }
 
         if let Some(value) = self.default.as_ref() {

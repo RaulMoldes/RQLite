@@ -1604,7 +1604,7 @@ mod database_tests {
         let (_dir, path) = temp_db_path();
         let db = Database::create(&path, DBConfig::default()).unwrap();
 
-        db.execute("CREATE TABLE test (id BIGINT, code TEXT UNIQUE)")
+        db.execute("CREATE TABLE test (id BIGINT, code TEXT, UNIQUE (code))")
             .expect("Failed to create table");
         db.execute("INSERT INTO test VALUES (1, 'A')").unwrap();
 
@@ -1631,7 +1631,7 @@ mod database_tests {
         let (_dir, path) = temp_db_path();
         let db = Database::create(&path, DBConfig::default()).unwrap();
 
-        db.execute("CREATE TABLE codes (id BIGINT, code TEXT UNIQUE)")
+        db.execute("CREATE TABLE codes (id BIGINT, code TEXT, UNIQUE (code))")
             .expect("Failed to create table");
 
         db.execute("INSERT INTO codes VALUES (1, 'ABC')").unwrap();

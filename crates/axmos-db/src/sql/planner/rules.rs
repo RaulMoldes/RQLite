@@ -122,12 +122,12 @@ fn swap_join_condition(cond: &BoundExpression) -> BoundExpression {
 /// Shifts column indices by offset.
 fn shift_columns(expr: &BoundExpression, offset: i32) -> Option<BoundExpression> {
     match expr {
-        BoundExpression::ColumnRef(c) => {
+        BoundExpression::ColumnBinding(c) => {
             let new_idx = c.column_idx as i32 + offset;
             if new_idx < 0 {
                 None
             } else {
-                Some(BoundExpression::ColumnRef(BoundColumnRef {
+                Some(BoundExpression::ColumnBinding(Binding {
                     column_idx: new_idx as usize,
                     ..*c
                 }))
@@ -152,7 +152,7 @@ fn shift_columns(expr: &BoundExpression, offset: i32) -> Option<BoundExpression>
 /// Checks if all columns in expr have index >= min.
 fn all_columns_ge(expr: &BoundExpression, min: usize) -> bool {
     match expr {
-        BoundExpression::ColumnRef(c) => c.column_idx >= min,
+        BoundExpression::ColumnBinding(c) => c.column_idx >= min,
         BoundExpression::BinaryOp { left, right, .. } => {
             all_columns_ge(left, min) && all_columns_ge(right, min)
         }
@@ -164,7 +164,7 @@ fn all_columns_ge(expr: &BoundExpression, min: usize) -> bool {
 /// Checks if any column in expr is in range [start, end).
 fn any_column_in_range(expr: &BoundExpression, start: usize, end: usize) -> bool {
     match expr {
-        BoundExpression::ColumnRef(c) => c.column_idx >= start && c.column_idx < end,
+        BoundExpression::ColumnBinding(c) => c.column_idx >= start && c.column_idx < end,
         BoundExpression::BinaryOp { left, right, .. } => {
             any_column_in_range(left, start, end) || any_column_in_range(right, start, end)
         }
@@ -302,7 +302,7 @@ fn classify_predicates(
 /// Checks if expression uses left/right columns.
 fn check_column_usage(expr: &BoundExpression, left_cols: usize) -> (bool, bool) {
     match expr {
-        BoundExpression::ColumnRef(c) => {
+        BoundExpression::ColumnBinding(c) => {
             if c.column_idx < left_cols {
                 (true, false)
             } else {
@@ -341,7 +341,7 @@ fn check_column_usage(expr: &BoundExpression, left_cols: usize) -> (bool, bool) 
 /// Rewrites column references using a mapping.
 fn rewrite_with_mapping(expr: &BoundExpression, mapping: &[usize]) -> BoundExpression {
     match expr {
-        BoundExpression::ColumnRef(c) => BoundExpression::ColumnRef(BoundColumnRef {
+        BoundExpression::ColumnBinding(c) => BoundExpression::ColumnBinding(Binding {
             column_idx: mapping.get(c.column_idx).copied().unwrap_or(c.column_idx),
             ..*c
         }),
@@ -380,7 +380,7 @@ fn create_column_ref(column_idx: usize, schema: &Schema) -> BoundExpression {
         .map(|c| c.datatype())
         .unwrap_or(DataTypeKind::Null);
 
-    BoundExpression::ColumnRef(BoundColumnRef {
+    BoundExpression::ColumnBinding(Binding {
         table_id: None,
         scope_index: 0,
         column_idx,
@@ -741,7 +741,7 @@ impl TransformationRule for FilterPushdownProjectRule {
                             return proj
                                 .expressions
                                 .iter()
-                                .all(|e| matches!(&e.expr, BoundExpression::ColumnRef(_)));
+                                .all(|e| matches!(&e.expr, BoundExpression::ColumnBinding(_)));
                         }
                     }
                 }
@@ -776,7 +776,7 @@ impl TransformationRule for FilterPushdownProjectRule {
         // Build mapping from output to input columns
         let mut mapping = Vec::new();
         for proj_expr in &project_exprs {
-            if let BoundExpression::ColumnRef(col_ref) = &proj_expr.expr {
+            if let BoundExpression::ColumnBinding(col_ref) = &proj_expr.expr {
                 mapping.push(col_ref.column_idx);
             } else {
                 return Ok(vec![]);

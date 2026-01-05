@@ -7,7 +7,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BoundColumnRef {
+pub struct Binding {
     pub table_id: Option<ObjectId>,
     pub scope_index: usize,
     pub column_idx: usize,
@@ -78,7 +78,7 @@ impl ScalarFunction {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoundExpression {
-    ColumnRef(BoundColumnRef),
+    ColumnBinding(Binding),
     Literal {
         value: DataType,
     },
@@ -145,7 +145,7 @@ pub enum BoundExpression {
 impl BoundExpression {
     pub fn data_type(&self) -> DataTypeKind {
         match self {
-            Self::ColumnRef(cr) => cr.data_type,
+            Self::ColumnBinding(cr) => cr.data_type,
             Self::Literal { value } => value.kind(),
             Self::BinaryOp { result_type, .. } => *result_type,
             Self::UnaryOp { result_type, .. } => *result_type,
@@ -273,21 +273,10 @@ pub struct BoundColumnDef {
     pub name: String,
     pub data_type: DataTypeKind,
     pub is_non_null: bool,
-    pub is_unique: bool,
     pub default: Option<BoundExpression>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum BoundColumnConstraint {
-    PrimaryKey,
-    NotNull,
-    Unique,
-    ForeignKey {
-        ref_table_id: ObjectId,
-        ref_column_idx: usize,
-    },
-    Default(BoundExpression),
-}
+
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoundTableConstraint {
@@ -304,14 +293,8 @@ pub enum BoundTableConstraint {
 pub struct BoundCreateIndex {
     pub index_name: String,
     pub table_id: ObjectId,
-    pub columns: Vec<BoundIndexColumn>,
+    pub columns: Vec<usize>,
     pub if_not_exists: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct BoundIndexColumn {
-    pub column_idx: usize,
-    pub ascending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -326,13 +309,18 @@ pub enum BoundAlterAction {
     DropColumn(usize),
     AlterColumn {
         column_idx: usize,
-        new_type: Option<DataTypeKind>,
-        set_default: Option<BoundExpression>,
-        drop_default: bool,
-        set_not_null: bool,
-        drop_not_null: bool,
+        action_type: BoundAlterColumnAction,
     },
     AddConstraint(BoundTableConstraint),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoundAlterColumnAction {
+    SetDataType(DataTypeKind),
+    SetDefault(BoundExpression),
+    DropDefault,
+    SetNotNull,
+    DropNotNull,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -9,14 +9,21 @@ use crate::{
     core::SerializableType,
     runtime::{
         RuntimeError, RuntimeResult, TypeSystemError,
-        context::TransactionContext,
+        context::{ExecutionContext, TransactionContext},
         eval::ExpressionEvaluator,
-        validator::{validate_insert_constraints, validate_update_constraints},
+        validator::ConstraintValidator,
     },
-    schema::{Schema, base::IndexHandle, catalog::CatalogTrait},
+    schema::{
+        Schema,
+        base::{IndexHandle, Relation},
+        catalog::CatalogTrait,
+    },
     sql::binder::bounds::BoundExpression,
     storage::tuple::{Row, Tuple, TupleBuilder, TupleReader},
-    tree::{accessor::TreeWriter, bplustree::SearchResult},
+    tree::{
+        accessor::TreeWriter,
+        bplustree::SearchResult,
+    },
     types::{DataType, ObjectId, RowId, UInt64},
 };
 
@@ -42,23 +49,91 @@ pub struct DeleteResult {
 ///
 /// This component provides a clean interface for Insert, Update, and Delete
 /// operations.
-pub(crate) struct DmlExecutor<'ctx, Acc>
-where
-    Acc: TreeWriter + Clone + Default,
-{
-    ctx: &'ctx mut TransactionContext<Acc>,
+pub(crate) struct DmlExecutor<Acc: TreeWriter> {
+    ctx: TransactionContext<Acc>,
 }
 
-impl<'ctx, Acc> DmlExecutor<'ctx, Acc>
-where
-    Acc: TreeWriter + Clone + Default,
-{
+impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
     /// Creates a new DML executor with the given transaction context.
-    pub(crate) fn new(ctx: &'ctx mut TransactionContext<Acc>) -> Self {
+    pub(crate) fn new(ctx: TransactionContext<Acc>) -> Self {
         Self { ctx }
     }
 
-    // Public API
+    /// UTILITY TO BUILD THE ASSIGNMENTS HASHMAP
+    fn build_assignments(
+        old_row: &Row,
+        new_row: &Row,
+        num_keys: usize,
+    ) -> HashMap<usize, DataType> {
+        let mut assignments = HashMap::new();
+
+        for idx in num_keys..old_row.len().min(new_row.len()) {
+            if old_row[idx] != new_row[idx] {
+                assignments.insert(idx, new_row[idx].clone());
+            }
+        }
+
+        assignments
+    }
+
+    /// Validates constraints for an update operation.
+    ///
+    /// This function checks:
+    /// - NOT NULL constraints on updated columns
+    /// - UNIQUE constraints (excluding the current row) via index lookup
+    pub fn validate_update_constraints(
+        &self,
+        relation: &Relation,
+        old_values: &[DataType],
+        assignments: &HashMap<usize, DataType>,
+        row_id: RowId
+    ) -> RuntimeResult<()>
+    {
+
+        let schema = relation.schema();
+        // Build the new values array by applying assignments to old values
+        let mut new_values: Vec<DataType> = old_values.to_vec();
+        for (value_idx, value) in assignments {
+            // value_idx is relative to values (after keys), convert to column index
+            let col_idx = value_idx + schema.num_keys();
+            if col_idx < new_values.len() {
+                new_values[col_idx] = value.clone();
+            }
+        }
+
+
+
+        let table_name = relation.name().to_string();
+        let validator = ConstraintValidator::new(schema, table_name, self.ctx.clone());
+
+        // Validate NOT NULL
+        validator.validate_not_null_constraints(&new_values)?;
+        let mut excluded = HashSet::new();
+        excluded.insert(row_id);
+
+        // Validate UNIQUE
+        validator.validate_unique_constraints(&new_values, true, excluded)?;
+
+        Ok(())
+    }
+
+    pub(crate) fn validate_insert_constraints(
+        &self,
+        relation: &Relation,
+        new_values: &[DataType],
+    ) -> RuntimeResult<()> {
+        let schema = relation.schema();
+        let table_name = relation.name().to_string();
+        let validator = ConstraintValidator::new(schema, table_name, self.ctx.clone());
+
+        // Validate NOT NULL
+        validator.validate_not_null_constraints(&new_values)?;
+
+        // Validate UNIQUE
+        validator.validate_unique_constraints(&new_values, true, HashSet::new())?;
+
+        Ok(())
+    }
 
     /// Inserts a new row into the specified table.
     ///
@@ -94,26 +169,48 @@ where
 
         // Build the full row with the assigned row ID
         let full_row = self.build_full_row(&schema, columns, values, row_id)?;
-        let full_values: Vec<DataType> = full_row.iter().cloned().collect();
+
+
+        // Constraint validation goes here.
+        self.validate_insert_constraints(&relation, full_row.as_slice())?;
         let indexes = relation.get_indexes();
 
-        // *** ADD CONSTRAINT VALIDATION HERE ***
-        validate_insert_constraints(self.ctx, &schema, &full_values, &indexes)?;
-
         // Create and insert the tuple
-        let tuple = TupleBuilder::from_schema(&schema).build(full_row, tid)?;
+        let tuple = TupleBuilder::from_schema(&schema).build(&full_row, tid)?;
 
         // Log the insert operation
         self.ctx
             .log_insert(table_id, row_id.value(), Box::from(&tuple))?;
 
-        // Insert into main table
-        let mut btree = self.ctx.build_tree(root);
-        btree.insert(root, tuple, &schema)?;
-        btree.accessor_mut()?.clear();
+        // Table access scope
+        {
+            // Insert into main table
+            let mut btree = self.ctx.build_tree(root);
+            let search_result = btree.search_tuple(&tuple, &schema)?;
+
+            if let SearchResult::Found(position) = search_result {
+                let existing = btree.get_tuple_at_unchecked(position, &schema)?;
+
+                // If it is deleted we need to un-delete it
+                if existing.is_deleted() {
+                    btree.update(root, tuple, &schema)?;
+                };
+
+                // Otherwise there is nothing to do. Just keep the tuple there.
+            } else {
+                btree.insert(root, tuple, &schema)?;
+            }
+        }
 
         // Maintain secondary indexes
-        self.insert_index_entries(&indexes, &full_values, row_id.value())?;
+        self.maintain_secondary_indexes(
+            &relation.get_indexes(),
+            None,
+            Some(full_row),
+            None,
+            &schema,
+            row_id.value(),
+        )?;
 
         // Update relation metadata
         self.ctx.catalog().write().update_relation(
@@ -130,6 +227,22 @@ where
         })
     }
 
+    pub fn ctx(&self) -> &ExecutionContext<Acc> {
+        &self.ctx
+    }
+
+    /// Synthactic sugar for the update function
+    pub fn update_row(
+        &mut self,
+        table_id: ObjectId,
+        row_id: &UInt64,
+        old_row: &Row,
+        new_row: &Row,
+    ) -> RuntimeResult<UpdateResult> {
+        let assignments = Self::build_assignments(old_row, new_row, 1);
+        self.update(table_id, row_id, assignments)
+    }
+
     /// Updates a row identified by its row ID.
     ///
     /// # Arguments
@@ -143,7 +256,7 @@ where
         &mut self,
         table_id: ObjectId,
         row_id: &UInt64,
-        assignments: &HashMap<usize, DataType>,
+        assignments: HashMap<usize, DataType>,
     ) -> RuntimeResult<UpdateResult> {
         let row_id_bytes = row_id.serialize()?;
         let tid = self.ctx.tid();
@@ -156,6 +269,8 @@ where
                 .catalog()
                 .read()
                 .get_relation(table_id, &tree_builder, &snapshot)?;
+
+
         let schema = relation.schema().clone();
         let root = relation.root();
 
@@ -174,7 +289,6 @@ where
         })?;
 
         let Some(tuple) = existing_tuple else {
-            self.ctx.accessor_mut().clear();
             return Ok(UpdateResult { updated: false });
         };
 
@@ -183,20 +297,12 @@ where
             .get_row_at(position, &schema, &snapshot)?
             .expect("Tuple should exist");
 
-        // *** ADD CONSTRAINT VALIDATION HERE ***
-        validate_update_constraints(
-            self.ctx,
-            &schema,
-            &old_row.clone().into_inner(),
-            assignments,
-            &relation.get_indexes(),
-            row_id.value(),
-        )?;
+        // Constraint validation goes here.
+        self.validate_update_constraints(&relation, old_row.as_slice(), &assignments, row_id.value())?;
 
         // Apply the update
         let mut updated_tuple = tuple.clone();
-        updated_tuple.add_version_with(assignments, tid, &schema)?;
-        //    updated_tuple.vaccum_for_snapshot(&schema, &snapshot)?;
+        updated_tuple.add_version_with(&assignments, tid, &schema)?;
 
         // Get the new row for index maintenance
         let new_row = updated_tuple
@@ -216,11 +322,11 @@ where
         btree.update(root, updated_tuple, &schema)?;
 
         // Maintain secondary indexes
-        self.update_index_entries(
+        self.maintain_secondary_indexes(
             &relation.get_indexes(),
-            &old_row.clone().into_inner(),
-            &new_row.into_inner(),
-            assignments,
+            Some(old_row),
+            Some(new_row),
+            Some(assignments),
             &schema,
             row_id.value(),
         )?;
@@ -265,7 +371,6 @@ where
         })?;
 
         let Some(tuple) = existing_tuple else {
-            self.ctx.accessor_mut().clear();
             return Ok(DeleteResult { deleted: false });
         };
 
@@ -277,7 +382,6 @@ where
         // Mark as deleted
         let mut deleted_tuple = tuple.clone();
         deleted_tuple.delete(snapshot.xid())?;
-        //   deleted_tuple.vaccum_for_snapshot(&schema, &snapshot)?;
 
         // Log the delete
         self.ctx
@@ -287,9 +391,12 @@ where
         btree.update(root, deleted_tuple, &schema)?;
 
         // Maintain secondary indexes
-        self.delete_index_entries(
+        self.maintain_secondary_indexes(
             &relation.get_indexes(),
-            &old_row.into_inner(),
+            Some(old_row),
+            None,
+            None,
+            &schema,
             row_id.value(),
         )?;
 
@@ -347,80 +454,29 @@ where
         Ok(Row::new(entry.into_boxed_slice()))
     }
 
-    /// Inserts entries into all secondary indexes for a new row.
-    fn insert_index_entries(
+    /// Maintains secondary indexes.
+    fn maintain_secondary_indexes(
         &mut self,
         indexes: &[IndexHandle],
-        values: &[DataType],
-        row_id: RowId,
-    ) -> RuntimeResult<()> {
-        let tree_builder = self.ctx.tree_builder();
-        let snapshot = self.ctx.snapshot();
-        let tid = self.ctx.tid();
-
-        for index in indexes {
-            let index_relation =
-                self.ctx
-                    .catalog()
-                    .read()
-                    .get_relation(index.id(), &tree_builder, &snapshot)?;
-            let index_schema = index_relation.schema();
-            let index_root = index_relation.root();
-
-            let mut index_btree = self.ctx.build_tree(index_root);
-
-            // Build and insert the index entry
-            let index_row = Self::build_index_entry(values, index, index_schema, row_id)?;
-            let index_tuple = TupleBuilder::from_schema(index_schema).build(index_row, tid)?;
-
-            let search_result = index_btree.search_tuple(&index_tuple, &index_schema)?;
-
-            if let SearchResult::Found(position) = search_result {
-                let existing = index_btree.get_tuple_at_unchecked(position, &index_schema)?;
-
-                // If it is deleted we need to un-delete it
-                if existing.is_deleted() {
-                    index_btree.update(index_root, index_tuple, index_schema)?;
-                };
-
-                // Otherwise there is nothing to do. Just keep the tuple there.
-            } else {
-
-                index_btree.insert(index_root, index_tuple, index_schema)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Updates entries in secondary indexes affected by the update.
-    fn update_index_entries(
-        &mut self,
-        indexes: &[IndexHandle],
-        old_values: &[DataType],
-        new_values: &[DataType],
-        assignments: &HashMap<usize, DataType>,
+        old_values: Option<Row>,
+        new_values: Option<Row>,
+        table_assignments: Option<HashMap<usize, DataType>>,
         table_schema: &Schema,
         row_id: RowId,
     ) -> RuntimeResult<()> {
+        let old_values = old_values.map(|r| r.into_inner());
+        let new_values = new_values.map(|r| r.into_inner());
+
         let tree_builder = self.ctx.tree_builder();
         let snapshot = self.ctx.snapshot();
         let tid = self.ctx.tid();
 
         // Determine which columns were modified
-        let modified_columns: HashSet<usize> = assignments.keys().copied().collect();
+        let modified_columns: Option<HashSet<usize>> = table_assignments
+            .clone()
+            .map(|c| c.keys().copied().collect());
 
         for index in indexes {
-            // Skip indexes not affected by this update
-            let index_affected = index
-                .indexed_column_ids()
-                .iter()
-                .any(|col| modified_columns.contains(col));
-
-            if !index_affected {
-                continue;
-            }
-
             let index_relation =
                 self.ctx
                     .catalog()
@@ -429,38 +485,114 @@ where
             let index_schema = index_relation.schema();
             let index_root = index_relation.root();
 
-            // Build the old index key for searching
-            let old_index_row = Self::build_index_entry(old_values, index, index_schema, row_id)?;
-            let old_index_tuple =
-                TupleBuilder::from_schema(index_schema).build(old_index_row, tid)?;
+            if let Some(modified) = modified_columns.as_ref() {
+                // Skip indexes not affected by this update
+                let index_affected = index
+                    .indexed_column_ids()
+                    .iter()
+                    .any(|col| modified.contains(col));
 
-            // Build new assignments for the index
-            let index_assignments =
-                self.build_index_assignments(old_values, assignments, index, index_schema)?;
-
-            // Search and update the index entry
-            let mut index_btree = self.ctx.build_tree(index_root);
-            let search_result = index_btree.search_tuple(&old_index_tuple, index_schema)?;
-
-            if let SearchResult::Found(pos) = search_result {
-                let tuple_reader = TupleReader::from_schema(index_schema);
-                let updated = index_btree.with_cell_at(pos, |bytes| {
-                    tuple_reader.parse_for_snapshot(bytes, &snapshot).ok()??;
-                    let mut tuple = Tuple::from_slice_unchecked(bytes).ok()?;
-                    tuple
-                        .add_version_with(&index_assignments, snapshot.xid(), index_schema)
-                        .ok()?;
-                    //    let _ = tuple.vaccum_for_snapshot(&index_schema, &snapshot);
-                    Some(tuple)
-                })?;
-
-                if let Some(tuple) = updated {
-                    index_btree.update(index_root, tuple, index_schema)?;
+                if !index_affected {
+                    continue;
                 }
+            }
+
+            let mut index_btree = self.ctx.build_tree(index_root);
+
+            match (
+                old_values.as_ref(),
+                new_values.as_ref(),
+                table_assignments.as_ref(),
+            ) {
+                // Insert operation
+                (None, Some(values), None) => {
+                    let index_row = Self::build_index_entry(&values, index, index_schema, row_id)?;
+                    let index_tuple =
+                        TupleBuilder::from_schema(index_schema).build(&index_row, tid)?;
+
+                    let search_result = index_btree.search_tuple(&index_tuple, &index_schema)?;
+
+                    if let SearchResult::Found(position) = search_result {
+                        let existing =
+                            index_btree.get_tuple_at_unchecked(position, &index_schema)?;
+
+                        // If it is deleted we need to un-delete it
+                        if existing.is_deleted() {
+                            index_btree.update(index_root, index_tuple, index_schema)?;
+                        };
+
+                        // Otherwise there is nothing to do. Just keep the tuple there.
+                    } else {
+                        index_btree.insert(index_root, index_tuple, index_schema)?;
+                    }
+                }
+                // New values was set to [None] which means we are on a delete operation. Then we need to perform the maintenance in a different way.
+                // Delete operation
+                (Some(values), None, None) => {
+                    let index_row = Self::build_index_entry(&values, index, index_schema, row_id)?;
+                    let index_tuple =
+                        TupleBuilder::from_schema(index_schema).build(&index_row, tid)?;
+                    let search_result = index_btree.search_tuple(&index_tuple, &index_schema)?;
+
+                    if let SearchResult::Found(position) = search_result {
+                        let tuple_reader = TupleReader::from_schema(index_schema);
+
+                        // Update the index entry by adding a new version to it.
+                        let updated = index_btree.with_cell_at(position, |bytes| {
+                            tuple_reader.parse_for_snapshot(bytes, &snapshot).ok()??;
+                            let tuple = Tuple::from_slice_unchecked(bytes).ok()?;
+                            Some(tuple)
+                        })?;
+
+                        if let Some(mut tuple) = updated {
+                            tuple.delete(self.ctx.tid())?;
+                            index_btree.update(index_root, tuple, index_schema)?;
+                        }
+                    };
+                } // Update operation
+                (Some(old_values), Some(new_values), Some(assignments)) => {
+                    // Build the old index key for searching
+                    let old_index_row =
+                        Self::build_index_entry(&old_values, index, index_schema, row_id)?;
+                    let old_index_tuple =
+                        TupleBuilder::from_schema(index_schema).build(&old_index_row, tid)?;
+
+                    // Build new assignments for the index
+                    let index_assignments = self.build_index_assignments(
+                        &old_values,
+                        &assignments,
+                        index,
+                        index_schema,
+                    )?;
+
+                    // Search and update the index entry
+                    let mut index_btree = self.ctx.build_tree(index_root);
+                    let search_result = index_btree.search_tuple(&old_index_tuple, index_schema)?;
+
+                    if let SearchResult::Found(pos) = search_result {
+                        let tuple_reader = TupleReader::from_schema(index_schema);
+
+                        // Update the index entry by adding a new version to it.
+                        let updated = index_btree.with_cell_at(pos, |bytes| {
+                            tuple_reader.parse_for_snapshot(bytes, &snapshot).ok()??;
+                            let tuple = Tuple::from_slice_unchecked(bytes).ok()?;
+                            Some(tuple)
+                        })?;
+
+                        if let Some(mut tuple) = updated {
+                            tuple.add_version_with(
+                                &index_assignments,
+                                snapshot.xid(),
+                                index_schema,
+                            )?;
+                            index_btree.update(index_root, tuple, index_schema)?;
+                        }
+                    }
+                }
+                _ => return Err(RuntimeError::InvalidStatement),
             }
         }
 
-        self.ctx.accessor_mut().clear();
         Ok(())
     }
 
@@ -496,54 +628,6 @@ where
         }
 
         Ok(index_assignments)
-    }
-
-    /// Marks entries as deleted in all secondary indexes for a deleted row.
-    fn delete_index_entries(
-        &mut self,
-        indexes: &[IndexHandle],
-        values: &[DataType],
-        row_id: RowId,
-    ) -> RuntimeResult<()> {
-        let tree_builder = self.ctx.tree_builder();
-        let snapshot = self.ctx.snapshot();
-        let tid = self.ctx.tid();
-
-        for index in indexes {
-            let index_relation =
-                self.ctx
-                    .catalog()
-                    .read()
-                    .get_relation(index.id(), &tree_builder, &snapshot)?;
-            let index_schema = index_relation.schema();
-            let index_root = index_relation.root();
-
-            // Build the index key for searching
-            let index_row = Self::build_index_entry(values, index, index_schema, row_id)?;
-            let index_tuple = TupleBuilder::from_schema(index_schema).build(index_row, tid)?;
-
-            // Search and mark as deleted
-            let mut index_btree = self.ctx.build_tree(index_root);
-            let search_result = index_btree.search_tuple(&index_tuple, index_schema)?;
-
-            if let SearchResult::Found(pos) = search_result {
-                let tuple_reader = TupleReader::from_schema(index_schema);
-                let deleted = index_btree.with_cell_at(pos, |bytes| {
-                    tuple_reader.parse_for_snapshot(bytes, &snapshot).ok()??;
-                    let mut tuple = Tuple::from_slice_unchecked(bytes).ok()?;
-                    tuple.delete(tid).ok()?;
-                    //       let _ = tuple.vaccum_for_snapshot(&index_schema, &snapshot);
-                    Some(tuple)
-                })?;
-
-                if let Some(tuple) = deleted {
-                    index_btree.update(index_root, tuple, index_schema)?;
-                }
-            }
-        }
-
-        self.ctx.accessor_mut().clear();
-        Ok(())
     }
 }
 

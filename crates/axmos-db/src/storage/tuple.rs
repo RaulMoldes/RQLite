@@ -97,6 +97,24 @@ impl Default for Row {
     }
 }
 
+impl From<Vec<DataType>> for Row {
+    fn from(value: Vec<DataType>) -> Self {
+        Self(value.into_boxed_slice())
+    }
+}
+
+impl From<&[DataType]> for Row {
+    fn from(value: &[DataType]) -> Self {
+        Self(value.to_vec().into_boxed_slice())
+    }
+}
+
+impl From<Box<[DataType]>> for Row {
+    fn from(value: Box<[DataType]>) -> Self {
+        Self(value)
+    }
+}
+
 impl Row {
     pub fn new(data: Box<[DataType]>) -> Self {
         Self(data)
@@ -112,6 +130,31 @@ impl Row {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    pub fn as_slice(&self) -> &[DataType] {
+        self.0.as_ref()
+    }
+
+    pub fn from_bytes_checked(value: &[u8], schema: &Schema) -> TupleResult<Self> {
+        let reader = TupleReader::from_schema(schema);
+        let layout = reader.parse_last_version(value)?;
+        let reference = TupleRef::new(value, layout);
+        reference.to_row_with(schema)
+    }
+
+    pub fn from_bytes_checked_with_snapshot(
+        value: &[u8],
+        schema: &Schema,
+        snapshot: &Snapshot,
+    ) -> TupleResult<Option<Self>> {
+        let reader = TupleReader::from_schema(schema);
+        if let Some(layout) = reader.parse_for_snapshot(value, snapshot)? {
+            let reference = TupleRef::new(value, layout);
+            Ok(Some(reference.to_row_with(schema)?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Validate a row by checking all value and keys against a [Schema]
@@ -412,7 +455,7 @@ impl<'a> TupleBuilder<'a> {
     }
 
     /// Build a tuple from a given row.
-    pub(crate) fn build(&self, row: Row, xmin: TransactionId) -> TupleResult<Tuple> {
+    pub(crate) fn build(&self, row: &Row, xmin: TransactionId) -> TupleResult<Tuple> {
         row.validate(self.schema)?;
 
         let size = self.compute_initial_size(&row);
@@ -1543,7 +1586,7 @@ mod tuple_tests {
         let row = test_row();
         let snapshot = snapshot!(xid: 0, xmin: 0);
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 1).unwrap();
+        let tuple = builder.build(&row, 1).unwrap();
 
         assert_eq!(tuple.version(), 0);
         assert_eq!(tuple.xmin(), 1);
@@ -1558,7 +1601,7 @@ mod tuple_tests {
         let schema = test_schema();
         let row = test_row();
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 1).unwrap();
+        let tuple = builder.build(&row, 1).unwrap();
         let snapshot = snapshot!(xid: 0, xmin: 0);
         let reader = TupleReader::from_schema(&schema);
         let layout = reader
@@ -1578,7 +1621,7 @@ mod tuple_tests {
         let schema = test_schema();
         let row = test_row();
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 1).unwrap();
+        let tuple = builder.build(&row, 1).unwrap();
 
         let reader = TupleReader::from_schema(&schema);
         let layout = reader
@@ -1597,7 +1640,7 @@ mod tuple_tests {
         let schema = test_schema();
         let row = test_row_with_nulls();
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 1).unwrap();
+        let tuple = builder.build(&row, 1).unwrap();
 
         let reader = TupleReader::from_schema(&schema);
         let layout = reader
@@ -1624,7 +1667,7 @@ mod tuple_tests {
         let schema = test_schema();
         let row = test_row();
         let builder = TupleBuilder::from_schema(&schema);
-        let mut tuple = builder.build(row, 1).unwrap();
+        let mut tuple = builder.build(&row, 1).unwrap();
 
         assert!(!tuple.is_deleted());
         tuple.delete(10).unwrap();
@@ -1637,7 +1680,7 @@ mod tuple_tests {
         let schema = test_schema();
         let row = test_row();
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 1).unwrap();
+        let tuple = builder.build(&row, 1).unwrap();
 
         assert!(tuple.is_visible(4));
         assert!(tuple.is_visible(5));
@@ -1649,7 +1692,7 @@ mod tuple_tests {
         let schema = test_schema();
         let row = test_row();
         let builder = TupleBuilder::from_schema(&schema);
-        let mut tuple = builder.build(row, 1).unwrap();
+        let mut tuple = builder.build(&row, 1).unwrap();
         tuple.delete(15).unwrap();
 
         assert!(tuple.is_visible(4));
@@ -1665,7 +1708,7 @@ mod tuple_tests {
         let schema = test_schema();
         let row = test_row();
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 1).unwrap();
+        let tuple = builder.build(&row, 1).unwrap();
 
         let size = tuple.serialized_size();
         let mut buffer = vec![0u8; size];
@@ -1682,7 +1725,7 @@ mod tuple_tests {
         let schema = test_schema();
         let row = test_row();
         let builder = TupleBuilder::from_schema(&schema);
-        let mut tuple = builder.build(row, 1).unwrap();
+        let mut tuple = builder.build(&row, 1).unwrap();
         let snapshot = snapshot!(xid: 0, xmin: 0);
         let mut modifications = HashMap::new();
         modifications.insert(1, DataType::BigInt(Int64(31)));
@@ -1726,7 +1769,7 @@ mod tuple_tests {
         ]));
 
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 1).unwrap();
+        let tuple = builder.build(&row, 1).unwrap();
 
         assert_eq!(tuple.version(), 0);
         assert_eq!(tuple.xmin(), 1);
@@ -1756,7 +1799,7 @@ mod tuple_tests {
         ]));
 
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 1).unwrap();
+        let tuple = builder.build(&row, 1).unwrap();
 
         let data = tuple.effective_data();
         let offset = Tuple::keys_offset(schema.num_values());
@@ -1791,7 +1834,7 @@ mod tuple_tests {
         ]));
 
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 1).unwrap();
+        let tuple = builder.build(&row, 1).unwrap();
 
         let reader = TupleReader::from_schema(&schema);
         let layout = reader.parse_last_version(tuple.effective_data()).unwrap();

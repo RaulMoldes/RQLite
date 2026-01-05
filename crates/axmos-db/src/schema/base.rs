@@ -1,5 +1,8 @@
 use super::stats::Stats;
 use crate::{
+    runtime::eval::eval_literal_expr,
+    schema::DatabaseItem,
+    sql::binder::bounds::BoundColumnDef,
     storage::tuple::Row,
     types::{
         Blob, DataType, DataTypeKind, ObjectId, PageId, RowId, SerializationError,
@@ -23,6 +26,8 @@ pub enum SchemaError {
     ColumnNotFound(String),
     ColumnIndexOutOfBounds(usize),
     NotATable,
+    NotFound(DatabaseItem),
+    AlreadyExists(DatabaseItem),
     InvalidDataType(DataTypeKind),
     DuplicatePrimaryKey,
     Other(String),
@@ -45,6 +50,8 @@ impl Display for SchemaError {
             Self::NotATable => {
                 f.write_str("constraints or indexes cannot be added to index schemas.")
             }
+            Self::NotFound(dbi) => write!(f, "object {dbi} not found"),
+            Self::AlreadyExists(dbi) => write!(f, "object {dbi} already exists"),
             Self::DuplicatePrimaryKey => f.write_str(
                 "attempted to add a duplicated primary key to an schema with a key already set.",
             ),
@@ -63,6 +70,23 @@ pub struct Schema {
     pub(crate) table_constraints: Option<Vec<TableConstraint>>,
     pub(crate) column_index: HashMap<String, usize>, // Quick index to bind columns
     pub(crate) table_indexes: Option<HashMap<ObjectId, Vec<usize>>>,
+}
+
+impl From<&BoundColumnDef> for Column {
+    fn from(value: &BoundColumnDef) -> Self {
+        let mut col = Column::new_with_defaults(value.data_type, &value.name);
+
+        col.is_non_null = value.is_non_null;
+
+
+        col.default = value
+            .default
+            .as_ref()
+            .and_then(|expr| eval_literal_expr(expr))
+            .and_then(|dt: DataType| dt.serialize().ok());
+
+        col
+    }
 }
 
 /// A handle representing an index.
@@ -107,9 +131,32 @@ impl Schema {
             .collect()
     }
 
+    pub(crate) fn reindex(&mut self) {
+        self.column_index = Self::build_column_index(&self.columns)
+    }
+
     /// Returns a reference to the columns vector
     pub(crate) fn columns(&self) -> &[Column] {
         &self.columns
+    }
+
+    pub(crate) fn column_indexes(&self) -> Vec<usize> {
+        (0..self.columns.len()).collect()
+    }
+
+    // Add a column to the schema without checking if it already exists
+    pub(crate) fn add_column_unchecked(&mut self, col: Column) {
+        let index = self.columns.len();
+        self.column_index.insert(col.name().to_string(), index);
+        self.columns.push(col);
+    }
+
+    // Remove a column from the schema without checking if it  exists
+    pub(crate) fn remove_column_unchecked(&mut self, index: usize) {
+        assert!(index >= self.num_keys, "Cannot remove key columns");
+        // Remove from columns vector
+        self.columns.remove(index);
+        self.reindex();
     }
 
     pub(crate) fn new_empty() -> Self {
@@ -133,6 +180,14 @@ impl Schema {
             v.iter()
                 .any(|c| matches!(c, TableConstraint::PrimaryKey(_)))
         })
+    }
+
+    pub(crate) fn constraints_mut(&mut self) -> Option<&mut [TableConstraint]> {
+        self.table_constraints.as_deref_mut()
+    }
+
+    pub(crate) fn constraints(&self) -> Option<&[TableConstraint]> {
+        self.table_constraints.as_deref()
     }
 
     /// Create a new table schema.
@@ -197,6 +252,11 @@ impl Schema {
     #[inline]
     pub(crate) fn column(&self, index: usize) -> Option<&Column> {
         self.columns.get(index)
+    }
+    /// Accessor for a column
+    #[inline]
+    pub(crate) fn column_mut(&mut self, index: usize) -> Option<&mut Column> {
+        self.columns.get_mut(index)
     }
 
     #[inline]
@@ -377,7 +437,6 @@ pub(crate) struct Column {
     pub(crate) dtype: u8,
     pub(crate) name: String,
     pub(crate) default: Option<Box<[u8]>>,
-    pub(crate) is_unique: bool,
     pub(crate) is_non_null: bool,
 }
 
@@ -388,7 +447,6 @@ impl Column {
             dtype: dtype as u8,
             name: name.to_string(),
             default: None,
-            is_unique: false,
             is_non_null: false,
         }
     }
@@ -430,11 +488,6 @@ impl Column {
         self
     }
 
-    /// Add a unique constraint to the column
-    pub(crate) fn with_unique_constraint(mut self) -> Self {
-        self.is_unique = true;
-        self
-    }
 
     pub(crate) fn datatype(&self) -> DataTypeKind {
         DataTypeKind::from_repr(self.dtype).unwrap_or(DataTypeKind::Null)
@@ -527,6 +580,19 @@ impl Relation {
     /// Check whether this is an index.
     pub(crate) fn is_index(&self) -> bool {
         self.schema().is_index()
+    }
+
+    pub(crate) fn add_column(&mut self, col: Column) -> SchemaResult<()> {
+        if self.schema().column_index.contains_key(col.name()) {
+            return Err(SchemaError::AlreadyExists(DatabaseItem::Column(
+                self.name.to_string(),
+                col.name().to_string(),
+            )));
+        }
+
+        self.schema_mut().add_column_unchecked(col);
+
+        Ok(())
     }
 
     /// Create a meta index formatted row from a given relation.

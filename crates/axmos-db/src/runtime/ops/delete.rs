@@ -109,7 +109,7 @@ where
             self.stats.rows_scanned += 1;
 
             let row_id = extract_row_id(&row)?;
-            let mut dml = DmlExecutor::new(&mut self.ctx);
+            let mut dml = DmlExecutor::new(self.ctx.clone());
             let result = dml.delete(self.op.table_id, row_id)?;
 
             if result.deleted {

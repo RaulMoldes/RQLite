@@ -1526,10 +1526,6 @@ impl Parser {
                     self.expect(Token::Null)?;
                     column_def.is_non_null = true;
                 }
-                Token::Unique => {
-                    self.next_token();
-                    column_def.is_unique = true;
-                }
                 Token::Default => {
                     self.next_token();
                     let expr = self.parse_expression()?;

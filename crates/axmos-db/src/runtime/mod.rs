@@ -11,11 +11,13 @@ use crate::{
     runtime::{
         builder::{BoxedExecutor, MutableExecutorBuilder, ReadOnlyExecutorBuilder},
         context::TransactionContext,
-        ddl::{DdlError, DdlExecutor, DdlOutcome},
+        ddl::{DdlExecutor, DdlResult},
         eval::EvaluationError,
+        validator::ValidationError,
     },
     schema::{
-        Schema,
+        DatabaseItem, Schema,
+        base::SchemaError,
         catalog::{CatalogError, SharedCatalog},
     },
     sql::{
@@ -28,7 +30,7 @@ use crate::{
     },
     storage::tuple::{Row, TupleError},
     tree::{
-        accessor::{Accessor, BtreeReadAccessor, BtreeWriteAccessor, TreeReader},
+        accessor::{BtreeReadAccessor, BtreeWriteAccessor, TreeReader},
         bplustree::BtreeError,
     },
 };
@@ -37,7 +39,7 @@ pub mod builder;
 pub mod context;
 pub mod ddl;
 pub mod dml;
-mod eval;
+pub mod eval;
 mod ops;
 pub mod validator;
 
@@ -54,9 +56,22 @@ pub enum RuntimeError {
     Btree(BtreeError),
     TypeError(TypeSystemError),
     TupleError(TupleError),
+    ValidationError(ValidationError),
     CannotUpdateKeyColumn,
-    InvalidState,
+
+    /// Cursor not initialized.
+    CursorUninitialized,
+    /// Schema error
+    Schema(SchemaError),
+
+    /// Object already exists
+    AlreadyExists(DatabaseItem),
+    /// Object not found
+    NotFound(DatabaseItem),
     Serialization(SerializationError),
+
+    /// An invalid statement was passed to an executor.
+    InvalidStatement,
     Other(String),
 }
 
@@ -77,9 +92,14 @@ impl Display for RuntimeError {
             Self::TypeError(err) => write!(f, "type error {err}"),
             Self::TupleError(err) => write!(f, "tuple error {err}"),
             Self::Serialization(err) => write!(f, "serialization error {err}"),
-            Self::InvalidState => write!(f, "invalid execution state"),
+            Self::InvalidStatement => write!(f, "invalid statement received"),
             Self::ColumnNotFound(idx) => write!(f, "column not found in schema {idx}"),
             Self::CannotUpdateKeyColumn => f.write_str("attempted to update a key column"),
+            Self::AlreadyExists(ae) => write!(f, "{} already exists", ae),
+            Self::NotFound(nf) => write!(f, "{} not found", nf),
+            Self::Schema(e) => write!(f, "schema error: {}", e),
+            Self::CursorUninitialized => f.write_str("uninitialized btree cursor"),
+            Self::ValidationError(err) => write!(f, "constraint validation error {err}"),
         }
     }
 }
@@ -87,6 +107,18 @@ impl Display for RuntimeError {
 impl From<SerializationError> for RuntimeError {
     fn from(value: SerializationError) -> Self {
         Self::Serialization(value)
+    }
+}
+
+impl From<ValidationError> for RuntimeError {
+    fn from(value: ValidationError) -> Self {
+        Self::ValidationError(value)
+    }
+}
+
+impl From<SchemaError> for RuntimeError {
+    fn from(value: SchemaError) -> Self {
+        Self::Schema(value)
     }
 }
 
@@ -161,7 +193,7 @@ pub(crate) struct ExecutionStats {
 #[derive(Debug, Clone)]
 pub enum QueryResult {
     /// DDL operation completed
-    Ddl(DdlOutcome),
+    Ddl(DdlResult),
     /// Query returned rows
     Rows(RowsResult),
     /// DML operation affected N rows
@@ -228,7 +260,7 @@ impl QueryResult {
     }
 
     /// Returns the DDL outcome if this is a Ddl result.
-    pub fn into_ddl(self) -> Option<DdlOutcome> {
+    pub fn into_ddl(self) -> Option<DdlResult> {
         match self {
             Self::Ddl(outcome) => Some(outcome),
             _ => None,
@@ -258,7 +290,6 @@ pub type QueryPreparationResult<T> = Result<T, QueryPreparationError>;
 #[derive(Debug)]
 pub enum QueryError {
     Prep(QueryPreparationError),
-    Ddl(DdlError),
     Planner(PlannerError),
     Runtime(RuntimeError),
     InvalidStatementType,
@@ -268,7 +299,6 @@ impl Display for QueryError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             Self::Prep(e) => write!(f, "preparation error {e}"),
-            Self::Ddl(e) => write!(f, "DDL error: {}", e),
             Self::Planner(e) => write!(f, "planner error: {}", e),
             Self::Runtime(e) => write!(f, "runtime error: {}", e),
             Self::InvalidStatementType => f.write_str("invalid statement type"),
@@ -293,12 +323,6 @@ impl From<BinderError> for QueryPreparationError {
 impl From<QueryPreparationError> for QueryError {
     fn from(value: QueryPreparationError) -> Self {
         Self::Prep(value)
-    }
-}
-
-impl From<DdlError> for QueryError {
-    fn from(e: DdlError) -> Self {
-        Self::Ddl(e)
     }
 }
 

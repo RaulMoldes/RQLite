@@ -110,8 +110,8 @@ where
         let assignments = evaluate_assignments(self.op.assignments.iter(), row, &schema)?;
 
         // Delegate to DML executor
-        let mut dml = DmlExecutor::new(&mut self.ctx);
-        let result = dml.update(self.op.table_id, row_id, &assignments)?;
+        let mut dml = DmlExecutor::new(self.ctx.clone());
+        let result = dml.update(self.op.table_id, row_id, assignments)?;
 
         Ok(result.updated)
     }

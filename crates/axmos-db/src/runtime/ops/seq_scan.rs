@@ -109,7 +109,7 @@ where
             let next_pos = match self
                 .cursor
                 .as_mut()
-                .ok_or(RuntimeError::InvalidState)?
+                .ok_or(RuntimeError::CursorUninitialized)?
                 .next()
             {
                 Some(res) => res?,
@@ -124,7 +124,7 @@ where
             let mut tree = self
                 .cursor
                 .as_ref()
-                .ok_or(RuntimeError::InvalidState)?
+                .ok_or(RuntimeError::CursorUninitialized)?
                 .get_tree();
             let maybe_row = tree
                 .get_row_at(next_pos, &self.op.output_schema, &snapshot)?
@@ -142,8 +142,7 @@ where
         }
     }
 
-    fn close(mut self) -> RuntimeResult<Self::Closed> {
-        self.ctx.accessor_mut().clear();
+    fn close(self) -> RuntimeResult<Self::Closed> {
         Ok(ClosedSeqScan::new(self.op, self.ctx, Some(self.stats)))
     }
 }

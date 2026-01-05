@@ -1,5 +1,5 @@
 use crate::{
-    schema::base::Schema,
+    schema::{DatabaseItem, base::Schema},
     types::{DataTypeKind, ObjectId},
 };
 
@@ -12,28 +12,6 @@ use std::{
 pub mod analyzer;
 pub mod binder;
 pub mod bounds;
-
-/// Object already exists errors
-#[derive(Debug, Clone, PartialEq)]
-pub enum DatabaseItem {
-    Table(String),
-    Index(String),
-    Constraint(String),
-    Column(String, String),
-}
-
-impl Display for DatabaseItem {
-    fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        match self {
-            Self::Index(index) => write!(f, "Index '{}'", index),
-            Self::Table(table) => write!(f, "Table '{}' ", table),
-            Self::Constraint(ct) => write!(f, "Constraint '{}'", ct),
-            Self::Column(table, column) => {
-                write!(f, "Column '{}' on table '{}'", column, table)
-            }
-        }
-    }
-}
 
 /// Contains the minimum information needed for column resolution.
 pub(crate) struct ScopeEntry {
@@ -256,7 +234,7 @@ fn resolve_in_scope(
 }
 
 /// Calculate the column offset for entries before the given scope_index
-fn calculate_column_offset(scope: &QueryScope, target_scope_index: usize) -> usize {
+pub(crate) fn calculate_column_offset(scope: &QueryScope, target_scope_index: usize) -> usize {
     let mut offset = 0;
     for entry in scope.iter() {
         if entry.scope_index >= target_scope_index {

@@ -1,4 +1,5 @@
 // src/sql/executor/context.rs
+use super::RuntimeResult;
 use crate::{
     io::{
         logger::{Begin, Commit, Delete, End, Insert, Operation, Update},
@@ -10,12 +11,12 @@ use crate::{
     types::{Lsn, ObjectId, PageId, RowId, TransactionId},
 };
 use std::cell::Cell;
-
-use super::RuntimeResult;
+use std::ops::Deref;
+use std::rc::Rc;
 
 /// Lightweight execution context for query operators.
 #[derive(Clone)]
-pub(crate) struct TransactionContext<Acc: TreeReader> {
+pub(crate) struct ExecutionContext<Acc: TreeReader> {
     accessor: Acc,
     pager: SharedPager,
     catalog: SharedCatalog,
@@ -23,7 +24,35 @@ pub(crate) struct TransactionContext<Acc: TreeReader> {
     pub last_lsn: Cell<Option<Lsn>>,
 }
 
-impl<Acc> TransactionContext<Acc>
+pub(crate) struct TransactionContext<Acc: TreeReader>(Rc<ExecutionContext<Acc>>);
+
+impl<Acc: TreeReader + Clone> TransactionContext<Acc> {
+    pub(crate) fn new(
+        accessor: Acc,
+        pager: SharedPager,
+        catalog: SharedCatalog,
+        handle: TransactionHandle,
+    ) -> RuntimeResult<Self> {
+        let context = ExecutionContext::new(accessor, pager, catalog, handle)?;
+        Ok(Self(Rc::new(context)))
+    }
+}
+
+impl<Acc: TreeReader> Deref for TransactionContext<Acc> {
+    type Target = ExecutionContext<Acc>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<Acc: TreeReader> Clone for TransactionContext<Acc> {
+    fn clone(&self) -> Self {
+        Self(Rc::clone(&self.0))
+    }
+}
+
+impl<Acc> ExecutionContext<Acc>
 where
     Acc: TreeReader + Clone,
 {

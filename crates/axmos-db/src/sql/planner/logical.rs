@@ -298,8 +298,8 @@ impl JoinOp {
                 op, left, right, ..
             } => match op {
                 BinaryOperator::Eq => {
-                    matches!(left.as_ref(), BoundExpression::ColumnRef(_))
-                        && matches!(right.as_ref(), BoundExpression::ColumnRef(_))
+                    matches!(left.as_ref(), BoundExpression::ColumnBinding(_))
+                        && matches!(right.as_ref(), BoundExpression::ColumnBinding(_))
                 }
                 BinaryOperator::And => {
                     Self::is_equi_condition(left) && Self::is_equi_condition(right)
@@ -325,7 +325,7 @@ impl JoinOp {
                 op, left, right, ..
             } => match op {
                 BinaryOperator::Eq => {
-                    if let (BoundExpression::ColumnRef(l), BoundExpression::ColumnRef(r)) =
+                    if let (BoundExpression::ColumnBinding(l), BoundExpression::ColumnBinding(r)) =
                         (left.as_ref(), right.as_ref())
                     {
                         keys.push((l.column_idx, r.column_idx));

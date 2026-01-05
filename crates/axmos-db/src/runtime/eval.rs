@@ -7,7 +7,7 @@ use crate::{
     TypeSystemError, TypeSystemResult,
     schema::Schema,
     sql::{
-        binder::bounds::{BoundColumnRef, BoundExpression, ScalarFunction},
+        binder::bounds::{BoundExpression, ScalarFunction, Binding},
         parser::ast::{BinaryOperator, UnaryOperator},
     },
     storage::tuple::Row,
@@ -68,7 +68,7 @@ impl<'a> ExpressionEvaluator<'a> {
     pub(crate) fn evaluate(&self, expr: &BoundExpression) -> EvaluationResult<DataType> {
         match expr {
             BoundExpression::Literal { value } => Ok(value.clone()),
-            BoundExpression::ColumnRef(col_ref) => self.eval_column(col_ref.clone()),
+            BoundExpression::ColumnBinding(col_ref) => self.eval_column(col_ref.clone()),
             BoundExpression::BinaryOp {
                 left,
                 op,
@@ -243,7 +243,8 @@ impl<'a> ExpressionEvaluator<'a> {
         }
     }
 
-    fn eval_column(&self, col_ref: BoundColumnRef) -> EvaluationResult<DataType> {
+    fn eval_column(&self, col_ref: Binding
+     ) -> EvaluationResult<DataType> {
         let idx = col_ref.column_idx;
         // column_index is the index into the values portion of the schema
         if idx >= self.row.len() {
@@ -641,5 +642,14 @@ impl Callable for Length {
         Ok(DataType::BigUInt(crate::UInt64::from(
             s.chars().count() as u64
         )))
+    }
+}
+
+/// Evaluate a literal expression to get a DataType value.
+/// Only supports literal values for DEFAULT constraints.
+pub(crate) fn eval_literal_expr(expr: &BoundExpression) -> Option<DataType> {
+    match expr {
+        BoundExpression::Literal { value } => Some(value.clone()),
+        _ => None, // Non-literal defaults are not supported yet
     }
 }
