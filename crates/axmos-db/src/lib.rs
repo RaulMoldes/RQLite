@@ -1333,7 +1333,7 @@ mod database_tests {
             .unwrap();
 
         // Create many transactions
-        for i in 0..20 {
+        for i in 0..50 {
             db.execute(&format!("INSERT INTO test VALUES ({}, {})", i, i * 10))
                 .unwrap();
         }
@@ -1444,5 +1444,209 @@ mod database_tests {
             stats.tables_vacuumed,
             stats.total_freed()
         );
+    }
+
+    #[test]
+    fn test_unique_constraint_on_create_table() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        // Create table with unique constraint
+        db.execute("CREATE TABLE users (id BIGINT, email TEXT UNIQUE, name TEXT)")
+            .expect("Failed to create table");
+
+        // Insert first row
+        db.execute("INSERT INTO users VALUES (1, 'alice@example.com', 'Alice')")
+            .expect("First insert should succeed");
+
+        // Try to insert duplicate email - should fail
+        let result = db.execute("INSERT INTO users VALUES (2, 'alice@example.com', 'Bob')");
+        assert!(result.is_err(), "Duplicate unique value should fail");
+
+        let err_msg = format!("{:?}", result.err().unwrap());
+        assert!(
+            err_msg.contains("UNIQUE") || err_msg.contains("constraint"),
+            "Error should mention unique constraint violation"
+        );
+
+        // Insert different email - should succeed
+        db.execute("INSERT INTO users VALUES (2, 'bob@example.com', 'Bob')")
+            .expect("Different unique value should succeed");
+
+        // Verify data
+        let result = db.execute("SELECT COUNT(*) FROM users").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_not_null_constraint_on_create_table() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        // Create table with NOT NULL constraint
+        // Note: Your parser needs to support NOT NULL syntax
+        db.execute("CREATE TABLE products (id BIGINT, name TEXT NOT NULL, price DOUBLE)")
+            .expect("Failed to create table");
+
+        // Insert with all values - should succeed
+        db.execute("INSERT INTO products VALUES (1, 'Widget', 9.99)")
+            .expect("Insert with NOT NULL value should succeed");
+
+        // Verify the row was inserted
+        let result = db.execute("SELECT COUNT(*) FROM products").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_unique_constraint_allows_update_same_row() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        db.execute("CREATE TABLE accounts (id BIGINT, username TEXT UNIQUE, status TEXT)")
+            .expect("Failed to create table");
+
+        db.execute("INSERT INTO accounts VALUES (1, 'john_doe', 'active')")
+            .unwrap();
+        db.execute("INSERT INTO accounts VALUES (2, 'jane_doe', 'active')")
+            .unwrap();
+
+        // Update same row to same value - should succeed
+        db.execute("UPDATE accounts SET username = 'john_doe' WHERE id = 1")
+            .expect("Updating to same unique value on same row should succeed");
+
+        // Update to different existing value - should fail
+        let result = db.execute("UPDATE accounts SET username = 'jane_doe' WHERE id = 1");
+        assert!(
+            result.is_err(),
+            "Updating to another row's unique value should fail"
+        );
+
+        // Update to new value - should succeed
+        db.execute("UPDATE accounts SET username = 'johnny' WHERE id = 1")
+            .expect("Updating to new unique value should succeed");
+
+        // Verify final state
+        let result = db
+            .execute("SELECT username FROM accounts WHERE id = 1")
+            .unwrap();
+        let rows = result.into_rows().unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn test_multiple_unique_constraints() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        // Create table with multiple unique columns
+        db.execute(
+        "CREATE TABLE employees (id BIGINT, email TEXT UNIQUE, badge_num INT UNIQUE, name TEXT)",
+    )
+    .expect("Failed to create table");
+
+        db.execute("INSERT INTO employees VALUES (1, 'a@test.com', 100, 'Alice')")
+            .unwrap();
+
+        // Duplicate email - should fail
+        let result = db.execute("INSERT INTO employees VALUES (2, 'a@test.com', 200, 'Bob')");
+        assert!(result.is_err(), "Duplicate email should fail");
+
+        // Duplicate badge_num - should fail
+        let result = db.execute("INSERT INTO employees VALUES (2, 'b@test.com', 100, 'Bob')");
+        assert!(result.is_err(), "Duplicate badge_num should fail");
+
+        // Both unique - should succeed
+        db.execute("INSERT INTO employees VALUES (2, 'b@test.com', 200, 'Bob')")
+            .expect("Both unique values should succeed");
+
+        // Verify count
+        let result = db.execute("SELECT COUNT(*) FROM employees").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_unique_constraint_via_create_index() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        // Create table without unique constraint
+        db.execute("CREATE TABLE items (id BIGINT, sku TEXT, name TEXT)")
+            .expect("Failed to create table");
+
+        // Insert first row
+        db.execute("INSERT INTO items VALUES (1, 'SKU001', 'Item 1')")
+            .unwrap();
+
+        // Create unique index
+        db.execute("CREATE UNIQUE INDEX idx_sku ON items (sku)")
+            .expect("Failed to create unique index");
+
+        // Now try to insert duplicate - should fail
+        let result = db.execute("INSERT INTO items VALUES (2, 'SKU001', 'Item 2')");
+        assert!(
+            result.is_err(),
+            "Duplicate should fail after creating unique index"
+        );
+
+        // Insert different SKU - should succeed
+        db.execute("INSERT INTO items VALUES (2, 'SKU002', 'Item 2')")
+            .expect("Different SKU should succeed");
+    }
+
+    #[test]
+    fn test_constraint_violation_in_transaction_rollback() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        db.execute("CREATE TABLE test (id BIGINT, code TEXT UNIQUE)")
+            .expect("Failed to create table");
+        db.execute("INSERT INTO test VALUES (1, 'A')").unwrap();
+
+        let mut session = db.session();
+        session.execute("BEGIN").unwrap();
+        session.execute("INSERT INTO test VALUES (2, 'B')").unwrap();
+
+        // This should fail due to unique constraint
+        let result = session.execute("INSERT INTO test VALUES (3, 'A')");
+        assert!(result.is_err(), "Duplicate should fail");
+
+        // Rollback
+        session.execute("ROLLBACK").unwrap();
+
+        // Verify only original row exists
+        let result = db.execute("SELECT COUNT(*) FROM test").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 1, "Transaction should have been rolled back");
+    }
+
+    #[test]
+    fn test_unique_constraint_with_delete_and_reinsert() {
+        let (_dir, path) = temp_db_path();
+        let db = Database::create(&path, DBConfig::default()).unwrap();
+
+        db.execute("CREATE TABLE codes (id BIGINT, code TEXT UNIQUE)")
+            .expect("Failed to create table");
+
+        db.execute("INSERT INTO codes VALUES (1, 'ABC')").unwrap();
+
+        // Delete the row
+        db.execute("DELETE FROM codes WHERE id = 1").unwrap();
+
+        // Should be able to reinsert the same code now
+        db.execute("INSERT INTO codes VALUES (2, 'ABC')")
+            .expect("Should be able to reuse deleted unique value");
+
+        // Verify
+        let result = db.execute("SELECT COUNT(*) FROM codes").unwrap();
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+        assert_eq!(count, 1);
     }
 }

@@ -14,7 +14,8 @@ use crate::{
 
 use std::{
     cmp::{Ordering, min},
-    io, mem, usize,
+    io::{self, Error as IoError},
+    mem, usize,
 };
 
 /// The cell builder is a type of accessor that is only used to build cells.
@@ -269,18 +270,26 @@ impl CellBuilder {
     }
 
     /// Builds a cell from an [Tuple] that implements From<Box<[u8]>> and From <&'a [u8]>>
-    pub fn build_cell(&self, data: Tuple, schema: &Schema) -> io::Result<OwnedCell> {
+    pub fn build_cell(&self, mut data: Tuple, schema: &Schema) -> io::Result<OwnedCell> {
         let page_size = self.pager.write().page_size();
         let max_payload_size: usize = self.compute_available_space_in_first_page(page_size);
         let total_size = data.total_size();
+        let effective_data_size = data.effective_data().len();
 
         // If the cell fits in a single page simply return the built cell.
         if total_size <= max_payload_size {
             return Ok(data.into());
         };
 
+        // If the tuple payload has padding, but if we remove the padding we are able to fit it on a single cell, shrink it.
+        if effective_data_size <= max_payload_size {
+            data.shrink_to_fit()
+                .map_err(|e| IoError::other(format!("Error while shrinking tuple size: {e}")))?;
+            return Ok(data.into());
+        }
+
         // At this point we have to split the payload.
-        let payload = data.effective_data();
+        let payload = data.full_data();
 
         let mut overflow_page_number = self.pager.write().allocate_page::<OverflowPage>()?;
 
@@ -600,7 +609,7 @@ mod reassembler_tests {
         let layout = reader.parse_last_version(&reassembled_data).unwrap();
         let tuple_ref = TupleRef::new(&reassembled_data, layout);
 
-        let key = tuple_ref.key_with_schema(0, &schema).unwrap();
+        let key = tuple_ref.key_with(0, &schema).unwrap();
         match key {
             DataTypeRef::BigUInt(v) => assert_eq!(v.value(), 42),
             _ => panic!("Expected BigUInt"),
@@ -693,18 +702,18 @@ mod reassembler_tests {
         let tuple_ref = TupleRef::new(&reassembled_data, layout);
 
         // Key
-        match tuple_ref.key_with_schema(0, &schema).unwrap() {
+        match tuple_ref.key_with(0, &schema).unwrap() {
             DataTypeRef::BigUInt(v) => assert_eq!(v.value(), 1),
             _ => panic!("Expected BigUInt for key"),
         }
 
         // Values
-        match tuple_ref.value_with_schema(0, &schema).unwrap() {
+        match tuple_ref.value_with(0, &schema).unwrap() {
             DataTypeRef::Blob(v) => assert_eq!(v.data().unwrap(), b"Alice"),
             _ => panic!("Expected Blob for name"),
         }
 
-        match tuple_ref.value_with_schema(1, &schema).unwrap() {
+        match tuple_ref.value_with(1, &schema).unwrap() {
             DataTypeRef::BigUInt(v) => assert_eq!(v.value(), 30),
             _ => panic!("Expected BigUInt for age"),
         }

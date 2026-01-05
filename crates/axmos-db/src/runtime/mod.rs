@@ -39,6 +39,7 @@ pub mod ddl;
 pub mod dml;
 mod eval;
 mod ops;
+pub mod validator;
 
 #[cfg(test)]
 mod tests;

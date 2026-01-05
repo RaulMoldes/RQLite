@@ -2,7 +2,7 @@ use crate::{
     SerializationError, SerializationResult, bytemuck_struct,
     multithreading::coordinator::Snapshot,
     schema::{Schema, base::SchemaError},
-    storage::core::buffer::{Payload, PayloadRef},
+    storage::core::buffer::{Payload, PayloadMut, PayloadRef},
     types::{DataType, DataTypeKind, DataTypeRef, TransactionId},
 };
 
@@ -165,6 +165,14 @@ impl Row {
 
     pub fn into_inner(self) -> Box<[DataType]> {
         self.0
+    }
+
+    pub fn last(&self) -> Option<&DataType> {
+        self.0.last()
+    }
+
+    pub fn first(&self) -> Option<&DataType> {
+        self.0.first()
     }
 }
 
@@ -413,121 +421,6 @@ impl<'a> TupleBuilder<'a> {
         self.write_initial(&row, xmin, data.effective_data_mut())?;
 
         Ok(Tuple { data })
-    }
-}
-
-/// Inmutable tuple accessor to get access to a single tuple ref.
-pub struct RefTupleAccessor<'a, 'b> {
-    schema: &'a Schema,
-    tuple: TupleRef<'b>,
-}
-
-impl<'a, 'b> RefTupleAccessor<'a, 'b> {
-    pub(crate) fn new(tuple: TupleRef<'b>, schema: &'a Schema) -> Self {
-        Self { schema, tuple }
-    }
-
-    pub(crate) fn key(&self, index: usize) -> TupleResult<DataTypeRef<'_>> {
-        self.tuple.key_with_schema(index, &self.schema)
-    }
-
-    pub(crate) fn value(&self, index: usize) -> TupleResult<DataTypeRef<'_>> {
-        self.tuple.value_with_schema(index, &self.schema)
-    }
-
-    pub(crate) fn is_null(&self, index: usize) -> bool {
-        self.tuple.is_null_with_schema(index, self.schema)
-    }
-
-    pub(crate) fn null_bitmap(&self) -> &[u8] {
-        self.tuple.null_bitmap_with_schema(&self.schema)
-    }
-
-    pub(crate) fn to_row(&self) -> TupleResult<Row> {
-        self.tuple.to_row_with_schema(&self.schema)
-    }
-
-    pub(crate) fn reader(&self) -> TupleReader<'a> {
-        TupleReader {
-            schema: self.schema,
-        }
-    }
-}
-
-/// Tuple modifier with an owned version of the tuple
-pub struct OwnedTupleAccessor<'a> {
-    tuple: Tuple,
-    schema: &'a Schema,
-}
-
-impl<'a> OwnedTupleAccessor<'a> {
-    fn new(tuple: Tuple, schema: &'a Schema) -> Self {
-        Self { tuple, schema }
-    }
-
-    fn add_version(
-        &mut self,
-        modified: &HashMap<usize, DataType>,
-        new_xmin: TransactionId,
-    ) -> TupleResult<()> {
-        self.tuple
-            .add_version_with_schema(modified, new_xmin, self.schema)
-    }
-
-    fn vaccum_for_snapshot(&mut self, snapshot: &Snapshot) -> TupleResult<usize> {
-        self.tuple.vaccum_with_schema(snapshot.xmin(), self.schema)
-    }
-
-    fn has_history(&self) -> bool {
-        self.tuple.has_history_with_schema(&self.schema)
-    }
-
-    fn num_versions(&self) -> TupleResult<usize> {
-        self.tuple.num_versions_with_schema(self.schema)
-    }
-
-    pub fn reader(&self) -> TupleReader<'a> {
-        TupleReader {
-            schema: self.schema,
-        }
-    }
-
-    pub(crate) fn into_data(self) -> Payload {
-        self.tuple.into_data()
-    }
-
-    pub(crate) fn version(&self) -> u8 {
-        self.tuple.version()
-    }
-
-    pub(crate) fn payload_ref(&self) -> PayloadRef<'_> {
-        self.tuple.payload_ref()
-    }
-
-    pub(crate) fn delete(&mut self, transaction_id: TransactionId) -> TupleResult<()> {
-        self.tuple.delete(transaction_id)
-    }
-
-    pub(crate) fn xmin(&self) -> TransactionId {
-        self.tuple.xmin()
-    }
-
-    pub(crate) fn xmax(&self) -> Option<TransactionId> {
-        self.tuple.xmax()
-    }
-
-    pub(crate) fn is_visible(&self, xid: TransactionId) -> bool {
-        self.tuple.is_visible(xid)
-    }
-
-    pub(crate) fn is_deleted(&self) -> bool {
-        self.tuple.is_deleted()
-    }
-}
-
-impl<'schema> From<OwnedTupleAccessor<'schema>> for Payload {
-    fn from(value: OwnedTupleAccessor<'schema>) -> Self {
-        value.tuple.into_data()
     }
 }
 
@@ -823,22 +716,18 @@ impl<'a> TupleRef<'a> {
         self.version_xmin() <= xid
     }
 
-    fn null_bitmap_with_schema(&self, schema: &Schema) -> &[u8] {
+    fn null_bitmap_with(&self, schema: &Schema) -> &[u8] {
         let start = self.layout.null_bitmap_start;
         let len = null_bitmap_size(schema.num_values());
         &self.data[start..start + len]
     }
 
-    fn is_null_with_schema(&self, val_idx: usize, schema: &Schema) -> bool {
-        TupleReader::check_null(self.null_bitmap_with_schema(schema), val_idx)
+    fn is_null_with(&self, val_idx: usize, schema: &Schema) -> bool {
+        TupleReader::check_null(self.null_bitmap_with(schema), val_idx)
     }
 
     /// Returns the key found at a specific index
-    pub(crate) fn key_with_schema(
-        &self,
-        index: usize,
-        schema: &Schema,
-    ) -> TupleResult<DataTypeRef<'_>> {
+    pub(crate) fn key_with(&self, index: usize, schema: &Schema) -> TupleResult<DataTypeRef<'_>> {
         if index >= schema.num_keys() {
             return Err(TupleError::KeyError(index));
         }
@@ -854,16 +743,12 @@ impl<'a> TupleRef<'a> {
         Ok(value)
     }
 
-    pub(crate) fn value_with_schema(
-        &self,
-        index: usize,
-        schema: &Schema,
-    ) -> TupleResult<DataTypeRef<'_>> {
+    pub(crate) fn value_with(&self, index: usize, schema: &Schema) -> TupleResult<DataTypeRef<'_>> {
         if index >= schema.num_values() {
             return Err(TupleError::ValueError(index));
         }
 
-        if self.is_null_with_schema(index, schema) {
+        if self.is_null_with(index, schema) {
             return Ok(DataTypeRef::Null);
         }
 
@@ -881,16 +766,16 @@ impl<'a> TupleRef<'a> {
         Ok(value)
     }
 
-    pub(crate) fn to_row_with_schema(&self, schema: &Schema) -> TupleResult<Row> {
+    pub(crate) fn to_row_with(&self, schema: &Schema) -> TupleResult<Row> {
         let mut data = Vec::with_capacity(schema.num_columns());
 
         for i in 0..schema.num_keys() {
-            let key_ref = self.key_with_schema(i, schema)?;
+            let key_ref = self.key_with(i, schema)?;
             data.push(key_ref.to_owned().unwrap_or(DataType::Null));
         }
 
         for i in 0..schema.num_values() {
-            let val_ref = self.value_with_schema(i, schema)?;
+            let val_ref = self.value_with(i, schema)?;
             data.push(val_ref.to_owned().unwrap_or(DataType::Null));
         }
 
@@ -937,6 +822,11 @@ impl Tuple {
     }
 
     #[inline]
+    pub(crate) fn payload_mut(&mut self) -> PayloadMut<'_> {
+        self.data.as_payload_mut()
+    }
+
+    #[inline]
     pub(crate) fn effective_data(&self) -> &[u8] {
         self.data.effective_data()
     }
@@ -956,7 +846,7 @@ impl Tuple {
         TupleHeader::SIZE + null_bitmap_size(num_values)
     }
 
-    pub fn as_tuple_ref_with_schema(&self, schema: &Schema) -> TupleRef<'_> {
+    pub fn as_tuple_ref_with(&self, schema: &Schema) -> TupleRef<'_> {
         let reader = TupleReader::from_schema(schema);
         let layout = reader
             .parse_last_version(self.effective_data())
@@ -977,6 +867,11 @@ impl Tuple {
         self.data.full_data_mut()
     }
 
+    pub(crate) fn shrink_to_fit(&mut self) -> TupleResult<()> {
+        self.data.shrink_to_fit()?;
+        Ok(())
+    }
+
     pub(crate) fn version(&self) -> u8 {
         let (header, _) = TupleHeader::read_from(self.data.effective_data(), 0);
         header.version()
@@ -988,7 +883,7 @@ impl Tuple {
         schema: &Schema,
         snapshot: &Snapshot,
     ) -> TupleResult<usize> {
-        self.vaccum_with_schema(snapshot.xmin(), schema)
+        self.vaccum_with(snapshot.xmin(), schema)
     }
 
     pub(crate) fn xmin(&self) -> TransactionId {
@@ -1033,7 +928,7 @@ impl Tuple {
     /// ```text
     /// [field_idx: u8][value_bytes (if not null)]
     /// ```
-    pub(crate) fn add_version_with_schema(
+    pub(crate) fn add_version_with(
         &mut self,
         modified: &HashMap<usize, DataType>,
         new_xmin: TransactionId,
@@ -1112,8 +1007,6 @@ impl Tuple {
         Ok(())
     }
 
-    // === Private helper methods ===
-
     fn validate_modifications(
         &self,
         modified: &HashMap<usize, DataType>,
@@ -1133,7 +1026,7 @@ impl Tuple {
         let mut keys = Vec::with_capacity(num_keys);
 
         for i in 0..num_keys {
-            let key_ref = current.key_with_schema(i, schema)?;
+            let key_ref = current.key_with(i, schema)?;
             keys.push(key_ref.to_owned().unwrap_or(DataType::Null));
         }
 
@@ -1159,7 +1052,7 @@ impl Tuple {
 
         for i in 0..num_values {
             let current_val = current
-                .value_with_schema(i, schema)?
+                .value_with(i, schema)?
                 .to_owned()
                 .unwrap_or(DataType::Null);
 
@@ -1346,7 +1239,7 @@ impl Tuple {
     /// transaction ID, meaning no transaction can ever need to see that version.
     ///
     /// Returns the number of bytes freed.
-    pub(crate) fn vaccum_with_schema(
+    pub(crate) fn vaccum_with(
         &mut self,
         oldest_active_xid: TransactionId,
         schema: &Schema,
@@ -1415,7 +1308,7 @@ impl Tuple {
         Ok(freed)
     }
 
-    pub(crate) fn has_history_with_schema(&self, schema: &Schema) -> bool {
+    pub(crate) fn has_history_with(&self, schema: &Schema) -> bool {
         let reader = TupleReader::from_schema(schema);
         let layout = reader
             .parse_last_version(self.data.effective_data())
@@ -1428,7 +1321,7 @@ impl Tuple {
     }
 
     /// Parses the delta directory and counts the number of active versions in the tuple at this point in time.
-    pub(crate) fn num_versions_with_schema(&self, schema: &Schema) -> TupleResult<usize> {
+    pub(crate) fn num_versions_with(&self, schema: &Schema) -> TupleResult<usize> {
         let reader = TupleReader::from_schema(schema);
         let layout = reader
             .parse_last_version(self.data.effective_data())
@@ -1490,6 +1383,18 @@ impl Tuple {
     pub(crate) fn serialized_size(&self) -> usize {
         self.data.full_data().len()
     }
+
+    pub(crate) fn display_with<'b>(
+        &'b self,
+        schema: &'b Schema,
+        snapshot: &'b Snapshot,
+    ) -> DisplayWith<'b, Tuple> {
+        DisplayWith {
+            tuple: self,
+            schema,
+            snapshot,
+        }
+    }
 }
 
 impl From<&Tuple> for Box<[u8]> {
@@ -1497,36 +1402,6 @@ impl From<&Tuple> for Box<[u8]> {
         Box::from(value.full_data())
     }
 }
-
-impl<'a, 'b> Display for RefTupleAccessor<'a, 'b> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        let row = self.to_row().map_err(|_| std::fmt::Error)?;
-
-        write!(f, "(")?;
-        for (i, value) in row.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{value}")?;
-        }
-        write!(f, ")")
-    }
-}
-
-impl<'a> Display for OwnedTupleAccessor<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        let reader = self.reader();
-        let layout = reader
-            .parse_last_version(self.tuple.effective_data())
-            .map_err(|_| std::fmt::Error)?;
-
-        let tuple_ref = TupleRef::new(self.tuple.effective_data(), layout);
-        let accessor = RefTupleAccessor::new(tuple_ref, self.schema);
-
-        write!(f, "{accessor}")
-    }
-}
-
 pub struct DisplayWith<'a, T> {
     tuple: &'a T,
     schema: &'a Schema,
@@ -1598,9 +1473,7 @@ impl<'a> TupleFormatter<'a> {
     }
 
     pub fn to_string(self) -> String {
-        let accessor = RefTupleAccessor::new(self.tuple, self.schema);
-
-        let row = match accessor.to_row() {
+        let row = match self.tuple.to_row_with(&self.schema) {
             Ok(r) => r,
             Err(_) => return "<invalid tuple>".to_string(),
         };
@@ -1633,9 +1506,9 @@ impl<'a> TupleFormatter<'a> {
 #[cfg(test)]
 mod tuple_tests {
     use super::*;
-    use crate::Int64;
     use crate::schema::{Column, Schema};
     use crate::types::{Blob, DataType, DataTypeKind};
+    use crate::{Int64, snapshot};
 
     fn test_schema() -> Schema {
         Schema::new_table(vec![
@@ -1668,7 +1541,7 @@ mod tuple_tests {
     fn test_tuple_new() {
         let schema = test_schema();
         let row = test_row();
-
+        let snapshot = snapshot!(xid: 0, xmin: 0);
         let builder = TupleBuilder::from_schema(&schema);
         let tuple = builder.build(row, 1).unwrap();
 
@@ -1676,6 +1549,8 @@ mod tuple_tests {
         assert_eq!(tuple.xmin(), 1);
         assert_eq!(tuple.xmax(), None);
         assert!(!tuple.is_deleted());
+
+        println!("{}", tuple.display_with(&schema, &snapshot))
     }
 
     #[test]
@@ -1684,16 +1559,15 @@ mod tuple_tests {
         let row = test_row();
         let builder = TupleBuilder::from_schema(&schema);
         let tuple = builder.build(row, 1).unwrap();
-
+        let snapshot = snapshot!(xid: 0, xmin: 0);
         let reader = TupleReader::from_schema(&schema);
         let layout = reader
             .parse_last_version(tuple.data.effective_data())
             .unwrap();
         let reference = TupleRef::new(tuple.data.effective_data(), layout);
+        println!("{}", reference.display_with(&schema, &snapshot));
 
-        let accessor = RefTupleAccessor::new(reference, &schema);
-
-        match accessor.key(0).unwrap() {
+        match reference.key_with(0, &schema).unwrap() {
             DataTypeRef::BigInt(v) => assert_eq!(v.value(), 1),
             _ => panic!("Expected BigInt"),
         }
@@ -1712,9 +1586,7 @@ mod tuple_tests {
             .unwrap();
         let reference = TupleRef::new(tuple.data.effective_data(), layout);
 
-        let accessor = RefTupleAccessor::new(reference, &schema);
-
-        match accessor.value(1).unwrap() {
+        match reference.value_with(1, &schema).unwrap() {
             DataTypeRef::BigInt(v) => assert_eq!(v.value(), 30),
             _ => panic!("Expected BigInt"),
         }
@@ -1733,14 +1605,18 @@ mod tuple_tests {
             .unwrap();
         let reference = TupleRef::new(tuple.data.effective_data(), layout);
 
-        let accessor = RefTupleAccessor::new(reference, &schema);
-
-        assert!(matches!(accessor.value(0).unwrap(), DataTypeRef::Null));
-        match accessor.value(1).unwrap() {
+        assert!(matches!(
+            reference.value_with(0, &schema).unwrap(),
+            DataTypeRef::Null
+        ));
+        match reference.value_with(1, &schema).unwrap() {
             DataTypeRef::BigInt(v) => assert_eq!(v.value(), 30),
             _ => panic!("Expected BigInt"),
         }
-        assert!(matches!(accessor.value(2).unwrap(), DataTypeRef::Null));
+        assert!(matches!(
+            reference.value_with(2, &schema).unwrap(),
+            DataTypeRef::Null
+        ));
     }
 
     #[test]
@@ -1806,64 +1682,22 @@ mod tuple_tests {
         let schema = test_schema();
         let row = test_row();
         let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 1).unwrap();
-
-        let mut accessor = OwnedTupleAccessor::new(tuple, &schema);
-
-        assert_eq!(accessor.version(), 0);
-        assert!(!accessor.has_history());
+        let mut tuple = builder.build(row, 1).unwrap();
+        let snapshot = snapshot!(xid: 0, xmin: 0);
         let mut modifications = HashMap::new();
         modifications.insert(1, DataType::BigInt(Int64(31)));
-        accessor.add_version(&modifications, 10).unwrap();
+        tuple.add_version_with(&modifications, 10, &schema).unwrap();
 
-        assert_eq!(accessor.version(), 1);
-        assert!(accessor.has_history());
-        assert_eq!(accessor.num_versions().unwrap(), 2);
-        assert_eq!(accessor.xmin(), 10);
+        assert_eq!(tuple.num_versions_with(&schema).unwrap(), 2);
+        println!("{}", tuple.display_with(&schema, &snapshot));
 
         let reader = TupleReader::from_schema(&schema);
-        let layout = reader
-            .parse_last_version(accessor.tuple.data.effective_data())
-            .unwrap();
-        let reference = TupleRef::new(accessor.tuple.data.effective_data(), layout);
-        let accessor = RefTupleAccessor::new(reference, &schema);
+        let layout = reader.parse_last_version(tuple.effective_data()).unwrap();
+        let reference = TupleRef::new(tuple.effective_data(), layout);
+        println!("{}", reference.display_with(&schema, &snapshot));
 
-        match accessor.value(1).unwrap() {
+        match reference.value_with(1, &schema).unwrap() {
             DataTypeRef::BigInt(v) => assert_eq!(v.value(), 31),
-            _ => panic!("Expected BigInt"),
-        }
-    }
-
-    #[test]
-    fn test_tuple_version_history_read() {
-        let schema = test_schema();
-        let row = test_row();
-        let builder = TupleBuilder::from_schema(&schema);
-        let tuple = builder.build(row, 1).unwrap();
-        let mut accessor = OwnedTupleAccessor::new(tuple, &schema);
-        let mut modifications = HashMap::new();
-        modifications.insert(1, DataType::BigInt(Int64(31)));
-        accessor.add_version(&modifications, 10).unwrap();
-
-        let reader = TupleReader::from_schema(&schema);
-        let layout = reader
-            .parse_last_version(accessor.tuple.data.effective_data())
-            .unwrap();
-        let ref_v1 = TupleRef::new(accessor.tuple.data.effective_data(), layout);
-        let ref_accessor = RefTupleAccessor::new(ref_v1, &schema);
-        match ref_accessor.value(1).unwrap() {
-            DataTypeRef::BigInt(v) => assert_eq!(v.value(), 31),
-            _ => panic!("Expected BigInt"),
-        }
-
-        let reader = TupleReader::from_schema(&schema);
-        let layout = reader
-            .parse_version(accessor.tuple.data.effective_data(), 0)
-            .unwrap();
-        let ref_v0 = TupleRef::new(accessor.tuple.data.effective_data(), layout);
-        let ref_accessor = RefTupleAccessor::new(ref_v0, &schema);
-        match ref_accessor.value(1).unwrap() {
-            DataTypeRef::BigInt(v) => assert_eq!(v.value(), 30),
             _ => panic!("Expected BigInt"),
         }
     }
@@ -1902,7 +1736,7 @@ mod tuple_tests {
         let layout = reader.parse_last_version(tuple.effective_data()).unwrap();
         let tuple_ref = TupleRef::new(tuple.effective_data(), layout);
 
-        let key = tuple_ref.key_with_schema(0, &schema).unwrap();
+        let key = tuple_ref.key_with(0, &schema).unwrap();
         match key {
             DataTypeRef::BigUInt(v) => assert_eq!(v.value(), 42),
             _ => panic!("Expected BigUInt, got {:?}", key),
@@ -1963,19 +1797,19 @@ mod tuple_tests {
         let layout = reader.parse_last_version(tuple.effective_data()).unwrap();
         let tuple_ref = TupleRef::new(tuple.effective_data(), layout);
 
-        let key0 = tuple_ref.key_with_schema(0, &schema).unwrap();
+        let key0 = tuple_ref.key_with(0, &schema).unwrap();
         match key0 {
             DataTypeRef::BigUInt(v) => assert_eq!(v.value(), 100),
             _ => panic!("Expected BigUInt for key 0"),
         }
 
-        let key1 = tuple_ref.key_with_schema(1, &schema).unwrap();
+        let key1 = tuple_ref.key_with(1, &schema).unwrap();
         match key1 {
             DataTypeRef::Blob(v) => assert_eq!(v.data().unwrap(), b"hello"),
             _ => panic!("Expected Blob for key 1"),
         }
 
-        let val = tuple_ref.value_with_schema(0, &schema).unwrap();
+        let val = tuple_ref.value_with(0, &schema).unwrap();
         match val {
             DataTypeRef::BigUInt(v) => assert_eq!(v.value(), 999),
             _ => panic!("Expected BigUInt for value"),

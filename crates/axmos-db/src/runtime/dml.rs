@@ -8,8 +8,10 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     core::SerializableType,
     runtime::{
-        RuntimeError, RuntimeResult, TypeSystemError, context::TransactionContext,
+        RuntimeError, RuntimeResult, TypeSystemError,
+        context::TransactionContext,
         eval::ExpressionEvaluator,
+        validator::{validate_insert_constraints, validate_update_constraints},
     },
     schema::{Schema, base::IndexHandle, catalog::CatalogTrait},
     sql::binder::bounds::BoundExpression,
@@ -93,6 +95,10 @@ where
         // Build the full row with the assigned row ID
         let full_row = self.build_full_row(&schema, columns, values, row_id)?;
         let full_values: Vec<DataType> = full_row.iter().cloned().collect();
+        let indexes = relation.get_indexes();
+
+        // *** ADD CONSTRAINT VALIDATION HERE ***
+        validate_insert_constraints(self.ctx, &schema, &full_values, &indexes)?;
 
         // Create and insert the tuple
         let tuple = TupleBuilder::from_schema(&schema).build(full_row, tid)?;
@@ -107,7 +113,7 @@ where
         btree.accessor_mut()?.clear();
 
         // Maintain secondary indexes
-        self.insert_index_entries(&relation.get_indexes(), &full_values, row_id.value())?;
+        self.insert_index_entries(&indexes, &full_values, row_id.value())?;
 
         // Update relation metadata
         self.ctx.catalog().write().update_relation(
@@ -177,16 +183,26 @@ where
             .get_row_at(position, &schema, &snapshot)?
             .expect("Tuple should exist");
 
+        // *** ADD CONSTRAINT VALIDATION HERE ***
+        validate_update_constraints(
+            self.ctx,
+            &schema,
+            &old_row.clone().into_inner(),
+            assignments,
+            &relation.get_indexes(),
+            row_id.value(),
+        )?;
+
         // Apply the update
         let mut updated_tuple = tuple.clone();
-        updated_tuple.add_version_with_schema(assignments, tid, &schema)?;
+        updated_tuple.add_version_with(assignments, tid, &schema)?;
         //    updated_tuple.vaccum_for_snapshot(&schema, &snapshot)?;
 
         // Get the new row for index maintenance
         let new_row = updated_tuple
             .as_tuple_ref(&schema, &snapshot)
             .expect("Updated tuple should be visible")
-            .to_row_with_schema(&schema)?;
+            .to_row_with(&schema)?;
 
         // Log the update
         self.ctx.log_update(
@@ -351,13 +367,27 @@ where
             let index_schema = index_relation.schema();
             let index_root = index_relation.root();
 
+            let mut index_btree = self.ctx.build_tree(index_root);
+
             // Build and insert the index entry
             let index_row = Self::build_index_entry(values, index, index_schema, row_id)?;
             let index_tuple = TupleBuilder::from_schema(index_schema).build(index_row, tid)?;
 
-            let mut index_btree = self.ctx.build_tree(index_root);
-            index_btree.insert(index_root, index_tuple, index_schema)?;
-            index_btree.accessor_mut()?.clear();
+            let search_result = index_btree.search_tuple(&index_tuple, &index_schema)?;
+
+            if let SearchResult::Found(position) = search_result {
+                let existing = index_btree.get_tuple_at_unchecked(position, &index_schema)?;
+
+                // If it is deleted we need to un-delete it
+                if existing.is_deleted() {
+                    index_btree.update(index_root, index_tuple, index_schema)?;
+                };
+
+                // Otherwise there is nothing to do. Just keep the tuple there.
+            } else {
+
+                index_btree.insert(index_root, index_tuple, index_schema)?;
+            }
         }
 
         Ok(())
@@ -418,7 +448,7 @@ where
                     tuple_reader.parse_for_snapshot(bytes, &snapshot).ok()??;
                     let mut tuple = Tuple::from_slice_unchecked(bytes).ok()?;
                     tuple
-                        .add_version_with_schema(&index_assignments, snapshot.xid(), index_schema)
+                        .add_version_with(&index_assignments, snapshot.xid(), index_schema)
                         .ok()?;
                     //    let _ = tuple.vaccum_for_snapshot(&index_schema, &snapshot);
                     Some(tuple)
@@ -532,7 +562,7 @@ pub(crate) fn extract_row_id(row: &Row) -> RuntimeResult<&UInt64> {
 /// * `schema` - The table schema
 ///
 /// # Returns
-/// A map of value_idx -> evaluated_value suitable for `add_version_with_schema`.
+/// A map of value_idx -> evaluated_value suitable for `add_version_with`.
 pub(crate) fn evaluate_assignments<'a>(
     assignments: impl Iterator<Item = &'a (usize, BoundExpression)>,
     row: &Row,

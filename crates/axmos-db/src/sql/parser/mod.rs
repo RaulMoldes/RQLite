@@ -785,7 +785,7 @@ impl Parser {
     fn parse_create_index_statement(&mut self) -> ParseResult<CreateIndexStatement> {
         self.expect(Token::Create)?;
 
-        let unique = self.consume_if(&Token::Unique);
+        self.expect(Token::Unique)?;
         self.expect(Token::Index)?;
 
         let if_not_exists = if self.current_token == Token::If {
@@ -853,7 +853,6 @@ impl Parser {
             name,
             table,
             columns,
-            unique,
             if_not_exists,
         })
     }

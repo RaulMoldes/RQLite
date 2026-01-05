@@ -970,6 +970,24 @@ impl Payload {
         })
     }
 
+    /// Similar to [Vec::shrink_to_fit]
+    pub(crate) fn shrink_to_fit(&mut self) -> Result<(), AllocError> {
+        let current_capacity = self.ptr.len();
+        let mut new_payload = Self::alloc_aligned(self.effective_size)?;
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.ptr.as_ptr() as *const u8,
+                new_payload.ptr.as_ptr() as *mut u8,
+                self.effective_size,
+            );
+        }
+
+        new_payload.effective_size = self.effective_size;
+        *self = new_payload;
+        Ok(())
+    }
+
     pub(crate) fn realloc(&mut self, new_size: usize) -> Result<(), AllocError> {
         let current_capacity = self.ptr.len();
 

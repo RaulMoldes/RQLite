@@ -305,7 +305,6 @@ pub struct BoundCreateIndex {
     pub index_name: String,
     pub table_id: ObjectId,
     pub columns: Vec<BoundIndexColumn>,
-    pub unique: bool,
     pub if_not_exists: bool,
 }
 

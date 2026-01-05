@@ -5,7 +5,7 @@ use crate::{
     make_shared,
     multithreading::coordinator::Snapshot,
     schema::{Schema, base::SchemaError},
-    storage::tuple::{RefTupleAccessor, Tuple, TupleBuilder, TupleError, TupleReader, TupleRef},
+    storage::tuple::{Tuple, TupleBuilder, TupleError, TupleReader, TupleRef},
     tree::{
         accessor::BtreePagePosition,
         bplustree::{BtreeError, SearchResult},
@@ -213,11 +213,10 @@ impl Catalog {
                 let reader = TupleReader::from_schema(&schema);
                 if let Some(layout) = reader.parse_for_snapshot(bytes, &snapshot)? {
                     let tuple = TupleRef::new(bytes, layout);
-                    let accessor = RefTupleAccessor::new(tuple, &schema);
 
                     // Collect key column stats
                     for i in 0..schema.num_keys() {
-                        if let Ok(value) = accessor.key(i) {
+                        if let Ok(value) = tuple.key_with(i, &schema) {
                             collectors[i].observe(value);
                         }
                     }
@@ -225,7 +224,7 @@ impl Catalog {
                     // Collect value column stats
                     for i in 0..schema.num_values() {
                         let col_idx = schema.num_keys as usize + i;
-                        if let Ok(value) = accessor.value(i) {
+                        if let Ok(value) = tuple.value_with(i, &schema) {
                             collectors[col_idx].observe(value);
                         }
                     }
@@ -289,8 +288,8 @@ impl Catalog {
                         let reader = TupleReader::from_schema(&schema);
                         if let Some(layout) = reader.parse_for_snapshot(bytes, &snapshot)? {
                             let tuple = TupleRef::new(bytes, layout);
-                            let accessor = RefTupleAccessor::new(tuple, &schema);
-                            if let Ok(DataTypeRef::BigUInt(value)) = accessor.key(0) {
+
+                            if let Ok(DataTypeRef::BigUInt(value)) = tuple.key_with(0, &schema) {
                                 relations_to_analyze.push(value.value())
                             }
                         }
@@ -366,7 +365,7 @@ impl Catalog {
                         let reader = TupleReader::from_schema(&schema);
                         if let Some(layout) = reader.parse_for_snapshot(bytes, snapshot)? {
                             let tuple = TupleRef::new(bytes, layout);
-                            let row = tuple.to_row_with_schema(&schema)?;
+                            let row = tuple.to_row_with(&schema)?;
                             let relation = Relation::from_meta_table_row(row);
 
                             relations.push((
@@ -418,8 +417,11 @@ impl Catalog {
             for position in tree.iter_forward()? {
                 if let Ok(pos) = position {
                     tree.with_cell_at(pos, |bytes| {
+                        println!("{}", bytes.len());
                         let mut tuple = Tuple::from_slice_unchecked(bytes)?;
-                        let freed = tuple.vaccum_with_schema(oldest_active_xid, schema)?;
+                        let freed = tuple.vaccum_with(oldest_active_xid, schema)?;
+
+                        println!("{freed}");
                         total_freed += freed;
                         if freed > 0 {
                             tuples_to_vaccum.push(tuple);
@@ -431,6 +433,7 @@ impl Catalog {
         }
 
         let mut tree = builder.build_tree_mut(root);
+
         for tuple in tuples_to_vaccum {
             tree.update(tree.get_root(), tuple, &schema)?;
         }
@@ -488,7 +491,7 @@ impl CatalogTrait for Catalog {
             return Ok(());
         };
 
-        tuple.add_version_with_schema(&changes, snapshot.xid(), &schema)?;
+        tuple.add_version_with(&changes, snapshot.xid(), &schema)?;
 
         let result = meta_table.update(self.meta_table, tuple, &schema)?;
 

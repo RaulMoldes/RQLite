@@ -693,7 +693,6 @@ pub struct CreateIndexStatement {
     pub(crate) name: String,
     pub(crate) table: String,
     pub(crate) columns: Vec<IndexColumn>,
-    pub(crate) unique: bool,
     pub(crate) if_not_exists: bool,
 }
 
@@ -1105,11 +1104,7 @@ impl Display for DropTableStatement {
 
 impl Display for CreateIndexStatement {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "CREATE")?;
-        if self.unique {
-            write!(f, " UNIQUE")?;
-        }
-        write!(f, " INDEX")?;
+        write!(f, "CREATE UNIQUE INDEX")?;
         if self.if_not_exists {
             write!(f, " IF NOT EXISTS")?;
         }

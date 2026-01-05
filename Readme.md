@@ -186,13 +186,7 @@ AxmosDB uses a Cascades-style optimizer, enabling:
 
 ## Pending Features
 
-### Constraint checking at analyze time
-
-Currently we are not able to check for unique constraints at runtime. We are only able to check for non null constraints.
-
-## Add proper testing for overflow page handling.
-
-I think there are some bugs on the overflow page logic. Review `cell_ops.rs` module to fix this.
+### DDL/DML executors and validator need a lot of refactoring.
 
 ### Join operators:
 

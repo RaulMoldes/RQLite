@@ -659,7 +659,6 @@ impl<C: CatalogTrait> Binder<C> {
             index_name: stmt.name.clone(),
             table_id,
             columns,
-            unique: stmt.unique,
             if_not_exists: stmt.if_not_exists,
         })
     }

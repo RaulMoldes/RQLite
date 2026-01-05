@@ -548,13 +548,13 @@ fn test_analyzer_drop_table_if_exists() {
 
 #[test]
 fn test_analyzer_create_index() {
-    let result = analyzer_test("CREATE INDEX idx_name ON users(name)");
+    let result = analyzer_test("CREATE UNIQUE INDEX idx_name ON users(name)");
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_analyzer_create_index_invalid_column_fails() {
-    let result = analyzer_test("CREATE INDEX idx_invalid ON users(nonexistent)");
+    let result = analyzer_test("CREATE UNIQUE INDEX idx_invalid ON users(nonexistent)");
     assert!(matches!(
         result,
         Err(AnalyzerError::NotFound(DatabaseItem::Column(_, _)))
@@ -563,7 +563,7 @@ fn test_analyzer_create_index_invalid_column_fails() {
 
 #[test]
 fn test_analyzer_create_index_invalid_table_fails() {
-    let result = analyzer_test("CREATE INDEX idx_test ON nonexistent(id)");
+    let result = analyzer_test("CREATE UNIQUE INDEX idx_test ON nonexistent(id)");
     assert!(matches!(
         result,
         Err(AnalyzerError::NotFound(DatabaseItem::Table(_)))
@@ -1003,7 +1003,7 @@ fn test_binder_drop_table_if_exists() {
 
 #[test]
 fn test_binder_create_index() {
-    let result = bind_sql("CREATE INDEX idx_name ON users(name)");
+    let result = bind_sql("CREATE UNIQUE INDEX idx_name ON users(name)");
     assert!(result.is_ok());
 
     if let Ok(BoundStatement::CreateIndex(idx)) = result {
@@ -1015,13 +1015,13 @@ fn test_binder_create_index() {
 
 #[test]
 fn test_binder_create_index_invalid_column_fails() {
-    let result = bind_sql("CREATE INDEX idx_invalid ON users(nonexistent)");
+    let result = bind_sql("CREATE UNIQUE INDEX idx_invalid ON users(nonexistent)");
     assert!(matches!(result, Err(BinderError::ColumnNotFound(_))));
 }
 
 #[test]
 fn test_binder_create_index_invalid_table_fails() {
-    let result = bind_sql("CREATE INDEX idx_test ON nonexistent(id)");
+    let result = bind_sql("CREATE UNIQUE INDEX idx_test ON nonexistent(id)");
     assert!(matches!(result, Err(BinderError::TableNotFound(_))));
 }
 

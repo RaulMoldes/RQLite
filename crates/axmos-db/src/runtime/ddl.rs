@@ -5,15 +5,20 @@
 //! and are executed directly against the catalog.
 
 use crate::{
+    PageId,
+    core::SerializableType,
     runtime::context::TransactionContext,
     schema::{
         base::{Column, ForeignKeyInfo, Relation, Schema, SchemaError, TableConstraint},
         catalog::{CatalogError, CatalogTrait},
     },
     sql::binder::{DatabaseItem, bounds::*},
-    storage::page::BtreePage,
+    storage::{
+        page::BtreePage,
+        tuple::{Row, TupleBuilder, TupleReader},
+    },
     tree::accessor::BtreeWriteAccessor,
-    types::{Blob, DataType, DataTypeKind, ObjectId},
+    types::{Blob, DataType, DataTypeKind, ObjectId, UInt64},
 };
 
 use std::{
@@ -187,11 +192,28 @@ impl DdlExecutor {
 
         // Allocate resources
         let object_id = self.ctx.catalog().get_next_object_id();
-
         let root_page = self.ctx.pager().write().allocate_page::<BtreePage>()?;
 
         // Create the relation
         let mut relation = Relation::table(object_id, &stmt.table_name, root_page, columns);
+
+        // Collect column-level unique constraints that need indexes
+        // These are columns marked with UNIQUE but not part of a table-level constraint
+        let column_level_unique_indices: Vec<(usize, String)> = stmt
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, col)| col.is_unique)
+            .map(|(idx, col)| (idx + 1, col.name.clone())) // +1 to account for row_id column
+            .filter(|(col_idx, _)| {
+                // Check if this column is already covered by a table-level constraint
+                !stmt.constraints.iter().any(|c| match c {
+                    BoundTableConstraint::Unique(indices) => indices.contains(&(col_idx - 1)),
+                    BoundTableConstraint::PrimaryKey(indices) => indices.contains(&(col_idx - 1)),
+                    _ => false,
+                })
+            })
+            .collect();
 
         // Apply table-level constraints (indices need to be adjusted by +1 for row_id)
         for constraint in &stmt.constraints {
@@ -203,13 +225,28 @@ impl DdlExecutor {
                 &adjusted,
             )?;
         }
+
         let snapshot = self.ctx.snapshot();
         let tree_builder = self.ctx.tree_builder();
+
         // Store in catalog
         self.ctx
             .catalog()
             .write()
             .store_relation(relation, &tree_builder, snapshot.xid())?;
+
+        // Now create indexes for column-level unique constraints
+        // This must happen AFTER storing the relation since create_index_for_constraint
+        // needs to look up the table
+        for (col_idx, col_name) in column_level_unique_indices {
+            let index_name = format!("{}_{}_unique_idx", stmt.table_name, col_name);
+            self.create_index_for_constraint(
+                object_id,
+                &index_name,
+                &[col_idx],
+                true, // unique
+            )?;
+        }
 
         Ok(DdlOutcome::TableCreated {
             name: stmt.table_name.clone(),
@@ -259,7 +296,8 @@ impl DdlExecutor {
                 .read()
                 .get_relation(stmt.table_id, &tree_builder, &snapshot)?;
 
-        let table_schema = table_relation.schema();
+        let table_schema = table_relation.schema().clone();
+        let table_root = table_relation.root();
 
         if stmt.columns.is_empty() {
             return Err(DdlError::Other(
@@ -284,17 +322,20 @@ impl DdlExecutor {
 
         // Allocate resources
         let object_id = self.ctx.catalog().read().get_next_object_id();
-
         let root_page = self.ctx.pager().write().allocate_page::<BtreePage>()?;
 
         // Create the index relation
-        let relation = Relation::index(
+        let index_relation = Relation::index(
             object_id,
             &stmt.index_name,
             root_page,
             index_columns,
             stmt.columns.len(), // num_keys = number of indexed columns
         );
+
+        let index_schema = index_relation.schema().clone();
+        let index_root = index_relation.root();
+
         let snapshot = self.ctx.snapshot();
         let tree_builder = self.ctx.tree_builder();
 
@@ -302,18 +343,104 @@ impl DdlExecutor {
         self.ctx
             .catalog()
             .write()
-            .store_relation(relation, &tree_builder, snapshot.xid())?;
+            .store_relation(index_relation, &tree_builder, snapshot.xid())?;
 
         // Update the table schema to reference this index
         // It is important that the order of the columns is kept.
         let indexed_column_ids: Vec<usize> = stmt.columns.iter().map(|c| c.column_idx).collect();
         self.add_unique_constraint_for_index(stmt.table_id, &indexed_column_ids)?;
-        self.add_index_to_table(stmt.table_id, object_id, indexed_column_ids)?;
+        self.add_index_to_table(stmt.table_id, object_id, indexed_column_ids.clone())?;
+
+        // *** POPULATE THE INDEX WITH EXISTING DATA ***
+        self.populate_index(
+            table_root,
+            &table_schema,
+            index_root,
+            &index_schema,
+            &indexed_column_ids,
+        )?;
 
         Ok(DdlOutcome::IndexCreated {
             name: stmt.index_name.clone(),
             object_id,
         })
+    }
+
+    /// Populates a newly created index with existing table data.
+    ///
+    /// This scans all visible rows in the table and inserts corresponding
+    /// entries into the index.
+    fn populate_index(
+        &mut self,
+        table_root: PageId,
+        table_schema: &Schema,
+        index_root: PageId,
+        index_schema: &Schema,
+        indexed_column_ids: &[usize],
+    ) -> DdlResult<()> {
+        let snapshot = self.ctx.snapshot();
+        let tid = snapshot.xid();
+        // Collect rows to insert into index
+        let mut index_entries: Vec<Row> = Vec::new();
+
+        {
+            // Scan the table and collect all visible rows
+            let mut table_btree = self.ctx.build_tree(table_root);
+
+            if table_btree.is_empty().map_err(|_| DdlError::Other("Failed to check tree emptyness".to_string()))? {
+                return Ok(())
+            };
+            let positions: Vec<crate::tree::accessor::BtreePagePosition> = table_btree
+                .iter_forward()
+                .map_err(|_| DdlError::Other("Failed to create tree iterator".to_string()))?
+                .filter(|p| p.is_ok())
+                .map(|f| f.unwrap())
+                .collect();
+
+            for pos in positions {
+                let row = table_btree
+                    .get_row_at(pos, table_schema, &snapshot)
+                    .map_err(|_| DdlError::Other(format!("failed to get row at position {pos}")))?;
+
+                let Some(row) = row else {
+                    continue;
+                };
+
+                let row_id = row.first();
+
+                let Some(DataType::BigUInt(UInt64(value))) = row_id else {
+                    return Err(DdlError::Other(
+                        "Tables should have row id type for the first column!".to_string(),
+                    ));
+                };
+
+                // Extract indexed column values + row_id
+                let mut entry_values: Vec<DataType> =
+                    Vec::with_capacity(indexed_column_ids.len() + 1);
+                for &col_idx in indexed_column_ids {
+                    if col_idx < row.len() {
+                        entry_values.push(row[col_idx].clone());
+                    }
+                }
+                entry_values.push(DataType::BigUInt(UInt64(*value)));
+
+                index_entries.push(Row::new(entry_values.into_boxed_slice()));
+            }
+        }
+
+        // Now insert all entries into the index
+        let mut index_btree = self.ctx.build_tree(index_root);
+        for entry in index_entries {
+            let tuple = TupleBuilder::from_schema(index_schema)
+                .build(entry, tid)
+                .map_err(|e| DdlError::Other(format!("Failed to build index tuple: {}", e)))?;
+
+            index_btree
+                .insert(index_root, tuple, index_schema)
+                .map_err(|e| DdlError::Other(format!("Failed to insert into index: {}", e)))?;
+        }
+
+        Ok(())
     }
 
     /// Creates an index to back a constraint (PRIMARY KEY or UNIQUE).
@@ -322,7 +449,7 @@ impl DdlExecutor {
         table_id: ObjectId,
         index_name: &str,
         col_indices: &[usize],
-        unique: bool,
+        _unique: bool,
     ) -> DdlResult<ObjectId> {
         let snapshot = self.ctx.snapshot();
         let tree_builder = self.ctx.tree_builder();
@@ -334,7 +461,8 @@ impl DdlExecutor {
                 .read()
                 .get_relation(table_id, &tree_builder, &snapshot)?;
 
-        let table_schema = table_relation.schema();
+        let table_schema = table_relation.schema().clone();
+        let table_root = table_relation.root();
 
         // Build index columns from the constraint columns + row_id
         let mut index_columns: Vec<Column> = Vec::with_capacity(col_indices.len() + 1);
@@ -356,7 +484,7 @@ impl DdlExecutor {
         let root_page = self.ctx.pager().write().allocate_page::<BtreePage>()?;
 
         // Create the index relation
-        let relation = Relation::index(
+        let index_relation = Relation::index(
             object_id,
             index_name,
             root_page,
@@ -364,14 +492,26 @@ impl DdlExecutor {
             col_indices.len(), // num_keys
         );
 
+        let index_schema = index_relation.schema().clone();
+        let index_root = index_relation.root();
+
         // Store in catalog
         self.ctx
             .catalog()
             .write()
-            .store_relation(relation, &tree_builder, snapshot.xid())?;
+            .store_relation(index_relation, &tree_builder, snapshot.xid())?;
 
         // Register the index with the table
         self.add_index_to_table(table_id, object_id, col_indices.to_vec())?;
+
+        // Populate the index with existing data
+        self.populate_index(
+            table_root,
+            &table_schema,
+            index_root,
+            &index_schema,
+            col_indices,
+        )?;
 
         Ok(object_id)
     }
