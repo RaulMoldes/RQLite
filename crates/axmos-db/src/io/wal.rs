@@ -202,7 +202,7 @@ impl WriteAheadLog {
                         .row_id
                         .expect("Row id must be set for delete operations");
                     let delete = Delete::new(oid, row_id, undo_content);
-                    result.delete_ops.insert(tid, delete);
+                    result.delete_ops.insert(lsn, delete);
                 }
                 RecordType::Update => {
                     let undo_content = Box::from(record.undo_payload());
@@ -216,7 +216,7 @@ impl WriteAheadLog {
                         .row_id
                         .expect("Row id must be set for update operations");
                     let update = Update::new(oid, row_id, undo_content, redo_content);
-                    result.update_ops.insert(tid, update);
+                    result.update_ops.insert(lsn, update);
                 }
                 RecordType::Insert => {
                     let redo_content = Box::from(record.redo_payload());
@@ -229,7 +229,7 @@ impl WriteAheadLog {
                         .row_id
                         .expect("Row id must be set for insert operations");
                     let insert = Insert::new(oid, row_id, redo_content);
-                    result.insert_ops.insert(tid, insert);
+                    result.insert_ops.insert(lsn, insert);
                 }
             }
         }

@@ -9,7 +9,7 @@ use crate::{
     core::SerializableType,
     runtime::{
         RuntimeError, RuntimeResult, TypeSystemError,
-        context::{ExecutionContext, TransactionContext},
+        context::{TransactionContext, TransactionLogger},
         eval::ExpressionEvaluator,
         validator::ConstraintValidator,
     },
@@ -20,10 +20,7 @@ use crate::{
     },
     sql::binder::bounds::BoundExpression,
     storage::tuple::{Row, Tuple, TupleBuilder, TupleReader},
-    tree::{
-        accessor::TreeWriter,
-        bplustree::SearchResult,
-    },
+    tree::bplustree::SearchResult,
     types::{DataType, ObjectId, RowId, UInt64},
 };
 
@@ -49,14 +46,15 @@ pub struct DeleteResult {
 ///
 /// This component provides a clean interface for Insert, Update, and Delete
 /// operations.
-pub(crate) struct DmlExecutor<Acc: TreeWriter> {
-    ctx: TransactionContext<Acc>,
+pub(crate) struct DmlExecutor {
+    ctx: TransactionContext,
+    logger: TransactionLogger,
 }
 
-impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
+impl DmlExecutor {
     /// Creates a new DML executor with the given transaction context.
-    pub(crate) fn new(ctx: TransactionContext<Acc>) -> Self {
-        Self { ctx }
+    pub(crate) fn new(ctx: TransactionContext, logger: TransactionLogger) -> Self {
+        Self { ctx, logger }
     }
 
     /// UTILITY TO BUILD THE ASSIGNMENTS HASHMAP
@@ -86,10 +84,8 @@ impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
         relation: &Relation,
         old_values: &[DataType],
         assignments: &HashMap<usize, DataType>,
-        row_id: RowId
-    ) -> RuntimeResult<()>
-    {
-
+        row_id: RowId,
+    ) -> RuntimeResult<()> {
         let schema = relation.schema();
         // Build the new values array by applying assignments to old values
         let mut new_values: Vec<DataType> = old_values.to_vec();
@@ -100,8 +96,6 @@ impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
                 new_values[col_idx] = value.clone();
             }
         }
-
-
 
         let table_name = relation.name().to_string();
         let validator = ConstraintValidator::new(schema, table_name, self.ctx.clone());
@@ -170,8 +164,9 @@ impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
         // Build the full row with the assigned row ID
         let full_row = self.build_full_row(&schema, columns, values, row_id)?;
 
-
         // Constraint validation goes here.
+        println!("VALIDANDO CONSTRAINTS PARA INSERT");
+        
         self.validate_insert_constraints(&relation, full_row.as_slice())?;
         let indexes = relation.get_indexes();
 
@@ -179,13 +174,13 @@ impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
         let tuple = TupleBuilder::from_schema(&schema).build(&full_row, tid)?;
 
         // Log the insert operation
-        self.ctx
+        self.logger
             .log_insert(table_id, row_id.value(), Box::from(&tuple))?;
 
         // Table access scope
         {
             // Insert into main table
-            let mut btree = self.ctx.build_tree(root);
+            let mut btree = self.ctx.build_tree_mut(root);
             let search_result = btree.search_tuple(&tuple, &schema)?;
 
             if let SearchResult::Found(position) = search_result {
@@ -227,7 +222,7 @@ impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
         })
     }
 
-    pub fn ctx(&self) -> &ExecutionContext<Acc> {
+    pub fn ctx(&self) -> &TransactionContext {
         &self.ctx
     }
 
@@ -270,12 +265,11 @@ impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
                 .read()
                 .get_relation(table_id, &tree_builder, &snapshot)?;
 
-
         let schema = relation.schema().clone();
         let root = relation.root();
 
         // Search for the tuple
-        let mut btree = self.ctx.build_tree(root);
+        let mut btree = self.ctx.build_tree_mut(root);
         let position = match btree.search(&row_id_bytes, &schema)? {
             SearchResult::Found(pos) => pos,
             SearchResult::NotFound(_) => return Ok(UpdateResult { updated: false }),
@@ -298,7 +292,12 @@ impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
             .expect("Tuple should exist");
 
         // Constraint validation goes here.
-        self.validate_update_constraints(&relation, old_row.as_slice(), &assignments, row_id.value())?;
+        self.validate_update_constraints(
+            &relation,
+            old_row.as_slice(),
+            &assignments,
+            row_id.value(),
+        )?;
 
         // Apply the update
         let mut updated_tuple = tuple.clone();
@@ -311,7 +310,7 @@ impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
             .to_row_with(&schema)?;
 
         // Log the update
-        self.ctx.log_update(
+        self.logger.log_update(
             table_id,
             row_id.value(),
             Box::from(&tuple),
@@ -357,7 +356,7 @@ impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
         let root = relation.root();
 
         // Search for the tuple
-        let mut btree = self.ctx.build_tree(root);
+        let mut btree = self.ctx.build_tree_mut(root);
         let position = match btree.search(&row_id_bytes, &schema)? {
             SearchResult::Found(pos) => pos,
             SearchResult::NotFound(_) => return Ok(DeleteResult { deleted: false }),
@@ -384,7 +383,7 @@ impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
         deleted_tuple.delete(snapshot.xid())?;
 
         // Log the delete
-        self.ctx
+        self.logger
             .log_delete(table_id, row_id.value(), Box::from(&tuple))?;
 
         // Update the main table
@@ -497,7 +496,7 @@ impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
                 }
             }
 
-            let mut index_btree = self.ctx.build_tree(index_root);
+            let mut index_btree = self.ctx.build_tree_mut(index_root);
 
             match (
                 old_values.as_ref(),
@@ -566,7 +565,7 @@ impl<Acc: TreeWriter + Clone> DmlExecutor<Acc> {
                     )?;
 
                     // Search and update the index entry
-                    let mut index_btree = self.ctx.build_tree(index_root);
+                    let mut index_btree = self.ctx.build_tree_mut(index_root);
                     let search_result = index_btree.search_tuple(&old_index_tuple, index_schema)?;
 
                     if let SearchResult::Found(pos) = search_result {

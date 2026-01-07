@@ -1,30 +1,28 @@
 // src/runtime/ops/values.rs
-
 use crate::{
     runtime::eval::ExpressionEvaluator,
-    runtime::{ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeResult},
+    runtime::{ExecutionStats, Executor, RuntimeResult},
     schema::Schema,
-    sql::planner::physical::PhysValuesOp,
+    sql::{binder::bounds::BoundExpression, planner::physical::PhysValuesOp},
     storage::tuple::Row,
     types::DataType,
 };
 
-pub(crate) struct OpenValues {
-    rows: std::vec::IntoIter<Vec<crate::sql::binder::bounds::BoundExpression>>,
+use std::vec::IntoIter;
+
+pub(crate) struct Values {
+    rows: IntoIter<Vec<BoundExpression>>,
     schema: Schema,
     stats: ExecutionStats,
 }
 
-pub(crate) struct ClosedValues {
-    op: PhysValuesOp,
-    stats: ExecutionStats,
-}
-
-impl ClosedValues {
-    pub(crate) fn new(op: PhysValuesOp, stats: Option<ExecutionStats>) -> Self {
+impl Values {
+    pub(crate) fn new(op: &PhysValuesOp) -> Self {
+        let schema = op.schema.clone();
         Self {
-            op,
-            stats: stats.unwrap_or_default(),
+            rows: op.rows.clone().into_iter(),
+            schema,
+            stats: ExecutionStats::default(),
         }
     }
 
@@ -33,20 +31,10 @@ impl ClosedValues {
     }
 }
 
-impl ClosedExecutor for ClosedValues {
-    type Running = OpenValues;
-
-    fn open(self) -> RuntimeResult<Self::Running> {
-        Ok(OpenValues {
-            rows: self.op.rows.into_iter(),
-            schema: self.op.schema,
-            stats: self.stats,
-        })
+impl Executor for Values {
+    fn open(&mut self) -> RuntimeResult<()> {
+        Ok(())
     }
-}
-
-impl RunningExecutor for OpenValues {
-    type Closed = ClosedValues;
 
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
         match self.rows.next() {
@@ -71,13 +59,7 @@ impl RunningExecutor for OpenValues {
         }
     }
 
-    fn close(self) -> RuntimeResult<Self::Closed> {
-        Ok(ClosedValues {
-            op: PhysValuesOp {
-                rows: Vec::new(),
-                schema: self.schema,
-            },
-            stats: self.stats,
-        })
+    fn close(&mut self) -> RuntimeResult<()> {
+        Ok(())
     }
 }

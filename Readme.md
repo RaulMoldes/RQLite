@@ -187,6 +187,7 @@ AxmosDB uses a Cascades-style optimizer, enabling:
 ## Pending Features
 
 ## REVIEW AND REFACTOR TEST FRAMEWORK
+
 ### Join operators:
 
 * Merge Join

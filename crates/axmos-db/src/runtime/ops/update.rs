@@ -1,94 +1,53 @@
-//! Update operator implementation.
-//!
-//! Updates rows in a table by consuming rows from its child operator
-//! (which provides rows to update) and delegating the actual update
-//! to the DML executor.
-
 use crate::{
+    ObjectId,
     runtime::{
-        ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeResult,
-        context::TransactionContext,
+        ExecutionStats, Executor, RuntimeResult,
+        context::{TransactionContext, TransactionLogger},
         dml::{DmlExecutor, evaluate_assignments, extract_row_id},
     },
-    schema::catalog::CatalogTrait,
-    sql::planner::physical::PhysUpdateOp,
+    schema::{Schema, catalog::CatalogTrait},
+    sql::{binder::bounds::BoundExpression, planner::physical::PhysUpdateOp},
     storage::tuple::Row,
-    tree::accessor::TreeWriter,
     types::{DataType, UInt64},
 };
 
 /// Running state for the Update operator.
-pub(crate) struct OpenUpdate<Acc, Child>
+pub(crate) struct Update<Child>
 where
-    Acc: TreeWriter + Clone + Default,
-    Child: RunningExecutor,
+    Child: Executor,
 {
-    op: PhysUpdateOp,
-    ctx: TransactionContext<Acc>,
+    ctx: TransactionContext,
+    logger: TransactionLogger,
+    table_id: ObjectId,
+    table_schema: Schema,
+    assignments: Box<[(usize, BoundExpression)]>,
     child: Child,
     stats: ExecutionStats,
     returned_result: bool,
 }
 
-/// Closed state for the Update operator.
-pub(crate) struct ClosedUpdate<Acc, Child>
+impl<Child> Update<Child>
 where
-    Acc: TreeWriter + Clone + Default,
-    Child: ClosedExecutor,
-{
-    op: PhysUpdateOp,
-    ctx: TransactionContext<Acc>,
-    child: Child,
-    stats: ExecutionStats,
-}
-
-impl<Acc, Child> ClosedUpdate<Acc, Child>
-where
-    Acc: TreeWriter + Clone + Default,
-    Child: ClosedExecutor,
+    Child: Executor,
 {
     pub(crate) fn new(
-        op: PhysUpdateOp,
-        ctx: TransactionContext<Acc>,
+        op: &PhysUpdateOp,
+        ctx: TransactionContext,
+        logger: TransactionLogger,
         child: Child,
-        stats: Option<ExecutionStats>,
     ) -> Self {
         Self {
-            op,
+            table_id: op.table_id,
+            table_schema: op.table_schema.clone(),
+            assignments: op.assignments.clone().into_boxed_slice(),
             ctx,
+            logger,
             child,
-            stats: stats.unwrap_or_default(),
+            stats: ExecutionStats::default(),
+            returned_result: false,
         }
     }
 
-    pub fn stats(&self) -> &ExecutionStats {
-        &self.stats
-    }
-}
-
-impl<Acc, Child> ClosedExecutor for ClosedUpdate<Acc, Child>
-where
-    Acc: TreeWriter + Clone + Default,
-    Child: ClosedExecutor,
-{
-    type Running = OpenUpdate<Acc, Child::Running>;
-
-    fn open(self) -> RuntimeResult<Self::Running> {
-        Ok(OpenUpdate {
-            op: self.op,
-            ctx: self.ctx,
-            child: self.child.open()?,
-            stats: self.stats,
-            returned_result: false,
-        })
-    }
-}
-
-impl<Acc, Child> OpenUpdate<Acc, Child>
-where
-    Acc: TreeWriter + Clone + Default,
-    Child: RunningExecutor,
-{
     pub fn stats(&self) -> &ExecutionStats {
         &self.stats
     }
@@ -102,27 +61,29 @@ where
             self.ctx
                 .catalog()
                 .read()
-                .get_relation(self.op.table_id, &tree_builder, &snapshot)?;
+                .get_relation(self.table_id, &tree_builder, &snapshot)?;
         let schema = relation.schema().clone();
 
         // Extract row ID and evaluate assignments
         let row_id = extract_row_id(row)?;
-        let assignments = evaluate_assignments(self.op.assignments.iter(), row, &schema)?;
+        let assignments = evaluate_assignments(self.assignments.iter(), row, &schema)?;
 
         // Delegate to DML executor
-        let mut dml = DmlExecutor::new(self.ctx.clone());
-        let result = dml.update(self.op.table_id, row_id, assignments)?;
+        let mut dml = DmlExecutor::new(self.ctx.clone(), self.logger.clone());
+        let result = dml.update(self.table_id, row_id, assignments)?;
 
         Ok(result.updated)
     }
 }
 
-impl<Acc, Child> RunningExecutor for OpenUpdate<Acc, Child>
+impl<Child> Executor for Update<Child>
 where
-    Acc: TreeWriter + Clone + Default,
-    Child: RunningExecutor,
+    Child: Executor,
 {
-    type Closed = ClosedUpdate<Acc, Child::Closed>;
+    fn open(&mut self) -> RuntimeResult<()> {
+        self.child.open()?;
+        Ok(())
+    }
 
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
         if self.returned_result {
@@ -146,12 +107,8 @@ where
         ))]))))
     }
 
-    fn close(self) -> RuntimeResult<Self::Closed> {
-        Ok(ClosedUpdate::new(
-            self.op,
-            self.ctx,
-            self.child.close()?,
-            Some(self.stats),
-        ))
+    fn close(&mut self) -> RuntimeResult<()> {
+        self.child.close()?;
+        Ok(())
     }
 }

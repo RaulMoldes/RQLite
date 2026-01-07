@@ -25,9 +25,7 @@ pub enum Request {
         sample_rate: f64,
         max_sample_rows: usize,
     },
-    Vacuum {
-        force: bool,
-    },
+    Vacuum,
     Close,
     Ping,
     Shutdown,
@@ -69,9 +67,8 @@ impl Request {
             Self::Ping => {
                 buf.push(0x07);
             }
-            Self::Vacuum { force } => {
+            Self::Vacuum => {
                 buf.push(0x09);
-                buf.push(if *force { 1 } else { 0 });
             }
             Self::Begin => {
                 buf.push(0x0A);
@@ -141,13 +138,7 @@ impl Request {
             }
             0x06 => Ok(Self::Close),
             0x07 => Ok(Self::Ping),
-            0x09 => {
-                if payload.is_empty() {
-                    return Err(TcpError::InvalidMessage("Vacuum payload too short".into()));
-                }
-                let force = payload[0] != 0;
-                Ok(Self::Vacuum { force })
-            }
+            0x09 => Ok(Self::Vacuum),
             0x0A => Ok(Self::Begin),
             0x0B => Ok(Self::Commit),
             0x0C => Ok(Self::Rollback),

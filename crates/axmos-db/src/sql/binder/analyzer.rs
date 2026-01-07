@@ -580,7 +580,7 @@ where
                 })
                 .collect::<AnalyzerResult<Vec<_>>>()?
         } else {
-            (0..schema.num_columns()).collect()
+            (1..schema.num_columns()).collect()
         };
 
         match &stmt.values {

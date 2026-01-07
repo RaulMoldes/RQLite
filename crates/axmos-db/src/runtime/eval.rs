@@ -7,7 +7,7 @@ use crate::{
     TypeSystemError, TypeSystemResult,
     schema::Schema,
     sql::{
-        binder::bounds::{BoundExpression, ScalarFunction, Binding},
+        binder::bounds::{Binding, BoundExpression, ScalarFunction},
         parser::ast::{BinaryOperator, UnaryOperator},
     },
     storage::tuple::Row,
@@ -243,8 +243,7 @@ impl<'a> ExpressionEvaluator<'a> {
         }
     }
 
-    fn eval_column(&self, col_ref: Binding
-     ) -> EvaluationResult<DataType> {
+    fn eval_column(&self, col_ref: Binding) -> EvaluationResult<DataType> {
         let idx = col_ref.column_idx;
         // column_index is the index into the values portion of the schema
         if idx >= self.row.len() {

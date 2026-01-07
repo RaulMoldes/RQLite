@@ -1,62 +1,32 @@
-use crate::core::SerializableType;
-use crate::schema::Schema;
-use crate::schema::catalog::CatalogTrait;
 use crate::{
     TypeSystemError, UInt64,
+    core::SerializableType,
     runtime::{
-        ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeError, RuntimeResult,
-        context::TransactionContext, eval::ExpressionEvaluator,
+        ExecutionStats, Executor, RuntimeError, RuntimeResult, context::TransactionContext,
+        eval::ExpressionEvaluator,
     },
-    sql::planner::physical::PhysIndexScanOp,
+    schema::{Schema, catalog::CatalogTrait},
+    sql::{binder::bounds::BoundExpression, planner::physical::PhysIndexScanOp},
     storage::tuple::Row,
-    tree::{
-        accessor::TreeReader,
-        bplustree::{Btree, BtreePositionalIterator, SearchResult},
-    },
+    tree::bplustree::{BtreePositionalIterator, SearchResult},
+    types::PageId,
 };
 
-pub(crate) struct OpenIndexScan<Acc: TreeReader + Clone> {
-    op: PhysIndexScanOp,
-    ctx: TransactionContext<Acc>,
-    table_tree: Btree<Acc>,
+pub(crate) struct IndexScan {
+    ctx: TransactionContext,
+    table_root: PageId,
+    index_root: PageId,
+    cursor: Option<BtreePositionalIterator>,
     index_schema: Schema,
     table_schema: Schema,
-    index_cursor: Option<BtreePositionalIterator>,
+    range_start: Option<BoundExpression>,
+    range_end: Option<BoundExpression>,
+    indexed_columns: Vec<usize>,
     stats: ExecutionStats,
 }
 
-pub(crate) struct ClosedIndexScan<Acc: TreeReader + Clone> {
-    op: PhysIndexScanOp,
-    ctx: TransactionContext<Acc>,
-    stats: ExecutionStats,
-}
-
-impl<Acc> ClosedIndexScan<Acc>
-where
-    Acc: TreeReader + Clone,
-{
-    pub(crate) fn new(
-        op: PhysIndexScanOp,
-        ctx: TransactionContext<Acc>,
-        stats: Option<ExecutionStats>,
-    ) -> Self {
-        Self {
-            op,
-            ctx,
-            stats: stats.unwrap_or(ExecutionStats::default()),
-        }
-    }
-
-    pub fn stats(&self) -> &ExecutionStats {
-        &self.stats
-    }
-}
-
-impl<Acc> OpenIndexScan<Acc>
-where
-    Acc: TreeReader + Clone + Default,
-{
-    pub(crate) fn new(op: PhysIndexScanOp, ctx: TransactionContext<Acc>) -> RuntimeResult<Self> {
+impl IndexScan {
+    pub(crate) fn new(op: &PhysIndexScanOp, ctx: TransactionContext) -> RuntimeResult<Self> {
         let tree_builder = ctx.tree_builder();
         let snapshot = ctx.snapshot();
         let table = ctx
@@ -68,22 +38,20 @@ where
             .get_relation(op.index_id, &tree_builder, &snapshot)?;
 
         let table_root_page = table.root();
-        let table_schema = table.schema().clone();
-
         let index_root_page = index.root();
+        let table_schema = table.schema().clone();
         let index_schema = index.schema().clone();
-
-        let mut index_tree = ctx.build_tree(index_root_page);
-        let table_tree = ctx.build_tree(table_root_page);
-
         Ok(Self {
-            op,
             ctx,
-            table_tree,
-            index_schema,
             table_schema,
-            index_cursor: index_tree.iter_forward().ok(),
+            index_schema,
             stats: ExecutionStats::default(),
+            table_root: table_root_page,
+            index_root: index_root_page,
+            cursor: None,
+            range_end: op.range_end.clone(),
+            range_start: op.range_start.clone(),
+            indexed_columns: op.index_columns.clone(),
         })
     }
 
@@ -91,22 +59,26 @@ where
         &self.stats
     }
 
-    fn evaluate_index_predicate(&self, row: &Row) -> RuntimeResult<bool> {
+    fn range_start(&self) -> Option<&BoundExpression> {
+        self.range_start.as_ref()
+    }
+
+    fn range_end(&self) -> Option<&BoundExpression> {
+        self.range_end.as_ref()
+    }
+
+    fn evaluate_index_predicate(&self, row: &Row, column_index: usize) -> RuntimeResult<bool> {
         let evaluator = ExpressionEvaluator::new(row, &self.index_schema);
 
-        let value = row[self.op.index_columns[0]].clone();
+        let value = row[self.indexed_columns[column_index]].clone();
         let lhs = self
-            .op
-            .range_start
-            .as_ref()
+            .range_start()
             .map(|expr| evaluator.evaluate(expr).expect("Evaluation failed"))
             .map(|l| l <= value)
             .unwrap_or(true);
 
         let rhs = self
-            .op
-            .range_end
-            .as_ref()
+            .range_end()
             .map(|expr| evaluator.evaluate(expr).expect("Evaluation failed"))
             .map(|l| l >= value)
             .unwrap_or(true);
@@ -124,29 +96,26 @@ where
     }
 }
 
-impl<Acc> ClosedExecutor for ClosedIndexScan<Acc>
-where
-    Acc: TreeReader + Clone + Default,
-{
-    type Running = OpenIndexScan<Acc>;
-    fn open(self) -> RuntimeResult<Self::Running> {
-        OpenIndexScan::new(self.op, self.ctx)
-    }
-}
+impl Executor for IndexScan {
+    fn open(&mut self) -> RuntimeResult<()> {
+        let mut index_tree = self.ctx.build_tree(self.index_root);
+        self.cursor = if index_tree.is_empty()? {
+            None
+        } else {
+            Some(index_tree.iter_forward()?)
+        };
 
-impl<Acc> RunningExecutor for OpenIndexScan<Acc>
-where
-    Acc: TreeReader + Clone + Default,
-{
-    type Closed = ClosedIndexScan<Acc>;
+        Ok(())
+    }
+
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
-        if self.index_cursor.is_none() {
+        if self.cursor.is_none() {
             return Ok(None);
         };
 
         loop {
             let next_pos = match self
-                .index_cursor
+                .cursor
                 .as_mut()
                 .ok_or(RuntimeError::CursorUninitialized)?
                 .next()
@@ -161,14 +130,14 @@ where
             let snapshot = self.ctx.snapshot();
 
             let mut tree = self
-                .index_cursor
+                .cursor
                 .as_ref()
                 .ok_or(RuntimeError::CursorUninitialized)?
                 .get_tree();
             let maybe_row = tree
                 .get_row_at(next_pos, &self.index_schema, &snapshot)?
                 .filter(|r| {
-                    self.evaluate_index_predicate(r)
+                    self.evaluate_index_predicate(r, 0)
                         .expect("Predicate evaluation failed")
                 });
 
@@ -179,9 +148,10 @@ where
             let found_row = maybe_row.unwrap();
             let row_key_bytes = self.get_row_id_checked(&found_row)?.serialize()?;
 
-            let actual_row_result = self
-                .table_tree
-                .search(row_key_bytes.as_ref(), &self.table_schema)?;
+            // Build the table tree
+            let mut table_tree = self.ctx.build_tree(self.table_root);
+            let actual_row_result =
+                table_tree.search(row_key_bytes.as_ref(), &self.table_schema)?;
 
             if let SearchResult::Found(found_pos) = actual_row_result {
                 let actual_row = tree.get_row_at(found_pos, &self.table_schema, &snapshot)?;
@@ -198,7 +168,8 @@ where
         }
     }
 
-    fn close(self) -> RuntimeResult<Self::Closed> {
-        Ok(ClosedIndexScan::new(self.op, self.ctx, Some(self.stats)))
+    fn close(&mut self) -> RuntimeResult<()> {
+        let _ = self.cursor.take();
+        Ok(())
     }
 }

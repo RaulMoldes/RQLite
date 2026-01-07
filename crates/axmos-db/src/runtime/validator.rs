@@ -13,10 +13,7 @@ use crate::{
         catalog::{CatalogError, CatalogTrait},
     },
     storage::tuple::{TupleError, TupleReader, TupleRef},
-    tree::{
-        accessor::TreeReader,
-        bplustree::{BtreeError, SearchResult},
-    },
+    tree::bplustree::{BtreeError, SearchResult},
     types::{DataType, RowId},
 };
 
@@ -85,18 +82,14 @@ impl From<BtreeError> for ValidationError {
 
 pub type ValidationResult<T> = Result<T, ValidationError>;
 
-pub(crate) struct ConstraintValidator<'a, Acc: TreeReader> {
+pub(crate) struct ConstraintValidator<'a> {
     table_name: String,
     schema: &'a Schema,
-    ctx: TransactionContext<Acc>,
+    ctx: TransactionContext,
 }
 
-impl<'a, Acc: TreeReader + Clone> ConstraintValidator<'a, Acc> {
-    pub(crate) fn new(
-        schema: &'a Schema,
-        table_name: String,
-        ctx: TransactionContext<Acc>,
-    ) -> Self {
+impl<'a> ConstraintValidator<'a> {
+    pub(crate) fn new(schema: &'a Schema, table_name: String, ctx: TransactionContext) -> Self {
         Self {
             table_name,
             schema,
@@ -128,7 +121,7 @@ impl<'a, Acc: TreeReader + Clone> ConstraintValidator<'a, Acc> {
         let tree_builder = self.ctx.tree_builder();
         let snapshot = self.ctx.snapshot();
         let indexes = self.schema.get_indexes();
-
+        println!("{:?}", indexes);
         // For each of the indexes, check if we can build a new entry with the
         for index in indexes {
             let index_relation =

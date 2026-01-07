@@ -1,33 +1,35 @@
 // src/runtime/ops/filter.rs
-
 use crate::{
     runtime::eval::ExpressionEvaluator,
-    runtime::{ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeResult},
+    runtime::{ExecutionStats, Executor, RuntimeResult},
     schema::Schema,
     sql::{binder::bounds::BoundExpression, planner::physical::PhysFilterOp},
     storage::tuple::Row,
 };
 
-pub(crate) struct OpenFilter<Child: RunningExecutor> {
-    predicate: BoundExpression,
+pub(crate) struct Filter<Child: Executor> {
     schema: Schema,
+    predicate: BoundExpression,
     child: Child,
     stats: ExecutionStats,
 }
 
-pub(crate) struct ClosedFilter<Child: ClosedExecutor> {
-    op: PhysFilterOp,
-    child: Child,
-    stats: ExecutionStats,
-}
-
-impl<Child: ClosedExecutor> ClosedFilter<Child> {
-    pub(crate) fn new(op: PhysFilterOp, child: Child, stats: Option<ExecutionStats>) -> Self {
+impl<Child: Executor> Filter<Child> {
+    pub(crate) fn new(op: &PhysFilterOp, child: Child) -> Self {
         Self {
-            op,
+            schema: op.schema.clone(),
+            predicate: op.predicate.clone(),
             child,
-            stats: stats.unwrap_or_default(),
+            stats: ExecutionStats::default(),
         }
+    }
+
+    pub(crate) fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    pub(crate) fn predicate(&self) -> &BoundExpression {
+        &self.predicate
     }
 
     pub fn stats(&self) -> &ExecutionStats {
@@ -35,22 +37,11 @@ impl<Child: ClosedExecutor> ClosedFilter<Child> {
     }
 }
 
-impl<Child: ClosedExecutor> ClosedExecutor for ClosedFilter<Child> {
-    type Running = OpenFilter<Child::Running>;
-
-    fn open(self) -> RuntimeResult<Self::Running> {
-        let child = self.child.open()?;
-        Ok(OpenFilter {
-            predicate: self.op.predicate,
-            schema: self.op.schema,
-            child,
-            stats: self.stats,
-        })
+impl<Child: Executor> Executor for Filter<Child> {
+    fn open(&mut self) -> RuntimeResult<()> {
+        self.child.open()?;
+        Ok(())
     }
-}
-
-impl<Child: RunningExecutor> RunningExecutor for OpenFilter<Child> {
-    type Closed = ClosedFilter<Child::Closed>;
 
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
         loop {
@@ -59,9 +50,9 @@ impl<Child: RunningExecutor> RunningExecutor for OpenFilter<Child> {
                 Some(row) => {
                     self.stats.rows_scanned += 1;
 
-                    let evaluator = ExpressionEvaluator::new(&row, &self.schema);
+                    let evaluator = ExpressionEvaluator::new(&row, self.schema());
 
-                    if evaluator.evaluate_as_bool(&self.predicate)? {
+                    if evaluator.evaluate_as_bool(self.predicate())? {
                         self.stats.rows_produced += 1;
                         return Ok(Some(row));
                     }
@@ -70,15 +61,8 @@ impl<Child: RunningExecutor> RunningExecutor for OpenFilter<Child> {
         }
     }
 
-    fn close(self) -> RuntimeResult<Self::Closed> {
-        let child = self.child.close()?;
-        Ok(ClosedFilter {
-            op: PhysFilterOp {
-                predicate: self.predicate,
-                schema: self.schema,
-            },
-            child,
-            stats: self.stats,
-        })
+    fn close(&mut self) -> RuntimeResult<()> {
+        self.child.close()?;
+        Ok(())
     }
 }

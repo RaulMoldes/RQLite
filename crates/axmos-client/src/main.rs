@@ -214,10 +214,7 @@ impl Client {
                     max_sample_rows: max_rows,
                 }
             }
-            "VACUUM" => {
-                let force = arg.to_uppercase() == "FORCE";
-                Request::Vacuum { force }
-            }
+            "VACUUM" => Request::Vacuum,
             "BEGIN" => Request::Begin,
             "COMMIT" => Request::Commit,
             "ROLLBACK" => Request::Rollback,

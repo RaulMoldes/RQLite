@@ -1,60 +1,44 @@
 // Limit operator
 use crate::{
-    runtime::{ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeResult},
+    runtime::{ExecutionStats, Executor, RuntimeResult},
     schema::Schema,
     sql::planner::physical::PhysLimitOp,
     storage::tuple::Row,
 };
 
-pub(crate) struct OpenLimit<Child: RunningExecutor> {
+pub(crate) struct Limit<Child: Executor> {
+    child: Child,
     limit: usize,
     offset: usize,
-    schema: Schema,
-    child: Child,
     current: usize,
     skipped: usize,
+    schema: Schema,
     stats: ExecutionStats,
 }
 
-pub(crate) struct ClosedLimit<Child: ClosedExecutor> {
-    op: PhysLimitOp,
-    child: Child,
-    stats: ExecutionStats,
-}
-
-impl<Child: ClosedExecutor> ClosedLimit<Child> {
-    pub(crate) fn new(
-        op: PhysLimitOp,
-        child: Child,
-        stats: Option<crate::runtime::ExecutionStats>,
-    ) -> Self {
+impl<Child: Executor> Limit<Child> {
+    pub(crate) fn new(op: &PhysLimitOp, child: Child) -> Self {
         Self {
-            op,
             child,
-            stats: stats.unwrap_or_default(),
-        }
-    }
-}
-
-impl<Child: ClosedExecutor> ClosedExecutor for ClosedLimit<Child> {
-    type Running = OpenLimit<Child::Running>;
-
-    fn open(self) -> RuntimeResult<Self::Running> {
-        let child = self.child.open()?;
-        Ok(OpenLimit {
-            limit: self.op.limit,
-            offset: self.op.offset.unwrap_or(0),
-            schema: self.op.schema,
-            child,
+            stats: ExecutionStats::default(),
+            limit: op.limit,
+            offset: op.offset.unwrap_or(0),
+            schema: op.schema.clone(),
             current: 0,
             skipped: 0,
-            stats: self.stats,
-        })
+        }
+    }
+
+    fn schema(&self) -> &Schema {
+        &self.schema
     }
 }
 
-impl<Child: RunningExecutor> RunningExecutor for OpenLimit<Child> {
-    type Closed = ClosedLimit<Child::Closed>;
+impl<Child: Executor> Executor for Limit<Child> {
+    fn open(&mut self) -> RuntimeResult<()> {
+        self.child.open()?;
+        Ok(())
+    }
 
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
         // Skip offset rows
@@ -84,16 +68,8 @@ impl<Child: RunningExecutor> RunningExecutor for OpenLimit<Child> {
         }
     }
 
-    fn close(self) -> RuntimeResult<Self::Closed> {
-        let child = self.child.close()?;
-        Ok(ClosedLimit {
-            op: PhysLimitOp {
-                limit: self.limit,
-                offset: Some(self.offset),
-                schema: self.schema,
-            },
-            child,
-            stats: self.stats,
-        })
+    fn close(&mut self) -> RuntimeResult<()> {
+        self.child.close()?;
+        Ok(())
     }
 }

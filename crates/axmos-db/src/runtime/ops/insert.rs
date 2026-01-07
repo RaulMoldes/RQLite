@@ -1,60 +1,47 @@
-//! Insert operator implementation.
-//!
-//! Inserts rows into a table by consuming rows from its child operator
-//! and delegating the actual insertion to the DML executor.
-
 use crate::{
+    ObjectId,
     runtime::{
-        ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeResult,
-        context::TransactionContext, dml::DmlExecutor,
+        ExecutionStats, Executor, RuntimeResult,
+        context::{TransactionContext, TransactionLogger},
+        dml::DmlExecutor,
     },
     sql::planner::physical::PhysInsertOp,
     storage::tuple::Row,
-    tree::accessor::TreeWriter,
     types::{DataType, UInt64},
 };
 
 /// Running state for the Insert operator.
-pub(crate) struct OpenInsert<Acc, Child>
+pub(crate) struct Insert<Child>
 where
-    Acc: TreeWriter + Clone + Default,
-    Child: RunningExecutor,
+    Child: Executor,
 {
-    op: PhysInsertOp,
-    ctx: TransactionContext<Acc>,
+    table_id: ObjectId,
+    columns: Box<[usize]>,
+    ctx: TransactionContext,
+    logger: TransactionLogger,
     child: Child,
     stats: ExecutionStats,
     returned_result: bool,
 }
 
-/// Closed state for the Insert operator.
-pub(crate) struct ClosedInsert<Acc, Child>
+impl<Child> Insert<Child>
 where
-    Acc: TreeWriter + Clone + Default,
-    Child: ClosedExecutor,
-{
-    op: PhysInsertOp,
-    ctx: TransactionContext<Acc>,
-    child: Child,
-    stats: ExecutionStats,
-}
-
-impl<Acc, Child> ClosedInsert<Acc, Child>
-where
-    Acc: TreeWriter + Clone + Default,
-    Child: ClosedExecutor,
+    Child: Executor,
 {
     pub(crate) fn new(
-        op: PhysInsertOp,
-        ctx: TransactionContext<Acc>,
+        op: &PhysInsertOp,
+        ctx: TransactionContext,
+        logger: TransactionLogger,
         child: Child,
-        stats: Option<ExecutionStats>,
     ) -> Self {
         Self {
-            op,
+            table_id: op.table_id,
+            columns: op.columns.clone().into_boxed_slice(),
             ctx,
+            logger,
             child,
-            stats: stats.unwrap_or_default(),
+            returned_result: false,
+            stats: ExecutionStats::default(),
         }
     }
 
@@ -63,40 +50,14 @@ where
     }
 }
 
-impl<Acc, Child> ClosedExecutor for ClosedInsert<Acc, Child>
+impl<Child> Executor for Insert<Child>
 where
-    Acc: TreeWriter + Clone + Default,
-    Child: ClosedExecutor,
+    Child: Executor,
 {
-    type Running = OpenInsert<Acc, Child::Running>;
-
-    fn open(self) -> RuntimeResult<Self::Running> {
-        Ok(OpenInsert {
-            op: self.op,
-            ctx: self.ctx,
-            child: self.child.open()?,
-            stats: self.stats,
-            returned_result: false,
-        })
+    fn open(&mut self) -> RuntimeResult<()> {
+        self.child.open()?;
+        Ok(())
     }
-}
-
-impl<Acc, Child> OpenInsert<Acc, Child>
-where
-    Acc: TreeWriter + Clone + Default,
-    Child: RunningExecutor,
-{
-    pub fn stats(&self) -> &ExecutionStats {
-        &self.stats
-    }
-}
-
-impl<Acc, Child> RunningExecutor for OpenInsert<Acc, Child>
-where
-    Acc: TreeWriter + Clone + Default,
-    Child: RunningExecutor,
-{
-    type Closed = ClosedInsert<Acc, Child::Closed>;
 
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
         if self.returned_result {
@@ -107,8 +68,8 @@ where
         while let Some(row) = self.child.next()? {
             self.stats.rows_scanned += 1;
 
-            let mut dml = DmlExecutor::new(self.ctx.clone());
-            dml.insert(self.op.table_id, &self.op.columns, &row)?;
+            let mut dml = DmlExecutor::new(self.ctx.clone(), self.logger.clone());
+            dml.insert(self.table_id, &self.columns, &row)?;
 
             self.stats.rows_produced += 1;
         }
@@ -121,12 +82,8 @@ where
         ))]))))
     }
 
-    fn close(self) -> RuntimeResult<Self::Closed> {
-        Ok(ClosedInsert::new(
-            self.op,
-            self.ctx,
-            self.child.close()?,
-            Some(self.stats),
-        ))
+    fn close(&mut self) -> RuntimeResult<()> {
+        self.child.close()?;
+        Ok(())
     }
 }

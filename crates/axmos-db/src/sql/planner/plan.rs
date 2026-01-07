@@ -23,7 +23,7 @@ use super::prop::{LogicalProperties, PropertyDeriver};
 /// Builds logical plans from bound statements.
 pub struct Planner<'a, C: CatalogTrait + Clone> {
     memo: &'a mut Memo,
-    deriver: &'a PropertyDeriver<StatisticsProvider<C>>,
+    deriver: &'a PropertyDeriver<StatisticsProvider<'a, C>>,
     /// CTE storage for WITH queries.
     cte_groups: Vec<Option<GroupId>>,
 }

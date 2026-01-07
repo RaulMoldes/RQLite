@@ -1,69 +1,42 @@
 use crate::{
     runtime::{
-        ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeError, RuntimeResult,
-        context::TransactionContext, eval::ExpressionEvaluator,
+        ExecutionStats, Executor, RuntimeError, RuntimeResult, context::TransactionContext,
+        eval::ExpressionEvaluator,
     },
-    sql::planner::physical::SeqScanOp,
+    schema::{Schema, catalog::CatalogTrait},
+    sql::{binder::bounds::BoundExpression, planner::physical::SeqScanOp},
     storage::tuple::Row,
-    tree::{accessor::TreeReader, bplustree::BtreePositionalIterator},
+    tree::bplustree::BtreePositionalIterator,
+    types::PageId,
 };
 
-use crate::schema::catalog::CatalogTrait;
-
-pub(crate) struct OpenSeqScan<Acc: TreeReader + Clone> {
-    op: SeqScanOp,
-    ctx: TransactionContext<Acc>,
+pub(crate) struct SeqScan {
+    ctx: TransactionContext,
+    output_schema: Schema,
+    table_schema: Schema,
+    table_root: PageId,
     cursor: Option<BtreePositionalIterator>,
+    predicate: Option<BoundExpression>,
     stats: ExecutionStats,
 }
 
-pub(crate) struct ClosedSeqScan<Acc: TreeReader + Clone> {
-    op: SeqScanOp,
-    ctx: TransactionContext<Acc>,
-    stats: ExecutionStats,
-}
-
-impl<Acc> ClosedSeqScan<Acc>
-where
-    Acc: TreeReader + Clone,
-{
-    pub(crate) fn new(
-        op: SeqScanOp,
-        ctx: TransactionContext<Acc>,
-        stats: Option<ExecutionStats>,
-    ) -> Self {
-        Self {
-            op,
-            ctx,
-            stats: stats.unwrap_or(ExecutionStats::default()),
-        }
-    }
-
-    pub fn stats(&self) -> &ExecutionStats {
-        &self.stats
-    }
-}
-
-impl<Acc> OpenSeqScan<Acc>
-where
-    Acc: TreeReader + Clone + Default,
-{
-    pub(crate) fn new(op: SeqScanOp, ctx: TransactionContext<Acc>) -> RuntimeResult<Self> {
+impl SeqScan {
+    pub(crate) fn new(op: &SeqScanOp, ctx: TransactionContext) -> RuntimeResult<Self> {
         let tree_builder = ctx.tree_builder();
         let snapshot = ctx.snapshot();
         let table = ctx
             .catalog()
             .get_relation(op.table_id, &tree_builder, &snapshot)?;
+        let table_root = table.root();
+        let table_schema = table.schema().clone();
 
-        let root_page = table.root();
-        let schema = table.schema();
-        let mut table = ctx.build_tree(root_page);
-
-        let cursor = table.iter_forward().ok();
         Ok(Self {
-            op,
             ctx,
-            cursor,
+            output_schema: op.output_schema.clone(),
+            table_schema,
+            table_root,
+            cursor: None,
+            predicate: op.predicate.clone(),
             stats: ExecutionStats::default(),
         })
     }
@@ -71,12 +44,14 @@ where
     pub fn stats(&self) -> &ExecutionStats {
         &self.stats
     }
+}
 
+impl SeqScan {
     fn evaluate_predicate(&self, row: &Row) -> RuntimeResult<bool> {
-        match &self.op.predicate {
+        match &self.predicate {
             None => Ok(true),
             Some(pred) => {
-                let evaluator = ExpressionEvaluator::new(row, &self.op.output_schema);
+                let evaluator = ExpressionEvaluator::new(row, &self.table_schema);
                 let bool = evaluator.evaluate_as_bool(pred)?;
                 Ok(bool)
             }
@@ -84,21 +59,17 @@ where
     }
 }
 
-impl<Acc> ClosedExecutor for ClosedSeqScan<Acc>
-where
-    Acc: TreeReader + Clone + Default,
-{
-    type Running = OpenSeqScan<Acc>;
-    fn open(self) -> RuntimeResult<Self::Running> {
-        OpenSeqScan::new(self.op, self.ctx)
-    }
-}
+impl Executor for SeqScan {
+    fn open(&mut self) -> RuntimeResult<()> {
+        let mut table = self.ctx.build_tree(self.table_root);
+        self.cursor = if table.is_empty()? {
+            None
+        } else {
+            Some(table.iter_forward()?)
+        };
 
-impl<Acc> RunningExecutor for OpenSeqScan<Acc>
-where
-    Acc: TreeReader + Clone + Default,
-{
-    type Closed = ClosedSeqScan<Acc>;
+        Ok(())
+    }
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
         // If building the cursor failed, it means the table was empty
         if self.cursor.is_none() {
@@ -126,8 +97,9 @@ where
                 .as_ref()
                 .ok_or(RuntimeError::CursorUninitialized)?
                 .get_tree();
+
             let maybe_row = tree
-                .get_row_at(next_pos, &self.op.output_schema, &snapshot)?
+                .get_row_at(next_pos, &self.output_schema, &snapshot)?
                 .filter(|r| {
                     self.evaluate_predicate(r)
                         .expect("Predicate evaluation failed")
@@ -142,7 +114,8 @@ where
         }
     }
 
-    fn close(self) -> RuntimeResult<Self::Closed> {
-        Ok(ClosedSeqScan::new(self.op, self.ctx, Some(self.stats)))
+    fn close(&mut self) -> RuntimeResult<()> {
+        let _ = self.cursor.take();
+        Ok(())
     }
 }

@@ -6,7 +6,7 @@ use crate::{
         BtreeMetadata, BtreeOps, Identifiable,
         cell::OwnedCell,
         page::{BtreePage, OverflowPage},
-        tuple::{Row, Tuple,  TupleError, TupleReader, TupleRef},
+        tuple::{Row, Tuple, TupleError, TupleReader, TupleRef},
     },
     tree::accessor::{
         Accessor, BtreePagePosition, BtreeReadAccessor, BtreeWriteAccessor, TreeReader, TreeWriter,

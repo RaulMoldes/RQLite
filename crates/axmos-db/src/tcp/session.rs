@@ -2,229 +2,72 @@
 
 use crate::{
     box_err,
-    io::pager::{BtreeBuilder, SharedPager},
-    multithreading::{
-        coordinator::{TransactionCoordinator, TransactionError, TransactionHandle},
-        runner::SharedTaskRunner,
-    },
+    multithreading::runner::SharedTaskRunner,
     runtime::{
-        ContextBuilder, QueryError, QueryResult, QueryRunnerResult, RuntimeError, bind,
-        context::TransactionContext, ddl::DdlResult, execute_statement, parse,
+        QueryError, QueryResult, QueryRunner, QueryRunnerResult, RuntimeError,
+        context::{TransactionContext, TransactionLogger},
     },
-    schema::catalog::SharedCatalog,
-    sql::{
-        binder::bounds::BoundStatement,
-        parser::ast::{Statement, TransactionStatement},
-    },
-    tree::accessor::{BtreeReadAccessor, TreeReader},
 };
-
-/// A database session with its own transaction state.
-///
-/// Each client/connection should have its own Session instance.
-/// This allows multiple concurrent transactions without blocking
-#[derive(Clone)]
-pub struct SessionContext {
-    pager: SharedPager,
-    catalog: SharedCatalog,
-    coordinator: TransactionCoordinator,
-    /// Active transaction handle
-    active_handle: Option<TransactionHandle>,
-}
-
-impl SessionContext {
-    pub(crate) fn new(
-        pager: SharedPager,
-        catalog: SharedCatalog,
-        coordinator: TransactionCoordinator,
-    ) -> Self {
-        Self {
-            pager,
-            catalog,
-            coordinator,
-
-            active_handle: None,
-        }
-    }
-
-    /// Check if session is in an explicit transaction
-    pub fn in_transaction(&self) -> bool {
-        self.active_handle.is_some()
-    }
-
-    pub fn begin(&mut self) -> QueryRunnerResult<QueryResult> {
-        if self.active_handle.is_some() {
-            return Err(QueryError::Runtime(RuntimeError::TransactionalError(
-                TransactionError::TransactionAlreadyStarted,
-            )));
-        }
-
-        let handle = self.coordinator.begin()?;
-        self.active_handle = Some(handle);
-
-        Ok(QueryResult::Ddl(DdlResult::TransactionStarted))
-    }
-
-    pub fn commit(&mut self) -> QueryRunnerResult<QueryResult> {
-        let handle = self.active_handle.take().ok_or_else(|| {
-            QueryError::Runtime(RuntimeError::TransactionalError(
-                TransactionError::TransactionNotStarted,
-            ))
-        })?;
-        let ctx = TransactionContext::new(
-            BtreeReadAccessor::new(),
-            self.pager.clone(),
-            self.catalog.clone(),
-            handle,
-        )?;
-        ctx.commit_transaction()?;
-        Ok(QueryResult::Ddl(DdlResult::TransactionCommitted))
-    }
-
-    pub fn rollback(&mut self) -> QueryRunnerResult<QueryResult> {
-        let handle = self.active_handle.take().ok_or_else(|| {
-            QueryError::Runtime(RuntimeError::TransactionalError(
-                TransactionError::TransactionNotStarted,
-            ))
-        })?;
-
-        let ctx = TransactionContext::new(
-            BtreeReadAccessor::new(),
-            self.pager.clone(),
-            self.catalog.clone(),
-            handle,
-        )?;
-        ctx.abort_transaction()?;
-
-        Ok(QueryResult::Ddl(DdlResult::TransactionRolledBack))
-    }
-}
-
 pub struct Session {
-    ctx: SessionContext,
+    ctx: TransactionContext,
+    logger: TransactionLogger,
     task_runner: SharedTaskRunner,
 }
 
 impl Session {
     pub(crate) fn new(
-        pager: SharedPager,
-        catalog: SharedCatalog,
-        coordinator: TransactionCoordinator,
+        ctx: TransactionContext,
+        logger: TransactionLogger,
         task_runner: SharedTaskRunner,
     ) -> Self {
         Self {
-            ctx: SessionContext::new(pager, catalog, coordinator),
+            ctx,
+            logger,
             task_runner,
         }
     }
 
-    pub fn context(&self) -> &SessionContext {
-        &self.ctx
+    pub fn commit_transaction(&mut self) -> QueryRunnerResult<()> {
+        self.logger.log_commit()?;
+        self.ctx.commit_transaction()?;
+        self.logger.log_end()?;
+        Ok(())
     }
 
-    pub fn context_mut(&mut self) -> &mut SessionContext {
-        &mut self.ctx
-    }
-
-    /// Check if session is in an explicit transaction
-    pub fn in_transaction(&self) -> bool {
-        self.ctx.in_transaction()
+    pub fn abort_transaction(&mut self) -> QueryRunnerResult<()> {
+        self.logger.log_abort()?;
+        self.ctx.abort_transaction()?;
+        self.logger.log_end()?;
+        Ok(())
     }
 
     /// Execute a SQL statement
     pub fn execute(&mut self, sql: &str) -> QueryRunnerResult<QueryResult> {
-        let sql = sql.to_string();
-        let pager = self.ctx.pager.clone();
-        let catalog = self.ctx.catalog.clone();
-        let coordinator = self.ctx.coordinator.clone();
-
-        // Parse first to detect transaction control
-        let ast = parse(&sql)?;
-
-        if !self.in_transaction()
-            && !matches!(ast, Statement::Transaction(TransactionStatement::Begin))
-        {
-            return Err(QueryError::Runtime(RuntimeError::TransactionalError(
-                TransactionError::TransactionNotStarted,
-            )));
-        };
-
-        if self.in_transaction()
-            && matches!(ast, Statement::Transaction(TransactionStatement::Begin))
-        {
-            return Err(QueryError::Runtime(RuntimeError::TransactionalError(
-                TransactionError::TransactionAlreadyStarted,
-            )));
-        };
-
-        if let Statement::Transaction(tx_stmt) = ast {
-            match tx_stmt {
-                TransactionStatement::Begin => {
-                    return self.ctx.begin();
-                }
-                TransactionStatement::Commit => {
-                    return self.ctx.commit();
-                }
-                TransactionStatement::Rollback => {
-                    return self.ctx.rollback();
-                }
-            }
-        }
-
-        // At this point it should be safe to unwrap the handle.
-        let handle = self
-            .ctx
-            .active_handle
-            .as_ref()
-            .ok_or(TransactionError::TransactionNotStarted)?;
-
-        // Bind needs a snapshot
-
-        let min_keys = pager.read().min_keys_per_page();
-        let num_siblings = pager.read().num_siblings_per_side();
-
-        let tree_builder = BtreeBuilder::new(min_keys, num_siblings).with_pager(pager.clone());
-
-        let bound = bind(&ast, &catalog, &tree_builder, handle.snapshot())?;
-        self.execute_async(bound)
+        self.execute_async(sql.to_string())
     }
 
-    fn execute_async(&self, bound: BoundStatement) -> QueryRunnerResult<QueryResult> {
-        let ctx = self.ctx.clone();
+    fn execute_async(&self, sql: String) -> QueryRunnerResult<QueryResult> {
+        let logger = self.logger.clone();
+        // Build a temporary context for this thread
+        // Cloning the handle creates an invalidated copy of itself that can fo everything but committing  or aborting.
+        let child_ctx = self.ctx.create_child()?;
+
         self.task_runner
             .run_with_result(move |_| {
-                let result = execute_statement(&ctx, &bound).map_err(box_err)?;
-                Ok(result)
+                let runner = QueryRunner::new(child_ctx.clone(), logger.clone());
+                let result = runner.prepare_and_run(&sql, false).map_err(box_err)?;
+
+                Ok(result.into_result())
             })
             .map_err(|e| QueryError::Runtime(RuntimeError::Other(e.to_string())))
     }
 }
 
-impl ContextBuilder for SessionContext {
-    fn build_ctx<Acc: TreeReader + Clone>(
-        &self,
-        acc: Acc,
-    ) -> QueryRunnerResult<TransactionContext<Acc>> {
-        if !self.in_transaction() {
-            return Err(QueryError::Runtime(RuntimeError::TransactionalError(
-                TransactionError::TransactionNotStarted,
-            )));
-        }
-        let ctx = TransactionContext::new(
-            acc,
-            self.pager.clone(),
-            self.catalog.clone(),
-            self.active_handle.as_ref().unwrap().clone(),
-        )?;
-        Ok(ctx)
-    }
-}
+unsafe impl Send for Session {}
+unsafe impl Sync for Session {}
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Rollback any uncommitted transaction
-        if let Some(handle) = self.ctx.active_handle.take() {
-            let _ = handle.abort();
-        }
+        let _ = self.abort_transaction();
     }
 }

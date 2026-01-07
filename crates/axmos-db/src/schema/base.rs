@@ -78,7 +78,6 @@ impl From<&BoundColumnDef> for Column {
 
         col.is_non_null = value.is_non_null;
 
-
         col.default = value
             .default
             .as_ref()
@@ -487,7 +486,6 @@ impl Column {
         self.is_non_null = true;
         self
     }
-
 
     pub(crate) fn datatype(&self) -> DataTypeKind {
         DataTypeKind::from_repr(self.dtype).unwrap_or(DataTypeKind::Null)

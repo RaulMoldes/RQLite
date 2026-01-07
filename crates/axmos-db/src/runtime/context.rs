@@ -1,3 +1,5 @@
+use parking_lot::RwLock;
+
 // src/sql/executor/context.rs
 use super::RuntimeResult;
 use crate::{
@@ -7,113 +9,83 @@ use crate::{
     },
     multithreading::coordinator::{Snapshot, TransactionHandle},
     schema::catalog::SharedCatalog,
-    tree::{accessor::TreeReader, bplustree::Btree},
-    types::{Lsn, ObjectId, PageId, RowId, TransactionId},
+    tree::{
+        accessor::{BtreeReadAccessor, BtreeWriteAccessor},
+        bplustree::Btree,
+    },
+    types::{ObjectId, PageId, RowId, TransactionId},
 };
-use std::cell::Cell;
-use std::ops::Deref;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// Lightweight execution context for query operators.
-#[derive(Clone)]
-pub(crate) struct ExecutionContext<Acc: TreeReader> {
-    accessor: Acc,
+pub(crate) struct TransactionContext {
     pager: SharedPager,
     catalog: SharedCatalog,
-    handle: TransactionHandle,
-    pub last_lsn: Cell<Option<Lsn>>,
+    handle: Arc<RwLock<TransactionHandle>>,
 }
 
-pub(crate) struct TransactionContext<Acc: TreeReader>(Rc<ExecutionContext<Acc>>);
-
-impl<Acc: TreeReader + Clone> TransactionContext<Acc> {
-    pub(crate) fn new(
-        accessor: Acc,
-        pager: SharedPager,
-        catalog: SharedCatalog,
-        handle: TransactionHandle,
-    ) -> RuntimeResult<Self> {
-        let context = ExecutionContext::new(accessor, pager, catalog, handle)?;
-        Ok(Self(Rc::new(context)))
-    }
-}
-
-impl<Acc: TreeReader> Deref for TransactionContext<Acc> {
-    type Target = ExecutionContext<Acc>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<Acc: TreeReader> Clone for TransactionContext<Acc> {
+// Creates a cloned reference to the context.
+impl Clone for TransactionContext {
     fn clone(&self) -> Self {
-        Self(Rc::clone(&self.0))
+        Self {
+            pager: self.pager().clone(),
+            catalog: self.catalog.clone(),
+            handle: Arc::clone(&self.handle),
+        }
     }
 }
 
-impl<Acc> ExecutionContext<Acc>
-where
-    Acc: TreeReader + Clone,
-{
-    pub(crate) fn new(
-        accessor: Acc,
-        pager: SharedPager,
-        catalog: SharedCatalog,
-        handle: TransactionHandle,
-    ) -> RuntimeResult<Self> {
-        let context = Self {
-            accessor,
+pub(crate) struct TransactionLogger {
+    tid: TransactionId,
+    pager: SharedPager,
+    last_lsn: Arc<RwLock<u64>>,
+}
+
+impl Clone for TransactionLogger {
+    fn clone(&self) -> Self {
+        Self {
+            tid: self.tid,
+            pager: self.pager.clone(),
+            last_lsn: Arc::clone(&self.last_lsn),
+        }
+    }
+}
+
+impl TransactionLogger {
+    pub(crate) fn new(xid: TransactionId, pager: SharedPager, last_lsn: u64) -> Self {
+        Self {
+            tid: xid,
             pager,
-            catalog,
-            handle,
-            last_lsn: Cell::new(None),
-        };
-        context.log_operation(Begin)?;
-        Ok(context)
+            last_lsn: Arc::new(RwLock::new(last_lsn)),
+        }
     }
-
-    pub(crate) fn tid(&self) -> TransactionId {
-        self.handle.id()
-    }
-
-    pub(crate) fn snapshot(&self) -> Snapshot {
-        self.handle.snapshot()
-    }
-
-    pub(crate) fn handle(&self) -> &TransactionHandle {
-        &self.handle
-    }
-
-    pub(crate) fn pre_commit(&self) -> RuntimeResult<()> {
+    pub(crate) fn log_commit(&self) -> RuntimeResult<()> {
         self.log_operation(Commit)?;
         Ok(())
     }
 
-    pub(crate) fn pre_abort(&self) -> RuntimeResult<()> {
+    pub(crate) fn log_abort(&self) -> RuntimeResult<()> {
         self.log_operation(Commit)?;
         Ok(())
     }
 
-    pub(crate) fn post_commit(&self) -> RuntimeResult<()> {
-        self.log_operation(End)?;
-        self.pager().write().flush_wal()?;
+    pub(crate) fn log_begin(&self) -> RuntimeResult<()> {
+        self.log_operation(Begin)?;
         Ok(())
     }
 
-    pub(crate) fn end(&self) -> RuntimeResult<()> {
+    pub(crate) fn log_end(&self) -> RuntimeResult<()> {
         self.log_operation(End)?;
-        self.pager().write().flush_wal()?;
+        self.pager.write().flush_wal()?;
         Ok(())
     }
 
     fn log_operation<O: Operation>(&self, operation: O) -> RuntimeResult<()> {
-        let prev_lsn = self.last_lsn.get();
-        let new_last_lsn = self
-            .pager
-            .write()
-            .push_to_log(operation, self.tid(), prev_lsn)?;
-        self.last_lsn.set(Some(new_last_lsn));
+        let new_last_lsn =
+            self.pager
+                .write()
+                .push_to_log(operation, self.tid, Some(*self.last_lsn.read()))?;
+        *self.last_lsn.write() = new_last_lsn;
         Ok(())
     }
 
@@ -150,6 +122,43 @@ where
         let delete = Delete::new(oid, rowid, old_data);
         self.log_operation(delete)
     }
+}
+
+impl TransactionContext {
+    pub(crate) fn new(
+        pager: SharedPager,
+        catalog: SharedCatalog,
+        handle: TransactionHandle,
+    ) -> RuntimeResult<Self> {
+        let context = Self {
+            pager,
+            catalog,
+            handle: Arc::new(RwLock::new(handle)),
+        };
+
+        Ok(context)
+    }
+
+    /// Creates a new context with a handle that cannot be committed.
+    pub(crate) fn create_child(&self) -> RuntimeResult<TransactionContext> {
+        Self::new(
+            self.pager().clone(),
+            self.catalog().clone(),
+            self.handle_cloned(),
+        )
+    }
+
+    pub(crate) fn tid(&self) -> TransactionId {
+        self.handle.read().id()
+    }
+
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        self.handle.read().snapshot().clone()
+    }
+
+    pub(crate) fn handle_cloned(&self) -> TransactionHandle {
+        self.handle.read().clone() // Cloning the handle invalidates it access to the coordinator.
+    }
 
     #[inline]
     pub(crate) fn catalog(&self) -> &SharedCatalog {
@@ -161,20 +170,16 @@ where
         &self.pager
     }
 
-    #[inline]
-    pub(crate) fn accessor(&self) -> &Acc {
-        &self.accessor
-    }
-
-    #[inline]
-    pub(crate) fn accessor_mut(&mut self) -> &mut Acc {
-        &mut self.accessor
-    }
-
-    /// Build a B-tree with the context's accessor
-    pub(crate) fn build_tree(&self, root: PageId) -> Btree<Acc> {
+    /// Build a read only btree
+    pub(crate) fn build_tree(&self, root: PageId) -> Btree<BtreeReadAccessor> {
         let builder = self.tree_builder();
-        builder.build_tree_with_accessor(root, self.accessor.clone())
+        builder.build_tree(root)
+    }
+
+    /// Build a mutable btree
+    pub(crate) fn build_tree_mut(&self, root: PageId) -> Btree<BtreeWriteAccessor> {
+        let builder = self.tree_builder();
+        builder.build_tree_mut(root)
     }
 
     /// Create a tree builder configured with the pager
@@ -186,24 +191,17 @@ where
 
     /// Commits the transaction: log commit, commit handle, end.
     pub(crate) fn commit_transaction(&self) -> RuntimeResult<()> {
-        self.pre_commit()?;
-        self.handle().commit()?;
-        self.end()?;
+        if let Some(mut h) = self.handle.try_write() {
+            h.commit()?;
+        }; // If we are not able to borrow the handle then we know there are other handles pointing to the same transaction so we should not commit yet
         Ok(())
     }
 
-    /// Aborts the transaction: log abort, abort handle, end.
+    /// Aborts the transaction: log commit, commit handle, end.
     pub(crate) fn abort_transaction(&self) -> RuntimeResult<()> {
-        self.pre_abort()?;
-        self.handle().abort()?;
-        self.end()?;
+        if let Some(mut h) = self.handle.try_write() {
+            h.abort()?;
+        };
         Ok(())
-    }
-
-    /// Aborts silently, ignoring errors (for cleanup in Drop, error paths)
-    pub(crate) fn abort_silent(&self) {
-        let _ = self.pre_abort();
-        let _ = self.handle().abort();
-        let _ = self.end();
     }
 }

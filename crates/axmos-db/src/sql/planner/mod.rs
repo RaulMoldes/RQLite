@@ -102,9 +102,9 @@ pub(crate) struct OptimizationStats {
 }
 
 /// Cascades-style query optimizer.
-pub struct CascadesOptimizer<C: CatalogTrait + Clone> {
+pub struct CascadesOptimizer<'a, C: CatalogTrait + Clone> {
     cost_model: DefaultCostModel,
-    deriver: PropertyDeriver<StatisticsProvider<C>>,
+    deriver: PropertyDeriver<StatisticsProvider<'a, C>>,
     transformation_rules: Vec<Box<dyn TransformationRule>>,
     implementation_rules: Vec<Box<dyn ImplementationRule>>,
     config: OptimizerConfig,
@@ -112,18 +112,18 @@ pub struct CascadesOptimizer<C: CatalogTrait + Clone> {
     stats: Option<OptimizationStats>,
 }
 
-impl<C: CatalogTrait + Clone> CascadesOptimizer<C> {
+impl<'a, C: CatalogTrait + Clone> CascadesOptimizer<'a, C> {
     /// Creates a new optimizer with the given catalog context.
     pub(crate) fn new(
         page_size: u32,
         catalog: C,
         builder: BtreeBuilder,
-        snapshot: Snapshot,
+        snapshot: &'a Snapshot,
         config: OptimizerConfig,
     ) -> Self {
         Self {
             cost_model: DefaultCostModel::new(page_size),
-            deriver: PropertyDeriver::new(StatisticsProvider::new(catalog, builder, snapshot)),
+            deriver: PropertyDeriver::new(StatisticsProvider::new(catalog, builder, &snapshot)),
             transformation_rules: rules::transformation_rules(),
             implementation_rules: rules::implementation_rules(),
             config,
@@ -133,7 +133,7 @@ impl<C: CatalogTrait + Clone> CascadesOptimizer<C> {
     }
 
     /// Creates an optimizer with default configuration.
-    pub fn with_defaults(catalog: C, builder: BtreeBuilder, snapshot: Snapshot) -> Self {
+    pub fn with_defaults(catalog: C, builder: BtreeBuilder, snapshot: &'a Snapshot) -> Self {
         Self::new(
             crate::DEFAULT_PAGE_SIZE as u32,
             catalog,

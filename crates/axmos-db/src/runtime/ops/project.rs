@@ -1,37 +1,41 @@
 // src/runtime/ops/project.rs
-
 use crate::{
-    runtime::{
-        ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeError, RuntimeResult,
-        eval::ExpressionEvaluator,
-    },
+    runtime::{ExecutionStats, Executor, RuntimeError, RuntimeResult, eval::ExpressionEvaluator},
     schema::Schema,
-    sql::planner::{logical::ProjectExpr, physical::PhysProjectOp},
+    sql::{binder::bounds::BoundExpression, planner::physical::PhysProjectOp},
     storage::tuple::Row,
     types::DataType,
 };
 
-pub(crate) struct OpenProject<Child: RunningExecutor> {
-    expressions: Vec<ProjectExpr>,
+pub(crate) struct Project<Child: Executor> {
+    child: Child,
     input_schema: Schema,
     output_schema: Schema,
-    child: Child,
+    exprs: Vec<BoundExpression>,
     stats: ExecutionStats,
 }
 
-pub(crate) struct ClosedProject<Child: ClosedExecutor> {
-    op: PhysProjectOp,
-    child: Child,
-    stats: ExecutionStats,
-}
-
-impl<Child: ClosedExecutor> ClosedProject<Child> {
-    pub(crate) fn new(op: PhysProjectOp, child: Child, stats: Option<ExecutionStats>) -> Self {
+impl<Child: Executor> Project<Child> {
+    pub(crate) fn new(op: &PhysProjectOp, child: Child) -> Self {
         Self {
-            op,
+            exprs: op
+                .expressions
+                .iter()
+                .map(|expr| expr.expr.clone())
+                .collect(),
+            input_schema: op.input_schema.clone(),
+            output_schema: op.output_schema.clone(),
             child,
-            stats: stats.unwrap_or_default(),
+            stats: ExecutionStats::default(),
         }
+    }
+
+    fn input_schema(&self) -> &Schema {
+        &self.input_schema
+    }
+
+    fn output_schema(&self) -> &Schema {
+        &self.output_schema
     }
 
     pub fn stats(&self) -> &ExecutionStats {
@@ -39,23 +43,11 @@ impl<Child: ClosedExecutor> ClosedProject<Child> {
     }
 }
 
-impl<Child: ClosedExecutor> ClosedExecutor for ClosedProject<Child> {
-    type Running = OpenProject<Child::Running>;
-
-    fn open(self) -> RuntimeResult<Self::Running> {
-        let child = self.child.open()?;
-        Ok(OpenProject {
-            expressions: self.op.expressions,
-            input_schema: self.op.input_schema,
-            output_schema: self.op.output_schema,
-            child,
-            stats: self.stats,
-        })
+impl<Child: Executor> Executor for Project<Child> {
+    fn open(&mut self) -> RuntimeResult<()> {
+        self.child.open()?;
+        Ok(())
     }
-}
-
-impl<Child: RunningExecutor> RunningExecutor for OpenProject<Child> {
-    type Closed = ClosedProject<Child::Closed>;
 
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
         match self.child.next()? {
@@ -64,11 +56,10 @@ impl<Child: RunningExecutor> RunningExecutor for OpenProject<Child> {
                 self.stats.rows_scanned += 1;
 
                 let evaluator = ExpressionEvaluator::new(&row, &self.input_schema);
-                let mut projected: Vec<DataType> = Vec::with_capacity(self.expressions.len());
+                let mut projected: Vec<DataType> = Vec::with_capacity(self.exprs.len());
 
-                for (i, proj_expr) in self.expressions.iter().enumerate() {
-                    let value = evaluator.evaluate(&proj_expr.expr)?;
-
+                for (i, proj_expr) in self.exprs.iter().enumerate() {
+                    let value = evaluator.evaluate(&proj_expr)?;
                     // Cast to the expected output type from the schema
                     let expected_type = self
                         .output_schema
@@ -86,16 +77,8 @@ impl<Child: RunningExecutor> RunningExecutor for OpenProject<Child> {
         }
     }
 
-    fn close(self) -> RuntimeResult<Self::Closed> {
-        let child = self.child.close()?;
-        Ok(ClosedProject {
-            op: PhysProjectOp {
-                expressions: self.expressions,
-                input_schema: self.input_schema,
-                output_schema: self.output_schema,
-            },
-            child,
-            stats: self.stats,
-        })
+    fn close(&mut self) -> RuntimeResult<()> {
+        self.child.close()?;
+        Ok(())
     }
 }

@@ -1,21 +1,23 @@
 // src/runtime/ops/nested_loop_join.rs
 use crate::{
-    runtime::{
-        ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeResult, eval::ExpressionEvaluator,
+    runtime::{ExecutionStats, Executor, RuntimeResult, eval::ExpressionEvaluator},
+    schema::Schema,
+    sql::{
+        binder::bounds::BoundExpression, parser::ast::JoinType, planner::physical::NestedLoopJoinOp,
     },
-    sql::{parser::ast::JoinType, planner::physical::NestedLoopJoinOp},
     storage::tuple::Row,
     types::DataType,
 };
 
 /// Nested Loop Join executor.
 /// For each row from the outer (left) child, scans all rows from the inner (right) child.
-pub(crate) struct OpenNestedLoopJoin<Left: RunningExecutor, Right: RunningExecutor> {
-    op: NestedLoopJoinOp,
-    left: Option<Left>,
-    right: Option<Right>,
-    closed_left: Option<Left::Closed>,
-    closed_right: Option<Right::Closed>,
+pub(crate) struct NestedLoopJoin<Left: Executor, Right: Executor> {
+    join_type: JoinType,
+    condition: Option<BoundExpression>,
+    output_schema: Schema,
+
+    left: Left,
+    right: Right,
     /// Current row from the left (outer) side
     current_left_row: Option<Row>,
     /// Buffered rows from the right (inner) side - rescanned for each left row
@@ -36,49 +38,16 @@ pub(crate) struct OpenNestedLoopJoin<Left: RunningExecutor, Right: RunningExecut
     stats: ExecutionStats,
 }
 
-pub(crate) struct ClosedNestedLoopJoin<Left: ClosedExecutor, Right: ClosedExecutor> {
-    op: NestedLoopJoinOp,
-    left: Left,
-    right: Right,
-    stats: ExecutionStats,
-}
-
-impl<Left: ClosedExecutor, Right: ClosedExecutor> ClosedNestedLoopJoin<Left, Right> {
-    pub(crate) fn new(
-        op: NestedLoopJoinOp,
-        left: Left,
-        right: Right,
-        stats: Option<ExecutionStats>,
-    ) -> Self {
+impl<Left: Executor, Right: Executor> NestedLoopJoin<Left, Right> {
+    pub(crate) fn new(op: &NestedLoopJoinOp, left: Left, right: Right) -> Self {
         Self {
-            op,
+            join_type: op.join_type,
+            condition: op.condition.clone(),
+            output_schema: op.output_schema.clone(),
             left,
             right,
-            stats: stats.unwrap_or_default(),
-        }
-    }
-
-    pub fn stats(&self) -> &ExecutionStats {
-        &self.stats
-    }
-}
-
-impl<Left: ClosedExecutor, Right: ClosedExecutor> ClosedExecutor
-    for ClosedNestedLoopJoin<Left, Right>
-{
-    type Running = OpenNestedLoopJoin<Left::Running, Right::Running>;
-
-    fn open(self) -> RuntimeResult<Self::Running> {
-        let left = self.left.open()?;
-        let right = self.right.open()?;
-
-        Ok(OpenNestedLoopJoin {
-            op: self.op,
-            left: Some(left),
-            right: Some(right),
-            closed_left: None,
-            closed_right: None,
             current_left_row: None,
+            stats: ExecutionStats::default(),
             right_buffer: Vec::new(),
             right_idx: 0,
             right_buffered: false,
@@ -86,12 +55,9 @@ impl<Left: ClosedExecutor, Right: ClosedExecutor> ClosedExecutor
             right_matched: Vec::new(),
             emitting_unmatched_right: false,
             unmatched_right_idx: 0,
-            stats: self.stats,
-        })
+        }
     }
-}
 
-impl<Left: RunningExecutor, Right: RunningExecutor> OpenNestedLoopJoin<Left, Right> {
     pub fn stats(&self) -> &ExecutionStats {
         &self.stats
     }
@@ -102,34 +68,18 @@ impl<Left: RunningExecutor, Right: RunningExecutor> OpenNestedLoopJoin<Left, Rig
             return Ok(());
         }
 
-        if let Some(mut right) = self.right.take() {
-            while let Some(row) = right.next()? {
-                self.right_buffer.push(row);
-            }
-            self.closed_right = Some(right.close()?);
+        while let Some(row) = self.right.next()? {
+            self.right_buffer.push(row);
         }
+        self.right.close()?;
 
         // Initialize right_matched for RIGHT/FULL joins
-        if matches!(self.op.join_type, JoinType::Right | JoinType::Full) {
+        if matches!(self.join_type, JoinType::Right | JoinType::Full) {
             self.right_matched = vec![false; self.right_buffer.len()];
         }
 
         self.right_buffered = true;
         Ok(())
-    }
-
-    /// Get next row from left child
-    fn next_left_row(&mut self) -> RuntimeResult<Option<Row>> {
-        if let Some(ref mut left) = self.left {
-            if let Some(row) = left.next()? {
-                self.stats.rows_scanned += 1;
-                return Ok(Some(row));
-            }
-            // Left exhausted, close it
-            let left = self.left.take().unwrap();
-            self.closed_left = Some(left.close()?);
-        }
-        Ok(None)
     }
 
     /// Combine left and right rows into output row
@@ -146,7 +96,7 @@ impl<Left: RunningExecutor, Right: RunningExecutor> OpenNestedLoopJoin<Left, Rig
 
     /// Create a row with left values and NULLs for right side
     fn left_with_nulls(&self, left: &Row) -> Row {
-        let right_cols = self.op.output_schema.num_columns() - left.len();
+        let right_cols = self.output_schema.num_columns() - left.len();
         let mut values: Vec<DataType> = Vec::with_capacity(left.len() + right_cols);
         for i in 0..left.len() {
             values.push(left[i].clone());
@@ -159,7 +109,7 @@ impl<Left: RunningExecutor, Right: RunningExecutor> OpenNestedLoopJoin<Left, Rig
 
     /// Create a row with NULLs for left side and right values
     fn nulls_with_right(&self, right: &Row) -> Row {
-        let left_cols = self.op.output_schema.num_columns() - right.len();
+        let left_cols = self.output_schema.num_columns() - right.len();
         let mut values: Vec<DataType> = Vec::with_capacity(left_cols + right.len());
         for _ in 0..left_cols {
             values.push(DataType::Null);
@@ -172,10 +122,10 @@ impl<Left: RunningExecutor, Right: RunningExecutor> OpenNestedLoopJoin<Left, Rig
 
     /// Evaluate join condition
     fn evaluate_condition(&self, combined: &Row) -> RuntimeResult<bool> {
-        match &self.op.condition {
+        match &self.condition {
             None => Ok(true),
             Some(cond) => {
-                let evaluator = ExpressionEvaluator::new(combined, &self.op.output_schema);
+                let evaluator = ExpressionEvaluator::new(combined, &self.output_schema);
                 let evaluated_bool = evaluator.evaluate_as_bool(cond)?;
                 Ok(evaluated_bool)
             }
@@ -183,10 +133,13 @@ impl<Left: RunningExecutor, Right: RunningExecutor> OpenNestedLoopJoin<Left, Rig
     }
 }
 
-impl<Left: RunningExecutor, Right: RunningExecutor> RunningExecutor
-    for OpenNestedLoopJoin<Left, Right>
-{
-    type Closed = ClosedNestedLoopJoin<Left::Closed, Right::Closed>;
+impl<Left: Executor, Right: Executor> Executor for NestedLoopJoin<Left, Right> {
+    fn open(&mut self) -> RuntimeResult<()> {
+        self.left.open()?;
+        self.right.open()?;
+
+        Ok(())
+    }
 
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
         // First, buffer the right side
@@ -210,16 +163,19 @@ impl<Left: RunningExecutor, Right: RunningExecutor> RunningExecutor
         loop {
             // If no current left row, get one
             if self.current_left_row.is_none() {
-                match self.next_left_row()? {
+                match self.left.next()? {
                     Some(row) => {
+                        self.stats.rows_scanned += 1;
                         self.current_left_row = Some(row);
                         self.right_idx = 0;
                         self.left_matched = false;
                     }
                     None => {
+                        self.left.close()?;
+
                         // Left exhausted
                         // For RIGHT/FULL JOIN, now emit unmatched right rows
-                        if matches!(self.op.join_type, JoinType::Right | JoinType::Full) {
+                        if matches!(self.join_type, JoinType::Right | JoinType::Full) {
                             self.emitting_unmatched_right = true;
                             return self.next();
                         }
@@ -241,7 +197,7 @@ impl<Left: RunningExecutor, Right: RunningExecutor> RunningExecutor
                     self.left_matched = true;
 
                     // Mark right row as matched for RIGHT/FULL joins
-                    if matches!(self.op.join_type, JoinType::Right | JoinType::Full) {
+                    if matches!(self.join_type, JoinType::Right | JoinType::Full) {
                         self.right_matched[self.right_idx - 1] = true;
                     }
 
@@ -252,7 +208,7 @@ impl<Left: RunningExecutor, Right: RunningExecutor> RunningExecutor
 
             // Finished scanning right for current left row
             // For LEFT/FULL JOIN: emit left row with NULLs if no match
-            if !self.left_matched && matches!(self.op.join_type, JoinType::Left | JoinType::Full) {
+            if !self.left_matched && matches!(self.join_type, JoinType::Left | JoinType::Full) {
                 let row = self.left_with_nulls(left_row);
                 self.current_left_row = None;
                 self.stats.rows_produced += 1;
@@ -264,22 +220,9 @@ impl<Left: RunningExecutor, Right: RunningExecutor> RunningExecutor
         }
     }
 
-    fn close(self) -> RuntimeResult<Self::Closed> {
-        // Handle case where iterators weren't fully consumed
-        let closed_left = match self.closed_left {
-            Some(c) => c,
-            None => self.left.expect("Left should exist").close()?,
-        };
-        let closed_right = match self.closed_right {
-            Some(c) => c,
-            None => self.right.expect("Right should exist").close()?,
-        };
-
-        Ok(ClosedNestedLoopJoin {
-            op: self.op,
-            left: closed_left,
-            right: closed_right,
-            stats: self.stats,
-        })
+    fn close(&mut self) -> RuntimeResult<()> {
+        self.left.close()?;
+        self.right.close()?;
+        Ok(())
     }
 }

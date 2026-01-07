@@ -3,6 +3,7 @@ use crate::{
     multithreading::coordinator::Snapshot,
     schema::{
         DatabaseItem,
+        base::SchemaError,
         base::{Column, Relation},
         catalog::{CatalogTrait, MemCatalog},
     },
@@ -29,6 +30,7 @@ fn create_test_catalog(builder: &BtreeBuilder) -> MemCatalog {
         "users",
         100,
         vec![
+            Column::new_with_defaults(DataTypeKind::Int, "row_id"),
             Column::new_with_defaults(DataTypeKind::Int, "id"),
             Column::new_with_defaults(DataTypeKind::Blob, "name"),
             Column::new_with_defaults(DataTypeKind::Blob, "email"),
@@ -43,6 +45,7 @@ fn create_test_catalog(builder: &BtreeBuilder) -> MemCatalog {
         "orders",
         200,
         vec![
+            Column::new_with_defaults(DataTypeKind::Int, "row_id"),
             Column::new_with_defaults(DataTypeKind::Int, "id"),
             Column::new_with_defaults(DataTypeKind::Int, "user_id"),
             Column::new_with_defaults(DataTypeKind::Double, "amount"),
@@ -78,7 +81,7 @@ fn bind_sql(sql: &str) -> BinderResult<BoundStatement> {
     let stmt = parser
         .parse()
         .map_err(|e| BinderError::Other(e.to_string()))?;
-    let mut binder = Binder::new(catalog, builder, snapshot);
+    let mut binder = Binder::new(catalog, builder, &snapshot);
     binder.bind(&stmt)
 }
 
@@ -112,10 +115,10 @@ fn optimize_sql(sql: &str) -> PhysicalPlan {
     let mut parser = Parser::new(sql);
     let stmt = parser.parse().expect("parse failed");
 
-    let mut binder = Binder::new(catalog.clone(), builder.clone(), snapshot.clone());
+    let mut binder = Binder::new(catalog.clone(), builder.clone(), &snapshot);
     let bound = binder.bind(&stmt).expect("bind failed");
 
-    let mut optimizer = CascadesOptimizer::with_defaults(catalog, builder, snapshot);
+    let mut optimizer = CascadesOptimizer::with_defaults(catalog, builder, &snapshot);
     optimizer.optimize(&bound).expect("optimize failed")
 }
 
@@ -128,10 +131,10 @@ fn try_optimize_sql(sql: &str) -> Result<PhysicalPlan, String> {
     let mut parser = Parser::new(sql);
     let stmt = parser.parse().map_err(|e| e.to_string())?;
 
-    let mut binder = Binder::new(catalog.clone(), builder.clone(), snapshot.clone());
+    let mut binder = Binder::new(catalog.clone(), builder.clone(), &snapshot);
     let bound = binder.bind(&stmt).map_err(|e| e.to_string())?;
 
-    let mut optimizer = CascadesOptimizer::with_defaults(catalog, builder, snapshot);
+    let mut optimizer = CascadesOptimizer::with_defaults(catalog, builder, &snapshot);
     optimizer.optimize(&bound).map_err(|e| e.to_string())
 }
 
@@ -356,6 +359,7 @@ fn test_analyzer_cte_multiple() {
 #[test]
 fn test_analyzer_insert_all_columns() {
     let result = analyzer_test("INSERT INTO users VALUES (1, 'John', 'john@test.com', 25)");
+    dbg!(&result);
     assert!(result.is_ok());
 }
 
@@ -624,11 +628,11 @@ fn test_binder_select_simple_columns() {
         assert_eq!(select.columns.len(), 2);
         // id is column 0, name is column 1
         if let BoundExpression::ColumnBinding(cr) = &select.columns[0].expr {
-            assert_eq!(cr.column_idx, 0);
+            assert_eq!(cr.column_idx, 1);
             assert_eq!(cr.data_type, DataTypeKind::Int);
         }
         if let BoundExpression::ColumnBinding(cr) = &select.columns[1].expr {
-            assert_eq!(cr.column_idx, 1);
+            assert_eq!(cr.column_idx, 2);
             assert_eq!(cr.data_type, DataTypeKind::Blob);
         }
     }
@@ -698,11 +702,11 @@ fn test_binder_join_qualified_resolves_ambiguity() {
         // First id from users (scope_index 0), second from orders (scope_index 1)
         if let BoundExpression::ColumnBinding(cr) = &select.columns[0].expr {
             assert_eq!(cr.scope_index, 0);
-            assert_eq!(cr.column_idx, 0);
+            assert_eq!(cr.column_idx, 1);
         }
         if let BoundExpression::ColumnBinding(cr) = &select.columns[1].expr {
             assert_eq!(cr.scope_index, 1);
-            assert_eq!(cr.column_idx, 0);
+            assert_eq!(cr.column_idx, 6);
         }
     }
 }
@@ -826,7 +830,7 @@ fn test_binder_insert_all_columns() {
     assert!(result.is_ok());
 
     if let Ok(BoundStatement::Insert(insert)) = result {
-        assert_eq!(insert.columns, vec![0, 1, 2, 3]);
+        assert_eq!(insert.columns, vec![1, 2, 3, 4]);
     }
 }
 
@@ -836,7 +840,7 @@ fn test_binder_insert_specific_columns() {
     assert!(result.is_ok());
 
     if let Ok(BoundStatement::Insert(insert)) = result {
-        assert_eq!(insert.columns, vec![0, 1]); // id=0, name=1
+        assert_eq!(insert.columns, vec![1, 2]); // id=1, name=2
     }
 }
 
@@ -868,7 +872,7 @@ fn test_binder_update_simple() {
 
     if let Ok(BoundStatement::Update(update)) = result {
         assert_eq!(update.assignments.len(), 1);
-        assert_eq!(update.assignments[0].column_idx, 3); // age is index 3
+        assert_eq!(update.assignments[0].column_idx, 4); // age is index 4
     }
 }
 
@@ -929,7 +933,7 @@ fn test_binder_create_table_with_foreign_key() {
         } = &create.constraints[0]
         {
             assert_eq!(*ref_table_id, 2); // orders table_id
-            assert_eq!(ref_columns, &vec![0]); // id column
+            assert_eq!(ref_columns, &vec![1]); // id column
         }
     }
 }
@@ -944,17 +948,13 @@ fn test_binder_create_table_fk_invalid_ref_table_fails() {
 
 #[test]
 fn test_binder_create_table_unique_constraint() {
-    let result = bind_sql(
-        "CREATE TABLE order_items (id INT, order_id INT, UNIQUE (order_id))",
-    );
+    let result = bind_sql("CREATE TABLE order_items (id INT, order_id INT, UNIQUE (order_id))");
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_binder_create_table_primary_key_constraint() {
-    let result = bind_sql(
-        "CREATE TABLE order_items (id INT, order_id INT, PRIMARY KEY (id))",
-    );
+    let result = bind_sql("CREATE TABLE order_items (id INT, order_id INT, PRIMARY KEY (id))");
     assert!(result.is_ok());
 }
 
@@ -979,7 +979,7 @@ fn test_binder_alter_drop_column() {
 
     if let Ok(BoundStatement::AlterTable(alter)) = result {
         if let BoundAlterAction::DropColumn(idx) = alter.action {
-            assert_eq!(idx, 2); // email is index 2
+            assert_eq!(idx, 3); // email is index 3
         }
     }
 }
@@ -1026,14 +1026,17 @@ fn test_binder_create_index() {
     if let Ok(BoundStatement::CreateIndex(idx)) = result {
         assert_eq!(idx.table_id, 1);
         assert_eq!(idx.columns.len(), 1);
-        assert_eq!(idx.columns[0], 1); // name is index 1
+        assert_eq!(idx.columns[0], 2); // name is index 1
     }
 }
 
 #[test]
 fn test_binder_create_index_invalid_column_fails() {
     let result = bind_sql("CREATE UNIQUE INDEX idx_invalid ON users(nonexistent)");
-    assert!(matches!(result, Err(BinderError::ColumnNotFound(_))));
+    assert!(matches!(
+        result,
+        Err(BinderError::Schema(SchemaError::ColumnNotFound(_)))
+    ));
 }
 
 #[test]

@@ -1,61 +1,46 @@
-//! Delete operator implementation.
-//!
-//! Deletes rows from a table by consuming rows from its child operator
-//! (which provides rows to delete) and delegating the actual deletion
-//! to the DML executor.
 use crate::{
+    ObjectId,
     runtime::{
-        ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeResult,
-        context::TransactionContext,
+        ExecutionStats, Executor, RuntimeResult,
+        context::{TransactionContext, TransactionLogger},
         dml::{DmlExecutor, extract_row_id},
     },
     sql::planner::physical::PhysDeleteOp,
     storage::tuple::Row,
-    tree::accessor::TreeWriter,
     types::{DataType, UInt64},
 };
 
-/// Running state for the Delete operator.
-pub(crate) struct OpenDelete<Acc, Child>
+/// Delete operator.
+pub(crate) struct Delete<Child>
 where
-    Acc: TreeWriter + Clone + Default,
-    Child: RunningExecutor,
+    Child: Executor,
 {
-    op: PhysDeleteOp,
-    ctx: TransactionContext<Acc>,
+    table_id: ObjectId,
+    ctx: TransactionContext,
+    logger: TransactionLogger,
     child: Child,
     stats: ExecutionStats,
     returned_result: bool,
 }
 
-/// Closed state for the Delete operator.
-pub(crate) struct ClosedDelete<Acc, Child>
+impl<Child> Delete<Child>
 where
-    Acc: TreeWriter + Clone + Default,
-    Child: ClosedExecutor,
-{
-    op: PhysDeleteOp,
-    ctx: TransactionContext<Acc>,
-    child: Child,
-    stats: ExecutionStats,
-}
-
-impl<Acc, Child> ClosedDelete<Acc, Child>
-where
-    Acc: TreeWriter + Clone + Default,
-    Child: ClosedExecutor,
+    Child: Executor,
 {
     pub(crate) fn new(
-        op: PhysDeleteOp,
-        ctx: TransactionContext<Acc>,
+        op: &PhysDeleteOp,
+        ctx: TransactionContext,
+        logger: TransactionLogger,
         child: Child,
         stats: Option<ExecutionStats>,
     ) -> Self {
         Self {
-            op,
+            table_id: op.table_id,
             ctx,
             child,
-            stats: stats.unwrap_or_default(),
+            logger,
+            stats: ExecutionStats::default(),
+            returned_result: false,
         }
     }
 
@@ -64,40 +49,14 @@ where
     }
 }
 
-impl<Acc, Child> ClosedExecutor for ClosedDelete<Acc, Child>
+impl<Child> Executor for Delete<Child>
 where
-    Acc: TreeWriter + Clone + Default,
-    Child: ClosedExecutor,
+    Child: Executor,
 {
-    type Running = OpenDelete<Acc, Child::Running>;
-
-    fn open(self) -> RuntimeResult<Self::Running> {
-        Ok(OpenDelete {
-            op: self.op,
-            ctx: self.ctx,
-            child: self.child.open()?,
-            stats: self.stats,
-            returned_result: false,
-        })
+    fn open(&mut self) -> RuntimeResult<()> {
+        self.child.open()?;
+        Ok(())
     }
-}
-
-impl<Acc, Child> OpenDelete<Acc, Child>
-where
-    Acc: TreeWriter + Clone + Default,
-    Child: RunningExecutor,
-{
-    pub fn stats(&self) -> &ExecutionStats {
-        &self.stats
-    }
-}
-
-impl<Acc, Child> RunningExecutor for OpenDelete<Acc, Child>
-where
-    Acc: TreeWriter + Clone + Default,
-    Child: RunningExecutor,
-{
-    type Closed = ClosedDelete<Acc, Child::Closed>;
 
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
         if self.returned_result {
@@ -109,8 +68,8 @@ where
             self.stats.rows_scanned += 1;
 
             let row_id = extract_row_id(&row)?;
-            let mut dml = DmlExecutor::new(self.ctx.clone());
-            let result = dml.delete(self.op.table_id, row_id)?;
+            let mut dml = DmlExecutor::new(self.ctx.clone(), self.logger.clone());
+            let result = dml.delete(self.table_id, row_id)?;
 
             if result.deleted {
                 self.stats.rows_produced += 1;
@@ -125,12 +84,8 @@ where
         ))]))))
     }
 
-    fn close(self) -> RuntimeResult<Self::Closed> {
-        Ok(ClosedDelete::new(
-            self.op,
-            self.ctx,
-            self.child.close()?,
-            Some(self.stats),
-        ))
+    fn close(&mut self) -> RuntimeResult<()> {
+        self.child.close()?;
+        Ok(())
     }
 }

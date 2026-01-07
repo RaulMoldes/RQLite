@@ -1,11 +1,9 @@
 // src/runtime/ops/aggregate.rs
-use std::collections::HashMap;
+use std::{collections::HashMap, vec::IntoIter};
 
 use crate::{
-    runtime::{
-        ClosedExecutor, ExecutionStats, RunningExecutor, RuntimeError, RuntimeResult,
-        eval::ExpressionEvaluator,
-    },
+    runtime::{ExecutionStats, Executor, RuntimeError, RuntimeResult, eval::ExpressionEvaluator},
+    schema::Schema,
     sql::{
         binder::bounds::{AggregateFunction, BoundExpression},
         planner::{logical::AggregateExpr, physical::HashAggregateOp},
@@ -146,68 +144,48 @@ impl GroupBucket {
 }
 
 /// Hash-based GROUP BY executor.
-pub(crate) struct OpenHashAggregate<Child: RunningExecutor> {
-    op: HashAggregateOp,
-    child: Option<Child>,
-    closed_child: Option<Child::Closed>,
+pub(crate) struct HashAggregate<Child: Executor> {
+    input_schema: Schema,
+    output_schema: Schema,
+    aggregates: Vec<AggregateExpr>,
+    group_by: Box<[BoundExpression]>,
+    /// Child
+    child: Child,
     /// Hash table mapping group keys to their buckets.
     buckets: HashMap<Vec<DataType>, GroupBucket>,
     /// Iterator over completed buckets for output phase.
-    output_iter: Option<std::vec::IntoIter<GroupBucket>>,
+    output_iter: Option<IntoIter<GroupBucket>>,
     /// Whether we've emitted the empty-group row
     emitted_empty_group: bool,
     /// Execution stats
     stats: ExecutionStats,
 }
 
-pub(crate) struct ClosedHashAggregate<Child: ClosedExecutor> {
-    op: HashAggregateOp,
-    child: Child,
-    stats: ExecutionStats,
-}
-
-impl<Child: ClosedExecutor> ClosedHashAggregate<Child> {
-    pub(crate) fn new(op: HashAggregateOp, child: Child, stats: Option<ExecutionStats>) -> Self {
+impl<Child: Executor> HashAggregate<Child> {
+    pub(crate) fn new(op: &HashAggregateOp, child: Child) -> Self {
         Self {
-            op,
+            input_schema: op.input_schema.clone(),
+            output_schema: op.output_schema.clone(),
+            aggregates: op.aggregates.clone(),
+            group_by: op.group_by.clone().into_boxed_slice(),
             child,
-            stats: stats.unwrap_or_default(),
+            stats: ExecutionStats::default(),
+            output_iter: None,
+            emitted_empty_group: false,
+            buckets: HashMap::new(),
         }
     }
 
     pub fn stats(&self) -> &ExecutionStats {
         &self.stats
     }
-}
-
-impl<Child: ClosedExecutor> ClosedExecutor for ClosedHashAggregate<Child> {
-    type Running = OpenHashAggregate<Child::Running>;
-
-    fn open(self) -> RuntimeResult<Self::Running> {
-        let child = self.child.open()?;
-        Ok(OpenHashAggregate {
-            op: self.op,
-            child: Some(child),
-            closed_child: None,
-            buckets: HashMap::new(),
-            output_iter: None,
-            emitted_empty_group: false,
-            stats: self.stats,
-        })
-    }
-}
-
-impl<Child: RunningExecutor> OpenHashAggregate<Child> {
-    pub fn stats(&self) -> &ExecutionStats {
-        &self.stats
-    }
 
     /// Extract group key values from a row.
     fn extract_group_key(&self, row: &Row) -> RuntimeResult<Vec<DataType>> {
-        let evaluator = ExpressionEvaluator::new(row, &self.op.input_schema);
+        let evaluator = ExpressionEvaluator::new(row, &self.input_schema);
 
-        let mut key_values = Vec::with_capacity(self.op.group_by.len());
-        for expr in &self.op.group_by {
+        let mut key_values = Vec::with_capacity(self.group_by.len());
+        for expr in &self.group_by {
             let value = evaluator.evaluate(expr)?;
             key_values.push(value);
         }
@@ -215,44 +193,46 @@ impl<Child: RunningExecutor> OpenHashAggregate<Child> {
         Ok(key_values)
     }
 
+    fn accumulate_row(&mut self, row: &Row) -> RuntimeResult<()> {
+        self.stats.rows_scanned += 1;
+
+        let key = self.extract_group_key(&row)?;
+
+        // Get or create bucket for this group
+        let bucket = self
+            .buckets
+            .entry(key.clone())
+            .or_insert_with(|| GroupBucket::new(key, &self.aggregates));
+
+        // Accumulate the row
+        let evaluator = ExpressionEvaluator::new(&row, &self.input_schema);
+        for (i, agg_expr) in self.aggregates.iter().enumerate() {
+            let value = if agg_expr.arg.is_none() {
+                DataType::Null
+            } else if let Some(ref arg) = agg_expr.arg {
+                match arg {
+                    BoundExpression::Star => DataType::Null,
+                    other => evaluator.evaluate(other)?,
+                }
+            } else {
+                DataType::Null
+            };
+            bucket.accumulators[i].accumulate(&value)?;
+        }
+
+        Ok(())
+    }
+
     /// Build phase: consume all input and build hash table.
     fn build(&mut self) -> RuntimeResult<()> {
-        if let Some(mut child) = self.child.take() {
-            while let Some(row) = child.next()? {
-                self.stats.rows_scanned += 1;
-
-                let key = self.extract_group_key(&row)?;
-
-                // Get or create bucket for this group
-                let aggregates = &self.op.aggregates;
-                let bucket = self
-                    .buckets
-                    .entry(key.clone())
-                    .or_insert_with(|| GroupBucket::new(key, aggregates));
-
-                // Accumulate the row
-                let evaluator = ExpressionEvaluator::new(&row, &self.op.input_schema);
-                for (i, agg_expr) in self.op.aggregates.iter().enumerate() {
-                    let value = if agg_expr.arg.is_none() {
-                        DataType::Null
-                    } else if let Some(ref arg) = agg_expr.arg {
-                        match arg {
-                            BoundExpression::Star => DataType::Null,
-                            other => evaluator.evaluate(other)?,
-                        }
-                    } else {
-                        DataType::Null
-                    };
-                    bucket.accumulators[i].accumulate(&value)?;
-                }
-            }
-
-            self.closed_child = Some(child.close()?);
-
-            // Prepare output iterator
-            let buckets: Vec<GroupBucket> = self.buckets.drain().map(|(_, v)| v).collect();
-            self.output_iter = Some(buckets.into_iter());
+        while let Some(row) = self.child.next()? {
+            self.accumulate_row(&row)?;
         }
+        self.child.close()?;
+
+        // Prepare output iterator
+        let buckets: Vec<GroupBucket> = self.buckets.drain().map(|(_, v)| v).collect();
+        self.output_iter = Some(buckets.into_iter());
 
         Ok(())
     }
@@ -268,14 +248,11 @@ impl<Child: RunningExecutor> OpenHashAggregate<Child> {
         // First, add group-by key values (cast to expected output type)
         for (i, value) in bucket.key.into_iter().enumerate() {
             let expected_type = self
-                .op
                 .output_schema
                 .column(i)
                 .ok_or(RuntimeError::ColumnNotFound(i))?
                 .datatype();
-            let casted = value
-                .try_cast(expected_type)
-                .map_err(|e| RuntimeError::TypeError(e))?;
+            let casted = value.try_cast(expected_type)?;
             values.push(casted);
         }
 
@@ -284,14 +261,11 @@ impl<Child: RunningExecutor> OpenHashAggregate<Child> {
             let value = acc.finalize()?;
             let col_idx = num_group_keys + i;
             let expected_type = self
-                .op
                 .output_schema
                 .column(col_idx)
                 .ok_or(RuntimeError::ColumnNotFound(i))?
                 .datatype();
-            let casted = value
-                .try_cast(expected_type)
-                .map_err(|e| RuntimeError::TypeError(e))?;
+            let casted = value.try_cast(expected_type)?;
             values.push(casted);
         }
 
@@ -299,18 +273,17 @@ impl<Child: RunningExecutor> OpenHashAggregate<Child> {
     }
 }
 
-impl<Child: RunningExecutor> RunningExecutor for OpenHashAggregate<Child> {
-    type Closed = ClosedHashAggregate<Child::Closed>;
+impl<Child: Executor> Executor for HashAggregate<Child> {
+    fn open(&mut self) -> RuntimeResult<()> {
+        self.child.open()?;
+        self.build()?;
+        Ok(())
+    }
 
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
-        // Build hash table on first call
-        if self.child.is_some() {
-            self.build()?;
-        }
-
         // Produce phase: emit rows from buckets
         if let Some(ref mut iter) = self.output_iter {
-            if let Some(bucket) = iter.next() {
+            while let Some(bucket) = iter.next() {
                 let row = self.bucket_to_row(bucket)?;
                 self.stats.rows_produced += 1;
                 return Ok(Some(row));
@@ -318,25 +291,21 @@ impl<Child: RunningExecutor> RunningExecutor for OpenHashAggregate<Child> {
         }
 
         // Handle empty GROUP BY (no group-by columns produces one row with default aggregates)
-        if !self.emitted_empty_group && self.op.group_by.is_empty() && self.stats.rows_produced == 0
-        {
+        if !self.emitted_empty_group && self.group_by.is_empty() && self.stats.rows_produced == 0 {
             self.emitted_empty_group = true;
-            let mut values: Vec<DataType> = Vec::with_capacity(self.op.aggregates.len());
+            let mut values: Vec<DataType> = Vec::with_capacity(self.aggregates.len());
 
-            for (i, agg_expr) in self.op.aggregates.iter().enumerate() {
+            for (i, agg_expr) in self.aggregates.iter().enumerate() {
                 let acc = Accumulator::new(&agg_expr.func);
                 let value = acc.finalize()?;
 
                 // Cast to expected output type
                 let expected_type = self
-                    .op
                     .output_schema
                     .column(i)
                     .ok_or(RuntimeError::ColumnNotFound(i))?
                     .datatype();
-                let casted = value
-                    .try_cast(expected_type)
-                    .map_err(|e| RuntimeError::TypeError(e))?;
+                let casted = value.try_cast(expected_type)?;
                 values.push(casted);
             }
 
@@ -347,11 +316,7 @@ impl<Child: RunningExecutor> RunningExecutor for OpenHashAggregate<Child> {
         Ok(None)
     }
 
-    fn close(self) -> RuntimeResult<Self::Closed> {
-        Ok(ClosedHashAggregate {
-            op: self.op,
-            child: self.closed_child.expect("Child should be closed"),
-            stats: self.stats,
-        })
+    fn close(&mut self) -> RuntimeResult<()> {
+        Ok(())
     }
 }

@@ -417,7 +417,6 @@ impl Catalog {
             for position in tree.iter_forward()? {
                 if let Ok(pos) = position {
                     tree.with_cell_at(pos, |bytes| {
-                        println!("{}", bytes.len());
                         let mut tuple = Tuple::from_slice_unchecked(bytes)?;
                         let freed = tuple.vaccum_with(oldest_active_xid, schema)?;
 
@@ -901,17 +900,17 @@ impl CatalogTrait for MemCatalog {
 }
 
 #[derive(Clone)]
-pub struct StatisticsProvider<C: CatalogTrait + Clone> {
+pub struct StatisticsProvider<'a, C: CatalogTrait + Clone> {
     catalog: C,
     builder: BtreeBuilder,
-    snapshot: Snapshot,
+    snapshot: &'a Snapshot,
 }
 
-impl<C> StatisticsProvider<C>
+impl<'a, C> StatisticsProvider<'a, C>
 where
     C: CatalogTrait + Clone,
 {
-    pub fn new(catalog: C, builder: BtreeBuilder, snapshot: Snapshot) -> Self {
+    pub fn new(catalog: C, builder: BtreeBuilder, snapshot: &'a Snapshot) -> Self {
         Self {
             catalog,
             builder,
@@ -920,7 +919,7 @@ where
     }
 }
 
-impl<C: CatalogTrait + Clone> StatsProvider for StatisticsProvider<C> {
+impl<'a, C: CatalogTrait + Clone> StatsProvider for StatisticsProvider<'a, C> {
     fn get_stats(&self, object: ObjectId) -> Option<Stats> {
         let relation = self
             .catalog

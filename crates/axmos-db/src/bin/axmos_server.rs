@@ -10,7 +10,6 @@ use axmosdb::{
 };
 
 use std::{
-    collections::HashMap,
     env,
     io::{BufReader, BufWriter},
     net::{TcpListener, TcpStream},
@@ -18,7 +17,7 @@ use std::{
     process,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
 };
 
@@ -99,13 +98,13 @@ impl Server {
             None => return Response::Error("No database open".into()),
         };
 
-        let session = db.session();
-        ctx.session = Some(session);
+        if let Ok(session) = db.session() {
+            ctx.session = Some(session);
+        } else {
+            return Response::Error("Failed to create session".into());
+        };
 
-        match ctx.session.as_mut().unwrap().context_mut().begin() {
-            Ok(_) => Response::SessionStarted,
-            Err(e) => Response::Error(format!("BEGIN failed: {}", e)),
-        }
+        Response::SessionStarted
     }
 
     fn handle_commit(&mut self, ctx: &mut ClientContext) -> Response {
@@ -114,7 +113,7 @@ impl Server {
             return Response::Error("No active transaction".into());
         };
 
-        match session.context_mut().commit() {
+        match session.commit_transaction() {
             Ok(_) => Response::SessionEnd,
             Err(e) => Response::Error(format!("COMMIT failed: {}", e)),
         }
@@ -125,7 +124,7 @@ impl Server {
             return Response::Error("No active transaction".into());
         };
 
-        match session.context_mut().rollback() {
+        match session.abort_transaction() {
             Ok(_) => Response::SessionEnd,
             Err(e) => Response::Error(format!("ROLLBACK failed: {}", e)),
         }
@@ -258,13 +257,7 @@ impl Server {
                 Request::Rollback => "ROLLBACK",
                 Request::Explain(_) => "EXPLAIN",
                 Request::Analyze { .. } => "ANALYZE",
-                Request::Vacuum { force } => {
-                    if *force {
-                        "VACUUM FORCE"
-                    } else {
-                        "VACUUM"
-                    }
-                }
+                Request::Vacuum => "VACUUM",
                 Request::Close => "CLOSE",
                 Request::Ping => "PING",
                 Request::Shutdown => "SHUTDOWN",
@@ -303,7 +296,7 @@ impl Server {
                 sample_rate,
                 max_sample_rows,
             } => self.handle_analyze(sample_rate, max_sample_rows),
-            Request::Vacuum { force } => self.handle_vacuum(force),
+            Request::Vacuum => self.handle_vacuum(),
             Request::Close => self.handle_close(),
             Request::Ping => Response::Pong,
             Request::Shutdown => {
@@ -313,13 +306,12 @@ impl Server {
         }
     }
 
-    fn handle_vacuum(&mut self, force: bool) -> Response {
+    fn handle_vacuum(&mut self) -> Response {
         let Some(db) = &self.db else {
             return Response::Error("No database open. Use OPEN or CREATE first.".into());
         };
 
-        let result = if force { db.vacuum() } else { db.vacuum_safe() };
-
+        let result = db.vacuum();
         match result {
             Ok(stats) => Response::VacuumComplete {
                 tables_vacuumed: stats.tables_vacuumed,
@@ -365,7 +357,7 @@ impl Server {
             Err(e) => return Response::Error(format!("Parse error: {}", e)),
         };
 
-        let handle = match db.coordinator().begin() {
+        let mut handle = match db.coordinator().begin() {
             Ok(h) => h,
             Err(e) => return Response::Error(format!("Transaction error: {}", e)),
         };
@@ -378,7 +370,7 @@ impl Server {
                 .with_pager(db.pager().clone())
         };
 
-        let mut binder = Binder::new(db.catalog().clone(), tree_builder.clone(), snapshot.clone());
+        let mut binder = Binder::new(db.catalog().clone(), tree_builder.clone(), &snapshot);
         let bound = match binder.bind(&stmt) {
             Ok(b) => b,
             Err(e) => return Response::Error(format!("Bind error: {}", e)),

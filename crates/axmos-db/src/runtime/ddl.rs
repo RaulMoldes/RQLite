@@ -16,7 +16,6 @@ use crate::{
         page::BtreePage,
         tuple::{Row, TupleBuilder},
     },
-    tree::accessor::BtreeWriteAccessor,
     types::{Blob, DataType, DataTypeKind, ObjectId, UInt64},
 };
 
@@ -91,12 +90,12 @@ fn index_name(col_names: &Vec<String>, table_name: &str) -> String {
 /// the query optimizer. They are executed immediately and affect
 /// the catalog metadata.
 pub struct DdlExecutor {
-    ctx: TransactionContext<BtreeWriteAccessor>,
+    ctx: TransactionContext,
 }
 
 impl DdlExecutor {
     /// Creates a new DDL executor.
-    pub(crate) fn new(ctx: TransactionContext<BtreeWriteAccessor>) -> Self {
+    pub(crate) fn new(ctx: TransactionContext) -> Self {
         Self { ctx }
     }
 
@@ -151,7 +150,6 @@ impl DdlExecutor {
         // Create the relation
         let relation = Relation::table(object_id, &stmt.table_name, root_page, columns);
 
-
         let snapshot = self.ctx.snapshot();
         let tree_builder = self.ctx.tree_builder();
         let schema = relation.schema().clone();
@@ -161,25 +159,17 @@ impl DdlExecutor {
             .write()
             .store_relation(relation, &tree_builder, snapshot.xid())?;
 
-
-        let mut relation = self.ctx.catalog().get_relation(object_id, &tree_builder, &snapshot)?;
+        let mut relation = self
+            .ctx
+            .catalog()
+            .get_relation(object_id, &tree_builder, &snapshot)?;
 
         // Now create indexes for column-level unique constraints
         // This must happen AFTER storing the relation since [create_unique_index] needs to look it up in the catalog.
         for constraint in stmt.constraints.iter() {
+            
             self.add_constraint(&mut relation, constraint)?;
-        };
-
-        // Store in catalog
-        self.ctx.catalog().write().update_relation(
-            object_id,
-            None,
-            Some(relation.schema().clone()),
-            None,
-            &tree_builder,
-            &snapshot,
-        )?;
-
+        }
 
 
 
@@ -210,8 +200,6 @@ impl DdlExecutor {
         }
 
         let index_id = self.create_unique_index(stmt.table_id, &stmt.index_name, &stmt.columns)?;
-
-
 
         Ok(DdlResult::IndexCreated {
             name: stmt.index_name.to_string(),
@@ -380,7 +368,7 @@ impl DdlExecutor {
         }
 
         // Now insert all entries into the index
-        let mut index_btree = self.ctx.build_tree(index_root);
+        let mut index_btree = self.ctx.build_tree_mut(index_root);
         for entry in index_entries {
             let tuple = TupleBuilder::from_schema(index_schema).build(&entry, tid)?;
             index_btree.insert(index_root, tuple, index_schema)?;
@@ -544,6 +532,7 @@ impl DdlExecutor {
 
                 let index_name = index_name(&col_names, relation.name());
                 self.create_unique_index(relation.object_id(), &index_name, col_indices)?;
+
 
                 Ok(format!(
                     "ADDED UNIQUE CONSTRAINT ON COLUMNS: {}",

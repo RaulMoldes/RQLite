@@ -269,6 +269,10 @@ impl TransactionMetadata {
     pub fn write_set(&self) -> &HashMap<LogicalId, u8> {
         &self.write_set
     }
+
+    pub fn is_active(&self) -> bool {
+        matches!(self.state, TransactionState::Active)
+    }
 }
 
 /// Shared transaction table protected by RwLock
@@ -341,22 +345,23 @@ impl TransactionCoordinator {
             .fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Get a set of transactions with the provided state.
+    pub fn transaction_set(&self, state: TransactionState) -> HashSet<TransactionId> {
+        self.transactions
+            .read()
+            .iter()
+            .filter(|(_, entry)| entry.state() == state)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Create a snapshot of the database state for a given transaction id.
     pub fn snapshot(&self, txid: TransactionId) -> TransactionResult<Snapshot> {
-        let txs = self.transactions.read();
+        // Collect active transaction ids
+        let active: HashSet<TransactionId> = self.transaction_set(TransactionState::Active);
 
-        // Collect active transaction IDs
-        let active: HashSet<TransactionId> = txs
-            .iter()
-            .filter(|(_, entry)| entry.state == TransactionState::Active)
-            .map(|(id, _)| *id)
-            .collect();
-
-        let aborted: HashSet<TransactionId> = txs
-            .iter()
-            .filter(|(_, entry)| entry.state == TransactionState::Aborted)
-            .map(|(id, _)| *id)
-            .collect();
+        // Collect tracked aborted transaction ids.
+        let aborted: HashSet<TransactionId> = self.transaction_set(TransactionState::Aborted);
 
         // xmin is the smallest active transaction ID (or our ID if none active)
         let xmin = active.iter().min().copied().unwrap_or(txid);
@@ -389,7 +394,7 @@ impl TransactionCoordinator {
         Ok(TransactionHandle {
             id: txid,
             snapshot,
-            coordinator: self.clone(),
+            commit_handle: Some(CommitHandle::new(self.clone())),
         })
     }
 
@@ -425,15 +430,6 @@ impl TransactionCoordinator {
 
         entry.state = TransactionState::Aborted;
         Ok(())
-    }
-
-    /// Get a transaction's snapshot for visibility checks
-    pub fn get_snapshot(&self, txid: TransactionId) -> TransactionResult<Snapshot> {
-        let txs = self.transactions.read();
-
-        let entry = txs.get(&txid).ok_or(TransactionError::NotFound(txid))?;
-
-        Ok(entry.snapshot.clone())
     }
 
     /// Record a read operation for a transaction
@@ -545,7 +541,8 @@ impl TransactionCoordinator {
 
     /// Clean up old committed/aborted transactions
     /// Should be called periodically by a background vacuum process
-    pub fn cleanup_old_transactions(&self, min_active_xid: TransactionId) {
+    pub fn cleanup_old_transactions(&self, min_active_xid: TransactionId) -> usize {
+        let current_count = self.transactions.read().len();
         self.transactions.write().retain(|id, entry| {
             // Keep active transactions
             if entry.state == TransactionState::Active {
@@ -554,6 +551,8 @@ impl TransactionCoordinator {
             // Keep transactions that might still be needed for visibility
             *id >= min_active_xid
         });
+        let final_count = self.transactions.read().len();
+        final_count.saturating_sub(current_count)
     }
 
     pub fn pager(&self) -> SharedPager {
@@ -562,7 +561,7 @@ impl TransactionCoordinator {
 
     /// Aborts all currently active transactions.
     /// Returns the list of transaction IDs that were aborted.
-    pub fn abort_all_active(&self) -> Vec<TransactionId> {
+    pub fn abort_all(&self) -> Vec<TransactionId> {
         let mut txs = self.transactions.write();
         let mut aborted = Vec::new();
 
@@ -576,51 +575,14 @@ impl TransactionCoordinator {
         aborted
     }
 
-    /// Gets the minimum transaction ID that is still needed for visibility.
-    /// This is the minimum of:
-    /// All active transaction IDs
-    /// All active transaction start timestamps (xmin in their snapshots)
-    pub fn get_oldest_required_xid(&self) -> TransactionId {
-        let txs = self.transactions.read();
-
-        let mut oldest = self.last_created_transaction.load(Ordering::Relaxed);
-
-        for (id, entry) in txs.iter() {
-            if entry.state == TransactionState::Active {
-                // Active transaction needs visibility from its snapshot's xmin
-                oldest = oldest.min(entry.snapshot.xmin());
-                oldest = oldest.min(*id);
-            }
-        }
-
-        oldest
-    }
-
     /// Cleans up all completed (committed or aborted) transactions from memory.
     /// Only keeps transactions that are still needed for visibility checks.
     /// Returns the number of transactions cleaned up.
     pub fn vacuum_transactions(&self) -> usize {
-        let oldest_required = self.get_oldest_required_xid();
-        let mut removed = self.transactions.read().len();
-        {
-            let mut txs = self.transactions.write();
-
-            txs.retain(|id, entry| {
-                // Always keep active transactions
-                if entry.state == TransactionState::Active {
-                    return true;
-                }
-
-                // Keep committed/aborted transactions that might still be needed
-                // for visibility checks by active transactions
-                *id >= oldest_required
-            });
-
-            removed -= txs.len();
-        }
+        let oldest_required = self.get_last_committed();
+        let removed = self.cleanup_old_transactions(oldest_required);
 
         // Also clean up tuple commits that are no longer needed
-
         let min_start_ts = self.get_min_active_start_ts();
         self.cleanup_tuple_commits(min_start_ts);
 
@@ -637,34 +599,60 @@ impl TransactionCoordinator {
             .min()
             .unwrap_or(self.commit_counter.load(Ordering::SeqCst))
     }
-
-    /// Creates a special vacuum snapshot that can see all committed data.
-    /// Used during vacuum operations.
-    pub fn vacuum_snapshot(&self) -> Snapshot {
-        let txid = self
-            .last_created_transaction
-            .fetch_add(1, Ordering::Relaxed);
-        let last_committed = self.last_committed.read().unwrap_or(0);
-
-        // Vacuum snapshot has no active transactions in its view
-        // and xmin = 0 so it can see everything
-        Snapshot::new(
-            txid,
-            0, // xmin = 0 means we can see all committed versions
-            Some(last_committed),
-            HashSet::new(),
-            HashSet::new(),
-        )
-    }
 }
 
 /// Handle to an active transaction
 /// Provides a safe interface for transaction operations
-#[derive(Clone)]
 pub struct TransactionHandle {
     id: TransactionId,
     snapshot: Snapshot,
+    commit_handle: Option<CommitHandle>,
+}
+
+impl TransactionHandle {
+    pub fn new(id: TransactionId, snapshot: Snapshot) -> Self {
+        Self {
+            id,
+            snapshot,
+            commit_handle: None,
+        }
+    }
+
+    pub(crate) fn with_commit_handle(mut self, commit_handle: CommitHandle) -> Self {
+        self.commit_handle = Some(commit_handle);
+        self
+    }
+}
+
+/// The commit handle is not [Clone] so that we make sure each transaction only commits or aborts once.
+impl Clone for TransactionHandle {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            snapshot: self.snapshot.clone(),
+            commit_handle: None,
+        }
+    }
+}
+
+pub(crate) struct CommitHandle {
     coordinator: TransactionCoordinator,
+}
+
+impl CommitHandle {
+    pub fn new(coordinator: TransactionCoordinator) -> Self {
+        Self { coordinator }
+    }
+
+    /// Commit this transaction, consuming itself
+    pub fn commit(self, id: TransactionId) -> TransactionResult<()> {
+        self.coordinator.commit(id)
+    }
+
+    /// Abort this transaction, consuming itself.
+    pub fn abort(self, id: TransactionId) -> TransactionResult<()> {
+        self.coordinator.abort(id)
+    }
 }
 
 impl TransactionHandle {
@@ -672,17 +660,33 @@ impl TransactionHandle {
         self.id
     }
 
-    pub fn snapshot(&self) -> Snapshot {
-        self.snapshot.clone()
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
     }
 
-    /// Commit this transaction
-    pub fn commit(&self) -> TransactionResult<()> {
-        self.coordinator.commit(self.id)
+    pub fn can_commit(&self) -> bool {
+        self.commit_handle.is_some()
     }
 
-    /// Abort this transaction
-    pub fn abort(&self) -> TransactionResult<()> {
-        self.coordinator.abort(self.id)
+    pub fn commit(&mut self) -> TransactionResult<()> {
+        if let Some(handle) = self.commit_handle.take() {
+            handle.commit(self.id())?;
+        };
+
+        Ok(())
+    }
+
+    pub fn abort(&mut self) -> TransactionResult<()> {
+        if let Some(handle) = self.commit_handle.take() {
+            handle.abort(self.id())?;
+        };
+        Ok(())
+    }
+}
+
+// If the handle is not committed before, the transaction will be aborted whenever it is dropped.
+impl Drop for TransactionHandle {
+    fn drop(&mut self) {
+        let _ = self.abort();
     }
 }

@@ -10,16 +10,20 @@ use crate::{
     },
     make_shared,
     multithreading::frames::{AsReadLatch, AsWriteLatch, Frame, MemFrame},
-    runtime::{RuntimeError, RuntimeResult, context::TransactionContext, dml::DmlExecutor},
+    runtime::{
+        RuntimeResult,
+        context::{TransactionContext, TransactionLogger},
+        dml::DmlExecutor,
+    },
     schema::catalog::CatalogTrait,
     storage::{
         core::{buffer::MemBlock, traits::Buffer},
         page::{OverflowPage, PageZero, PageZeroHeader},
-        tuple::{Row, Tuple, TupleError, TupleReader, TupleRef},
+        tuple::Row,
     },
     tree::{
         accessor::{BtreeReadAccessor, BtreeWriteAccessor, TreeReader, TreeWriter},
-        bplustree::{Btree, SearchResult},
+        bplustree::Btree,
     },
     types::{Lsn, PAGE_ZERO, PageId},
 };
@@ -103,13 +107,13 @@ impl<'a> FileOperations for Pager {
 }
 
 pub struct WalRecuperator {
-    executor: DmlExecutor<BtreeWriteAccessor>,
+    executor: DmlExecutor,
 }
 
 impl WalRecuperator {
-    pub(crate) fn new_with_context(ctx: TransactionContext<BtreeWriteAccessor>) -> Self {
+    pub(crate) fn new(ctx: TransactionContext, logger: TransactionLogger) -> Self {
         Self {
-            executor: DmlExecutor::new(ctx),
+            executor: DmlExecutor::new(ctx, logger),
         }
     }
 
@@ -204,6 +208,8 @@ impl WalRecuperator {
                         .row_id()
                         .map(|r| UInt64::from(r))
                         .expect("Row id must be set for DML logs");
+                    println!("DESHACIENCIO INSERT OPERATIION");
+                    println!("{:?}", insert_operation);
 
                     let row_id_bytes = row_id.serialize()?;
 
@@ -305,6 +311,9 @@ impl WalRecuperator {
                     let table_id = insert_operation
                         .object_id()
                         .expect("Table id must be set for DML logs"); // Sfae to unwrap since all
+
+                    println!("EJECUTANDO INSERT OPERATIION");
+                    println!("{:?}", insert_operation);
 
                     // Get builder and snapshot
                     let builder = self.executor.ctx().tree_builder();
@@ -751,6 +760,8 @@ impl Write for Pager {
         self.sync_header()?;
 
         self.file.flush()?;
+        self.wal.truncate()?;
+        self.wal.flush()?;
         Ok(())
     }
 }

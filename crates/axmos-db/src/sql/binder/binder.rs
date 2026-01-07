@@ -73,17 +73,17 @@ impl From<SchemaError> for BinderError {
 
 pub type BinderResult<T> = Result<T, BinderError>;
 
-pub struct Binder<C: CatalogTrait> {
+pub struct Binder<'a, C: CatalogTrait> {
     catalog: C,
     tree_builder: BtreeBuilder,
-    snapshot: Snapshot,
+    snapshot: &'a Snapshot,
     scopes: ScopeStack,
     ctes: HashMap<String, (usize, Schema)>,
     cte_queries: Vec<BoundSelect>,
 }
 
-impl<C: CatalogTrait> Binder<C> {
-    pub fn new(catalog: C, tree_builder: BtreeBuilder, snapshot: Snapshot) -> Self {
+impl<'a, C: CatalogTrait> Binder<'a, C> {
+    pub fn new(catalog: C, tree_builder: BtreeBuilder, snapshot: &'a Snapshot) -> Self {
         Self {
             catalog,
             tree_builder,
@@ -291,11 +291,17 @@ impl<C: CatalogTrait> Binder<C> {
             match item {
                 SelectItem::Star => {
                     // Expand star to all columns from all tables in scope
+                    // Skip column 0 (internal row_id) for each table
                     if let Some(scope) = self.scopes.current() {
                         for entry in scope.iter() {
                             let offset = self.calculate_column_offset(entry.scope_index);
 
                             for (col_idx, col) in entry.schema.iter_columns().enumerate() {
+                                // Skip internal row_id column (always column 0)
+                                if col_idx == 0 {
+                                    continue;
+                                }
+
                                 let col_ref = Binding {
                                     table_id: entry.table_id,
                                     scope_index: entry.scope_index,
@@ -433,6 +439,7 @@ impl<C: CatalogTrait> Binder<C> {
             }
             Values::Query(select) => {
                 let bound_query = self.bind_select(select)?;
+                // Bind select already adds the row id which we have not added yet so we substract it for the check.
                 if bound_query.columns.len() != column_indices.len() {
                     return Err(BinderError::ColumnCountMismatch {
                         expected: column_indices.len(),
@@ -542,14 +549,19 @@ impl<C: CatalogTrait> Binder<C> {
 
     /// Binds a [CreateTableStatement], producing a [BoundCreateTable] statement
     fn bind_create_table(&mut self, stmt: &CreateTableStatement) -> BinderResult<BoundCreateTable> {
-        // Build temporary schema for constraint resolution
-        let temp_columns: Vec<Column> = stmt
-            .columns
-            .iter()
-            .map(|c| Column::new_with_defaults(c.data_type, &c.name))
-            .collect();
+        // Build temporary schema INCLUDING row_id, exactly as DDL executor does
+        let mut temp_columns: Vec<Column> = Vec::with_capacity(stmt.columns.len() + 1);
+
+        // Add internal row_id column first (index 0) - same as DDL executor
+        temp_columns.push(Column::new_with_defaults(DataTypeKind::BigUInt, "row_id"));
+
+        // Then add user columns (indices 1, 2, 3, ...)
+        for c in &stmt.columns {
+            temp_columns.push(Column::new_with_defaults(c.data_type, &c.name));
+        }
 
         let temp_schema = Schema::new_table(temp_columns);
+
         let columns: Vec<BoundColumnDef> = stmt
             .columns
             .iter()
@@ -1012,8 +1024,6 @@ impl<C: CatalogTrait> Binder<C> {
         BoundExpression::Literal { value }
     }
 
-
-
     fn try_parse_aggregate(&self, name: &str) -> Option<AggregateFunction> {
         match name {
             "COUNT" => Some(AggregateFunction::Count),
@@ -1162,9 +1172,7 @@ impl<C: CatalogTrait> Binder<C> {
     ) -> BinderResult<Vec<usize>> {
         let col_names = names
             .iter()
-            .map(|name| {
-                schema.bind_column(name).map_err(|e| BinderError::from(e))
-            })
+            .map(|name| schema.bind_column(name).map_err(|e| BinderError::from(e)))
             .collect::<BinderResult<Vec<usize>>>();
         col_names
     }

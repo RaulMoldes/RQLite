@@ -276,8 +276,6 @@ pub struct BoundColumnDef {
     pub default: Option<BoundExpression>,
 }
 
-
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoundTableConstraint {
     PrimaryKey(Vec<usize>),

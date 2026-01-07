@@ -25,6 +25,34 @@ macro_rules! param_tests {
             )+
         }
     };
+
+
+     // Named variant for complex values (strings, expressions)
+    ($fn:ident, $p1:ident=> [$( $n1:ident : $v1:expr);+ $(;)?]) => {
+        paste::paste! {
+            $(
+                #[test]
+                #[serial_test::serial]
+                #[cfg_attr(miri, ignore)]
+                fn [<$fn _ $n1>]() {
+                    $fn($v1)
+                }
+            )+
+        }
+    };
+
+    // Named variant miri_safe
+    ($fn:ident, $p1:ident => [$( $n1:ident : $v1:expr );+ $(;)?], miri_safe $(,)?) => {
+        paste::paste! {
+            $(
+                #[test]
+                #[serial_test::serial]
+                fn [<$fn _ $n1>]() {
+                    $fn($v1)
+                }
+            )+
+        }
+    };
 }
 
 /// Parameterized tests for types
@@ -59,10 +87,12 @@ macro_rules! param_type_tests {
 
 #[macro_export]
 macro_rules! param2_tests {
+    // Original variant for simple values
     ($fn:ident, $p1:ident, $p2:ident => [$(($v1:expr, $v2:expr)),+ $(,)?]) => {
         paste::paste! {
             $(
                 #[test]
+                #[allow(non_snake_case)]
                 #[serial_test::serial]
                 #[cfg_attr(miri, ignore)]
                 fn [<$fn _ $p1 _ $v1 _ $p2 _ $v2>]() {
@@ -72,12 +102,40 @@ macro_rules! param2_tests {
         }
     };
 
+    // Original miri_safe variant
     ($fn:ident, $p1:ident, $p2:ident => [$(($v1:expr, $v2:expr)),+ $(,)?], miri_safe $(,)?) => {
         paste::paste! {
             $(
                 #[test]
                 #[serial_test::serial]
                 fn [<$fn _ $p1 _ $v1 _ $p2 _ $v2>]() {
+                    $fn($v1, $v2)
+                }
+            )+
+        }
+    };
+
+    // Named variant for complex values (strings, expressions)
+    ($fn:ident, $p1:ident, $p2:ident => [$( $n1:ident : $v1:expr, $n2:ident : $v2:expr );+ $(;)?]) => {
+        paste::paste! {
+            $(
+                #[test]
+                #[serial_test::serial]
+                #[cfg_attr(miri, ignore)]
+                fn [<$fn _ $n1 _ $n2>]() {
+                    $fn($v1, $v2)
+                }
+            )+
+        }
+    };
+
+    // Named variant miri_safe
+    ($fn:ident, $p1:ident, $p2:ident => [$( $n1:ident : $v1:expr, $n2:ident : $v2:expr );+ $(;)?], miri_safe $(,)?) => {
+        paste::paste! {
+            $(
+                #[test]
+                #[serial_test::serial]
+                fn [<$fn _ $n1 _ $n2>]() {
                     $fn($v1, $v2)
                 }
             )+
@@ -154,6 +212,36 @@ macro_rules! param3_tests {
                 #[test]
                 #[serial_test::serial]
                 fn [<$fn _ $p1 _ $v1 _ $p2 _ $v2 _ $p3 _ $v3>]() {
+                    $fn($v1, $v2, $v3)
+                }
+            )+
+        }
+    };
+
+
+
+
+    // Named variant for complex values (strings, expressions)
+    ($fn:ident, $p1:ident, $p2:ident, $p3:ident => [$( $n1:ident : $v1:expr, $n2:ident : $v2:expr,  $n3:ident : $v3:expr  );+ $(;)?]) => {
+        paste::paste! {
+            $(
+                #[test]
+                #[serial_test::serial]
+                #[cfg_attr(miri, ignore)]
+                fn [<$fn _ $n1 _ $n2 _$n3>]() {
+                    $fn($v1, $v2, $v3)
+                }
+            )+
+        }
+    };
+
+    // Named variant miri_safe
+    ($fn:ident, $p1:ident, $p2:ident, $p3:ident => [$( $n1:ident : $v1:expr, $n2:ident : $v2:expr,  $n3:ident : $v3:expr  );+ $(;)?], miri_safe $(,)?) => {
+        paste::paste! {
+            $(
+                #[test]
+                #[serial_test::serial]
+                fn [<$fn _ $n1 _ $n2 _$n3>]() {
                     $fn($v1, $v2, $v3)
                 }
             )+
