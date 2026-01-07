@@ -1,5 +1,5 @@
 use super::utils::*;
-use crate::{DBConfig, Database, DatabaseResult, QueryResult};
+use crate::{DBConfig, Database};
 
 pub fn test_create_and_open(flush_before_close: bool) {
     let (dir, path) = temp_db_path();
