@@ -186,7 +186,7 @@ impl<Child: Executor> HashAggregate<Child> {
 
         let mut key_values = Vec::with_capacity(self.group_by.len());
         for expr in &self.group_by {
-            let value = evaluator.evaluate(expr)?;
+            let value = evaluator.evaluate_as_single_value(expr)?;
             key_values.push(value);
         }
 
@@ -212,7 +212,7 @@ impl<Child: Executor> HashAggregate<Child> {
             } else if let Some(ref arg) = agg_expr.arg {
                 match arg {
                     BoundExpression::Star => DataType::Null,
-                    other => evaluator.evaluate(other)?,
+                    other => evaluator.evaluate_as_single_value(other)?,
                 }
             } else {
                 DataType::Null

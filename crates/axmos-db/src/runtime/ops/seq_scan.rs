@@ -1,6 +1,6 @@
 use crate::{
     runtime::{
-        ExecutionStats, Executor, RuntimeError, RuntimeResult, context::TransactionContext,
+        ExecutionStats, Executor, RuntimeError, RuntimeResult, context::ThreadContext,
         eval::ExpressionEvaluator,
     },
     schema::{Schema, catalog::CatalogTrait},
@@ -11,7 +11,7 @@ use crate::{
 };
 
 pub(crate) struct SeqScan {
-    ctx: TransactionContext,
+    ctx: ThreadContext,
     output_schema: Schema,
     table_schema: Schema,
     table_root: PageId,
@@ -21,7 +21,7 @@ pub(crate) struct SeqScan {
 }
 
 impl SeqScan {
-    pub(crate) fn new(op: &SeqScanOp, ctx: TransactionContext) -> RuntimeResult<Self> {
+    pub(crate) fn new(op: &SeqScanOp, ctx: ThreadContext) -> RuntimeResult<Self> {
         let tree_builder = ctx.tree_builder();
         let snapshot = ctx.snapshot();
         let table = ctx

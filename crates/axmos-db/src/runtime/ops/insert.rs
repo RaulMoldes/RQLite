@@ -2,7 +2,7 @@ use crate::{
     ObjectId,
     runtime::{
         ExecutionStats, Executor, RuntimeResult,
-        context::{TransactionContext, TransactionLogger},
+        context::{ThreadContext, TransactionLogger},
         dml::DmlExecutor,
     },
     sql::planner::physical::PhysInsertOp,
@@ -17,7 +17,7 @@ where
 {
     table_id: ObjectId,
     columns: Box<[usize]>,
-    ctx: TransactionContext,
+    ctx: ThreadContext,
     logger: TransactionLogger,
     child: Child,
     stats: ExecutionStats,
@@ -30,7 +30,7 @@ where
 {
     pub(crate) fn new(
         op: &PhysInsertOp,
-        ctx: TransactionContext,
+        ctx: ThreadContext,
         logger: TransactionLogger,
         child: Child,
     ) -> Self {

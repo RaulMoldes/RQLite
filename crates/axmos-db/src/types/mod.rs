@@ -167,7 +167,6 @@ pub type SerializationResult<T> = Result<T, SerializationError>;
     method = "write_to",
     args = "&self, writer: &mut [u8], cursor: usize",
     target = "main",
-    self_ref = "true",
     call_args = "inner, writer, cursor",
     return_type = "SerializationResult<usize>",
     default = "Err(SerializationError::NotSupported)"
@@ -177,7 +176,6 @@ pub type SerializationResult<T> = Result<T, SerializationError>;
     method = "serialize",
     args = "&self",
     target = "main",
-    self_ref = "true",
     call_args = "inner",
     return_type = "SerializationResult<Box<[u8]>>",
     default = "Err(SerializationError::NotSupported)"
@@ -203,62 +201,59 @@ pub type SerializationResult<T> = Result<T, SerializationError>;
     wrap_variant = "ref,result,tuple"
 )]
 #[delegate(
-    trait = "crate::types::core::NumericType",
+    trait = "crate::types::core::NumericOps",
     method = "abs",
     target = "main",
     args = "&self",
     return_type = "DataType",
     default = "DataType::Null",
     wrap_variant = "main",
-    only_for = "numeric"
+    filter_attributes = "numeric"
 )]
 #[delegate(
-    trait = "crate::types::core::NumericType",
+    trait = "crate::types::core::NumericOps",
     method = "floor",
     target = "main",
     args = "&self",
     return_type = "DataType",
     default = "DataType::Null",
     wrap_variant = "main",
-    only_for = "numeric"
+    filter_attributes = "numeric"
 )]
 #[delegate(
-    trait = "crate::types::core::NumericType",
+    trait = "crate::types::core::NumericOps",
     method = "ceil",
     target = "main",
     args = "&self",
     return_type = "DataType",
     default = "DataType::Null",
     wrap_variant = "main",
-    only_for = "numeric"
+    filter_attributes = "numeric"
 )]
 #[delegate(
-    trait = "crate::types::core::NumericType",
+    trait = "crate::types::core::NumericOps",
     method = "round",
     target = "main",
     args = "&self",
     return_type = "DataType",
     default = "DataType::Null",
     wrap_variant = "main",
-    only_for = "numeric"
+    filter_attributes = "numeric"
 )]
 #[delegate(
-    trait = "crate::types::core::NumericType",
+    trait = "crate::types::core::NumericOps",
     method = "sqrt",
     target = "main",
     args = "&self",
     return_type = "DataType",
     default = "DataType::Null",
     wrap_variant = "main",
-    only_for = "numeric"
+    filter_attributes = "numeric"
 )]
-#[ref_trait(
-    ref_trait = "crate::types::core::RefTrait",
-    assoc_type = "Ref",
-    owned_trait = "crate::types::core::TypeRef<'a>",
-    as_bytes_conversor = "as_slice"
+#[config(
+    reference_trait = "crate::types::core::TypeRef<'a>",
+    owned_trait = "crate::types::core::TypeOwned"
 )]
-
 pub enum DataType {
     #[null]
     Null,

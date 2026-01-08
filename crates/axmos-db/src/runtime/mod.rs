@@ -10,7 +10,7 @@ use crate::{
     multithreading::coordinator::{Snapshot, TransactionError},
     runtime::{
         builder::{BoxedExecutor, ExecutorBuilder},
-        context::{TransactionContext, TransactionLogger},
+        context::{ThreadContext, TransactionLogger},
         ddl::{DdlExecutor, DdlResult},
         eval::EvaluationError,
         validator::ValidationError,
@@ -390,7 +390,7 @@ pub(crate) fn optimize(
     stmt: &BoundStatement,
     catalog: &SharedCatalog,
     tree_builder: &BtreeBuilder,
-    snapshot: Snapshot,
+    snapshot: &Snapshot,
 ) -> Result<PhysicalPlan, QueryError> {
     let mut optimizer =
         CascadesOptimizer::with_defaults(catalog.clone(), tree_builder.clone(), &snapshot);
@@ -414,12 +414,12 @@ pub(crate) fn extract_affected_count(rows: &[Row]) -> u64 {
 }
 
 pub(crate) struct QueryRunner {
-    ctx: TransactionContext,
+    ctx: ThreadContext,
     logger: TransactionLogger,
 }
 
 impl QueryRunner {
-    pub fn new(ctx: TransactionContext, logger: TransactionLogger) -> Self {
+    pub fn new(ctx: ThreadContext, logger: TransactionLogger) -> Self {
         Self { ctx, logger }
     }
 
@@ -440,31 +440,20 @@ impl QueryRunner {
         is_dml(stmt)
     }
 
-    fn snapshot(&self) -> Snapshot {
+    fn snapshot(&self) -> &Snapshot {
         self.ctx.snapshot()
     }
 
-    pub(crate) fn prepare_and_run(
-        &self,
-        sql: &str,
-        autocommit: bool,
-    ) -> QueryRunnerResult<ResultGuard> {
+    pub(crate) fn prepare_and_run(&self, sql: &str) -> QueryRunnerResult<QueryResult> {
         let bound = self.prepare(sql)?;
-        self.execute_statement(bound, autocommit)
+        self.execute_statement(bound)
     }
 
-    fn execute_statement(
-        &self,
-        stmt: BoundStatement,
-        autocommit: bool,
-    ) -> QueryRunnerResult<ResultGuard> {
+    fn execute_statement(&self, stmt: BoundStatement) -> QueryRunnerResult<QueryResult> {
         if is_ddl(&stmt) {
             let mut executor = DdlExecutor::new(self.ctx.clone());
             let outcome = executor.execute(&stmt)?;
-            return Ok(ResultGuard::new(
-                self.ctx.clone(),
-                QueryResult::Ddl(outcome),
-            ));
+            return Ok(QueryResult::Ddl(outcome));
         }
         let is_dml = is_dml(&stmt);
         let plan = optimize(
@@ -478,62 +467,27 @@ impl QueryRunner {
         let mut executor = builder.build(&plan)?;
         let rows = collect_rows(&mut executor)?;
 
-        if autocommit {
-            self.ctx.commit_transaction()?;
-        }
-
         if is_dml {
             let affected = extract_affected_count(&rows);
 
-            Ok(ResultGuard::new(
-                self.ctx.clone(),
-                QueryResult::RowsAffected(affected),
-            ))
+            Ok(QueryResult::RowsAffected(affected))
         } else {
-            Ok(ResultGuard::new(
-                self.ctx.clone(),
-                QueryResult::Rows(RowsResult::new(rows, plan.output_schema().clone())),
-            ))
+            Ok(QueryResult::Rows(RowsResult::new(
+                rows,
+                plan.output_schema().clone(),
+            )))
         }
-    }
-}
-
-pub struct ResultGuard {
-    handle: TransactionContext,
-    result: QueryResult,
-}
-
-impl ResultGuard {
-    pub(crate) fn new(ctx: TransactionContext, result: QueryResult) -> Self {
-        Self {
-            handle: ctx,
-            result,
-        }
-    }
-
-    pub(crate) fn commit(&self) -> QueryRunnerResult<()> {
-        self.handle.commit_transaction()?;
-        Ok(())
-    }
-
-    pub(crate) fn abort(&self) -> QueryRunnerResult<()> {
-        self.handle.abort_transaction()?;
-        Ok(())
-    }
-
-    pub(crate) fn into_result(self) -> QueryResult {
-        self.result
     }
 }
 
 /// Executes multiple statements in a single transaction with atomic commit/rollback.
 pub(crate) struct MultiQueryRunner {
-    ctx: TransactionContext,
+    ctx: ThreadContext,
     logger: TransactionLogger,
 }
 
 impl MultiQueryRunner {
-    pub fn new(ctx: TransactionContext, logger: TransactionLogger) -> Self {
+    pub fn new(ctx: ThreadContext, logger: TransactionLogger) -> Self {
         Self { ctx, logger }
     }
 
@@ -542,29 +496,12 @@ impl MultiQueryRunner {
         let mut results = Vec::with_capacity(statements.len());
 
         // Execute all statements sequentially, collecting results or failing fast
-        let execution_result: QueryRunnerResult<()> = (|| {
-            for sql in statements {
-                let runner = QueryRunner::new(self.ctx.clone(), self.logger.clone());
-                results.push(runner.prepare_and_run(sql, false)?);
-            }
-            Ok(())
-        })();
 
-        // Commit or abort based on execution result
-        match execution_result {
-            Ok(()) => {
-                self.logger.log_commit()?;
-                self.ctx.commit_transaction()?;
-                self.logger.log_end()?;
-                Ok(results.into_iter().map(|r| r.into_result()).collect())
-            }
-            Err(e) => {
-                // Abort the transaction
-                self.logger.log_abort()?;
-                self.ctx.abort_transaction()?;
-                self.logger.log_end()?;
-                Err(e)
-            }
+        for sql in statements {
+            let runner = QueryRunner::new(self.ctx.clone(), self.logger.clone());
+            results.push(runner.prepare_and_run(sql)?);
         }
+
+        Ok(results)
     }
 }

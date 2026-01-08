@@ -10,6 +10,13 @@ macro_rules! numeric {
         #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default)]
         pub struct $name(pub $inner);
 
+        impl $crate::types::core::TypeClass for $name {
+            const SIZE: Option<usize> = Some(std::mem::size_of::<$inner>());
+            const ALIGN: usize = std::mem::align_of::<$inner>();
+        }
+
+
+
         /// Will trigger the autogeneration of the ByteMuck ref type.
         unsafe impl bytemuck::Pod for $name {}
         unsafe impl bytemuck::Zeroable for $name {}
@@ -43,10 +50,9 @@ macro_rules! numeric {
         }
 
 
-        impl $crate::types::core::BytemuckDeserializable for $name {
+        impl $crate::types::core::BytemuckType for $name {}
 
-        }
-            impl AsRef<[u8]> for $name {
+        impl AsRef<[u8]> for $name {
             fn as_ref(&self) -> &[u8] {
                 bytemuck::bytes_of(self)
             }
@@ -55,10 +61,10 @@ macro_rules! numeric {
 
         /// Numeric types always have a fixed size.
         impl $crate::types::core::FixedSizeType for $name {}
-
+        impl $crate::types::core::NumericType for $name {}
 
         /// Implement [to_primitive] type casting
-        impl $crate::types::core::NumericType for $name {
+        impl $crate::types::core::NumericOps for $name {
             type Primitive = $primitive;
 
             fn to_primitive(self) -> $primitive {

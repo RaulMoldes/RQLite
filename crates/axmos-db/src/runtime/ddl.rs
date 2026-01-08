@@ -5,7 +5,7 @@
 //! and are executed directly against the catalog.
 use crate::{
     PageId,
-    runtime::{RuntimeError, RuntimeResult, context::TransactionContext, eval::eval_literal_expr},
+    runtime::{RuntimeError, RuntimeResult, context::ThreadContext, eval::eval_literal_expr},
     schema::{
         DatabaseItem,
         base::{Column, ForeignKeyInfo, Relation, Schema, SchemaError, TableConstraint},
@@ -90,12 +90,12 @@ fn index_name(col_names: &Vec<String>, table_name: &str) -> String {
 /// the query optimizer. They are executed immediately and affect
 /// the catalog metadata.
 pub struct DdlExecutor {
-    ctx: TransactionContext,
+    ctx: ThreadContext,
 }
 
 impl DdlExecutor {
     /// Creates a new DDL executor.
-    pub(crate) fn new(ctx: TransactionContext) -> Self {
+    pub(crate) fn new(ctx: ThreadContext) -> Self {
         Self { ctx }
     }
 
@@ -167,11 +167,8 @@ impl DdlExecutor {
         // Now create indexes for column-level unique constraints
         // This must happen AFTER storing the relation since [create_unique_index] needs to look it up in the catalog.
         for constraint in stmt.constraints.iter() {
-            
             self.add_constraint(&mut relation, constraint)?;
         }
-
-
 
         Ok(DdlResult::TableCreated {
             name: stmt.table_name.clone(),
@@ -378,13 +375,14 @@ impl DdlExecutor {
     }
 
     fn execute_alter_table(&mut self, stmt: &BoundAlterTable) -> RuntimeResult<DdlResult> {
-        let snapshot = self.ctx.snapshot();
-        let tree_builder = self.ctx.tree_builder();
-        let mut relation =
+        let mut relation = {
+            let snapshot = self.ctx.snapshot();
+            let tree_builder = self.ctx.tree_builder();
             self.ctx
                 .catalog()
                 .read()
-                .get_relation(stmt.table_id, &tree_builder, &snapshot)?;
+                .get_relation(stmt.table_id, &tree_builder, &snapshot)?
+        };
 
         let table_name = relation.name().to_string();
 
@@ -431,6 +429,7 @@ impl DdlExecutor {
         }?;
 
         let id = relation.object_id();
+        let tree_builder = self.ctx.tree_builder();
         // Update the relation in catalog
         self.ctx.catalog().write().update_relation(
             id,
@@ -438,7 +437,7 @@ impl DdlExecutor {
             Some(relation.into_schema()),
             None,
             &tree_builder,
-            &snapshot,
+            self.ctx.snapshot(),
         )?;
 
         Ok(DdlResult::TableAltered {
@@ -532,7 +531,6 @@ impl DdlExecutor {
 
                 let index_name = index_name(&col_names, relation.name());
                 self.create_unique_index(relation.object_id(), &index_name, col_indices)?;
-
 
                 Ok(format!(
                     "ADDED UNIQUE CONSTRAINT ON COLUMNS: {}",

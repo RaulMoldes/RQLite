@@ -2,7 +2,7 @@ use crate::{
     ObjectId,
     runtime::{
         ExecutionStats, Executor, RuntimeResult,
-        context::{TransactionContext, TransactionLogger},
+        context::{ThreadContext, TransactionLogger},
         dml::{DmlExecutor, extract_row_id},
     },
     sql::planner::physical::PhysDeleteOp,
@@ -16,7 +16,7 @@ where
     Child: Executor,
 {
     table_id: ObjectId,
-    ctx: TransactionContext,
+    ctx: ThreadContext,
     logger: TransactionLogger,
     child: Child,
     stats: ExecutionStats,
@@ -29,7 +29,7 @@ where
 {
     pub(crate) fn new(
         op: &PhysDeleteOp,
-        ctx: TransactionContext,
+        ctx: ThreadContext,
         logger: TransactionLogger,
         child: Child,
         stats: Option<ExecutionStats>,

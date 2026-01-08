@@ -47,7 +47,7 @@ impl<Child: Executor> QuickSort<Child> {
 
         let mut key_values = Vec::with_capacity(self.sort_exprs.len());
         for sort_expr in &self.sort_exprs {
-            let value = evaluator.evaluate(&sort_expr.expr)?;
+            let value = evaluator.evaluate_as_single_value(&sort_expr.expr)?;
             key_values.push(value);
         }
 

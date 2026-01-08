@@ -25,67 +25,49 @@ fn to_snake_case(s: &str) -> String {
 
 /// Trait which includes the reference to the [Ref::Type] for the main enum
 #[derive(Debug)]
-pub struct RefTrait {
+pub struct TypeConfig {
     pub ref_trait_path: TokenStream, // Path to the trait that has the [::Ref] implementation
-    pub ref_assoc_type: Ident,       // Trait associated type
-    pub to_owned_trait_path: TokenStream,
-    pub as_bytes_method: Ident, //
+    pub owned_trait_path: TokenStream,
 }
 
-impl RefTrait {
-    pub fn trait_path(&self) -> &TokenStream {
+impl TypeConfig {
+    pub fn ref_trait_path(&self) -> &TokenStream {
         &self.ref_trait_path
     }
 
     pub fn owned_trait_path(&self) -> &TokenStream {
-        &self.to_owned_trait_path
+        &self.owned_trait_path
     }
 
-    pub fn associated_type(&self) -> &Ident {
-        &self.ref_assoc_type
-    }
-
-    pub fn as_bytes_method(&self) -> &Ident {
-        &self.as_bytes_method
-    }
-
-    fn parse(attrs: &[Attribute]) -> SynResult<Option<Self>> {
-        let Some(attr) = attrs.iter().find(|a| a.path().is_ident("ref_trait")) else {
-            return Ok(None);
+    fn parse(attrs: &[Attribute]) -> SynResult<Self> {
+        let Some(attr) = attrs.iter().find(|a| a.path().is_ident("config")) else {
+            return Err(SynError::new(
+                proc_macro2::Span::call_site(),
+                "no datatype configuration provided".to_string(),
+            ));
         };
 
-        let mut trait_path = None;
-        let mut assoc_type = None;
+        let mut ref_trait_path = None;
         let mut owned_trait = None;
-        let mut as_bytes_method = None;
 
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("ref_trait") {
+            if meta.path.is_ident("reference_trait") {
                 let v: LitStr = meta.value()?.parse()?;
-                trait_path = Some(v.parse::<TokenStream>()?);
+                ref_trait_path = Some(v.parse::<TokenStream>()?);
             } else if meta.path.is_ident("owned_trait") {
                 let v: LitStr = meta.value()?.parse()?;
                 owned_trait = Some(v.parse::<TokenStream>()?);
-            } else if meta.path.is_ident("assoc_type") {
-                let v: LitStr = meta.value()?.parse()?;
-                assoc_type = Some(format_ident!("{}", v.value()));
-            } else if meta.path.is_ident("as_bytes_conversor") {
-                let v: LitStr = meta.value()?.parse()?;
-                as_bytes_method = Some(format_ident!("{}", v.value()));
             }
             Ok(())
         })?;
 
-        Ok(Some(Self {
-            ref_trait_path: trait_path
-                .ok_or_else(|| SynError::new_spanned(attr, "missing 'ref_trait'"))?,
-            ref_assoc_type: assoc_type
-                .ok_or_else(|| SynError::new_spanned(attr, "missing 'assoc_type'"))?,
-            to_owned_trait_path: owned_trait
+        Ok(Self {
+            ref_trait_path: ref_trait_path
+                .ok_or_else(|| SynError::new_spanned(attr, "missing 'reference_trait'"))?,
+
+            owned_trait_path: owned_trait
                 .ok_or_else(|| SynError::new_spanned(attr, "missing 'owned_trait'"))?,
-            as_bytes_method: as_bytes_method
-                .ok_or_else(|| SynError::new_spanned(attr, "missing 'as_bytes_conversor'"))?,
-        }))
+        })
     }
 }
 
@@ -132,9 +114,6 @@ pub struct DelegateAttr {
     // Method default value.
     pub default_value: TokenStream,
 
-    // Whether the method consumes self or takes a reference.
-    pub consumes_itself: bool,
-
     // THe type of delegate (method or const)
     pub kind: DelegateKind,
 
@@ -145,7 +124,7 @@ pub struct DelegateAttr {
     pub args: Option<TokenStream>,
 
     /// Filter the implementation of the trait for spedific variants attrs.
-    pub only_for: Option<String>,
+    pub filter_attributes: Option<String>,
 
     // Call args
     pub call_args: Option<TokenStream>,
@@ -194,14 +173,6 @@ impl DelegateAttr {
         self.args.as_ref()
     }
 
-    pub fn consumes_itself(&self) -> bool {
-        self.consumes_itself
-    }
-
-    pub fn has_custom_args(&self) -> bool {
-        self.args.is_some()
-    }
-
     pub fn call_args(&self) -> Option<&TokenStream> {
         self.call_args.as_ref()
     }
@@ -222,7 +193,6 @@ impl DelegateAttr {
         let mut rename = None;
         let mut return_type = None;
         let mut default_value = None;
-        let mut consumes_itself = true;
         let mut kind = DelegateKind::Method;
         let mut target = DelegateTarget::Main;
         let mut wrap_variant = None;
@@ -230,7 +200,7 @@ impl DelegateAttr {
         let mut call_args = None;
         let mut generics = None;
         let mut where_clause = None;
-        let mut only_for = None;
+        let mut filter_attributes = None;
 
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("trait") {
@@ -253,9 +223,6 @@ impl DelegateAttr {
             } else if meta.path.is_ident("default") {
                 let v: LitStr = meta.value()?.parse()?;
                 default_value = Some(v.parse::<TokenStream>()?);
-            } else if meta.path.is_ident("self_ref") {
-                let v: LitStr = meta.value()?.parse()?;
-                consumes_itself = v.value() == "true";
             } else if meta.path.is_ident("target") {
                 let v: LitStr = meta.value()?.parse()?;
                 target = match v.value().as_str() {
@@ -264,9 +231,9 @@ impl DelegateAttr {
                     "ref" => DelegateTarget::Ref,
                     _ => return Err(meta.error("target must be 'main', 'kind', or 'ref'")),
                 };
-            } else if meta.path.is_ident("only_for") {
+            } else if meta.path.is_ident("filter_attributes") {
                 let v: LitStr = meta.value()?.parse()?;
-                only_for = Some(v.value());
+                filter_attributes = Some(v.value());
             } else if meta.path.is_ident("wrap_variant") {
                 let v: LitStr = meta.value()?.parse()?;
                 let value = v.value();
@@ -311,7 +278,7 @@ impl DelegateAttr {
                 .ok_or_else(|| SynError::new_spanned(attr, "missing 'return_type'"))?,
             default_value: default_value
                 .ok_or_else(|| SynError::new_spanned(attr, "missing 'default'"))?,
-            consumes_itself,
+
             kind,
             target,
             args,
@@ -319,7 +286,7 @@ impl DelegateAttr {
             wrap_variant,
             generics,
             where_clause,
-            only_for,
+            filter_attributes,
         }))
     }
 }
@@ -400,7 +367,7 @@ pub struct EnumInfo {
     pub delegates: Vec<DelegateAttr>,
 
     // Delegate reference information
-    pub ref_trait: Option<RefTrait>,
+    pub datatype_config: TypeConfig,
 }
 
 impl EnumInfo {
@@ -418,7 +385,7 @@ impl EnumInfo {
             .collect::<SynResult<Vec<_>>>()?;
 
         // Parse the delegate_ref attribute
-        let ref_trait = RefTrait::parse(&input.attrs)?;
+        let config = TypeConfig::parse(&input.attrs)?;
 
         // Track how many [is_null] we find.
         let mut is_null_flag: bool = false;
@@ -460,7 +427,7 @@ impl EnumInfo {
             name: input.ident,
             variants,
             delegates,
-            ref_trait: ref_trait,
+            datatype_config: config,
         })
     }
     pub fn name(&self) -> &Ident {
@@ -478,8 +445,8 @@ impl EnumInfo {
         self.variants.iter()
     }
 
-    pub fn ref_trait(&self) -> Option<&RefTrait> {
-        self.ref_trait.as_ref()
+    pub fn config(&self) -> &TypeConfig {
+        &self.datatype_config
     }
 
     pub fn iter_delegates(&self) -> Iter<'_, DelegateAttr> {
@@ -595,23 +562,19 @@ fn autogen_kind_enum(info: &EnumInfo) -> TokenStream {
 /// Autogenerates the reference implementation using the [delegate_ref] attr
 /// if it is set.
 fn autogen_ref_enum(info: &EnumInfo) -> TokenStream {
-    let Some(dr) = info.ref_trait() else {
-        return quote! {};
-    };
-
+    let config = info.config();
     let ref_name = info.ref_name();
     let kind_name = info.kind_name();
-    let trait_path = dr.trait_path();
-    let owned_trait = dr.owned_trait_path();
-    let assoc = dr.associated_type();
-    let as_bytes = dr.as_bytes_method();
+
+    let ref_trait_path = config.ref_trait_path();
+    let owned_trait_path = config.owned_trait_path();
 
     let variants: Vec<_> = info
         .iter_variants()
         .map(|v| {
             let vn = v.name();
             if let Some(ty) = v.inner_type() {
-                quote! { #vn(<#ty as #trait_path>::#assoc<'a>) }
+                quote! { #vn(<#ty as #owned_trait_path>::Ref<'a>) }
             } else {
                 quote! { #vn }
             }
@@ -636,7 +599,7 @@ fn autogen_ref_enum(info: &EnumInfo) -> TokenStream {
         .map(|v| {
             let vn = v.name();
             if let Some(ty) = v.inner_type() {
-                quote! { Self::#vn(inner) => Some(#main_name::#vn(<<#ty as #trait_path>::#assoc<'a> as #owned_trait>::to_owned(inner))) }
+                quote! { Self::#vn(inner) => Some(#main_name::#vn(<<#ty as #owned_trait_path>::Ref<'a> as #ref_trait_path>::to_owned(inner))) }
             } else {
                 quote! { Self::#vn => None }
             }
@@ -669,7 +632,7 @@ fn autogen_ref_enum(info: &EnumInfo) -> TokenStream {
         .map(|v| {
             let vn = v.name();
             if let Some(ty) = v.inner_type() {
-                quote! { Self::#vn(inner) => <<#ty as #trait_path>::#assoc<'a> as #owned_trait>::#as_bytes(inner) }
+                quote! { Self::#vn(inner) => <<#ty as #owned_trait_path>::Ref<'a> as #ref_trait_path>::as_bytes(inner) }
             } else {
                 quote! { Self::#vn => &[] }
             }
@@ -824,7 +787,7 @@ fn autogen_delegates(info: &EnumInfo) -> TokenStream {
                 let vn = v.name();
 
                 // Check if this variant should use the delegate or the default
-                let should_delegate = if let Some(ref attr_filter) = d.only_for {
+                let should_delegate = if let Some(ref attr_filter) = d.filter_attributes {
                     v.attrs.has_attr(attr_filter)
                 } else {
                     true // No filter, delegate for all variants with inner type
@@ -848,21 +811,13 @@ fn autogen_delegates(info: &EnumInfo) -> TokenStream {
                                     quote! { <#ty as #trait_path>::#original_name(#ca) }
                                 } else if target == DelegateTarget::Ref {
                                     quote! { #trait_path::#original_name(inner) }
-                                } else if d.consumes_itself() {
-                                    quote! { <#ty as #trait_path>::#original_name(inner) }
                                 } else {
-                                    quote! { <#ty as #trait_path>::#original_name(*inner) }
+                                    // REVISAR AQUI
+                                    quote! { <#ty as #trait_path>::#original_name(inner) }
                                 };
 
                                 let pat = if target == DelegateTarget::Kind {
                                     quote! { Self::#vn }
-                                } else if d.call_args.is_some()
-                                    && d.has_custom_args()
-                                    && !d.consumes_itself()
-                                {
-                                    quote! { Self::#vn(_) }
-                                } else if d.consumes_itself() {
-                                    quote! { Self::#vn(inner) }
                                 } else {
                                     quote! { Self::#vn(inner) }
                                 };
@@ -977,7 +932,7 @@ fn autogen_delegates(info: &EnumInfo) -> TokenStream {
     } else {
         quote! { impl #kind_name { #(#kind)* } }
     };
-    let ref_impl = if ref_m.is_empty() || info.ref_trait.is_none() {
+    let ref_impl = if ref_m.is_empty() {
         quote! {}
     } else {
         quote! { impl<'a> #ref_name<'a> { #(#ref_m)* } }

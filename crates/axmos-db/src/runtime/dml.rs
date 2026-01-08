@@ -9,7 +9,7 @@ use crate::{
     core::SerializableType,
     runtime::{
         RuntimeError, RuntimeResult, TypeSystemError,
-        context::{TransactionContext, TransactionLogger},
+        context::{ThreadContext, TransactionLogger},
         eval::ExpressionEvaluator,
         validator::ConstraintValidator,
     },
@@ -47,13 +47,13 @@ pub struct DeleteResult {
 /// This component provides a clean interface for Insert, Update, and Delete
 /// operations.
 pub(crate) struct DmlExecutor {
-    ctx: TransactionContext,
+    ctx: ThreadContext,
     logger: TransactionLogger,
 }
 
 impl DmlExecutor {
     /// Creates a new DML executor with the given transaction context.
-    pub(crate) fn new(ctx: TransactionContext, logger: TransactionLogger) -> Self {
+    pub(crate) fn new(ctx: ThreadContext, logger: TransactionLogger) -> Self {
         Self { ctx, logger }
     }
 
@@ -87,6 +87,8 @@ impl DmlExecutor {
         row_id: RowId,
     ) -> RuntimeResult<()> {
         let schema = relation.schema();
+        let id = relation.object_id();
+
         // Build the new values array by applying assignments to old values
         let mut new_values: Vec<DataType> = old_values.to_vec();
         for (value_idx, value) in assignments {
@@ -102,6 +104,9 @@ impl DmlExecutor {
 
         // Validate NOT NULL
         validator.validate_not_null_constraints(&new_values)?;
+
+        // Validate foreign keys.
+        validator.validate_foreign_key_constraints(id, &new_values)?;
         let mut excluded = HashSet::new();
         excluded.insert(row_id);
 
@@ -117,11 +122,15 @@ impl DmlExecutor {
         new_values: &[DataType],
     ) -> RuntimeResult<()> {
         let schema = relation.schema();
+        let id = relation.object_id();
         let table_name = relation.name().to_string();
         let validator = ConstraintValidator::new(schema, table_name, self.ctx.clone());
 
         // Validate NOT NULL
         validator.validate_not_null_constraints(&new_values)?;
+
+        // Validate foreign keys.
+        validator.validate_foreign_key_constraints(id, &new_values)?;
 
         // Validate UNIQUE
         validator.validate_unique_constraints(&new_values, true, HashSet::new())?;
@@ -145,7 +154,7 @@ impl DmlExecutor {
         values: &Row,
     ) -> RuntimeResult<InsertResult> {
         let tree_builder = self.ctx.tree_builder();
-        let snapshot = self.ctx.snapshot();
+        let snapshot = self.ctx.snapshot().clone();
         let tid = self.ctx.tid();
 
         // Get the relation and allocate a new row ID
@@ -166,7 +175,7 @@ impl DmlExecutor {
 
         // Constraint validation goes here.
         println!("VALIDANDO CONSTRAINTS PARA INSERT");
-        
+
         self.validate_insert_constraints(&relation, full_row.as_slice())?;
         let indexes = relation.get_indexes();
 
@@ -222,7 +231,7 @@ impl DmlExecutor {
         })
     }
 
-    pub fn ctx(&self) -> &TransactionContext {
+    pub fn ctx(&self) -> &ThreadContext {
         &self.ctx
     }
 
@@ -645,7 +654,7 @@ pub(crate) fn extract_row_id(row: &Row) -> RuntimeResult<&UInt64> {
 /// * `schema` - The table schema
 ///
 /// # Returns
-/// A map of value_idx -> evaluated_value suitable for `add_version_with`.
+/// A map of value_idx to evaluated_value suitable for `add_version_with`.
 pub(crate) fn evaluate_assignments<'a>(
     assignments: impl Iterator<Item = &'a (usize, BoundExpression)>,
     row: &Row,
@@ -662,11 +671,12 @@ pub(crate) fn evaluate_assignments<'a>(
         }
 
         // Evaluate and cast
-        let evaluated = evaluator.evaluate(expr)?;
+        let evaluated = evaluator.evaluate_as_single_value(expr)?;
         let expected_type = schema
             .column(*column_idx)
             .ok_or(RuntimeError::ColumnNotFound(*column_idx))?
             .datatype();
+
         let casted = evaluated.try_cast(expected_type)?;
 
         // Convert to value index

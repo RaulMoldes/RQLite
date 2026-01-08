@@ -59,7 +59,7 @@ impl<Child: Executor> Executor for Project<Child> {
                 let mut projected: Vec<DataType> = Vec::with_capacity(self.exprs.len());
 
                 for (i, proj_expr) in self.exprs.iter().enumerate() {
-                    let value = evaluator.evaluate(&proj_expr)?;
+                    let value = evaluator.evaluate_as_single_value(&proj_expr)?;
                     // Cast to the expected output type from the schema
                     let expected_type = self
                         .output_schema

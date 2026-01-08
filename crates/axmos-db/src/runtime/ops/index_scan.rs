@@ -1,8 +1,10 @@
+use std::cmp::Ordering;
+
 use crate::{
-    TypeSystemError, UInt64,
+    DataType, TypeSystemError, UInt64,
     core::SerializableType,
     runtime::{
-        ExecutionStats, Executor, RuntimeError, RuntimeResult, context::TransactionContext,
+        ExecutionStats, Executor, RuntimeError, RuntimeResult, context::ThreadContext,
         eval::ExpressionEvaluator,
     },
     schema::{Schema, catalog::CatalogTrait},
@@ -13,7 +15,7 @@ use crate::{
 };
 
 pub(crate) struct IndexScan {
-    ctx: TransactionContext,
+    ctx: ThreadContext,
     table_root: PageId,
     index_root: PageId,
     cursor: Option<BtreePositionalIterator>,
@@ -26,7 +28,7 @@ pub(crate) struct IndexScan {
 }
 
 impl IndexScan {
-    pub(crate) fn new(op: &PhysIndexScanOp, ctx: TransactionContext) -> RuntimeResult<Self> {
+    pub(crate) fn new(op: &PhysIndexScanOp, ctx: ThreadContext) -> RuntimeResult<Self> {
         let tree_builder = ctx.tree_builder();
         let snapshot = ctx.snapshot();
         let table = ctx
@@ -67,20 +69,38 @@ impl IndexScan {
         self.range_end.as_ref()
     }
 
-    fn evaluate_index_predicate(&self, row: &Row, column_index: usize) -> RuntimeResult<bool> {
+    fn compare_lists(lhs: &[DataType], rhs: &[DataType]) -> Option<Ordering> {
+        // Compare element by element util we find a diff.
+        for (left, right) in lhs.iter().zip(rhs.iter()) {
+            match left.partial_cmp(right) {
+                Some(Ordering::Equal) => continue,
+                Some(ordering) => return Some(ordering),
+                None => return None,
+            }
+        }
+
+        // If all elements are equal compare the lengths
+        Some(lhs.len().cmp(&rhs.len()))
+    }
+
+    fn evaluate_index_predicate(&self, row: &Row) -> RuntimeResult<bool> {
         let evaluator = ExpressionEvaluator::new(row, &self.index_schema);
 
-        let value = row[self.indexed_columns[column_index]].clone();
+        let mut values = vec![DataType::Null; self.indexed_columns.len()];
+        for (i, index) in self.indexed_columns.iter().enumerate() {
+            values[i] = row[*index].clone();
+        }
+
         let lhs = self
             .range_start()
             .map(|expr| evaluator.evaluate(expr).expect("Evaluation failed"))
-            .map(|l| l <= value)
+            .map(|l| Self::compare_lists(&l, &values) == Some(Ordering::Less))
             .unwrap_or(true);
 
         let rhs = self
             .range_end()
             .map(|expr| evaluator.evaluate(expr).expect("Evaluation failed"))
-            .map(|l| l >= value)
+            .map(|l| Self::compare_lists(&l, &values) == Some(Ordering::Greater))
             .unwrap_or(true);
 
         Ok(lhs && rhs)
@@ -137,7 +157,7 @@ impl Executor for IndexScan {
             let maybe_row = tree
                 .get_row_at(next_pos, &self.index_schema, &snapshot)?
                 .filter(|r| {
-                    self.evaluate_index_predicate(r, 0)
+                    self.evaluate_index_predicate(r)
                         .expect("Predicate evaluation failed")
                 });
 

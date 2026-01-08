@@ -1,6 +1,6 @@
 use crate::{
     numeric, promote_symmetric,
-    types::core::{FloatType, SignedIntType, TypeCast, UnsignedIntType},
+    types::core::{FloatOps, SignedIntOps, TypeCast, UnsignedIntOps},
 };
 
 // Generates the numeric traits implementations
@@ -8,7 +8,7 @@ numeric! {
     wrapper   Int64,
     inner     i64,
     primitive i64,
-    marker    SignedIntType,
+    marker    SignedIntOps,
 }
 
 // Generates the numeric traits implementations
@@ -16,7 +16,7 @@ numeric! {
     wrapper   Int32,
     inner     i32,
     primitive i64,
-    marker    SignedIntType,
+    marker    SignedIntOps,
 }
 
 // Generates the numeric traits implementations
@@ -24,7 +24,7 @@ numeric! {
     wrapper   UInt64,
     inner     u64,
     primitive u64,
-    marker    UnsignedIntType,
+    marker    UnsignedIntOps,
 }
 
 // Generates the numeric traits implementations
@@ -32,7 +32,7 @@ numeric! {
     wrapper   UInt32,
     inner     u32,
     primitive u64,
-    marker    UnsignedIntType,
+    marker    UnsignedIntOps,
 }
 
 // Generates the numeric traits implementations
@@ -40,7 +40,7 @@ numeric! {
     wrapper   Float32,
     inner     f32,
     primitive f64,
-    marker    FloatType,
+    marker    FloatOps,
 }
 
 // Generates the numeric traits implementations
@@ -48,7 +48,7 @@ numeric! {
     wrapper   Float64,
     inner     f64,
     primitive f64,
-    marker    FloatType,
+    marker    FloatOps,
 }
 
 promote_symmetric!(Int64, Int32 => i64);

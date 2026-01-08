@@ -64,11 +64,26 @@ impl<'a> ExpressionEvaluator<'a> {
         Self { row, schema }
     }
 
+    pub(crate) fn evaluate_as_single_value(
+        &self,
+        expr: &BoundExpression,
+    ) -> EvaluationResult<DataType> {
+        let mut evaluated = self.evaluate(expr)?;
+        if evaluated.len() != 1 {
+            return Err(EvaluationError::InvalidExpression(
+                "invalid evalution result. expected single value found list".to_string(),
+            ));
+        }
+        return Ok(evaluated
+            .pop()
+            .expect("Already checked the length of the evaluation result."));
+    }
+
     /// Evaluate an expression and return the result as a DataType
-    pub(crate) fn evaluate(&self, expr: &BoundExpression) -> EvaluationResult<DataType> {
+    pub(crate) fn evaluate(&self, expr: &BoundExpression) -> EvaluationResult<Vec<DataType>> {
         match expr {
-            BoundExpression::Literal { value } => Ok(value.clone()),
-            BoundExpression::ColumnBinding(col_ref) => self.eval_column(col_ref.clone()),
+            BoundExpression::Literal { value } => Ok(vec![value.clone()]),
+            BoundExpression::ColumnBinding(col_ref) => Ok(vec![self.eval_column(col_ref.clone())?]),
             BoundExpression::BinaryOp {
                 left,
                 op,
@@ -84,14 +99,28 @@ impl<'a> ExpressionEvaluator<'a> {
                 expr,
                 result_type,
             } => {
-                let operand = self.evaluate(expr)?;
-                self.eval_unary_op(operand, *op, Some(*result_type))
+                let mut operand = self.evaluate(expr)?;
+                if operand.len() != 1 {
+                    return Err(EvaluationError::InvalidExpression(
+                        "cannot apply unary operators to lists of values!".to_string(),
+                    ));
+                };
+                Ok(vec![self.eval_unary_op(
+                    operand.pop().unwrap(),
+                    *op,
+                    Some(*result_type),
+                )?])
             }
             BoundExpression::IsNull { expr, negated } => {
                 let evaluated = self.evaluate(expr)?;
-                Ok(DataType::Bool(Bool(
-                    matches!(evaluated, DataType::Null) || *negated,
-                )))
+                if evaluated.len() > 1 {
+                    return Err(EvaluationError::InvalidExpression(
+                        "cannot apply unary operators to lists of values!".to_string(),
+                    ));
+                };
+                Ok(vec![DataType::Bool(Bool(
+                    matches!(evaluated[0], DataType::Null) || *negated,
+                ))])
             }
             BoundExpression::Between {
                 expr,
@@ -102,10 +131,15 @@ impl<'a> ExpressionEvaluator<'a> {
                 let inner = self.evaluate(expr)?;
                 let low = self.evaluate(low)?;
                 let high = self.evaluate(high)?;
+                if inner.len() > 1 || low.len() > 1 || high.len() > 1 {
+                    return Err(EvaluationError::InvalidExpression(
+                        "cannot apply unary operators to lists of values!".to_string(),
+                    ));
+                };
 
-                Ok(DataType::Bool(Bool(
-                    (inner >= low && inner <= high) || *negated,
-                )))
+                Ok(vec![DataType::Bool(Bool(
+                    (inner[0] >= low[0] && inner[0] <= high[0]) || *negated,
+                ))])
             }
             BoundExpression::Exists { query, negated } => {
                 todo!("Subquery evaluation is not yet implemented")
@@ -118,11 +152,20 @@ impl<'a> ExpressionEvaluator<'a> {
                 let mut set: HashSet<DataType> = HashSet::new();
                 for exp in list {
                     let eval = self.evaluate(exp)?;
-                    set.insert(eval);
+                    for item in eval {
+                        set.insert(item);
+                    }
                 }
 
                 let evaluated = self.evaluate(expr)?;
-                Ok(DataType::Bool(Bool(set.contains(&evaluated) || *negated)))
+                if evaluated.len() > 1 {
+                    return Err(EvaluationError::InvalidExpression(
+                        "cannot apply unary operators to lists of values!".to_string(),
+                    ));
+                };
+                Ok(vec![DataType::Bool(Bool(
+                    set.contains(&evaluated[0]) || *negated,
+                ))])
             }
             BoundExpression::Subquery { query, result_type } => {
                 todo!("Subquery evaluation is not yet implemented")
@@ -143,13 +186,13 @@ impl<'a> ExpressionEvaluator<'a> {
                 let mut arg_list = Vec::new();
                 for expr in args {
                     let evaluated = self.evaluate(expr)?;
-                    arg_list.push(evaluated);
+                    arg_list.extend(evaluated);
                 }
                 match func {
                     ScalarFunction::Abs => {
                         let result = Abs::call(arg_list)?;
                         let result = result.try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
                     ScalarFunction::Cast => {
                         if arg_list.len() != 1 {
@@ -157,68 +200,68 @@ impl<'a> ExpressionEvaluator<'a> {
                         };
 
                         let result = arg_list[0].try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
                     ScalarFunction::Ceil => {
                         let result = Ceil::call(arg_list)?;
                         let result = result.try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
                     ScalarFunction::Coalesce => {
                         let result = Coalesce::call(arg_list)?;
                         let result = result.try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
                     ScalarFunction::Concat => {
                         let result = Concat::call(arg_list)?;
                         let result = result.try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
 
                     ScalarFunction::Floor => {
                         let result = Floor::call(arg_list)?;
                         let result = result.try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
                     ScalarFunction::NullIf => {
                         let result = NullIf::call(arg_list)?;
                         let result = result.try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
                     ScalarFunction::Round => {
                         let result = Round::call(arg_list)?;
                         let result = result.try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
                     ScalarFunction::LTrim => {
                         let result = LTrim::call(arg_list)?;
                         let result = result.try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
                     ScalarFunction::RTrim => {
                         let result = RTrim::call(arg_list)?;
                         let result = result.try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
                     ScalarFunction::Length => {
                         let result = Length::call(arg_list)?;
                         let result = result.try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
                     ScalarFunction::Lower => {
                         let result = Lower::call(arg_list)?;
                         let result = result.try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
                     ScalarFunction::Upper => {
                         let result = Upper::call(arg_list)?;
                         let result = result.try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
                     ScalarFunction::Sqrt => {
                         let result = Sqrt::call(arg_list)?;
                         let result = result.try_cast(*return_type)?;
-                        Ok(result)
+                        Ok(vec![result])
                     }
 
                     ScalarFunction::Unknown(name) => {
@@ -233,12 +276,16 @@ impl<'a> ExpressionEvaluator<'a> {
     /// Evaluate expression as boolean (for WHERE clauses, etc.)
     pub(crate) fn evaluate_as_bool(&self, expr: &BoundExpression) -> EvaluationResult<bool> {
         let result = self.evaluate(expr)?;
-
-        match &result {
+        if result.len() > 1 {
+            return Err(EvaluationError::InvalidExpression(
+                "cannot evaluate a list to bool!".to_string(),
+            ));
+        };
+        match &result[0] {
             DataType::Bool(Bool(b)) => Ok(*b),
             DataType::Null => Ok(false), // NULL is treated as false in boolean context
             other => Err(EvaluationError::TypeError(
-                TypeSystemError::UnexpectedDataType(result.kind()),
+                TypeSystemError::UnexpectedDataType(result[0].kind()),
             )),
         }
     }
@@ -295,6 +342,20 @@ impl<'a> ExpressionEvaluator<'a> {
         Ok(DataType::Bool(Bool(result)))
     }
 
+
+
+    fn string_like(str_lhs: &DataType, pattern: &DataType, negated: bool) -> TypeSystemResult<DataType> {
+        let lhs_blob = str_lhs
+            .as_blob()
+            .ok_or(TypeSystemError::UnexpectedDataType(str_lhs.kind()))?;
+        let pattern_blob = pattern
+            .as_blob()
+            .ok_or(TypeSystemError::UnexpectedDataType(pattern.kind()))?;
+
+        // Convert back to Blob and wrap as Text
+        Ok(DataType::Bool(Bool(!negated && lhs_blob.like(pattern_blob.as_str()?)?)))
+    }
+
     fn string_concat(str_a: &DataType, str_b: &DataType) -> TypeSystemResult<DataType> {
         let a_blob = str_a
             .as_blob()
@@ -315,81 +376,116 @@ impl<'a> ExpressionEvaluator<'a> {
 
     fn eval_binary_op(
         &self,
-        left: DataType,
-        right: DataType,
+        left: Vec<DataType>,
+        right: Vec<DataType>,
         bin_op: BinaryOperator,
         result: Option<DataTypeKind>,
-    ) -> EvaluationResult<DataType> {
-        // Handle NULL propagation for most operators
-        if matches!(left, DataType::Null) || matches!(right, DataType::Null) {
-            // AND/OR have special NULL handling
+    ) -> EvaluationResult<Vec<DataType>> {
+        if left.len() == 1 && right.len() == 1 {
+            // Handle NULL propagation for most operators
+            if matches!(left[0], DataType::Null)
+                || right.len() == 1 && matches!(right[0], DataType::Null)
+            {
+                // AND/OR have special NULL handling
+                match bin_op {
+                    BinaryOperator::And => {
+                        // FALSE AND NULL = FALSE, TRUE AND NULL = NULL
+                        if let Some(Bool(b)) = left[0].as_bool()
+                            && !b
+                        {
+                            return Ok(vec![DataType::Bool(Bool(false))]);
+                        } else if let Some(Bool(b)) = right[0].as_bool()
+                            && !b
+                        {
+                            return Ok(vec![DataType::Bool(Bool(false))]);
+                        };
+                    }
+                    BinaryOperator::Or => {
+                        // TRUE OR NULL = TRUE, FALSE OR NULL = NULL
+                        if let Some(Bool(b)) = left[0].as_bool()
+                            && *b
+                        {
+                            return Ok(vec![DataType::Bool(Bool(true))]);
+                        } else if let Some(Bool(b)) = right[0].as_bool()
+                            && *b
+                        {
+                            return Ok(vec![DataType::Bool(Bool(true))]);
+                        };
+                    }
+                    _ => return Ok(vec![DataType::Null]),
+                }
+            }
+
             match bin_op {
+                // Comparison operators
+                BinaryOperator::Eq | BinaryOperator::In | BinaryOperator::Is => {
+                    Ok(vec![DataType::Bool(Bool(left == right))])
+                }
+                BinaryOperator::Neq | BinaryOperator::NotIn | BinaryOperator::IsNot => {
+                    Ok(vec![DataType::Bool(Bool(left != right))])
+                }
+                BinaryOperator::Lt => Ok(vec![DataType::Bool(Bool(left < right))]),
+                BinaryOperator::Le => Ok(vec![DataType::Bool(Bool(left <= right))]),
+                BinaryOperator::Gt => Ok(vec![DataType::Bool(Bool(left > right))]),
+                BinaryOperator::Ge => Ok(vec![DataType::Bool(Bool(left >= right))]),
+
+                // Logical operators
                 BinaryOperator::And => {
-                    // FALSE AND NULL = FALSE, TRUE AND NULL = NULL
-                    if let Some(Bool(b)) = left.as_bool()
-                        && !b
-                    {
-                        return Ok(DataType::Bool(Bool(false)));
-                    } else if let Some(Bool(b)) = right.as_bool()
-                        && !b
-                    {
-                        return Ok(DataType::Bool(Bool(false)));
-                    };
+                    let bool = Self::logical_and(&left[0], &right[0])?;
+                    Ok(vec![bool])
                 }
                 BinaryOperator::Or => {
-                    // TRUE OR NULL = TRUE, FALSE OR NULL = NULL
-                    if let Some(Bool(b)) = left.as_bool()
-                        && *b
-                    {
-                        return Ok(DataType::Bool(Bool(true)));
-                    } else if let Some(Bool(b)) = right.as_bool()
-                        && *b
-                    {
-                        return Ok(DataType::Bool(Bool(true)));
-                    };
+                    let bool = Self::logical_or(&left[0], &right[0])?;
+                    Ok(vec![bool])
                 }
-                _ => return Ok(DataType::Null),
+
+                // Arithmetic operators use promoted operations (see the type system module for details)
+                BinaryOperator::Plus => {
+                    Ok(vec![left[0].add(&right[0]).map_err(EvaluationError::from)?])
+                }
+                BinaryOperator::Minus => {
+                    Ok(vec![left[0].sub(&right[0]).map_err(EvaluationError::from)?])
+                }
+                BinaryOperator::Multiply => {
+                    Ok(vec![left[0].mul(&right[0]).map_err(EvaluationError::from)?])
+                }
+                BinaryOperator::Divide => {
+                    Ok(vec![left[0].div(&right[0]).map_err(EvaluationError::from)?])
+                }
+                BinaryOperator::Modulo => {
+                    Ok(vec![left[0].rem(&right[0]).map_err(EvaluationError::from)?])
+                }
+
+                // String operators
+                BinaryOperator::Concat => {
+                    let result = Self::string_concat(&left[0], &right[0])?;
+                    Ok(vec![result])
+                }
+                BinaryOperator::Like => {
+                    let result = Self::string_like(&left[0], &right[0], false)?;
+                    Ok(vec![result])
+                },
+                BinaryOperator::NotLike => {
+                    let result = Self::string_like(&left[0], &right[0], true)?;
+                    Ok(vec![result])
+                },
             }
-        }
-
-        match bin_op {
-            // Comparison operators
-            BinaryOperator::Eq => Ok(DataType::Bool(Bool(left == right))),
-            BinaryOperator::Neq => Ok(DataType::Bool(Bool(left != right))),
-            BinaryOperator::Lt => Ok(DataType::Bool(Bool(left < right))),
-            BinaryOperator::Le => Ok(DataType::Bool(Bool(left <= right))),
-            BinaryOperator::Gt => Ok(DataType::Bool(Bool(left > right))),
-            BinaryOperator::Ge => Ok(DataType::Bool(Bool(left >= right))),
-
-            // Logical operators
-            BinaryOperator::And => {
-                let bool = Self::logical_and(&left, &right)?;
-                Ok(bool)
+        } else if right.len() > 1 {
+            match bin_op {
+                BinaryOperator::In => {
+                    return Ok(vec![DataType::Bool(Bool(right.contains(&left[0])))]);
+                }
+                BinaryOperator::NotIn => {
+                    return Ok(vec![DataType::Bool(Bool(!right.contains(&left[0])))]);
+                }
+                _ => Err(EvaluationError::InvalidExpression(
+                    "only in and not in operators can be applied to lists".to_string(),
+                )),
             }
-            BinaryOperator::Or => {
-                let bool = Self::logical_or(&left, &right)?;
-                Ok(bool)
-            }
-
-            // Arithmetic operators use promoted operations (see the type system module for details)
-            BinaryOperator::Plus => left.add(&right).map_err(EvaluationError::from),
-            BinaryOperator::Minus => left.sub(&right).map_err(EvaluationError::from),
-            BinaryOperator::Multiply => left.mul(&right).map_err(EvaluationError::from),
-            BinaryOperator::Divide => left.div(&right).map_err(EvaluationError::from),
-            BinaryOperator::Modulo => left.rem(&right).map_err(EvaluationError::from),
-
-            // String operators
-            BinaryOperator::Concat => {
-                let result = Self::string_concat(&left, &right)?;
-                Ok(result)
-            }
-
-            BinaryOperator::Is => todo!(),
-            BinaryOperator::IsNot => todo!(),
-            BinaryOperator::In => todo!(),
-            BinaryOperator::Like => todo!(),
-            BinaryOperator::NotLike => todo!(),
-            BinaryOperator::NotIn => todo!(),
+        } else {
+            return Err(EvaluationError::InvalidExpression(
+                "invalid arguments for binary operators. cannot compare two lists".to_string(),
+            ));
         }
     }
 

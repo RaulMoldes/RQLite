@@ -303,17 +303,16 @@ impl Database {
 
     /// Runs WAL recovery to restore database to consistent state.
     fn run_recovery(&self) -> DatabaseResult<()> {
+        let (tx_ctx, logger) = Self::begin_transaction(
+            self.coordinator.clone(),
+            self.pager.clone(),
+            self.catalog.clone(),
+        )?;
+        let child = tx_ctx.create_child()?;
         let pager = self.pager.clone();
-        let catalog = self.catalog.clone();
-        let coordinator = self.coordinator.clone();
         // Begin a recovery transaction
-
         self.task_runner.run(move |ctx| {
-            let (tx_ctx, logger) =
-                Self::begin_transaction(coordinator.clone(), pager.clone(), catalog.clone())
-                    .map_err(box_err)?;
-
-            let mut recuperator = WalRecuperator::new(tx_ctx.clone(), logger);
+            let mut recuperator = WalRecuperator::new(child, logger.clone());
 
             // Run analysis INSIDE the closure using the cloned pager
             let analysis = pager.write().run_analysis().map_err(box_err)?;
@@ -336,23 +335,22 @@ impl Database {
     /// Executes a SQL query and returns the result.
     pub fn execute(&self, sql: &str) -> DatabaseResult<QueryResult> {
         let sql = sql.to_string();
-        let pager = self.pager.clone();
-        let catalog = self.catalog.clone();
-        let coordinator = self.coordinator.clone();
+        let (tx_ctx, logger) = Self::begin_transaction(
+            self.coordinator.clone(),
+            self.pager.clone(),
+            self.catalog.clone(),
+        )?;
 
+        let child = tx_ctx.create_child()?;
         let result = self.task_runner.run_with_result(move |_ctx| {
-            let (tx_ctx, logger) =
-                Self::begin_transaction(coordinator.clone(), pager.clone(), catalog.clone())
-                    .map_err(box_err)?;
-
-            let runner = QueryRunner::new(tx_ctx, logger.clone());
-            let result_guard = runner.prepare_and_run(&sql, false).map_err(box_err)?;
+            let runner = QueryRunner::new(child, logger.clone());
+            let result_guard = runner.prepare_and_run(&sql).map_err(box_err)?;
 
             logger.log_commit().map_err(box_err)?;
-            result_guard.commit().map_err(box_err)?;
+            tx_ctx.commit_transaction().map_err(box_err)?;
             logger.log_end().map_err(box_err)?;
 
-            Ok(result_guard.into_result())
+            Ok(result_guard)
         })?;
 
         Ok(result)
@@ -361,19 +359,25 @@ impl Database {
     /// Executes multiple SQL statements in a single transaction.
     pub fn execute_batch(&self, statements: &[&str]) -> DatabaseResult<Vec<QueryResult>> {
         let statements: Vec<String> = statements.iter().map(|s| s.to_string()).collect();
-        let pager = self.pager.clone();
-        let catalog = self.catalog.clone();
-        let coordinator = self.coordinator.clone();
+        // Begin transaction
+        let (tx_ctx, logger) = Self::begin_transaction(
+            self.coordinator.clone(),
+            self.pager.clone(),
+            self.catalog.clone(),
+        )?;
 
+        let child = tx_ctx.create_child()?;
         let results = self.task_runner.run_with_result(move |_ctx| {
-            // Begin transaction
-            let (tx_ctx, logger) =
-                Self::begin_transaction(coordinator.clone(), pager.clone(), catalog.clone())
-                    .map_err(box_err)?;
             // Use BatchQueryRunner for atomic execution
-            let runner = MultiQueryRunner::new(tx_ctx, logger);
+            let runner = MultiQueryRunner::new(child, logger.clone());
 
-            runner.execute_all(&statements).map_err(box_err)
+            let results = runner.execute_all(&statements).map_err(box_err)?;
+
+            logger.log_commit().map_err(box_err)?;
+            tx_ctx.commit_transaction().map_err(box_err)?;
+            logger.log_end().map_err(box_err)?;
+
+            Ok(results)
         })?;
 
         Ok(results)

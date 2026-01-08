@@ -2,7 +2,7 @@ use crate::{
     ObjectId,
     runtime::{
         ExecutionStats, Executor, RuntimeResult,
-        context::{TransactionContext, TransactionLogger},
+        context::{ThreadContext, TransactionLogger},
         dml::{DmlExecutor, evaluate_assignments, extract_row_id},
     },
     schema::{Schema, catalog::CatalogTrait},
@@ -16,7 +16,7 @@ pub(crate) struct Update<Child>
 where
     Child: Executor,
 {
-    ctx: TransactionContext,
+    ctx: ThreadContext,
     logger: TransactionLogger,
     table_id: ObjectId,
     table_schema: Schema,
@@ -32,7 +32,7 @@ where
 {
     pub(crate) fn new(
         op: &PhysUpdateOp,
-        ctx: TransactionContext,
+        ctx: ThreadContext,
         logger: TransactionLogger,
         child: Child,
     ) -> Self {

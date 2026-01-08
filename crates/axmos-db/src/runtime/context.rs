@@ -17,6 +17,66 @@ use crate::{
 };
 use std::sync::Arc;
 
+/// Context of a single thread. Cannot commit transactions by itself.
+#[derive(Clone)]
+pub(crate) struct ThreadContext {
+    pager: SharedPager,
+    catalog: SharedCatalog,
+    tid: TransactionId,
+    snapshot: Snapshot,
+}
+
+impl ThreadContext {
+    pub(crate) fn new(
+        tid: TransactionId,
+        snapshot: Snapshot,
+        pager: SharedPager,
+        catalog: SharedCatalog,
+    ) -> Self {
+        Self {
+            tid,
+            snapshot,
+            pager,
+            catalog,
+        }
+    }
+
+    pub(crate) fn pager(&self) -> &SharedPager {
+        &self.pager
+    }
+
+    pub(crate) fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
+    pub(crate) fn tid(&self) -> TransactionId {
+        self.tid
+    }
+
+    pub(crate) fn catalog(&self) -> &SharedCatalog {
+        &self.catalog
+    }
+
+    /// Build a read only btree
+    pub(crate) fn build_tree(&self, root: PageId) -> Btree<BtreeReadAccessor> {
+        let builder = self.tree_builder();
+        builder.build_tree(root)
+    }
+
+    /// Build a mutable btree
+    pub(crate) fn build_tree_mut(&self, root: PageId) -> Btree<BtreeWriteAccessor> {
+        let builder = self.tree_builder();
+        builder.build_tree_mut(root)
+    }
+
+    /// Create a tree builder configured with the pager
+    pub(crate) fn tree_builder(&self) -> BtreeBuilder {
+        let pager = self.pager().read();
+        BtreeBuilder::new(pager.min_keys_per_page(), pager.num_siblings_per_side())
+            .with_pager(self.pager().clone())
+    }
+}
+
 /// Lightweight execution context for query operators.
 pub(crate) struct TransactionContext {
     pager: SharedPager,
@@ -28,7 +88,7 @@ pub(crate) struct TransactionContext {
 impl Clone for TransactionContext {
     fn clone(&self) -> Self {
         Self {
-            pager: self.pager().clone(),
+            pager: self.pager.clone(),
             catalog: self.catalog.clone(),
             handle: Arc::clone(&self.handle),
         }
@@ -140,12 +200,13 @@ impl TransactionContext {
     }
 
     /// Creates a new context with a handle that cannot be committed.
-    pub(crate) fn create_child(&self) -> RuntimeResult<TransactionContext> {
-        Self::new(
+    pub(crate) fn create_child(&self) -> RuntimeResult<ThreadContext> {
+        Ok(ThreadContext::new(
+            self.tid(),
+            self.snapshot(),
             self.pager().clone(),
             self.catalog().clone(),
-            self.handle_cloned(),
-        )
+        ))
     }
 
     pub(crate) fn tid(&self) -> TransactionId {
@@ -184,9 +245,9 @@ impl TransactionContext {
 
     /// Create a tree builder configured with the pager
     pub(crate) fn tree_builder(&self) -> BtreeBuilder {
-        let pager = self.pager.read();
+        let pager = self.pager().read();
         BtreeBuilder::new(pager.min_keys_per_page(), pager.num_siblings_per_side())
-            .with_pager(self.pager.clone())
+            .with_pager(self.pager().clone())
     }
 
     /// Commits the transaction: log commit, commit handle, end.

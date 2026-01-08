@@ -12,7 +12,7 @@ use crate::{
     multithreading::frames::{AsReadLatch, AsWriteLatch, Frame, MemFrame},
     runtime::{
         RuntimeResult,
-        context::{TransactionContext, TransactionLogger},
+        context::{ThreadContext, TransactionLogger},
         dml::DmlExecutor,
     },
     schema::catalog::CatalogTrait,
@@ -111,7 +111,7 @@ pub struct WalRecuperator {
 }
 
 impl WalRecuperator {
-    pub(crate) fn new(ctx: TransactionContext, logger: TransactionLogger) -> Self {
+    pub(crate) fn new(ctx: ThreadContext, logger: TransactionLogger) -> Self {
         Self {
             executor: DmlExecutor::new(ctx, logger),
         }

@@ -6,8 +6,8 @@ use std::{
 use crate::{
     blob::Blob,
     core::{
-        BooleanType, DeserializableType, FixedSizeType, Hashable, RefTrait, SerializableType,
-        TypeCast, TypeRef,
+        BooleanType, DeserializableType, FixedSizeType, Hashable, SerializableType, TypeCast,
+        TypeClass, TypeOwned, TypeRef,
     },
     types::{
         SerializationError, SerializationResult,
@@ -57,11 +57,13 @@ impl Bool {
     }
 }
 
+impl TypeClass for Bool {
+    const SIZE: Option<usize> = Some(std::mem::size_of::<bool>());
+    const ALIGN: usize = 1;
+}
+
 impl BooleanType for Bool {}
 impl FixedSizeType for Bool {}
-
-impl<'a> BooleanType for BoolRef<'a> {}
-impl<'a> FixedSizeType for BoolRef<'a> {}
 
 impl<'a> Display for BoolRef<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
@@ -118,12 +120,12 @@ impl<'a> TypeRef<'a> for BoolRef<'a> {
         BoolRef::to_owned(self)
     }
 
-    fn as_slice(&self) -> &[u8] {
+    fn as_bytes(&self) -> &[u8] {
         &[]
     }
 }
 
-impl RefTrait for Bool {
+impl TypeOwned for Bool {
     type Ref<'a> = BoolRef<'a>;
 }
 

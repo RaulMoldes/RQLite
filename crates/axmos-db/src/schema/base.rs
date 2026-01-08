@@ -404,6 +404,33 @@ impl Schema {
         deps.extend(self.table_indexes.as_ref().unwrap().keys());
         deps
     }
+
+    /// COllects all the foreign key info for this object
+    pub(crate) fn get_foreign_keys_info(&self) -> Vec<ForeignKeyInfo> {
+        let mut deps = Vec::new();
+        if self.is_index() {
+            return deps;
+        };
+
+        for ct in self.table_constraints.as_ref().unwrap() {
+            if let TableConstraint::ForeignKey { info, .. } = ct {
+                deps.push(info.clone());
+            };
+        }
+
+        deps
+    }
+
+    pub(crate) fn get_index_for_column_list(&self, columns: &[usize]) -> Option<IndexHandle> {
+        if let Some(indexes) = self.table_indexes.as_ref() {
+            for (object_id, index_columns) in indexes.iter() {
+                if index_columns == columns {
+                    return Some(IndexHandle::new(*object_id, columns.to_vec()));
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -428,6 +455,14 @@ impl ForeignKeyInfo {
             ref_table,
             ref_columns,
         }
+    }
+
+    pub(crate) fn referenced_columns(&self) -> &[usize] {
+        &self.ref_columns
+    }
+
+    pub(crate) fn referenced_table(&self) -> ObjectId {
+        self.ref_table
     }
 }
 

@@ -139,7 +139,7 @@ impl TestHarness {
 
         let logger = self.create_logger(tid, last_lsn);
 
-        let builder = ExecutorBuilder::new(ctx.clone(), logger);
+        let builder = ExecutorBuilder::new(ctx.create_child().unwrap(), logger);
         let mut executor = builder.build(plan).expect("Failed to build executor");
 
         let mut results = Vec::new();
@@ -171,7 +171,7 @@ impl TestHarness {
         let ctx = self
             .create_context(handle.clone())
             .expect("Failed to create context");
-        let mut ddl_executor = DdlExecutor::new(ctx.clone());
+        let mut ddl_executor = DdlExecutor::new(ctx.create_child().unwrap());
         ddl_executor.execute(&bound)?;
 
         ctx.commit_transaction().unwrap();

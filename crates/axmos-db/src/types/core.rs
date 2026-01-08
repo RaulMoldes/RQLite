@@ -2,7 +2,6 @@ use bytemuck::{Pod, Zeroable};
 use std::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
-    mem,
     ops::{Add, Deref, Div, Mul, Rem, Sub},
 };
 
@@ -22,11 +21,36 @@ pub trait TypeClass: Sized + Debug + Display + PartialEq + PartialOrd {
     const ALIGN: usize = 1;
 }
 
+/// Trait to indicate which is the Ref::type of each inner type in the system
+pub trait TypeOwned: TypeClass {
+    type Ref<'a>: TypeRef<'a, Owned = Self>
+    where
+        Self: 'a;
+}
+
+pub trait TypeRef<'a>: Sized + AsRef<[u8]> + TypeClass {
+    type Owned: TypeOwned + DeserializableType;
+    fn to_owned(&self) -> Self::Owned;
+    fn as_bytes(&self) -> &[u8];
+}
+
+impl<'a, T: TypeRef<'a>> TypeClass for T {
+    const SIZE: Option<usize> = <T::Owned as TypeClass>::SIZE; // Size is unknown by default.
+    const ALIGN: usize = <T::Owned as TypeClass>::ALIGN;
+}
+
 /// Varlen Type's size stays unknown.
 pub trait VarlenType: TypeClass {}
+pub trait BooleanType: TypeClass {}
+pub trait NumericType: TypeClass {}
+
+impl<'a, T: TypeRef<'a>> NumericType for T where T::Owned: NumericType {}
+impl<'a, T: TypeRef<'a>> VarlenType for T where T::Owned: VarlenType {}
+impl<'a, T: TypeRef<'a>> BooleanType for T where T::Owned: BooleanType {}
+impl<'a, T: TypeRef<'a>> FixedSizeType for T where T::Owned: FixedSizeType {}
 
 /// TypeClass representing all fixed size types.
-pub trait FixedSizeType: TypeClass + Copy {
+pub trait FixedSizeType: TypeClass {
     #[inline]
     fn mem_size() -> usize {
         Self::SIZE.unwrap_or(0)
@@ -38,17 +62,19 @@ pub trait FixedSizeType: TypeClass + Copy {
     }
 }
 
-/// All fixed sizes are known at compile time.
-impl<T: FixedSizeType> TypeClass for T {
-    const SIZE: Option<usize> = Some(mem::size_of::<T>());
-    const ALIGN: usize = mem::align_of::<T>();
+// TYPES WHOSE SIZE IS NOT KNOWN AT COMPILE TIME
+pub trait RuntimeSized: TypeClass {
+    fn runtime_size(&self) -> usize;
 }
 
-/// Trait for Boolean types
-pub trait BooleanType: FixedSizeType {}
+impl<T: FixedSizeType> RuntimeSized for T {
+    fn runtime_size(&self) -> usize {
+        T::SIZE.unwrap_or(0)
+    }
+}
 
 /// Numeric types do have a fixed size, and also some extra constraints.
-pub trait NumericType: FixedSizeType {
+pub trait NumericOps: NumericType {
     /// Every numeric type has an associated [Primitive] type to which it can promote to.
     type Primitive: Copy
         + Add<Output = Self::Primitive>
@@ -76,12 +102,12 @@ pub trait NumericType: FixedSizeType {
 }
 
 /// Numeric types specializations.
-pub trait SignedIntType: NumericType<Primitive = i64> {}
-pub trait UnsignedIntType: NumericType<Primitive = u64> {}
-pub trait FloatType: NumericType<Primitive = f64> {}
+pub trait SignedIntOps: NumericOps<Primitive = i64> {}
+pub trait UnsignedIntOps: NumericOps<Primitive = u64> {}
+pub trait FloatOps: NumericOps<Primitive = f64> {}
 
 /// Trait to generate promotion tables for numeric types.
-pub trait Promote<Rhs>: NumericType {
+pub trait Promote<Rhs>: NumericOps {
     type Output: Add<Output = Self::Output>
         + Sub<Output = Self::Output>
         + Mul<Output = Self::Output>
@@ -170,7 +196,7 @@ where
     }
 }
 
-pub trait BytemuckDeserializable: Pod + Zeroable + FixedSizeType {}
+pub trait BytemuckType: Pod + Zeroable + FixedSizeType {}
 
 /// Automatically generates a [RefType] for all types that implement [bytemuck's] [Pod] and [Zeroable] traits.
 ///
@@ -181,9 +207,9 @@ pub trait BytemuckDeserializable: Pod + Zeroable + FixedSizeType {}
 /// The target [T] type must be both [Pod] and [Zeroable]
 #[repr(transparent)]
 #[derive(Copy, Clone)]
-pub struct BytemuckRef<'a, T: BytemuckDeserializable>(&'a T);
+pub struct BytemuckRef<'a, T: BytemuckType>(&'a T);
 
-impl<'a, T: BytemuckDeserializable> BytemuckRef<'a, T> {
+impl<'a, T: BytemuckType> BytemuckRef<'a, T> {
     #[inline]
     pub fn get(&self) -> &T {
         self.0
@@ -195,20 +221,20 @@ impl<'a, T: BytemuckDeserializable> BytemuckRef<'a, T> {
     }
 }
 
-impl<'a, T: BytemuckDeserializable> Deref for BytemuckRef<'a, T> {
+impl<'a, T: BytemuckType> Deref for BytemuckRef<'a, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         self.0
     }
 }
 
-impl<'a, T: BytemuckDeserializable> AsRef<[u8]> for BytemuckRef<'a, T> {
+impl<'a, T: BytemuckType> AsRef<[u8]> for BytemuckRef<'a, T> {
     fn as_ref(&self) -> &[u8] {
         bytemuck::bytes_of(self.0)
     }
 }
 
-impl<'a, T: BytemuckDeserializable> TryFrom<&'a [u8]> for BytemuckRef<'a, T> {
+impl<'a, T: BytemuckType> TryFrom<&'a [u8]> for BytemuckRef<'a, T> {
     type Error = SerializationError;
     // We use
     fn try_from(value: &'a [u8]) -> Result<Self, Self::Error> {
@@ -222,57 +248,40 @@ impl<'a, T: BytemuckDeserializable> TryFrom<&'a [u8]> for BytemuckRef<'a, T> {
 }
 
 /// The types are equal if their byte patterns are the same.
-impl<'a, T: BytemuckDeserializable> PartialEq for BytemuckRef<'a, T> {
+impl<'a, T: BytemuckType> PartialEq for BytemuckRef<'a, T> {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
     }
 }
 
-impl<'a, T: BytemuckDeserializable> Eq for BytemuckRef<'a, T> {}
+impl<'a, T: BytemuckType> Eq for BytemuckRef<'a, T> {}
 
-impl<'a, T: BytemuckDeserializable> PartialOrd for BytemuckRef<'a, T> {
+impl<'a, T: BytemuckType> PartialOrd for BytemuckRef<'a, T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.0.partial_cmp(other.0)
     }
 }
 
-impl<'a, T: BytemuckDeserializable + Ord> Ord for BytemuckRef<'a, T> {
+impl<'a, T: BytemuckType + Ord> Ord for BytemuckRef<'a, T> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.0.cmp(other.0)
     }
 }
 
-impl<'a, T: BytemuckDeserializable> Debug for BytemuckRef<'a, T> {
+impl<'a, T: BytemuckType> Debug for BytemuckRef<'a, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "Ref({:?})", self.0)
     }
 }
 
-impl<'a, T: BytemuckDeserializable> Display for BytemuckRef<'a, T> {
+impl<'a, T: BytemuckType> Display for BytemuckRef<'a, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         Display::fmt(self.0, f)
     }
 }
 
-/// Trait to indicate which is the Ref::type of each inner type in the system
-pub trait RefTrait: TypeClass {
-    type Ref<'a>: TypeRef<'a, Owned = Self>
-    where
-        Self: 'a;
-}
-
-impl<'a, T: TypeClass + BytemuckDeserializable> TypeClass for BytemuckRef<'a, T> {
-    const ALIGN: usize = T::ALIGN;
-    const SIZE: Option<usize> = T::SIZE;
-}
-
-impl<'a, T: TypeClass + RuntimeSized + BytemuckDeserializable> RuntimeSized for BytemuckRef<'a, T> where
-    Self: TypeClass
-{
-}
-
 /// Trait for making types deserializable.
-pub trait DeserializableType: RefTrait {
+pub trait DeserializableType: TypeOwned {
     /// Reinterprets a buffer slice into a  its [Ref] type.
     ///
     /// For fixed size numeric types we are leveraging [bytemuck] to do this, while [Blob]
@@ -300,7 +309,7 @@ pub trait SerializableType: TypeClass + RuntimeSized {
     }
 }
 
-impl<T: TypeClass + BytemuckDeserializable + AsRef<[u8]>> SerializableType for T {
+impl<T: TypeClass + BytemuckType + AsRef<[u8]>> SerializableType for T {
     fn write_to(&self, writer: &mut [u8], cursor: usize) -> SerializationResult<usize> {
         let aligned = Self::aligned_offset(cursor);
         let data_bytes = self.as_ref();
@@ -310,7 +319,7 @@ impl<T: TypeClass + BytemuckDeserializable + AsRef<[u8]>> SerializableType for T
     }
 }
 
-impl<T: BytemuckDeserializable> RefTrait for T {
+impl<T: BytemuckType> TypeOwned for T {
     type Ref<'a>
         = BytemuckRef<'a, T>
     where
@@ -318,7 +327,7 @@ impl<T: BytemuckDeserializable> RefTrait for T {
 }
 
 /// All bytemuck serializable types will implement [DeserialiableType]
-impl<T: BytemuckDeserializable> DeserializableType for T {
+impl<T: BytemuckType> DeserializableType for T {
     fn reinterpret_cast(buffer: &[u8]) -> SerializationResult<(Self::Ref<'_>, usize)> {
         Ok((
             BytemuckRef::try_from(&buffer[..Self::SIZE.unwrap_or(0)])?,
@@ -334,26 +343,14 @@ impl<T: BytemuckDeserializable> DeserializableType for T {
     }
 }
 
-pub trait TypeRef<'a>: Sized + AsRef<[u8]> + TypeClass {
-    type Owned: DeserializableType;
-    fn to_owned(&self) -> Self::Owned;
-    fn as_slice(&self) -> &[u8];
-}
-
-impl<'a, T: BytemuckDeserializable + DeserializableType> TypeRef<'a> for BytemuckRef<'a, T> {
+impl<'a, T: BytemuckType + DeserializableType> TypeRef<'a> for BytemuckRef<'a, T> {
     type Owned = T;
     fn to_owned(&self) -> Self::Owned {
         BytemuckRef::to_owned(self)
     }
 
-    fn as_slice(&self) -> &[u8] {
+    fn as_bytes(&self) -> &[u8] {
         self.as_ref()
-    }
-}
-
-pub trait RuntimeSized: TypeClass {
-    fn runtime_size(&self) -> usize {
-        Self::SIZE.unwrap_or(0)
     }
 }
 
@@ -382,12 +379,6 @@ impl<T: AsRef<[u8]>> Hashable for T {
     fn hash128(&self) -> u128 {
         let mut cursor = Cursor::new(self.as_ref());
         murmur3_x64_128(&mut cursor, 0).unwrap()
-    }
-}
-
-impl<T: FixedSizeType> RuntimeSized for T {
-    fn runtime_size(&self) -> usize {
-        T::SIZE.unwrap_or(0)
     }
 }
 

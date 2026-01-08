@@ -1,6 +1,6 @@
 use crate::{
     SerializationResult,
-    core::{DeserializableType, RefTrait, RuntimeSized, SerializableType},
+    core::{DeserializableType, RuntimeSized, SerializableType, TypeOwned},
     types::{
         SerializationError, TypeSystemResult, VarInt,
         core::{NumericType, TypeCast, TypeClass, TypeRef, VarlenType},
@@ -161,9 +161,6 @@ impl Ord for Blob {
 #[derive(Debug, Clone, Copy)]
 pub struct BlobRef<'a>(&'a [u8]);
 
-impl<'a> TypeClass for BlobRef<'a> {}
-impl<'a> VarlenType for BlobRef<'a> {}
-
 impl<'a> BlobRef<'a> {
     /// Get the length of the full byte slice.
     pub fn total_length(&self) -> usize {
@@ -217,6 +214,8 @@ impl<'a> BlobRef<'a> {
         Blob(self.0.to_vec().into_boxed_slice())
     }
 }
+
+
 
 impl<'a> Display for BlobRef<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
@@ -281,12 +280,12 @@ impl<'a> TypeRef<'a> for BlobRef<'a> {
         self.to_blob()
     }
 
-    fn as_slice(&self) -> &[u8] {
+    fn as_bytes(&self) -> &[u8] {
         self.as_ref()
     }
 }
 
-impl RefTrait for Blob {
+impl TypeOwned for Blob {
     type Ref<'a> = BlobRef<'a>;
 }
 
@@ -371,6 +370,176 @@ impl SerializableType for Blob {
         let data_bytes = self.as_ref();
         writer[cursor..cursor + self.runtime_size()].copy_from_slice(data_bytes);
         Ok(cursor + self.runtime_size())
+    }
+}
+
+impl<'a> BlobRef<'a> {
+    /// Pattern matching similar to SQL LIKE operator.
+    ///
+    /// Supports:
+    /// - `%` matches any sequence of characters
+    /// - `_` matches any single character
+    /// - `\` escapes special characters
+    /// - All other characters match literally
+    pub fn like(&self, pattern: &str) -> TypeSystemResult<bool> {
+        self.like_bytes(pattern.as_bytes())
+    }
+
+    /// Checks if the blob starts with the given pattern.
+    pub fn starts_with(&self, pattern: &[u8]) -> TypeSystemResult<bool> {
+        let data = self.data()?;
+        Ok(data.starts_with(pattern))
+    }
+
+    /// Pattern matching directly on bytes.
+    pub fn like_bytes(&self, pattern: &[u8]) -> TypeSystemResult<bool> {
+        let data = self.data()?;
+        Ok(Self::match_pattern(data, pattern))
+    }
+
+    /// Internal pattern matching implementation.
+    fn match_pattern(data: &[u8], pattern: &[u8]) -> bool {
+        let mut data_idx = 0;
+        let mut pattern_idx = 0;
+        let mut backtrack_data_idx = 0;
+        let mut backtrack_pattern_idx = 0;
+        let mut in_escape = false;
+
+        while data_idx < data.len() {
+            if pattern_idx < pattern.len() {
+                let pattern_char = pattern[pattern_idx];
+
+                if in_escape {
+                    // Escaped character, match literally
+                    if data[data_idx] != pattern_char {
+                        // No match, try backtracking if we have a % to expand
+                        if backtrack_pattern_idx > 0 {
+                            backtrack_data_idx += 1;
+                            data_idx = backtrack_data_idx;
+                            pattern_idx = backtrack_pattern_idx;
+                            continue;
+                        }
+                        return false;
+                    }
+                    data_idx += 1;
+                    pattern_idx += 1;
+                    in_escape = false;
+                    continue;
+                }
+
+                match pattern_char {
+                    b'\\' => {
+                        // Next character is escaped
+                        in_escape = true;
+                        pattern_idx += 1;
+                        continue;
+                    }
+                    b'%' => {
+                        // % matches any sequence
+                        // Store backtrack positions
+                        backtrack_data_idx = data_idx;
+                        backtrack_pattern_idx = pattern_idx + 1;
+                        pattern_idx += 1;
+                        continue;
+                    }
+                    b'_' => {
+                        // _ matches any single character
+                        data_idx += 1;
+                        pattern_idx += 1;
+                        continue;
+                    }
+                    _ => {
+                        // Literal character
+                        if data[data_idx] != pattern_char {
+                            // No match, try backtracking if we have a % to expand
+                            if backtrack_pattern_idx > 0 {
+                                backtrack_data_idx += 1;
+                                data_idx = backtrack_data_idx;
+                                pattern_idx = backtrack_pattern_idx;
+                                continue;
+                            }
+                            return false;
+                        }
+                        data_idx += 1;
+                        pattern_idx += 1;
+                    }
+                }
+            } else if backtrack_pattern_idx > 0 {
+                // Pattern exhausted but we have a % to expand
+                backtrack_data_idx += 1;
+                data_idx = backtrack_data_idx;
+                pattern_idx = backtrack_pattern_idx;
+            } else {
+                // Pattern exhausted but data remains (only OK if trailing %)
+                // Check if pattern ends with %
+                if pattern.last() == Some(&b'%') {
+                    return true;
+                }
+                return false;
+            }
+        }
+
+        // Skip any trailing % in pattern
+        while pattern_idx < pattern.len() && pattern[pattern_idx] == b'%' {
+            pattern_idx += 1;
+        }
+
+        // Check if we consumed all pattern
+        pattern_idx == pattern.len()
+    }
+
+    /// Case-insensitive LIKE comparison (for text blobs).
+    pub fn ilike(&self, pattern: &str) -> TypeSystemResult<bool> {
+        let data = self.data()?;
+        let data_lower: Vec<u8> = data.iter().map(|&b| b.to_ascii_lowercase()).collect();
+        let pattern_lower = pattern.to_ascii_lowercase();
+        Ok(Self::match_pattern(&data_lower, pattern_lower.as_bytes()))
+    }
+
+    /// Checks if blob contains a substring.
+    pub fn contains(&self, substring: &[u8]) -> TypeSystemResult<bool> {
+        let data = self.data()?;
+        Ok(data
+            .windows(substring.len())
+            .any(|window| window == substring))
+    }
+
+    /// Checks if blob ends with the given pattern.
+    pub fn ends_with(&self, pattern: &[u8]) -> TypeSystemResult<bool> {
+        let data = self.data()?;
+        Ok(data.ends_with(pattern))
+    }
+}
+
+impl Blob {
+    /// Pattern matching similar to SQL LIKE operator.
+    pub fn like(&self, pattern: &str) -> TypeSystemResult<bool> {
+        self.as_blob_ref().like(pattern)
+    }
+
+    /// Pattern matching directly on bytes.
+    pub fn like_bytes(&self, pattern: &[u8]) -> TypeSystemResult<bool> {
+        self.as_blob_ref().like_bytes(pattern)
+    }
+
+    /// Case-insensitive LIKE comparison.
+    pub fn ilike(&self, pattern: &str) -> TypeSystemResult<bool> {
+        self.as_blob_ref().ilike(pattern)
+    }
+
+    /// Checks if blob contains a substring.
+    pub fn contains(&self, substring: &[u8]) -> TypeSystemResult<bool> {
+        self.as_blob_ref().contains(substring)
+    }
+
+    /// Checks if blob ends with the given pattern.
+    pub fn ends_with(&self, pattern: &[u8]) -> TypeSystemResult<bool> {
+        self.as_blob_ref().ends_with(pattern)
+    }
+
+    /// Checks if blob starts with the given pattern.
+    pub fn starts_with(&self, pattern: &[u8]) -> TypeSystemResult<bool> {
+        self.as_blob_ref().starts_with(pattern)
     }
 }
 

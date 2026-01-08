@@ -49,7 +49,7 @@ impl Executor for Values {
 
                 let mut values: Vec<DataType> = Vec::with_capacity(exprs.len());
                 for expr in exprs {
-                    let value = evaluator.evaluate(&expr)?;
+                    let value = evaluator.evaluate_as_single_value(&expr)?;
                     values.push(value);
                 }
 

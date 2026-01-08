@@ -1,7 +1,7 @@
 use crate::{
     runtime::{
         Executor, RuntimeError, RuntimeResult,
-        context::{TransactionContext, TransactionLogger},
+        context::{ThreadContext, TransactionLogger},
         ops::{
             Delete, Filter, HashAggregate, IndexScan, Insert, Limit, Materialize, NestedLoopJoin,
             Project, QuickSort, SeqScan, Update, Values,
@@ -29,12 +29,12 @@ fn require_children(
 }
 
 pub(crate) struct ExecutorBuilder {
-    ctx: TransactionContext,
+    ctx: ThreadContext,
     logger: TransactionLogger,
 }
 
 impl ExecutorBuilder {
-    pub(crate) fn new(ctx: TransactionContext, logger: TransactionLogger) -> Self {
+    pub(crate) fn new(ctx: ThreadContext, logger: TransactionLogger) -> Self {
         Self { ctx, logger }
     }
 

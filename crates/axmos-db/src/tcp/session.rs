@@ -54,10 +54,10 @@ impl Session {
 
         self.task_runner
             .run_with_result(move |_| {
-                let runner = QueryRunner::new(child_ctx.clone(), logger.clone());
-                let result = runner.prepare_and_run(&sql, false).map_err(box_err)?;
+                let runner = QueryRunner::new(child_ctx, logger.clone());
+                let result = runner.prepare_and_run(&sql).map_err(box_err)?;
 
-                Ok(result.into_result())
+                Ok(result)
             })
             .map_err(|e| QueryError::Runtime(RuntimeError::Other(e.to_string())))
     }
