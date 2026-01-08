@@ -16,6 +16,17 @@ The most clear of them all is the single file approach and the Pager and the Ind
 
 In my storage engine implementation, the Pager is also responsable to handles write ahead logging. There is a component in the Pager, called the WriteAheadLog, where writes to tables are written before writing then to the msin database file. This allows us to recoger the database from a possible crash. My WAL recovery implementation follows the three phase ARIES protocol (analysis, undo and redo). Each time the database is opened, It will look on the directory if there is a wal file. If there is one, the recovery process will be run, redoing everything that needs to be redone and undoing every change that needs to be undone. Once the recovery finished, the wal is truncated to zero length.
 
+## Page-Level latching
+
+On databases there is a distinción between database object locking (Table Locks, row Locks) and latching. Latching is what database people call what OS developers call locks. 
+
+As my database is multitenant, It must support multiple threads accessing the data structures that support it at the same time. I am using Parking Lot's lock api which provides a handful implementation of several types of locks. Parking lot uses a single byte to store the mutex, and causes generally less contention than standard OS futexes (std::sync::Mutex) which makes it more suitable for this implementation.
+
+There is also a lot to think on how to acquire this locks when traversing btrees, as when you modify a page, you might need to rebalance the whole structure (which means modifying other pages) ,and you do not want to come to the situation where someone already has the lock on a page you need to modify in order to complete the rebalance operation.
+
+The solution is to differentiate between tree access modes. When accessing a tree to read, you can just free the lock on a node once you have acquired the lock on its child. When accessing on write mode, you cannot realase any lock until you know you have finished your operation on the tree.
+
+
 ## ACID compliant transactions.
 
 The transactions coordinator component in the database is the main manager for the MVCC systems. In Axmos DB, tuples (rows) are stored with an special layout. 
@@ -50,4 +61,5 @@ Note that although most basic operators are implemented, there is still a missin
 - ExternalSort
 - HashJoin
 
-After that the resulta are returned to the client and pretty-printed.
+After that the results are returned to the client and pretty-printed.
+
