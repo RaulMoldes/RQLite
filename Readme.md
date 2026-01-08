@@ -26,6 +26,15 @@ There is also a lot to think on how to acquire this locks when traversing btrees
 
 The solution is to differentiate between tree access modes. When accessing a tree to read, you can just free the lock on a node once you have acquired the lock on its child. When accessing on write mode, you cannot realase any lock until you know you have finished your operation on the tree.
 
+## OS concerns. Direct Io
+
+Basically there are two ways of developing a database storage systems. 
+
+Option A is to rely on the OS cache, as Postgres used to do (although the are moving away from it).
+
+Option B is to force all writes to the disk (Direct IO). This is preferred since you want to make sure every single bit of information is on disk once you tell the client that is the case. On Linux systems this can be achieved via the O_DIRECT flag which must be set once the file is opened.
+
+O_DIRECT forces all memory blocks to be aligned to the filesystem block size (size and address), which is one of the main reasons why we use fixed size pages in databases.
 
 ## ACID compliant transactions.
 
@@ -106,7 +115,7 @@ Other statements you can run include:
 
 ```sh
 
- EXPLAIN {QUERY} // Prints the execution plan as a tree.
+EXPLAIN {QUERY} // Prints the execution plan as a tree.
 
 ANALYZE // Recomputes table statistics for the whole database.
 
@@ -115,3 +124,10 @@ VACUUM // Vacuums tuple versions that are not needed anymore, recovering space o
 QUIT // Close the connection
 SHUTDOWN // Flush all pending changes to disk and stop the server
 ```
+
+
+# Acknowldegements.
+
+I would not have been able to develop this project without the CMU courses on databases systems. 
+
+I have also uses quite a lot of SQLite's , PostgresQL and InnoDB docs pages, and the databasedevelopment community on reddit.
