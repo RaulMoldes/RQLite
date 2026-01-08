@@ -1,4 +1,4 @@
-# AxmosDB
+  # AxmosDB
 
 AxmosDB is an experimental relational database server written in Rust, designed to explore modern database internals with a clean, modular architecture.
 
@@ -63,3 +63,55 @@ Note that although most basic operators are implemented, there is still a missin
 
 After that the results are returned to the client and pretty-printed.
 
+# TCP protocol.
+
+AxmosDB is on active development. You can run the server on development Mode vía the command line:
+
+```bash
+
+cargo run --bin axmos-server -- -p 5432
+
+```
+Then connect to it with a client:
+
+```bash
+
+cargo run --bin axmos-clien -- -p 5432
+
+```
+
+Using the client, create a new database using the command:
+
+```bash
+
+CREATEDB mydb.axm
+
+```
+
+This will create the main database file (mydb.axm) and the wal file (axmos.log).
+
+You could also open an existing database file.
+
+```bash
+
+OPENDB mydb.axm
+
+```
+
+After that you can start running SQL queries, or open a new session with atomic guarantees via ```sh BEGIN ```.
+
+The session can be closed with ```sh ROLLBACK ``` or ```sh COMMIT ```.
+
+Other statements you can run include:
+
+```sh
+
+ EXPLAIN {QUERY} // Prints the execution plan as a tree.
+
+ANALYZE // Recomputes table statistics for the whole database.
+
+VACUUM // Vacuums tuple versions that are not needed anymore, recovering space on disk.
+
+QUIT // Close the connection
+SHUTDOWN // Flush all pending changes to disk and stop the server
+```
