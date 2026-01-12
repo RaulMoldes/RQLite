@@ -46,7 +46,8 @@ use crate::{
     io::{
         disk::FileOperations,
         logger::Begin,
-        pager::{Pager, SharedPager, WalRecuperator},
+        pager::{Pager, SharedPager},
+        recovery::WalRecuperator
     },
     multithreading::{
         coordinator::{TransactionCoordinator, TransactionError},

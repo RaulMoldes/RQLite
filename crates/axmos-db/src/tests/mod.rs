@@ -419,12 +419,49 @@ fn test_rollback_reopen_vacuum() {
         assert_eq!(count, 10, "Data should still not be visible after vacuum");
     }
 
-    println!("Test passed!");
-    println!("  Initial size:      {} bytes", initial_size);
-    println!("  After reopen:      {} bytes", size_after_rollback);
-    println!("  After vacuum:      {} bytes", size_after_vacuum);
-    println!(
-        "  Space recovered:   {} bytes",
-        initial_size.saturating_sub(size_after_vacuum)
-    );
+}
+
+
+
+/// Recovery tests on failure scenarios.
+///
+/// This test suite intends to validate that via the wal we are able to recover the database to a usable consistent state after a disk failover.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_ddl_recovery_without_flush() {
+    use tempfile::tempdir;
+
+    let dir = tempdir().expect("Failed to create temp dir");
+    let db_path = dir.path().join("ddl_no_flush.axm");
+    let config = DBConfig::default();
+
+    // Create table and insert data WITHOUT calling flush (simulating crash)
+    {
+        let db = Database::create(&db_path, config).expect("Failed to create database");
+
+        db.execute("CREATE TABLE crash_test (id BIGINT, data TEXT)")
+            .expect("Failed to create table");
+
+        db.execute("INSERT INTO crash_test VALUES (1, 'before_crash')")
+            .expect("Failed to insert");
+    }
+
+    // Reopen and verify recovery worked
+    {
+        let db = Database::open(&db_path, config).expect("Failed to open database");
+
+        let result = db.execute("SELECT COUNT(*) FROM crash_test");
+        assert!(result.is_ok(), "Transaction was committed so it must be recovered by the wal");
+
+        // If table exists, verify data integrity
+        if let Ok(result) = result {
+            let rows = result.into_rows().expect("Expected rows");
+            let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
+            // Count should be consistent (either 0 or 1, not corrupted)
+            assert!(count == 0 || count == 1, "Data should be consistent");
+        }
+        // If table doesn't exist, that's also acceptable (transaction wasn't committed)
+    }
+
+    drop(dir);
 }

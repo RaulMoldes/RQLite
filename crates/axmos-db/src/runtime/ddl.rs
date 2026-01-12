@@ -624,4 +624,7 @@ impl DdlExecutor {
             .get_relation_by_name(name, &tree_builder, &snapshot)
             .is_ok()
     }
+
+
+    
 }

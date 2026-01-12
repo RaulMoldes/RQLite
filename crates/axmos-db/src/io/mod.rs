@@ -5,6 +5,7 @@
 pub mod cache;
 pub mod disk;
 pub mod logger;
+pub mod recovery;
 
 pub mod pager;
 pub mod wal;

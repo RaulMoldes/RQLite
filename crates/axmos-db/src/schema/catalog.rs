@@ -520,7 +520,9 @@ impl Catalog {
         Ok(())
     }
 
-    /// Removes a given relation using the provided RcPageAccessor.
+
+
+    /// Removes a given relation using the provided
     /// Cascades the removal if required.
     pub(crate) fn remove_relation(
         &self,
@@ -620,6 +622,21 @@ impl Catalog {
         meta_index.update(self.meta_index, tuple, &index_schema)?;
 
         Ok(())
+    }
+
+
+    /// Removes a given relation using the provided id
+    /// Cascades the removal if required.
+    pub(crate) fn remove_relation_by_id(
+        &self,
+        relation_id: ObjectId,
+        builder: &BtreeBuilder,
+        snapshot: &Snapshot,
+        cascade: bool,
+        logger: Option<&TransactionLogger>
+    ) -> CatalogResult<()> {
+        let rel = self.get_relation(relation_id, builder, snapshot)?;
+        self.remove_relation(rel, builder, snapshot, cascade, logger)
     }
 
     /// Stores a new relation in the meta table.

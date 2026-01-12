@@ -231,6 +231,10 @@ impl DmlExecutor {
     pub fn ctx(&self) -> &ThreadContext {
         &self.ctx
     }
+    
+     pub fn logger(&self) -> &TransactionLogger {
+        &self.logger
+    }
 
     /// Synthactic sugar for the update function
     pub fn update_row(
