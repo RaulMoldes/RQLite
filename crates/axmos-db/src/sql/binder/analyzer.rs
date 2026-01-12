@@ -2,8 +2,8 @@ use crate::{
     io::pager::BtreeBuilder,
     multithreading::coordinator::Snapshot,
     schema::{
+        SharedCatalog,
         base::{Column, Relation, Schema},
-        catalog::CatalogTrait,
     },
     sql::{
         binder::{DatabaseItem, ScopeEntry, ScopeError, ScopeStack},
@@ -92,19 +92,16 @@ impl From<ScopeError> for AnalyzerError {
 
 pub type AnalyzerResult<T> = Result<T, AnalyzerError>;
 
-pub(crate) struct Analyzer<C: CatalogTrait> {
-    catalog: C,
+pub(crate) struct Analyzer {
+    catalog: SharedCatalog,
     tree_builder: BtreeBuilder,
     snapshot: Snapshot,
     ctes: HashMap<String, Schema>,
     scopes: ScopeStack,
 }
 
-impl<C> Analyzer<C>
-where
-    C: CatalogTrait,
-{
-    pub(crate) fn new(catalog: C, builder: BtreeBuilder, snapshot: Snapshot) -> Self {
+impl Analyzer {
+    pub(crate) fn new(catalog: SharedCatalog, builder: BtreeBuilder, snapshot: Snapshot) -> Self {
         Self {
             catalog,
             tree_builder: builder,

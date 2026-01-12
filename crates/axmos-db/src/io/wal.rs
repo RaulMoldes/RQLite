@@ -1,7 +1,7 @@
 use crate::{
     TransactionId,
     io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
-    io::logger::{Delete, Insert, Update},
+    io::logger::{Delete, Insert, Update, Alter, DropOp, Create},
     storage::{
         Allocatable, AvailableSpace, WalMetadata, WalOps, Writable,
         wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock},
@@ -124,6 +124,12 @@ pub struct AnalysisResult {
     pub delete_ops: HashMap<Lsn, Delete>,
     /// Update ops
     pub update_ops: HashMap<Lsn, Update>,
+    /// Map from transaction ID to its last LSN
+    pub create_ops: HashMap<Lsn, Create>,
+    /// Map from transaction ID to its last LSN
+    pub alter_ops: HashMap<Lsn, Alter>,
+    /// Update ops
+    pub drop_ops: HashMap<Lsn, DropOp>,
     /// The starting point for redo
     pub start_redo_lsn: Option<Lsn>,
 }
@@ -230,6 +236,37 @@ impl WriteAheadLog {
                         .expect("Row id must be set for insert operations");
                     let insert = Insert::new(oid, row_id, redo_content);
                     result.insert_ops.insert(lsn, insert);
+                }
+                RecordType::Create => {
+                    let redo_content = Box::from(record.redo_payload());
+
+                    let row_id = record
+                        .metadata()
+                        .row_id
+                        .expect("Row id must be set for insert operations");
+                    let insert = Create::new(row_id, redo_content);
+                    result.create_ops.insert(lsn, insert);
+                }
+
+                RecordType::Alter => {
+                    let undo_content = Box::from(record.undo_payload());
+                    let redo_content = Box::from(record.redo_payload());
+                    let row_id = record
+                        .metadata()
+                        .row_id
+                        .expect("Row id must be set for alter operations");
+                    let update = Alter::new( row_id, undo_content, redo_content);
+                    result.alter_ops.insert(lsn, update);
+                }
+
+                RecordType::Drop => {
+                    let undo_content = Box::from(record.undo_payload());
+                    let row_id = record
+                        .metadata()
+                        .row_id
+                        .expect("Row id must be set for drop operations");
+                    let drop_op = DropOp::new( row_id, undo_content);
+                    result.drop_ops.insert(lsn, drop_op);
                 }
             }
         }

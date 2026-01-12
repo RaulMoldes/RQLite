@@ -16,7 +16,6 @@ use crate::{
     schema::{
         Schema,
         base::{IndexHandle, Relation},
-        catalog::CatalogTrait,
     },
     sql::binder::bounds::BoundExpression,
     storage::tuple::{Row, Tuple, TupleBuilder, TupleReader},
@@ -161,7 +160,6 @@ impl DmlExecutor {
         let mut relation =
             self.ctx
                 .catalog()
-                .read()
                 .get_relation(table_id, &tree_builder, &snapshot)?;
 
         let row_id = relation.next_row_id();
@@ -174,8 +172,6 @@ impl DmlExecutor {
         let full_row = self.build_full_row(&schema, columns, values, row_id)?;
 
         // Constraint validation goes here.
-        println!("VALIDANDO CONSTRAINTS PARA INSERT");
-
         self.validate_insert_constraints(&relation, full_row.as_slice())?;
         let indexes = relation.get_indexes();
 
@@ -217,7 +213,7 @@ impl DmlExecutor {
         )?;
 
         // Update relation metadata
-        self.ctx.catalog().write().update_relation(
+        self.ctx.catalog().update_relation(
             relation.object_id(),
             Some(relation.next_row_id().value()),
             None,
@@ -271,7 +267,6 @@ impl DmlExecutor {
         let relation =
             self.ctx
                 .catalog()
-                .read()
                 .get_relation(table_id, &tree_builder, &snapshot)?;
 
         let schema = relation.schema().clone();
@@ -359,7 +354,6 @@ impl DmlExecutor {
         let relation =
             self.ctx
                 .catalog()
-                .read()
                 .get_relation(table_id, &tree_builder, &snapshot)?;
         let schema = relation.schema().clone();
         let root = relation.root();
@@ -488,7 +482,6 @@ impl DmlExecutor {
             let index_relation =
                 self.ctx
                     .catalog()
-                    .read()
                     .get_relation(index.id(), &tree_builder, &snapshot)?;
             let index_schema = index_relation.schema();
             let index_root = index_relation.root();

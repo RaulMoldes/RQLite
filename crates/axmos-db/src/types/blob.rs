@@ -215,8 +215,6 @@ impl<'a> BlobRef<'a> {
     }
 }
 
-
-
 impl<'a> Display for BlobRef<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "BlobRef ({})", self.to_string_lossy_unchecked())

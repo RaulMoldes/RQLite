@@ -40,3 +40,46 @@ macro_rules! make_shared {
         unsafe impl Sync for $inner_ty {}
     };
 }
+
+#[macro_export]
+macro_rules! make_shared_readonly {
+    ($shared_ty:ident, $inner_ty:ty) => {
+        #[repr(transparent)]
+        pub struct $shared_ty(std::sync::Arc<$inner_ty>);
+
+        impl From<std::sync::Arc<$inner_ty>> for $shared_ty {
+            fn from(value: std::sync::Arc<$inner_ty>) -> Self {
+                Self(std::sync::Arc::clone(&value))
+            }
+        }
+
+        impl From<$inner_ty> for $shared_ty {
+            fn from(value: $inner_ty) -> Self {
+                Self(std::sync::Arc::new(value))
+            }
+        }
+
+        impl Clone for $shared_ty {
+            fn clone(&self) -> Self {
+                Self(std::sync::Arc::clone(&self.0))
+            }
+        }
+
+        impl std::ops::Deref for $shared_ty {
+            type Target = $inner_ty;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+
+        impl $shared_ty {
+            pub fn strong_count(&self) -> usize {
+                std::sync::Arc::strong_count(&self.0)
+            }
+        }
+
+        unsafe impl Send for $inner_ty {}
+        unsafe impl Sync for $inner_ty {}
+    };
+}

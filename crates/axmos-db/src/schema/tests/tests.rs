@@ -1,30 +1,28 @@
 use super::utils::{TestConfig, TestDb, make_relation};
 use crate::{
     ObjectId,
-    io::pager::BtreeBuilder,
+    io::pager::{BtreeBuilder, SharedPager},
     multithreading::coordinator::Snapshot,
-    schema::catalog::{Catalog, CatalogError, CatalogTrait},
+    schema::catalog::{Catalog, CatalogError},
     storage::page::BtreePage,
 };
 
-macro_rules! test_catalog {
-    ($db:expr) => {{
-        let mut pager = $db.pager.write();
-        let meta_table = pager
-            .allocate_page::<BtreePage>()
-            .expect("Failed to allocate meta_table");
-        let meta_index = pager
-            .allocate_page::<BtreePage>()
-            .expect("Failed to allocate meta_index");
-        drop(pager);
-        Catalog::new(meta_table, meta_index)
-    }};
+fn create_test_catalog(pager: SharedPager) -> Catalog {
+    let meta_table = pager
+        .write()
+        .allocate_page::<BtreePage>()
+        .expect("Failed to allocate meta_table");
+    let meta_index = pager
+        .write()
+        .allocate_page::<BtreePage>()
+        .expect("Failed to allocate meta_index");
+    Catalog::new(pager, meta_table, meta_index)
 }
 
 pub fn test_get_relation_by_name(count: usize) {
     let config = TestConfig::default();
     let db = TestDb::new("catalog_get_by_name", &config).expect("Failed to create test db");
-    let mut catalog = test_catalog!(&db);
+    let catalog = create_test_catalog(db.pager.clone());
     let builder = BtreeBuilder::default().with_pager(db.pager.clone());
     let snapshot = Snapshot::default();
 
@@ -51,7 +49,7 @@ pub fn test_get_relation_by_name(count: usize) {
 pub fn test_store_relation(count: usize) {
     let config = TestConfig::default();
     let db = TestDb::new("catalog_store", &config).expect("Failed to create test db");
-    let mut catalog = test_catalog!(&db);
+    let catalog = create_test_catalog(db.pager.clone());
     let builder = BtreeBuilder::default().with_pager(db.pager.clone());
     let snapshot = Snapshot::default();
 
@@ -75,7 +73,7 @@ pub fn test_store_relation(count: usize) {
 pub fn test_get_relation(count: usize) {
     let config = TestConfig::default();
     let db = TestDb::new("catalog_get", &config).expect("Failed to create test db");
-    let mut catalog = test_catalog!(&db);
+    let mut catalog = create_test_catalog(db.pager.clone());
     let builder = BtreeBuilder::default().with_pager(db.pager.clone());
     let snapshot = Snapshot::default();
 
@@ -102,7 +100,7 @@ pub fn test_get_relation(count: usize) {
 pub fn test_delete_relation(count: usize, delete_count: usize) {
     let config = TestConfig::default();
     let db = TestDb::new("catalog_delete", &config).expect("Failed to create test db");
-    let mut catalog = test_catalog!(&db);
+    let catalog = create_test_catalog(db.pager.clone());
     let builder = BtreeBuilder::default().with_pager(db.pager.clone());
     let snapshot = Snapshot::default();
 

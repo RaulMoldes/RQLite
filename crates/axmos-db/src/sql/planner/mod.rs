@@ -20,7 +20,7 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use crate::{
     io::pager::BtreeBuilder,
     multithreading::coordinator::Snapshot,
-    schema::catalog::{CatalogTrait, StatisticsProvider},
+    schema::catalog::{SharedCatalog, StatisticsProvider},
     sql::{binder::bounds::*, planner::prop::PropertyDeriver},
 };
 
@@ -102,9 +102,9 @@ pub(crate) struct OptimizationStats {
 }
 
 /// Cascades-style query optimizer.
-pub struct CascadesOptimizer<'a, C: CatalogTrait + Clone> {
+pub struct CascadesOptimizer<'a> {
     cost_model: DefaultCostModel,
-    deriver: PropertyDeriver<StatisticsProvider<'a, C>>,
+    deriver: PropertyDeriver<StatisticsProvider<'a>>,
     transformation_rules: Vec<Box<dyn TransformationRule>>,
     implementation_rules: Vec<Box<dyn ImplementationRule>>,
     config: OptimizerConfig,
@@ -112,11 +112,11 @@ pub struct CascadesOptimizer<'a, C: CatalogTrait + Clone> {
     stats: Option<OptimizationStats>,
 }
 
-impl<'a, C: CatalogTrait + Clone> CascadesOptimizer<'a, C> {
+impl<'a> CascadesOptimizer<'a> {
     /// Creates a new optimizer with the given catalog context.
     pub(crate) fn new(
         page_size: u32,
-        catalog: C,
+        catalog: SharedCatalog,
         builder: BtreeBuilder,
         snapshot: &'a Snapshot,
         config: OptimizerConfig,
@@ -133,7 +133,11 @@ impl<'a, C: CatalogTrait + Clone> CascadesOptimizer<'a, C> {
     }
 
     /// Creates an optimizer with default configuration.
-    pub fn with_defaults(catalog: C, builder: BtreeBuilder, snapshot: &'a Snapshot) -> Self {
+    pub fn with_defaults(
+        catalog: SharedCatalog,
+        builder: BtreeBuilder,
+        snapshot: &'a Snapshot,
+    ) -> Self {
         Self::new(
             crate::DEFAULT_PAGE_SIZE as u32,
             catalog,

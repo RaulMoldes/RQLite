@@ -1,11 +1,8 @@
 mod tests;
 mod utils;
 
+use crate::types::{DataType, UInt64};
 use crate::{matrix_tests, param_tests, param2_tests, param3_tests};
-use crate::{
-    schema::catalog::CatalogTrait,
-    types::{DataType, UInt64},
-};
 use tests::*;
 use utils::*;
 
@@ -365,7 +362,6 @@ fn test_create_index_via_sql() {
     let index =
         harness
             .catalog()
-            .read()
             .get_relation_by_name("idx_products_price", &builder, &snapshot);
     assert!(index.is_ok(), "Index should exist in catalog");
     handle.commit().expect("Failed to commit");

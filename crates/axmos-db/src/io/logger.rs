@@ -161,3 +161,113 @@ impl Operation for Delete {
         self.old.as_ref()
     }
 }
+
+
+
+/// LOGGING FOR DDL OPERATORS.
+/// [CREATE]
+#[repr(C)]
+#[derive(Debug)]
+pub struct Create {
+    oid: ObjectId,
+    new: Box<[u8]>, // Data in the meta table
+}
+
+impl Create {
+    pub(crate) fn new(oid: ObjectId, new: Box<[u8]>) -> Self {
+        Self { oid, new }
+    }
+}
+
+impl Operation for Create {
+    fn op_type(&self) -> RecordType {
+        RecordType::Delete
+    }
+    fn object_id(&self) -> Option<ObjectId> {
+        None // OID IS THE META TABLE
+    }
+    fn row_id(&self) -> Option<RowId> {
+        Some(self.oid)
+    }
+    fn undo(&self) -> &[u8] {
+        &[]
+    }
+
+    fn redo(&self) -> &[u8] {
+        &self.new
+    }
+}
+
+
+
+
+/// LOGGING FOR DDL OPERATORS.
+/// [DROP /REMOVE]
+#[repr(C)]
+#[derive(Debug)]
+pub struct DropOp {
+    oid: ObjectId,
+    old: Box<[u8]>, // Data in the meta table
+}
+
+impl DropOp {
+    pub(crate) fn new(oid: ObjectId, old: Box<[u8]>) -> Self {
+        Self { oid, old }
+    }
+}
+
+impl Operation for DropOp {
+    fn op_type(&self) -> RecordType {
+        RecordType::Delete
+    }
+    fn object_id(&self) -> Option<ObjectId> {
+        None // OID IS THE META TABLE
+    }
+    fn row_id(&self) -> Option<RowId> {
+        Some(self.oid)
+    }
+    fn undo(&self) -> &[u8] {
+        &self.old
+    }
+
+    fn redo(&self) -> &[u8] {
+        &[]
+    }
+}
+
+
+
+/// LOGGING FOR DDL OPERATORS.
+/// [DROP /REMOVE]
+#[repr(C)]
+#[derive(Debug)]
+pub struct Alter {
+    oid: ObjectId,
+    new: Box<[u8]>,
+    old: Box<[u8]>, // Data in the meta table
+}
+
+impl Alter {
+    pub(crate) fn new(oid: ObjectId,new: Box<[u8]>,  old: Box<[u8]>) -> Self {
+        Self { oid, new, old }
+    }
+}
+
+impl Operation for Alter {
+    fn op_type(&self) -> RecordType {
+        RecordType::Delete
+    }
+    fn object_id(&self) -> Option<ObjectId> {
+        None // OID IS THE META TABLE
+    }
+    fn row_id(&self) -> Option<RowId> {
+        Some(self.oid)
+    }
+    fn undo(&self) -> &[u8] {
+        &self.old
+    }
+
+    fn redo(&self) -> &[u8] {
+        &self.new
+    }
+}

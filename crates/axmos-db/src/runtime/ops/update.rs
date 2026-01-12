@@ -5,7 +5,7 @@ use crate::{
         context::{ThreadContext, TransactionLogger},
         dml::{DmlExecutor, evaluate_assignments, extract_row_id},
     },
-    schema::{Schema, catalog::CatalogTrait},
+    schema::Schema,
     sql::{binder::bounds::BoundExpression, planner::physical::PhysUpdateOp},
     storage::tuple::Row,
     types::{DataType, UInt64},
@@ -60,7 +60,6 @@ where
         let relation =
             self.ctx
                 .catalog()
-                .read()
                 .get_relation(self.table_id, &tree_builder, &snapshot)?;
         let schema = relation.schema().clone();
 

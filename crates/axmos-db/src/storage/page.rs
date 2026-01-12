@@ -15,8 +15,8 @@ use crate::{
     types::{PAGE_ZERO, PageId},
 };
 
-pub(crate) const SIGNATURE_SIZE: usize = 64; // Ed25519
-pub(crate) const SIGNATURE_OFFSET: usize = PAGE_ZERO_HEADER_SIZE - SIGNATURE_SIZE;
+pub(crate) const ABORTED_BITMAP_SIZE: usize = 1024;
+pub(crate) const MAX_TRACKED_ABORTED_TXS: usize = ABORTED_BITMAP_SIZE * 8; // Are we going to create more than 2048 * 8 transactions?. Probably not.
 
 /// Slotted page header.
 #[derive(Debug, Clone, Copy)]
@@ -78,7 +78,7 @@ pub(crate) struct PageZeroHeader {
     pub(crate) cache_size: u16,
     pub(crate) min_keys: u8,
     pub(crate) num_siblings_per_side: u8,
-    pub(crate) reserved: [u8; SIGNATURE_SIZE], // 64 bytes are reserved for the signature.
+    pub(crate) aborted_txs_bitmap: [u8; ABORTED_BITMAP_SIZE],
 }
 pub(crate) const PAGE_ZERO_HEADER_SIZE: usize = mem::size_of::<PageZeroHeader>();
 
@@ -120,7 +120,7 @@ impl PageZeroHeader {
             min_keys, // DEFAULTS TO THREE
             num_siblings_per_side,
             cache_size,
-            reserved: [0u8; SIGNATURE_SIZE],
+            aborted_txs_bitmap: [0u8; ABORTED_BITMAP_SIZE],
         }
     }
 
@@ -132,6 +132,45 @@ impl PageZeroHeader {
             config.num_siblings_per_side as u8,
             config.cache_size as u16,
         )
+    }
+
+    pub(crate) fn mark_transaction_aborted(&mut self, txid: TransactionId) {
+        if txid < MAX_TRACKED_ABORTED_TXS as u64 {
+            let byte_idx = (txid / 8) as usize;
+            let bit_idx = (txid % 8) as u8;
+            self.aborted_txs_bitmap[byte_idx] |= 1 << bit_idx;
+        }
+    }
+
+    pub(crate) fn is_transaction_aborted(&self, txid: TransactionId) -> bool {
+        if txid >= MAX_TRACKED_ABORTED_TXS as u64 {
+            return false;
+        }
+        let byte_idx = (txid / 8) as usize;
+        let bit_idx = (txid % 8) as u8;
+        (self.aborted_txs_bitmap[byte_idx] & (1 << bit_idx)) != 0
+    }
+
+    pub(crate) fn get_aborted_transactions(&self) -> Vec<TransactionId> {
+        let mut aborted = Vec::new();
+        for txid in 0..MAX_TRACKED_ABORTED_TXS as u64 {
+            if self.is_transaction_aborted(txid) {
+                aborted.push(txid);
+            }
+        }
+        aborted
+    }
+
+    pub(crate) fn clear_aborted_bitmap(&mut self) {
+        self.aborted_txs_bitmap.fill(0);
+    }
+
+    pub(crate) fn clear_aborted_up_to(&mut self, max_txid: TransactionId) {
+        for txid in 0..=max_txid.min(MAX_TRACKED_ABORTED_TXS as u64 - 1) {
+            let byte_idx = (txid / 8) as usize;
+            let bit_idx = (txid % 8) as u8;
+            self.aborted_txs_bitmap[byte_idx] &= !(1 << bit_idx);
+        }
     }
 }
 

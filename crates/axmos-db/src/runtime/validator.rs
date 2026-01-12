@@ -8,11 +8,7 @@ use std::collections::HashSet;
 use crate::{
     ObjectId, SerializationError, UInt64,
     runtime::context::ThreadContext,
-    schema::{
-        DatabaseItem, Schema,
-        base::IndexHandle,
-        catalog::{CatalogError, CatalogTrait},
-    },
+    schema::{DatabaseItem, Schema, base::IndexHandle, catalog::CatalogError},
     storage::tuple::{TupleError, TupleReader, TupleRef},
     tree::bplustree::{BtreeError, SearchResult},
     types::{DataType, RowId},
@@ -126,7 +122,6 @@ impl<'a> ConstraintValidator<'a> {
         let ref_table_relation =
             self.ctx
                 .catalog()
-                .read()
                 .get_relation(table_id, &tree_builder, &snapshot)?;
         let schema = ref_table_relation.schema();
         let infos = schema.get_foreign_keys_info();
@@ -168,7 +163,6 @@ impl<'a> ConstraintValidator<'a> {
         let table_relation =
             self.ctx
                 .catalog()
-                .read()
                 .get_relation(table_id, &tree_builder, &snapshot)?;
         let table_root = table_relation.root();
 
@@ -225,7 +219,6 @@ impl<'a> ConstraintValidator<'a> {
         let index_relation =
             self.ctx
                 .catalog()
-                .read()
                 .get_relation(index.id(), &tree_builder, &snapshot)?;
 
         let index_schema = index_relation.schema();

@@ -342,9 +342,11 @@ impl<'a> ExpressionEvaluator<'a> {
         Ok(DataType::Bool(Bool(result)))
     }
 
-
-
-    fn string_like(str_lhs: &DataType, pattern: &DataType, negated: bool) -> TypeSystemResult<DataType> {
+    fn string_like(
+        str_lhs: &DataType,
+        pattern: &DataType,
+        negated: bool,
+    ) -> TypeSystemResult<DataType> {
         let lhs_blob = str_lhs
             .as_blob()
             .ok_or(TypeSystemError::UnexpectedDataType(str_lhs.kind()))?;
@@ -353,7 +355,9 @@ impl<'a> ExpressionEvaluator<'a> {
             .ok_or(TypeSystemError::UnexpectedDataType(pattern.kind()))?;
 
         // Convert back to Blob and wrap as Text
-        Ok(DataType::Bool(Bool(!negated && lhs_blob.like(pattern_blob.as_str()?)?)))
+        Ok(DataType::Bool(Bool(
+            !negated && lhs_blob.like(pattern_blob.as_str()?)?,
+        )))
     }
 
     fn string_concat(str_a: &DataType, str_b: &DataType) -> TypeSystemResult<DataType> {
@@ -464,11 +468,11 @@ impl<'a> ExpressionEvaluator<'a> {
                 BinaryOperator::Like => {
                     let result = Self::string_like(&left[0], &right[0], false)?;
                     Ok(vec![result])
-                },
+                }
                 BinaryOperator::NotLike => {
                     let result = Self::string_like(&left[0], &right[0], true)?;
                     Ok(vec![result])
-                },
+                }
             }
         } else if right.len() > 1 {
             match bin_op {

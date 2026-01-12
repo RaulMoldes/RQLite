@@ -11,7 +11,7 @@ use crate::{
     },
     schema::{
         base::{Column, Relation},
-        catalog::{Catalog, CatalogTrait, SharedCatalog},
+        catalog::{Catalog, SharedCatalog},
     },
     sql::{
         binder::binder::Binder,
@@ -54,7 +54,7 @@ impl TestHarness {
             (meta_table, meta_index)
         };
 
-        let catalog = Catalog::new(meta_table_page, meta_index_page);
+        let catalog = Catalog::new(pager.clone(), meta_table_page, meta_index_page);
         let catalog = SharedCatalog::from(catalog);
         let coordinator = TransactionCoordinator::new(pager.clone());
 
@@ -98,7 +98,7 @@ impl TestHarness {
     }
 
     pub fn create_table(&self, name: &str, columns: Vec<Column>, txid: u64) -> ObjectId {
-        let object_id = self.catalog.read().get_next_object_id();
+        let object_id = self.catalog.get_next_object_id();
 
         let root_page = self
             .pager
@@ -108,7 +108,6 @@ impl TestHarness {
 
         let relation = Relation::table(object_id, name, root_page, columns);
         self.catalog
-            .write()
             .store_relation(relation, &self.tree_builder(), txid)
             .expect("Failed to store relation");
 
@@ -190,7 +189,6 @@ impl TestHarness {
 
         let relation = self
             .catalog
-            .read()
             .get_relation(table_id, &builder, &snapshot)
             .expect("Table not found");
 

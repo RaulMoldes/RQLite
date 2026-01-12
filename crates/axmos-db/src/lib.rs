@@ -56,7 +56,7 @@ use crate::{
         MultiQueryRunner, QueryError, QueryResult, QueryRunner, RuntimeError,
         context::{TransactionContext, TransactionLogger},
     },
-    schema::catalog::{Catalog, CatalogTrait, SharedCatalog, VacuumStats},
+    schema::catalog::{Catalog, SharedCatalog, VacuumStats},
     storage::page::BtreePage,
     tcp::session::Session,
 };
@@ -187,7 +187,7 @@ impl Database {
         };
 
         // Create catalog
-        let catalog = Catalog::new(meta_table_page, meta_index_page);
+        let catalog = Catalog::new(pager.clone(), meta_table_page, meta_index_page);
         let catalog = SharedCatalog::from(catalog);
 
         // Create transaction coordinator
@@ -222,25 +222,16 @@ impl Database {
         let pager = Pager::open(&path)?;
         let pager = SharedPager::from(pager);
 
-        // Read persisted state from page zero header
-        let (last_created_transaction, last_object, last_committed) = {
-            let p = pager.read();
-            let header = p.header_unchecked();
-            (
-                header.last_created_transaction,
-                header.last_stored_object,
-                header.last_committed_transaction,
-            )
-        };
+
 
         // Create catalog with last stored object
-        let catalog = Catalog::new(1, 2).with_last_stored_object(last_object);
+        let catalog = Catalog::new(pager.clone(), 1, 2);
         let catalog = SharedCatalog::from(catalog);
 
         // Create transaction coordinator with last transaction
-        let coordinator = TransactionCoordinator::new(pager.clone())
-            .with_last_created_transaction(last_created_transaction)
-            .with_last_committed_transaction(last_committed);
+        let coordinator = TransactionCoordinator::new(pager.clone());
+        // Load persisted aborted transactions from page zero
+        coordinator.load_aborted_transactions();
 
         // Create task runner
         let task_runner =
@@ -385,7 +376,6 @@ impl Database {
 
     /// Flushes all pending writes to disk.
     pub fn flush(&self) -> DatabaseResult<()> {
-        self.update_header()?;
         self.pager.write().flush()?;
         Ok(())
     }
@@ -393,27 +383,7 @@ impl Database {
     /// Synchronizes all data to disk.
     pub fn sync(&self) -> DatabaseResult<()> {
         self.flush()?;
-        self.update_header()?;
         self.pager.read().sync_all()?;
-        Ok(())
-    }
-
-    /// Updates the page zero header with current state.
-    fn update_header(&self) -> DatabaseResult<()> {
-        // Get current last object ID from catalog
-        let last_object = self.catalog.read().get_next_object_id();
-        let last_committed_transaction = self.coordinator.get_last_committed();
-        let last_created_transaction = self.coordinator.get_next_transaction();
-
-        // Update header in pager
-        {
-            let mut pager = self.pager.write();
-            let header = pager.header_unchecked_mut();
-            header.last_stored_object = last_object;
-            header.last_created_transaction = last_created_transaction;
-            header.last_committed_transaction = last_committed_transaction;
-        }
-
         Ok(())
     }
 
@@ -457,7 +427,6 @@ impl Database {
             let snapshot = tx_ctx.snapshot();
 
             catalog
-                .write()
                 .analyze(&tree_builder, &snapshot, sample_rate, max_sample_rows)
                 .map_err(box_err)?;
 
@@ -484,6 +453,10 @@ impl Database {
             // Abort all active transactions
             let aborted_txs = coordinator.abort_all();
             let oldest_active_xid = coordinator.get_last_committed();
+            println!(
+                "INICIANDO VACUUM CON OLDEST ACTIVE ID: {:?}",
+                oldest_active_xid
+            );
             if !aborted_txs.is_empty() {
                 println!("VACUUM: Aborted {} active transactions", aborted_txs.len());
             }
@@ -497,12 +470,14 @@ impl Database {
             let vacuum_snapshot = tx_ctx.snapshot();
 
             let mut stats = catalog
-                .write()
                 .vacuum(&tree_builder, &vacuum_snapshot, oldest_active_xid)
                 .map_err(box_err)?;
 
             // Clean up transaction coordinator
             stats.transactions_cleaned = coordinator.vacuum_transactions();
+
+            // Clear aborted transactions bitmap up to oldest_active_xid
+            pager.write().clear_aborted_up_to(oldest_active_xid);
 
             // Commit vacuum transaction
             tx_ctx.commit_transaction().map_err(box_err)?;

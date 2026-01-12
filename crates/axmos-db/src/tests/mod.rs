@@ -1,7 +1,9 @@
 mod tests;
 mod utils;
 
-use crate::{DBConfig, Database, DatabaseError, matrix_tests, param_tests, param2_tests};
+use crate::{
+    DBConfig, Database, DatabaseError, QueryResult, matrix_tests, param_tests, param2_tests,
+};
 use tests::*;
 use utils::*;
 
@@ -288,4 +290,141 @@ fn test_recovery_multiple_sessions() {
     }
 
     drop(dir);
+}
+
+/// Integration test to validate correct execution under the following scenario:
+///
+/// Transaction A creates a table.
+///
+/// Transaction B inserts data and commits.
+///
+/// Transaction C inserts more data and aborts.
+///
+/// The DB vaccums.
+///
+/// Only non aborted data should be read by new transactions.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_rollback_reopen_vacuum() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let dir = tempdir().expect("Failed to create temp dir");
+    let db_path = dir.path().join("rollback_test.axm");
+    let config = DBConfig::default();
+
+    let initial_size: u64;
+    let size_after_rollback: u64;
+    let size_after_vacuum: u64;
+
+    // Phase 1: Create database, table, insert data in transaction, then rollback
+    {
+        let db = Database::create(&db_path, config).expect("Failed to create database");
+
+        db.execute("CREATE TABLE test_table (id INT, name TEXT, value INT)")
+            .expect("Failed to create table");
+
+        let mut session = db.session().expect("Failed to create session");
+
+        for i in 0..10 {
+            let sql = format!(
+                "INSERT INTO test_table (id, name, value) VALUES ({}, 'item_{}', {})",
+                i,
+                i,
+                i * 10
+            );
+            session.execute(&sql).expect("Failed to insert");
+        }
+
+        session.commit_transaction().expect("Failed to commit");
+
+        let mut session = db.session().expect("Failed to create session");
+        for i in 10..20 {
+            let sql = format!(
+                "INSERT INTO test_table (id, name, value) VALUES ({}, 'item_{}', {})",
+                i,
+                i,
+                i * 10
+            );
+            session.execute(&sql).expect("Failed to insert");
+        }
+
+        session.abort_transaction().expect("Failed to abort");
+
+        db.flush().expect("Failed to flush");
+
+        initial_size = fs::metadata(&db_path)
+            .expect("Failed to get file metadata")
+            .len();
+
+        println!("Initial size after rollback: {} bytes", initial_size);
+    }
+
+    // Phase 2: Reopen database and verify data is not visible
+    {
+        let db = Database::open(&db_path, config).expect("Failed to open database");
+
+        let result = db
+            .execute("SELECT COUNT(*) FROM test_table")
+            .expect("Failed to execute select");
+
+        let count: i64 = match &result {
+            QueryResult::Rows(rows) => rows.first().unwrap()[0].as_big_int().unwrap().value(),
+            _ => panic!("Expected Select result"),
+        };
+
+        assert_eq!(count, 10, "Aborted transaction data should not be visible");
+
+        size_after_rollback = fs::metadata(&db_path)
+            .expect("Failed to get file metadata")
+            .len();
+
+        println!("Size after reopen: {} bytes", size_after_rollback);
+    }
+
+    // Phase 3: Run vacuum and verify space is recovered
+    {
+        let db = Database::open(&db_path, config).expect("Failed to open database");
+
+        let stats = db.vacuum().expect("Failed to vacuum");
+
+        println!("Vacuum stats: {:?}", stats);
+        assert!(
+            stats.total_freed() > 0,
+            "Vacuum should have freed some space from aborted transaction tuples"
+        );
+
+        db.flush().expect("Failed to flush after vacuum");
+
+        size_after_vacuum = fs::metadata(&db_path)
+            .expect("Failed to get file metadata")
+            .len();
+
+        println!("Size after vacuum: {} bytes", size_after_vacuum);
+    }
+
+    // Phase 4: Final verification
+    {
+        let db = Database::open(&db_path, config).expect("Failed to open database");
+
+        let result = db
+            .execute("SELECT COUNT(*) FROM test_table")
+            .expect("Failed to execute select");
+
+        let count: i64 = match &result {
+            QueryResult::Rows(rows) => rows.first().unwrap()[0].as_big_int().unwrap().value(),
+            _ => panic!("Expected Select result"),
+        };
+
+        assert_eq!(count, 10, "Data should still not be visible after vacuum");
+    }
+
+    println!("Test passed!");
+    println!("  Initial size:      {} bytes", initial_size);
+    println!("  After reopen:      {} bytes", size_after_rollback);
+    println!("  After vacuum:      {} bytes", size_after_vacuum);
+    println!(
+        "  Space recovered:   {} bytes",
+        initial_size.saturating_sub(size_after_vacuum)
+    );
 }

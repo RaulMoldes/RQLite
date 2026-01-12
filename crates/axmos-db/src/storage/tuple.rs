@@ -1001,7 +1001,7 @@ impl Tuple {
         let existing_deltas_start = layout.delta_start();
         let existing_deltas_size = self.data.len().saturating_sub(existing_deltas_start);
 
-        // === PHASE 1: Calculate total size ===
+        // Compute total required size
         let total_size = Self::calculate_new_tuple_size(
             &keys,
             &new_values,
@@ -1010,14 +1010,14 @@ impl Tuple {
             bitmap_size,
         );
 
-        // === PHASE 2: Allocate and write ===
         let mut new_data = Payload::alloc_aligned(total_size)?;
         let buffer = new_data.effective_data_mut();
 
         let mut cursor = 0;
 
         // Write header
-        let header = TupleHeader::new(old_version + 1, new_xmin, None);
+        let original_xmin = self.xmin();
+        let header = TupleHeader::new(old_version + 1, original_xmin, None);
         cursor = header.write_to(buffer, cursor);
 
         // Write null bitmap for new values

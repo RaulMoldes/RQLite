@@ -1,8 +1,8 @@
 use crate::{
     ObjectId, SerializationError, TransactionId, UInt64,
     core::SerializableType,
-    io::pager::BtreeBuilder,
-    make_shared,
+    io::pager::{BtreeBuilder, SharedPager},
+   make_shared_readonly,
     multithreading::coordinator::Snapshot,
     schema::{Schema, base::SchemaError},
     storage::tuple::{Tuple, TupleBuilder, TupleError, TupleReader, TupleRef},
@@ -13,7 +13,7 @@ use crate::{
     types::{Blob, DataType, DataTypeRef, PageId},
 };
 
-use std::sync::atomic::{AtomicU64, Ordering};
+
 
 use super::{
     Stats,
@@ -21,8 +21,7 @@ use super::{
     meta_index_schema, meta_table_schema,
     stats::{ColumnStats, StatsCollector},
 };
-#[cfg(test)]
-use std::collections::HashMap;
+
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -106,26 +105,22 @@ impl VacuumStats {
     }
 }
 
-#[derive(Debug)]
+
+make_shared_readonly!(SharedCatalog, Catalog);
+
 pub struct Catalog {
     meta_table: PageId,
     meta_index: PageId,
-    last_stored_object: AtomicU64,
+    pager: SharedPager,
 }
 
 impl Catalog {
-    pub(crate) fn new(meta_table: PageId, meta_index: PageId) -> Self {
+    pub(crate) fn new(pager: SharedPager, meta_table: PageId, meta_index: PageId) -> Self {
         Self {
             meta_table,
             meta_index,
-            last_stored_object: AtomicU64::new(0),
+            pager,
         }
-    }
-
-    pub(crate) fn with_last_stored_object(self, last_stored: ObjectId) -> Self {
-        self.last_stored_object
-            .store(last_stored, Ordering::Relaxed);
-        self
     }
 
     /// Converts a relation into a meta table tuple for storage.
@@ -154,7 +149,7 @@ impl Catalog {
 
     /// Recomputes the statistics for a single item in the catalog
     fn recompute_relation_stats(
-        &mut self,
+        &self,
         relation: &Relation,
         builder: &BtreeBuilder,
         snapshot: &Snapshot,
@@ -265,7 +260,7 @@ impl Catalog {
 
     /// Recomputes statistics for all the tables in the catalog
     pub(crate) fn analyze(
-        &mut self,
+        &self,
         builder: &BtreeBuilder,
         snapshot: &Snapshot,
         sample_rate: f64,
@@ -323,30 +318,12 @@ impl Catalog {
     ///
     /// Returns statistics about the vacuum operation.
     pub fn vacuum(
-        &mut self,
+        &self,
         builder: &BtreeBuilder,
         snapshot: &Snapshot,
         oldest_active_xid: TransactionId,
     ) -> CatalogResult<VacuumStats> {
         let mut stats = VacuumStats::default();
-
-        // First, vacuum the meta table itself
-        stats.meta_table_bytes_freed += self.vacuum_btree(
-            self.meta_table,
-            &meta_table_schema(),
-            builder,
-            snapshot,
-            oldest_active_xid,
-        )?;
-
-        // Vacuum the meta index
-        stats.meta_index_bytes_freed += self.vacuum_btree(
-            self.meta_index,
-            &meta_index_schema(),
-            builder,
-            snapshot,
-            oldest_active_xid,
-        )?;
 
         // Collect all user relations
         let schema = meta_table_schema();
@@ -391,6 +368,24 @@ impl Catalog {
             stats.total_bytes_freed += bytes_freed;
         }
 
+        // vacuum the meta table itself
+        stats.meta_table_bytes_freed += self.vacuum_btree(
+            self.meta_table,
+            &meta_table_schema(),
+            builder,
+            snapshot,
+            oldest_active_xid,
+        )?;
+
+        // Vacuum the meta index
+        stats.meta_index_bytes_freed += self.vacuum_btree(
+            self.meta_index,
+            &meta_index_schema(),
+            builder,
+            snapshot,
+            oldest_active_xid,
+        )?;
+
         Ok(stats)
     }
 
@@ -405,6 +400,7 @@ impl Catalog {
         oldest_active_xid: TransactionId,
     ) -> CatalogResult<usize> {
         let mut tuples_to_vaccum = Vec::new();
+        let mut tuples_to_remove = Vec::new();
         let mut total_freed = 0;
         {
             let mut tree = builder.build_tree(root);
@@ -418,13 +414,21 @@ impl Catalog {
                 if let Ok(pos) = position {
                     tree.with_cell_at(pos, |bytes| {
                         let mut tuple = Tuple::from_slice_unchecked(bytes)?;
-                        let freed = tuple.vaccum_with(oldest_active_xid, schema)?;
+                        let xmin = tuple.xmin();
 
-                        println!("{freed}");
-                        total_freed += freed;
-                        if freed > 0 {
-                            tuples_to_vaccum.push(tuple);
+                        let freed = if snapshot.is_transaction_aborted(xmin) || tuple.is_deleted() {
+                            let freed = tuple.full_data().len();
+                            tuples_to_remove.push(tuple);
+                            freed
+                        } else {
+                            let freed = tuple.vaccum_with(oldest_active_xid, schema)?;
+                            if freed > 0 {
+                                tuples_to_vaccum.push(tuple);
+                            };
+                            freed
                         };
+
+                        total_freed += freed;
                         Ok::<(), TupleError>(())
                     })??;
                 }
@@ -437,16 +441,25 @@ impl Catalog {
             tree.update(tree.get_root(), tuple, &schema)?;
         }
 
+        for tuple in tuples_to_remove {
+            tree.remove_tuple(tree.get_root(), &tuple, &schema)?;
+        }
+
         Ok(total_freed)
     }
-}
 
-make_shared!(SharedCatalog, Catalog);
-
-impl CatalogTrait for Catalog {
+    pub(crate) fn get_relation_by_name(
+        &self,
+        name: &str,
+        builder: &BtreeBuilder,
+        snapshot: &Snapshot,
+    ) -> CatalogResult<Relation> {
+        let id = self.bind_relation(name, builder, snapshot)?;
+        self.get_relation(id, builder, snapshot)
+    }
     /// Updates the metadata of a given relation using the provided RcPageAccessor.
-    fn update_relation(
-        &mut self,
+    pub(crate) fn update_relation(
+        &self,
         relation_id: ObjectId,
         new_row_id: Option<u64>,
         new_schema: Option<Schema>,
@@ -499,8 +512,8 @@ impl CatalogTrait for Catalog {
 
     /// Removes a given relation using the provided RcPageAccessor.
     /// Cascades the removal if required.
-    fn remove_relation(
-        &mut self,
+    pub(crate) fn remove_relation(
+        &self,
         rel: Relation,
         builder: &BtreeBuilder,
         snapshot: &Snapshot,
@@ -594,8 +607,8 @@ impl CatalogTrait for Catalog {
     }
 
     /// Stores a new relation in the meta table.
-    fn store_relation(
-        &mut self,
+    pub(crate) fn store_relation(
+        &self,
         relation: Relation,
         builder: &BtreeBuilder,
         transaction_id: TransactionId,
@@ -626,7 +639,7 @@ impl CatalogTrait for Catalog {
     }
 
     /// Gets a relation id from the meta index, looking up by name
-    fn bind_relation(
+    pub(crate) fn bind_relation(
         &self,
         name: &str,
         builder: &BtreeBuilder,
@@ -656,12 +669,19 @@ impl CatalogTrait for Catalog {
         };
     }
 
-    fn get_next_object_id(&self) -> ObjectId {
-        self.last_stored_object.fetch_add(1, Ordering::Relaxed)
+    pub(crate) fn get_next_object_id(&self) -> ObjectId {
+        // Atomically get and increment the object ID in PageZero
+        let object_id = {
+            let mut pager = self.pager.write();
+            let current = pager.get_last_stored_object();
+            pager.set_last_stored_object(current + 1);
+            current
+        };
+        object_id
     }
 
     /// Gets a relation from the meta table
-    fn get_relation(
+    pub(crate) fn get_relation(
         &self,
         id: ObjectId,
         builder: &BtreeBuilder,
@@ -688,229 +708,15 @@ impl CatalogTrait for Catalog {
     }
 }
 
-impl CatalogTrait for SharedCatalog {
-    fn store_relation(
-        &mut self,
-        relation: Relation,
-        builder: &BtreeBuilder,
-        transaction_id: TransactionId,
-    ) -> CatalogResult<()> {
-        self.write()
-            .store_relation(relation, builder, transaction_id)
-    }
-
-    fn remove_relation(
-        &mut self,
-        relation: Relation,
-        builder: &BtreeBuilder,
-        snapshot: &Snapshot,
-        cascade: bool,
-    ) -> CatalogResult<()> {
-        self.write()
-            .remove_relation(relation, builder, snapshot, cascade)
-    }
-
-    fn update_relation(
-        &mut self,
-        relation_id: ObjectId,
-        new_row_id: Option<u64>,
-        new_schema: Option<Schema>,
-        new_stats: Option<Stats>,
-        builder: &BtreeBuilder,
-        snapshot: &Snapshot,
-    ) -> CatalogResult<()> {
-        self.write().update_relation(
-            relation_id,
-            new_row_id,
-            new_schema,
-            new_stats,
-            builder,
-            snapshot,
-        )
-    }
-    fn get_relation(
-        &self,
-        id: ObjectId,
-        builder: &BtreeBuilder,
-        snapshot: &Snapshot,
-    ) -> CatalogResult<Relation> {
-        self.read().get_relation(id, builder, snapshot)
-    }
-
-    fn bind_relation(
-        &self,
-        name: &str,
-        builder: &BtreeBuilder,
-        snapshot: &Snapshot,
-    ) -> CatalogResult<ObjectId> {
-        self.read().bind_relation(name, builder, snapshot)
-    }
-
-    fn get_next_object_id(&self) -> ObjectId {
-        self.read().get_next_object_id()
-    }
-}
-
-pub trait CatalogTrait {
-    fn store_relation(
-        &mut self,
-        relation: Relation,
-        builder: &BtreeBuilder,
-        transaction_id: TransactionId,
-    ) -> CatalogResult<()>;
-
-    fn get_relation(
-        &self,
-        id: ObjectId,
-        builder: &BtreeBuilder,
-        snapshot: &Snapshot,
-    ) -> CatalogResult<Relation>;
-
-    fn bind_relation(
-        &self,
-        name: &str,
-        builder: &BtreeBuilder,
-        snapshot: &Snapshot,
-    ) -> CatalogResult<ObjectId>;
-
-    fn update_relation(
-        &mut self,
-        relation_id: ObjectId,
-        new_row_id: Option<u64>,
-        new_schema: Option<Schema>,
-        new_stats: Option<Stats>,
-        builder: &BtreeBuilder,
-        snapshot: &Snapshot,
-    ) -> CatalogResult<()>;
-
-    fn remove_relation(
-        &mut self,
-        relation: Relation,
-        builder: &BtreeBuilder,
-        snapshot: &Snapshot,
-        cascade: bool,
-    ) -> CatalogResult<()>;
-
-    fn get_relation_by_name(
-        &self,
-        name: &str,
-        builder: &BtreeBuilder,
-        snapshot: &Snapshot,
-    ) -> CatalogResult<Relation> {
-        let id = self.bind_relation(name, builder, snapshot)?;
-        self.get_relation(id, builder, snapshot)
-    }
-
-    fn get_next_object_id(&self) -> ObjectId;
-}
-
-#[cfg(test)]
-pub type TestMetaTable = HashMap<ObjectId, Relation>;
-
-#[cfg(test)]
-pub type TestMetaIndex = HashMap<String, ObjectId>;
-
-// Mock test catalog for tests
-#[cfg(test)]
 #[derive(Clone)]
-pub struct MemCatalog {
-    meta_table: TestMetaTable,
-    meta_index: TestMetaIndex,
-}
-
-#[cfg(test)]
-impl MemCatalog {
-    pub fn new() -> Self {
-        Self {
-            meta_table: HashMap::new(),
-            meta_index: HashMap::new(),
-        }
-    }
-}
-
-#[cfg(test)]
-impl CatalogTrait for MemCatalog {
-    fn bind_relation(
-        &self,
-        name: &str,
-        _builder: &BtreeBuilder,
-        _snapshot: &Snapshot,
-    ) -> CatalogResult<ObjectId> {
-        let object = self
-            .meta_index
-            .get(name)
-            .ok_or(CatalogError::InvalidObjectName(name.to_string()))?;
-        Ok(*object)
-    }
-
-    fn get_next_object_id(&self) -> ObjectId {
-        self.meta_table.len() as u64
-    }
-
-    fn get_relation(
-        &self,
-        id: ObjectId,
-        _builder: &BtreeBuilder,
-        _snapshot: &Snapshot,
-    ) -> CatalogResult<Relation> {
-        let object = self
-            .meta_table
-            .get(&id)
-            .ok_or(CatalogError::TableNotFound(id))?;
-        Ok(object.clone())
-    }
-
-    fn store_relation(
-        &mut self,
-        relation: Relation,
-        builder: &BtreeBuilder,
-        transaction_id: TransactionId,
-    ) -> CatalogResult<()> {
-        self.meta_index
-            .insert(relation.name().to_string(), relation.object_id());
-        self.meta_table.insert(relation.object_id(), relation);
-
-        Ok(())
-    }
-
-    fn update_relation(
-        &mut self,
-        relation_id: ObjectId,
-        new_row_id: Option<u64>,
-        new_schema: Option<Schema>,
-        new_stats: Option<Stats>,
-        builder: &BtreeBuilder,
-        snapshot: &Snapshot,
-    ) -> CatalogResult<()> {
-        Ok(())
-        //self.store_relation(relation, builder, snapshot.xid())
-    }
-
-    fn remove_relation(
-        &mut self,
-        relation: Relation,
-        builder: &BtreeBuilder,
-        snapshot: &Snapshot,
-        cascade: bool,
-    ) -> CatalogResult<()> {
-        self.meta_table.remove(&relation.object_id());
-        self.meta_index.remove(relation.name());
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-pub struct StatisticsProvider<'a, C: CatalogTrait + Clone> {
-    catalog: C,
+pub struct StatisticsProvider<'a> {
+    catalog: SharedCatalog,
     builder: BtreeBuilder,
     snapshot: &'a Snapshot,
 }
 
-impl<'a, C> StatisticsProvider<'a, C>
-where
-    C: CatalogTrait + Clone,
-{
-    pub fn new(catalog: C, builder: BtreeBuilder, snapshot: &'a Snapshot) -> Self {
+impl<'a> StatisticsProvider<'a> {
+    pub fn new(catalog: SharedCatalog, builder: BtreeBuilder, snapshot: &'a Snapshot) -> Self {
         Self {
             catalog,
             builder,
@@ -919,7 +725,7 @@ where
     }
 }
 
-impl<'a, C: CatalogTrait + Clone> StatsProvider for StatisticsProvider<'a, C> {
+impl<'a> StatsProvider for StatisticsProvider<'a> {
     fn get_stats(&self, object: ObjectId) -> Option<Stats> {
         let relation = self
             .catalog
@@ -943,96 +749,4 @@ impl<'a, C: CatalogTrait + Clone> StatsProvider for StatisticsProvider<'a, C> {
 pub trait StatsProvider {
     fn get_stats(&self, object: ObjectId) -> Option<Stats>;
     fn get_column_stats(&self, object: ObjectId, column_index: usize) -> Option<ColumnStats>;
-}
-
-// Test para Catalog::analyze (añadir en catalog.rs dentro de #[cfg(test)])
-#[cfg(test)]
-mod analyze_tests {
-    use super::*;
-    use crate::{
-        DBConfig,
-        io::pager::{Pager, SharedPager},
-        multithreading::coordinator::TransactionCoordinator,
-        schema::base::Column,
-        snapshot,
-        storage::page::BtreePage,
-        types::DataTypeKind,
-    };
-    use tempfile::TempDir;
-
-    fn setup_test_db() -> (TempDir, SharedPager, BtreeBuilder, TransactionCoordinator) {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("test.db");
-
-        let pager = Pager::from_config(DBConfig::default(), &path).unwrap();
-        let pager = SharedPager::from(pager);
-
-        let tree_builder = {
-            let p = pager.read();
-            BtreeBuilder::new(p.min_keys_per_page(), p.num_siblings_per_side())
-                .with_pager(pager.clone())
-        };
-
-        let coordinator = TransactionCoordinator::new(pager.clone());
-
-        (dir, pager, tree_builder, coordinator)
-    }
-
-    #[test]
-    fn test_catalog_analyze_empty() {
-        let (_dir, pager, tree_builder, coordinator) = setup_test_db();
-
-        // Allocate meta pages
-        let (meta_table, meta_index) = {
-            let mut p = pager.write();
-            let mt = p.allocate_page::<BtreePage>().unwrap();
-            let mi = p.allocate_page::<BtreePage>().unwrap();
-            (mt, mi)
-        };
-
-        let mut catalog = Catalog::new(meta_table, meta_index);
-        let snapshot = snapshot!(xid: 1, xmin: 0);
-
-        // Analyze on empty catalog should succeed
-        let result = catalog.analyze(&tree_builder, &snapshot, 1.0, 10000);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_catalog_analyze_with_table() {
-        let (_dir, pager, tree_builder, coordinator) = setup_test_db();
-
-        // Allocate meta pages
-        let (meta_table, meta_index, table_root) = {
-            let mut p = pager.write();
-            let mt = p.allocate_page::<BtreePage>().unwrap();
-            let mi = p.allocate_page::<BtreePage>().unwrap();
-            let tr = p.allocate_page::<BtreePage>().unwrap();
-            (mt, mi, tr)
-        };
-
-        let mut catalog = Catalog::new(meta_table, meta_index);
-        let snapshot = snapshot!(xid: 1, xmin: 0);
-
-        // Create a test table schema
-        let relation = Relation::table(
-            1,
-            "test_table",
-            table_root,
-            vec![
-                Column::new_with_defaults(DataTypeKind::BigInt, "id"),
-                Column::new_with_defaults(DataTypeKind::Blob, "name"),
-            ],
-        );
-
-        // Store the relation
-        catalog
-            .store_relation(relation, &tree_builder, snapshot.xid())
-            .unwrap();
-
-        // Now analyze
-        let result = catalog.analyze(&tree_builder, &snapshot, 1.0, 10000);
-
-        assert!(result.is_ok());
-    }
 }

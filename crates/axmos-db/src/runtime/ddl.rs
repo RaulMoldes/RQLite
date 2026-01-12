@@ -9,7 +9,7 @@ use crate::{
     schema::{
         DatabaseItem,
         base::{Column, ForeignKeyInfo, Relation, Schema, SchemaError, TableConstraint},
-        catalog::{CatalogError, CatalogTrait},
+        catalog::CatalogError,
     },
     sql::binder::bounds::*,
     storage::{
@@ -156,7 +156,6 @@ impl DdlExecutor {
         // Store in catalog
         self.ctx
             .catalog()
-            .write()
             .store_relation(relation, &tree_builder, snapshot.xid())?;
 
         let mut relation = self
@@ -219,7 +218,6 @@ impl DdlExecutor {
         let mut table_relation =
             self.ctx
                 .catalog()
-                .read()
                 .get_relation(table_id, &tree_builder, &snapshot)?;
 
         let table_root = table_relation.root();
@@ -241,7 +239,7 @@ impl DdlExecutor {
         index_columns.push(Column::new_with_defaults(DataTypeKind::BigUInt, "row_id"));
 
         // Allocate resources
-        let object_id = self.ctx.catalog().read().get_next_object_id();
+        let object_id = self.ctx.catalog().get_next_object_id();
         let root_page = self.ctx.pager().write().allocate_page::<BtreePage>()?;
 
         // Create the index relation
@@ -258,7 +256,6 @@ impl DdlExecutor {
         // Store in catalog
         self.ctx
             .catalog()
-            .write()
             .store_relation(index_relation, &tree_builder, snapshot.xid())?;
 
         // Update the table schema to reference this index
@@ -284,7 +281,7 @@ impl DdlExecutor {
             }
         }
 
-        self.ctx.catalog().write().update_relation(
+        self.ctx.catalog().update_relation(
             table_id,
             None,
             Some(table_relation.schema().clone()),
@@ -380,7 +377,6 @@ impl DdlExecutor {
             let tree_builder = self.ctx.tree_builder();
             self.ctx
                 .catalog()
-                .read()
                 .get_relation(stmt.table_id, &tree_builder, &snapshot)?
         };
 
@@ -431,7 +427,7 @@ impl DdlExecutor {
         let id = relation.object_id();
         let tree_builder = self.ctx.tree_builder();
         // Update the relation in catalog
-        self.ctx.catalog().write().update_relation(
+        self.ctx.catalog().update_relation(
             id,
             None,
             Some(relation.into_schema()),
@@ -550,7 +546,6 @@ impl DdlExecutor {
                 let ref_table_name = self
                     .ctx
                     .catalog()
-                    .read()
                     .get_relation(*ref_table_id, &tree_builder, &snapshot)
                     .map(|r| r.name().to_string())?;
 
@@ -597,13 +592,12 @@ impl DdlExecutor {
         let relation =
             self.ctx
                 .catalog()
-                .read()
                 .get_relation(table_id, &tree_builder, &snapshot)?;
 
         let table_name = relation.name().to_string();
 
         // Remove the relation
-        self.ctx.catalog().write().remove_relation(
+        self.ctx.catalog().remove_relation(
             relation,
             &tree_builder,
             &snapshot,
@@ -619,7 +613,6 @@ impl DdlExecutor {
         let tree_builder = self.ctx.tree_builder();
         self.ctx
             .catalog()
-            .read()
             .get_relation_by_name(name, &tree_builder, &snapshot)
             .is_ok()
     }

@@ -30,9 +30,14 @@ pub enum RecordType {
     Commit = 0x01,
     Abort = 0x02,
     End = 0x03,
+    /// DML INSTRUNCTIONS
     Update = 0x06,
     Delete = 0x07,
     Insert = 0x08,
+    /// DDL INSTRUNCTIONS
+    Create = 0x09,
+    Drop = 0x0A,
+    Alter = 0x0B
 }
 
 /// The write ahead log header stores metadata about the file.

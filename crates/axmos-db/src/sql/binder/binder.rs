@@ -4,8 +4,8 @@ use crate::{
     io::pager::BtreeBuilder,
     multithreading::coordinator::Snapshot,
     schema::{
+        SharedCatalog,
         base::{Column, Schema, SchemaError, SchemaResult},
-        catalog::CatalogTrait,
     },
     sql::parser::ast::{
         AlterAction, AlterColumnAction, AlterTableStatement, BinaryOperator, ColumnDefExpr,
@@ -73,8 +73,8 @@ impl From<SchemaError> for BinderError {
 
 pub type BinderResult<T> = Result<T, BinderError>;
 
-pub struct Binder<'a, C: CatalogTrait> {
-    catalog: C,
+pub struct Binder<'a> {
+    catalog: SharedCatalog,
     tree_builder: BtreeBuilder,
     snapshot: &'a Snapshot,
     scopes: ScopeStack,
@@ -82,8 +82,8 @@ pub struct Binder<'a, C: CatalogTrait> {
     cte_queries: Vec<BoundSelect>,
 }
 
-impl<'a, C: CatalogTrait> Binder<'a, C> {
-    pub fn new(catalog: C, tree_builder: BtreeBuilder, snapshot: &'a Snapshot) -> Self {
+impl<'a> Binder<'a> {
+    pub fn new(catalog: SharedCatalog, tree_builder: BtreeBuilder, snapshot: &'a Snapshot) -> Self {
         Self {
             catalog,
             tree_builder,

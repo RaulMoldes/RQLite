@@ -4,10 +4,7 @@
 //! logical operators that can be optimized by the Cascades optimizer.
 
 use crate::{
-    schema::{
-        Schema,
-        catalog::{CatalogTrait, StatisticsProvider},
-    },
+    schema::{Schema, catalog::StatisticsProvider},
     sql::{
         binder::bounds::*,
         parser::ast::JoinType,
@@ -21,15 +18,15 @@ use super::memo::{GroupId, Memo};
 use super::prop::{LogicalProperties, PropertyDeriver};
 
 /// Builds logical plans from bound statements.
-pub struct Planner<'a, C: CatalogTrait + Clone> {
+pub struct Planner<'a> {
     memo: &'a mut Memo,
-    deriver: &'a PropertyDeriver<StatisticsProvider<'a, C>>,
+    deriver: &'a PropertyDeriver<StatisticsProvider<'a>>,
     /// CTE storage for WITH queries.
     cte_groups: Vec<Option<GroupId>>,
 }
 
-impl<'a, C: CatalogTrait + Clone> Planner<'a, C> {
-    pub fn new(memo: &'a mut Memo, deriver: &'a PropertyDeriver<StatisticsProvider<C>>) -> Self {
+impl<'a> Planner<'a> {
+    pub fn new(memo: &'a mut Memo, deriver: &'a PropertyDeriver<StatisticsProvider>) -> Self {
         Self {
             memo,
             deriver,

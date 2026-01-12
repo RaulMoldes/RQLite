@@ -122,6 +122,11 @@ impl Snapshot {
             aborted_txs: aborted,
         }
     }
+
+    pub fn is_transaction_aborted(&self, xid: TransactionId) -> bool {
+        self.aborted_txs.contains(&xid)
+    }
+
     #[inline]
     pub fn xmin(&self) -> TransactionId {
         self.xmin
@@ -283,29 +288,25 @@ impl Clone for TransactionCoordinator {
         Self {
             transactions: Arc::clone(&self.transactions),
             pager: self.pager.clone(),
-            last_committed: Arc::clone(&self.last_committed),
             commit_counter: Arc::clone(&self.commit_counter),
             tuple_commits: Arc::clone(&self.tuple_commits),
-            last_created_transaction: Arc::clone(&self.last_created_transaction),
         }
     }
 }
+
 /// Central coordinator for all transactions in the system.
 ///
-///  Creates transactions, snapshots, tracks active transactions, validates commits and maintains commit order.
+/// Creates transactions, snapshots, tracks active transactions, validates commits and maintains commit order.
+/// Transaction state (last_created, last_committed, aborted bitmap) is persisted in PageZero header.
 pub struct TransactionCoordinator {
-    /// All active and recently committed transactions
+    /// All active and recently committed transactions (in-memory only)
     transactions: SharedTransactionTable,
-    /// Shared pager for I/O operations
+    /// Shared pager for I/O operations (source of truth for persistent state)
     pager: SharedPager,
-    /// Last committed transaction to create snapshots
-    last_committed: Arc<RwLock<Option<TransactionId>>>,
-    /// Global commit timestamp counter
+    /// Global commit timestamp counter for OCC validation
     commit_counter: Arc<AtomicU64>,
     /// Last commit timestamp per tuple - tracks when each tuple was last modified
     tuple_commits: TupleCommitLog,
-    /// Last created transaction id:
-    last_created_transaction: Arc<AtomicU64>,
 }
 
 enum ValidationResult {
@@ -315,34 +316,42 @@ enum ValidationResult {
 
 impl TransactionCoordinator {
     pub fn new(pager: SharedPager) -> Self {
-        Self {
+        let coordinator = Self {
             transactions: Arc::new(RwLock::new(HashMap::new())),
             pager,
-            last_committed: Arc::new(RwLock::new(None)),
             commit_counter: Arc::new(AtomicU64::new(1)),
             tuple_commits: Arc::new(RwLock::new(HashMap::new())),
-            last_created_transaction: Arc::new(AtomicU64::new(0)),
-        }
+        };
+
+        // Load aborted transactions from PageZero into memory
+        coordinator.load_aborted_transactions();
+
+        coordinator
     }
 
-    pub fn with_last_created_transaction(self, last_id: TransactionId) -> Self {
-        self.last_created_transaction
-            .store(last_id, Ordering::Relaxed);
-        self
-    }
-
+    /// Returns the last committed transaction ID from PageZero header
     pub fn get_last_committed(&self) -> TransactionId {
-        self.last_committed.read().unwrap_or(0)
+        self.pager.read().get_last_committed_transaction()
     }
 
-    pub fn with_last_committed_transaction(self, last_id: TransactionId) -> Self {
-        *self.last_committed.write() = Some(last_id);
-        self
+    /// Returns the last created transaction ID from PageZero header
+    fn get_last_created(&self) -> TransactionId {
+        self.pager.read().get_last_created_transaction()
     }
 
-    pub fn get_next_transaction(&self) -> TransactionId {
-        self.last_created_transaction
-            .fetch_add(1, Ordering::Relaxed)
+    /// Loads aborted transactions from PageZero bitmap into the in-memory transaction table
+    pub fn load_aborted_transactions(&self) {
+        let aborted_txs = self.pager.read().get_aborted_transactions();
+        let mut txs = self.transactions.write();
+
+        for txid in aborted_txs {
+            if !txs.contains_key(&txid) {
+                let snapshot = Snapshot::new(txid, txid, None, HashSet::new(), HashSet::new());
+                let mut entry = TransactionMetadata::new(txid, snapshot, 0);
+                entry.state = TransactionState::Aborted;
+                txs.insert(txid, entry);
+            }
+        }
     }
 
     /// Get a set of transactions with the provided state.
@@ -360,14 +369,17 @@ impl TransactionCoordinator {
         // Collect active transaction ids
         let active: HashSet<TransactionId> = self.transaction_set(TransactionState::Active);
 
-        // Collect tracked aborted transaction ids.
+        // Collect tracked aborted transaction ids
         let aborted: HashSet<TransactionId> = self.transaction_set(TransactionState::Aborted);
 
         // xmin is the smallest active transaction ID (or our ID if none active)
         let xmin = active.iter().min().copied().unwrap_or(txid);
 
-        // xmax is the next transaction ID to be assigned
-        let xmax = *self.last_committed.read();
+        // xmax is the last committed transaction from PageZero
+        let xmax = {
+            let last = self.get_last_committed();
+            if last == 0 { None } else { Some(last) }
+        };
 
         Ok(Snapshot::new(txid, xmin, xmax, active, aborted))
     }
@@ -375,18 +387,21 @@ impl TransactionCoordinator {
     /// Begin a new transaction.
     /// Returns a [TransactionHandle] to the thread that requested the begin operation.
     pub fn begin(&self) -> TransactionResult<TransactionHandle> {
-        let txid = self
-            .last_created_transaction
-            .fetch_add(1, Ordering::Relaxed);
+        // Atomically get and increment the transaction ID in PageZero
+        let txid = {
+            let mut pager = self.pager.write();
+            let current = pager.get_last_created_transaction();
+            pager.set_last_created_transaction(current + 1);
+            current
+        };
 
-        // Create snapshot under read lock
+        // Create snapshot
         let snapshot = self.snapshot(txid)?;
         let start_ts = self.commit_counter.load(Ordering::SeqCst);
 
         // Insert new transaction entry
         {
             let mut txs = self.transactions.write();
-
             let entry = TransactionMetadata::new(txid, snapshot.clone(), start_ts);
             txs.insert(txid, entry);
         }
@@ -408,10 +423,16 @@ impl TransactionCoordinator {
         match self.validate_write_set(txid)? {
             ValidationResult::Allowed => {
                 self.set_transaction_state(txid, TransactionState::Committed)?;
-                let mut last = self.last_committed.write();
-                if last.map_or(true, |l| txid > l) {
-                    *last = Some(txid);
+
+                // Update last_committed in PageZero if this is the highest committed txid
+                {
+                    let mut pager = self.pager.write();
+                    let current_last = pager.get_last_committed_transaction();
+                    if txid > current_last {
+                        pager.set_last_committed_transaction(txid);
+                    }
                 }
+
                 Ok(())
             }
 
@@ -424,11 +445,16 @@ impl TransactionCoordinator {
 
     /// Abort a transaction
     pub fn abort(&self, txid: TransactionId) -> TransactionResult<()> {
-        let mut txs = self.transactions.write();
+        {
+            let mut txs = self.transactions.write();
 
-        let entry = txs.get_mut(&txid).ok_or(TransactionError::NotFound(txid))?;
+            let entry = txs.get_mut(&txid).ok_or(TransactionError::NotFound(txid))?;
 
-        entry.state = TransactionState::Aborted;
+            entry.state = TransactionState::Aborted;
+        }
+
+        // Persist aborted state to page zero for crash recovery
+        self.pager.write().mark_transaction_aborted(txid);
         Ok(())
     }
 

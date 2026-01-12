@@ -1,11 +1,11 @@
 use crate::{
-    io::pager::BtreeBuilder,
+    io::pager::{Pager, SharedPager, BtreeBuilder},
     multithreading::coordinator::Snapshot,
     schema::{
         DatabaseItem,
         base::SchemaError,
         base::{Column, Relation},
-        catalog::{CatalogTrait, MemCatalog},
+        catalog::{Catalog, SharedCatalog},
     },
     sql::{
         binder::{
@@ -17,12 +17,34 @@ use crate::{
         parser::Parser,
         planner::{CascadesOptimizer, PhysicalPlan},
     },
+    storage::page::BtreePage,
     types::DataTypeKind,
+    common::DBConfig
 };
 
+use std::path::Path;
+
+use tempfile::TempDir;
+
 /// Helper: Creates a test catalog with predefined tables
-fn create_test_catalog(builder: &BtreeBuilder) -> MemCatalog {
-    let mut catalog = MemCatalog::new();
+fn create_test_catalog(path: impl AsRef<Path>, snapshot: &Snapshot, builder: &BtreeBuilder) -> SharedCatalog {
+
+    let config = DBConfig::default();
+    let pager = SharedPager::from(Pager::from_config(config, path).expect("Failed to create pager"));
+
+    let (meta_table_page, meta_index_page) = {
+            let mut p = pager.write();
+            let meta_table = p
+                .allocate_page::<BtreePage>()
+                .expect("Failed to allocate meta table page");
+            let meta_index = p
+                .allocate_page::<BtreePage>()
+                .expect("Failed to allocate meta index page");
+            (meta_table, meta_index)
+        };
+
+        let catalog = Catalog::new(pager.clone(), meta_table_page, meta_index_page);
+        let catalog = SharedCatalog::from(catalog);
 
     // Table: users (id INT, name TEXT, email TEXT, age INT)
     let users = Relation::table(
@@ -37,7 +59,7 @@ fn create_test_catalog(builder: &BtreeBuilder) -> MemCatalog {
             Column::new_with_defaults(DataTypeKind::Int, "age"),
         ],
     );
-    catalog.store_relation(users, builder, 0).unwrap();
+    catalog.store_relation(users, &builder, 0).unwrap();
 
     // Table: orders (id INT, user_id INT, amount DOUBLE, status TEXT)
     let orders = Relation::table(
@@ -52,7 +74,7 @@ fn create_test_catalog(builder: &BtreeBuilder) -> MemCatalog {
             Column::new_with_defaults(DataTypeKind::Blob, "status"),
         ],
     );
-    catalog.store_relation(orders, builder, 0).unwrap();
+    catalog.store_relation(orders, &builder, 0).unwrap();
 
     // Table: products (id INT, name TEXT, price DOUBLE, category TEXT)
     let products = Relation::table(
@@ -66,17 +88,18 @@ fn create_test_catalog(builder: &BtreeBuilder) -> MemCatalog {
             Column::new_with_defaults(DataTypeKind::Blob, "category"),
         ],
     );
-    catalog.store_relation(products, builder, 0).unwrap();
+    catalog.store_relation(products, &builder, 0).unwrap();
 
     catalog
 }
 
 /// Helper: Parses and binds SQL
 fn bind_sql(sql: &str) -> BinderResult<BoundStatement> {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.db");
     let snapshot = Snapshot::default();
     let builder = BtreeBuilder::default();
-    let catalog = create_test_catalog(&builder);
-
+    let catalog = create_test_catalog(db_path, &snapshot, &builder);
     let mut parser = Parser::new(sql);
     let stmt = parser
         .parse()
@@ -86,9 +109,9 @@ fn bind_sql(sql: &str) -> BinderResult<BoundStatement> {
 }
 
 /// Helper: Parses and analyzes SQL, returns result
-fn analyze_sql<C: CatalogTrait>(
+fn analyze_sql(
     sql: &str,
-    catalog: C,
+    catalog: SharedCatalog,
     builder: BtreeBuilder,
     snapshot: Snapshot,
 ) -> AnalyzerResult<()> {
@@ -99,18 +122,22 @@ fn analyze_sql<C: CatalogTrait>(
 }
 
 fn analyzer_test(sql: &str) -> AnalyzerResult<()> {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.db");
     let snapshot = Snapshot::default();
     let builder = BtreeBuilder::default();
-    let catalog = create_test_catalog(&builder);
+    let catalog = create_test_catalog(db_path, &snapshot, &builder);
 
     analyze_sql(sql, catalog, builder, snapshot)
 }
 
 /// Helper: Optimizes SQL and returns the physical plan
 fn optimize_sql(sql: &str) -> PhysicalPlan {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.db");
     let snapshot = Snapshot::default();
     let builder = BtreeBuilder::default();
-    let catalog = create_test_catalog(&builder);
+    let catalog = create_test_catalog(db_path, &snapshot, &builder);
 
     let mut parser = Parser::new(sql);
     let stmt = parser.parse().expect("parse failed");
@@ -124,9 +151,11 @@ fn optimize_sql(sql: &str) -> PhysicalPlan {
 
 /// Helper: Optimizes SQL and returns Result for error testing
 fn try_optimize_sql(sql: &str) -> Result<PhysicalPlan, String> {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.db");
     let snapshot = Snapshot::default();
     let builder = BtreeBuilder::default();
-    let catalog = create_test_catalog(&builder);
+    let catalog = create_test_catalog(db_path, &snapshot, &builder);
 
     let mut parser = Parser::new(sql);
     let stmt = parser.parse().map_err(|e| e.to_string())?;

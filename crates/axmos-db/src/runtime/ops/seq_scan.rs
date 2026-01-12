@@ -3,7 +3,7 @@ use crate::{
         ExecutionStats, Executor, RuntimeError, RuntimeResult, context::ThreadContext,
         eval::ExpressionEvaluator,
     },
-    schema::{Schema, catalog::CatalogTrait},
+    schema::Schema,
     sql::{binder::bounds::BoundExpression, planner::physical::SeqScanOp},
     storage::tuple::Row,
     tree::bplustree::BtreePositionalIterator,

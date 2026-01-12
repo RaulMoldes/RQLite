@@ -1,6 +1,6 @@
 use crate::{
     DBConfig, DEFAULT_BTREE_MIN_KEYS, DEFAULT_BTREE_NUM_SIBLINGS_PER_SIDE, DEFAULT_CACHE_SIZE,
-    MAGIC, PAGE_ALIGNMENT, TransactionId, UInt64,
+    MAGIC, ObjectId, PAGE_ALIGNMENT, TransactionId, UInt64,
     core::SerializableType,
     io::{
         cache::PageCache,
@@ -11,11 +11,8 @@ use crate::{
     make_shared,
     multithreading::frames::{AsReadLatch, AsWriteLatch, Frame, MemFrame},
     runtime::{
-        RuntimeResult,
-        context::{ThreadContext, TransactionLogger},
-        dml::DmlExecutor,
+        RuntimeResult, context::{ThreadContext, TransactionLogger}, ddl::DdlExecutor, dml::DmlExecutor
     },
-    schema::catalog::CatalogTrait,
     storage::{
         core::{buffer::MemBlock, traits::Buffer},
         page::{OverflowPage, PageZero, PageZeroHeader},
@@ -107,13 +104,15 @@ impl<'a> FileOperations for Pager {
 }
 
 pub struct WalRecuperator {
-    executor: DmlExecutor,
+    dml_executor: DmlExecutor,
+    ddl_executor: DdlExecutor
 }
 
 impl WalRecuperator {
     pub(crate) fn new(ctx: ThreadContext, logger: TransactionLogger) -> Self {
         Self {
-            executor: DmlExecutor::new(ctx, logger),
+            dml_executor: DmlExecutor::new(ctx.clone(), logger),
+            ddl_executor: DdlExecutor::new(ctx)
         }
     }
 
@@ -139,12 +138,12 @@ impl WalRecuperator {
                         .expect("Table id must be set for DML logs"); // Sfae to unwrap since all
 
                     // Get builder and snapshot
-                    let builder = self.executor.ctx().tree_builder();
-                    let snapshot = self.executor.ctx().snapshot();
+                    let builder = self.dml_executor.ctx().tree_builder();
+                    let snapshot = self.dml_executor.ctx().snapshot();
 
                     // Locate the table
                     let table = self
-                        .executor
+                        .dml_executor
                         .ctx()
                         .catalog()
                         .get_relation(table_id, &builder, &snapshot)?;
@@ -157,7 +156,7 @@ impl WalRecuperator {
                         &snapshot,
                     )? {
                         let columns = schema.column_indexes();
-                        self.executor.insert(table_id, &columns, &row)?;
+                        self.dml_executor.insert(table_id, &columns, &row)?;
                     }
                 }
                 if let Some(update_operation) = analysis.update_ops.get(&lsn) {
@@ -170,12 +169,12 @@ impl WalRecuperator {
                         .expect("Row id must be set for DML logs");
 
                     // Get builder and snapshot
-                    let builder = self.executor.ctx().tree_builder();
-                    let snapshot = self.executor.ctx().snapshot();
+                    let builder = self.dml_executor.ctx().tree_builder();
+                    let snapshot = self.dml_executor.ctx().snapshot();
 
                     // Locate the table
                     let table = self
-                        .executor
+                        .dml_executor
                         .ctx()
                         .catalog()
                         .get_relation(table_id, &builder, &snapshot)?;
@@ -193,7 +192,7 @@ impl WalRecuperator {
                             schema,
                             &snapshot,
                         )? {
-                            self.executor
+                            self.dml_executor
                                 .update_row(table_id, &row_id, &redo_row, &undo_row)?;
                         }
                     }
@@ -208,25 +207,27 @@ impl WalRecuperator {
                         .row_id()
                         .map(|r| UInt64::from(r))
                         .expect("Row id must be set for DML logs");
-                    println!("DESHACIENCIO INSERT OPERATIION");
-                    println!("{:?}", insert_operation);
+          
 
                     let row_id_bytes = row_id.serialize()?;
 
                     // Get builder and snapshot
-                    let builder = self.executor.ctx().tree_builder();
-                    let snapshot = self.executor.ctx().snapshot();
+                    let builder = self.dml_executor.ctx().tree_builder();
+                    let snapshot = self.dml_executor.ctx().snapshot();
 
                     // Locate the table
                     let table = self
-                        .executor
+                        .dml_executor
                         .ctx()
                         .catalog()
                         .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
-                    self.executor.delete(table_id, &row_id)?;
+                    self.dml_executor.delete(table_id, &row_id)?;
                 }
+
+
+
             }
         }
 
@@ -254,18 +255,18 @@ impl WalRecuperator {
                     let row_id_bytes = row_id.serialize()?;
 
                     // Get builder and snapshot
-                    let builder = self.executor.ctx().tree_builder();
-                    let snapshot = self.executor.ctx().snapshot();
+                    let builder = self.dml_executor.ctx().tree_builder();
+                    let snapshot = self.dml_executor.ctx().snapshot();
 
                     // Locate the table
                     let table = self
-                        .executor
+                        .dml_executor
                         .ctx()
                         .catalog()
                         .get_relation(table_id, &builder, &snapshot)?;
 
                     let schema = table.schema();
-                    self.executor.delete(table_id, &row_id)?;
+                    self.dml_executor.delete(table_id, &row_id)?;
                 }
 
                 if let Some(update_operation) = analysis.update_ops.get(&lsn) {
@@ -278,12 +279,12 @@ impl WalRecuperator {
                         .expect("Row id must be set for DML logs");
 
                     // Get builder and snapshot
-                    let builder = self.executor.ctx().tree_builder();
-                    let snapshot = self.executor.ctx().snapshot();
+                    let builder = self.dml_executor.ctx().tree_builder();
+                    let snapshot = self.dml_executor.ctx().snapshot();
 
                     // Locate the table
                     let table = self
-                        .executor
+                        .dml_executor
                         .ctx()
                         .catalog()
                         .get_relation(table_id, &builder, &snapshot)?;
@@ -301,7 +302,7 @@ impl WalRecuperator {
                             schema,
                             &snapshot,
                         )? {
-                            self.executor
+                            self.dml_executor
                                 .update_row(table_id, &row_id, &undo_row, &redo_row)?;
                         }
                     }
@@ -312,16 +313,15 @@ impl WalRecuperator {
                         .object_id()
                         .expect("Table id must be set for DML logs"); // Sfae to unwrap since all
 
-                    println!("EJECUTANDO INSERT OPERATIION");
-                    println!("{:?}", insert_operation);
+
 
                     // Get builder and snapshot
-                    let builder = self.executor.ctx().tree_builder();
-                    let snapshot = self.executor.ctx().snapshot();
+                    let builder = self.dml_executor.ctx().tree_builder();
+                    let snapshot = self.dml_executor.ctx().snapshot();
 
                     // Locate the table
                     let table = self
-                        .executor
+                        .dml_executor
                         .ctx()
                         .catalog()
                         .get_relation(table_id, &builder, &snapshot)?;
@@ -334,7 +334,7 @@ impl WalRecuperator {
                         &snapshot,
                     )? {
                         let columns = schema.column_indexes();
-                        self.executor.insert(table_id, &columns, &row)?;
+                        self.dml_executor.insert(table_id, &columns, &row)?;
                     }
                 }
             }
@@ -409,6 +409,42 @@ impl Pager {
         let mut block: MemBlock<PageZeroHeader> = MemBlock::new(block_size);
         self.read_block(PAGE_ZERO, block.as_mut(), block_size)?;
         Ok(block)
+    }
+
+    pub(crate) fn mark_transaction_aborted(&mut self, txid: TransactionId) {
+        self.header_unchecked_mut().mark_transaction_aborted(txid);
+    }
+
+    pub(crate) fn get_aborted_transactions(&self) -> Vec<TransactionId> {
+        self.header_unchecked().get_aborted_transactions()
+    }
+
+    pub(crate) fn clear_aborted_up_to(&mut self, max_txid: TransactionId) {
+        self.header_unchecked_mut().clear_aborted_up_to(max_txid);
+    }
+
+    pub(crate) fn get_last_committed_transaction(&self) -> TransactionId {
+        self.header_unchecked().last_committed_transaction
+    }
+
+    pub(crate) fn set_last_committed_transaction(&mut self, txid: TransactionId) {
+        self.header_unchecked_mut().last_committed_transaction = txid;
+    }
+
+    pub(crate) fn get_last_stored_object(&self) -> ObjectId {
+        self.header_unchecked().last_stored_object
+    }
+
+    pub(crate) fn set_last_stored_object(&mut self, oid: ObjectId) {
+        self.header_unchecked_mut().last_stored_object = oid;
+    }
+
+    pub(crate) fn get_last_created_transaction(&self) -> TransactionId {
+        self.header_unchecked().last_created_transaction
+    }
+
+    pub(crate) fn set_last_created_transaction(&mut self, txid: TransactionId) {
+        self.header_unchecked_mut().last_created_transaction = txid;
     }
 
     /// Apply a read-only callback to any page type

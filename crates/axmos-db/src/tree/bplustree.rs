@@ -863,6 +863,44 @@ where
 
     /// Removes the entry corresponding to the given key if it exists.
     /// Returns an [BtreeError] if the key is not found.
+    pub(crate) fn remove_tuple(
+        &mut self,
+        page_id: PageId,
+        tuple: &Tuple,
+        schema: &Schema,
+    ) -> BtreeResult<()> {
+        let target_cursor = Tuple::keys_offset(schema.num_values());
+        let search_result = self.page_search(
+            self.get_root(),
+            &tuple.effective_data(),
+            target_cursor,
+            schema,
+        )?;
+
+        match search_result {
+            SearchResult::NotFound(_) => Err(BtreeError::NonExistentKey),
+            SearchResult::Found(pos) => {
+                let page_id = pos.entry();
+                let slot = pos.slot();
+                let page = self.get_page_mut(page_id)?;
+                let cell = page.remove(slot)?;
+
+                let deallocator = CellDeallocator::new(self.pager.clone());
+                deallocator.deallocate_cell(cell)?;
+
+                self.balance(page_id)?;
+
+                Ok(())
+            }
+        }?;
+
+        // Cleanup traversal here.
+        self.accessor_mut()?.clear();
+        Ok(())
+    }
+
+    /// Removes the entry corresponding to the given key if it exists.
+    /// Returns an [BtreeError] if the key is not found.
     pub(crate) fn remove(
         &mut self,
         page_id: PageId,
