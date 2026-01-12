@@ -5,7 +5,7 @@
 //! and are executed directly against the catalog.
 use crate::{
     PageId,
-    runtime::{RuntimeError, RuntimeResult, context::ThreadContext, eval::eval_literal_expr},
+    runtime::{RuntimeError, RuntimeResult, context::{TransactionLogger, ThreadContext}, eval::eval_literal_expr},
     schema::{
         DatabaseItem,
         base::{Column, ForeignKeyInfo, Relation, Schema, SchemaError, TableConstraint},
@@ -91,12 +91,13 @@ fn index_name(col_names: &Vec<String>, table_name: &str) -> String {
 /// the catalog metadata.
 pub struct DdlExecutor {
     ctx: ThreadContext,
+    logger: TransactionLogger
 }
 
 impl DdlExecutor {
     /// Creates a new DDL executor.
-    pub(crate) fn new(ctx: ThreadContext) -> Self {
-        Self { ctx }
+    pub(crate) fn new(ctx: ThreadContext, logger: TransactionLogger) -> Self {
+        Self { ctx, logger }
     }
 
     /// Check if a statement is a DDL statement.
@@ -156,7 +157,7 @@ impl DdlExecutor {
         // Store in catalog
         self.ctx
             .catalog()
-            .store_relation(relation, &tree_builder, snapshot.xid())?;
+            .store_relation(relation, &tree_builder, snapshot.xid(), Some(&self.logger))?;
 
         let mut relation = self
             .ctx
@@ -168,6 +169,10 @@ impl DdlExecutor {
         for constraint in stmt.constraints.iter() {
             self.add_constraint(&mut relation, constraint)?;
         }
+
+
+
+
 
         Ok(DdlResult::TableCreated {
             name: stmt.table_name.clone(),
@@ -256,7 +261,7 @@ impl DdlExecutor {
         // Store in catalog
         self.ctx
             .catalog()
-            .store_relation(index_relation, &tree_builder, snapshot.xid())?;
+            .store_relation(index_relation, &tree_builder, snapshot.xid(), Some(&self.logger))?;
 
         // Update the table schema to reference this index
         // It is important that the order of the columns is kept.
@@ -288,6 +293,7 @@ impl DdlExecutor {
             None,
             &tree_builder,
             &snapshot,
+            Some(&self.logger)
         )?;
 
         // Populate the index with existing data
@@ -434,6 +440,7 @@ impl DdlExecutor {
             None,
             &tree_builder,
             self.ctx.snapshot(),
+            Some(&self.logger)
         )?;
 
         Ok(DdlResult::TableAltered {
@@ -602,6 +609,7 @@ impl DdlExecutor {
             &tree_builder,
             &snapshot,
             stmt.cascade,
+            Some(&self.logger)
         )?;
 
         Ok(DdlResult::TableDropped { name: table_name })

@@ -111,8 +111,8 @@ pub struct WalRecuperator {
 impl WalRecuperator {
     pub(crate) fn new(ctx: ThreadContext, logger: TransactionLogger) -> Self {
         Self {
-            dml_executor: DmlExecutor::new(ctx.clone(), logger),
-            ddl_executor: DdlExecutor::new(ctx)
+            dml_executor: DmlExecutor::new(ctx.clone(), logger.clone()),
+            ddl_executor: DdlExecutor::new(ctx, logger)
         }
     }
 
@@ -207,7 +207,7 @@ impl WalRecuperator {
                         .row_id()
                         .map(|r| UInt64::from(r))
                         .expect("Row id must be set for DML logs");
-          
+
 
                     let row_id_bytes = row_id.serialize()?;
 

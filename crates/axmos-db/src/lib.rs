@@ -259,7 +259,6 @@ impl Database {
     ) -> DatabaseResult<(TransactionContext, TransactionLogger)> {
         let handle = coordinator.begin()?;
         let tid = handle.id();
-        println!("Se crea transaccion con id {}", tid);
         let first_lsn = pager.write().push_to_log(Begin, tid, None)?;
         let ctx = TransactionContext::new(pager.clone(), catalog.clone(), handle)?;
         let logger = TransactionLogger::new(tid, pager.clone(), first_lsn);
@@ -427,7 +426,7 @@ impl Database {
             let snapshot = tx_ctx.snapshot();
 
             catalog
-                .analyze(&tree_builder, &snapshot, sample_rate, max_sample_rows)
+                .analyze(&tree_builder, &snapshot, Some(&logger), sample_rate, max_sample_rows, )
                 .map_err(box_err)?;
 
             tx_ctx.commit_transaction().map_err(box_err)?;

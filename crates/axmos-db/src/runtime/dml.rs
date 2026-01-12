@@ -220,6 +220,7 @@ impl DmlExecutor {
             None,
             &tree_builder,
             &snapshot,
+            Some(&self.logger)
         )?;
 
         Ok(InsertResult {

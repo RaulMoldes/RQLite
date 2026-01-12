@@ -59,7 +59,7 @@ fn create_test_catalog(path: impl AsRef<Path>, snapshot: &Snapshot, builder: &Bt
             Column::new_with_defaults(DataTypeKind::Int, "age"),
         ],
     );
-    catalog.store_relation(users, &builder, 0).unwrap();
+    catalog.store_relation(users, &builder, 0, None).unwrap();
 
     // Table: orders (id INT, user_id INT, amount DOUBLE, status TEXT)
     let orders = Relation::table(
@@ -74,7 +74,7 @@ fn create_test_catalog(path: impl AsRef<Path>, snapshot: &Snapshot, builder: &Bt
             Column::new_with_defaults(DataTypeKind::Blob, "status"),
         ],
     );
-    catalog.store_relation(orders, &builder, 0).unwrap();
+    catalog.store_relation(orders, &builder, 0, None).unwrap();
 
     // Table: products (id INT, name TEXT, price DOUBLE, category TEXT)
     let products = Relation::table(
@@ -88,7 +88,7 @@ fn create_test_catalog(path: impl AsRef<Path>, snapshot: &Snapshot, builder: &Bt
             Column::new_with_defaults(DataTypeKind::Blob, "category"),
         ],
     );
-    catalog.store_relation(products, &builder, 0).unwrap();
+    catalog.store_relation(products, &builder, 0, None).unwrap();
 
     catalog
 }

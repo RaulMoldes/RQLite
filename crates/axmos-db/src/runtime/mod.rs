@@ -451,7 +451,7 @@ impl QueryRunner {
 
     fn execute_statement(&self, stmt: BoundStatement) -> QueryRunnerResult<QueryResult> {
         if is_ddl(&stmt) {
-            let mut executor = DdlExecutor::new(self.ctx.clone());
+            let mut executor = DdlExecutor::new(self.ctx.clone(), self.logger.clone());
             let outcome = executor.execute(&stmt)?;
             return Ok(QueryResult::Ddl(outcome));
         }

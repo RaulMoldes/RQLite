@@ -4,7 +4,7 @@ use parking_lot::RwLock;
 use super::RuntimeResult;
 use crate::{
     io::{
-        logger::{Begin, Commit, Delete, End, Insert, Operation, Update},
+        logger::{Begin, Commit, Delete, End, Insert, Operation, Update, Create, Alter, DropOp},
         pager::{BtreeBuilder, SharedPager},
     },
     multithreading::coordinator::{Snapshot, TransactionHandle},
@@ -158,6 +158,39 @@ impl TransactionLogger {
     ) -> RuntimeResult<()> {
         let insert = Insert::new(oid, rowid, data);
         self.log_operation(insert)
+    }
+
+
+    /// Log an create operation
+    pub(crate) fn log_create(
+        &self,
+        oid: ObjectId,
+        data: Box<[u8]>,
+    ) -> RuntimeResult<()> {
+        let create = Create::new(oid,  data);
+        self.log_operation(create)
+    }
+
+    /// Log an alter operation
+    pub(crate) fn log_alter(
+        &self,
+        oid: ObjectId,
+        new_data: Box<[u8]>,
+        old_data: Box<[u8]>
+    ) -> RuntimeResult<()> {
+        let alter = Alter::new(oid,  new_data, old_data);
+        self.log_operation(alter)
+    }
+
+
+    /// Log an alter operation
+    pub(crate) fn log_drop(
+        &self,
+        oid: ObjectId,
+        old_data: Box<[u8]>
+    ) -> RuntimeResult<()> {
+        let drop_op = DropOp::new(oid,  old_data);
+        self.log_operation(drop_op)
     }
 
     /// Log an update operation

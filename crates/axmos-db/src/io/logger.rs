@@ -181,7 +181,7 @@ impl Create {
 
 impl Operation for Create {
     fn op_type(&self) -> RecordType {
-        RecordType::Delete
+        RecordType::Create
     }
     fn object_id(&self) -> Option<ObjectId> {
         None // OID IS THE META TABLE
@@ -218,7 +218,7 @@ impl DropOp {
 
 impl Operation for DropOp {
     fn op_type(&self) -> RecordType {
-        RecordType::Delete
+        RecordType::Drop
     }
     fn object_id(&self) -> Option<ObjectId> {
         None // OID IS THE META TABLE
@@ -255,7 +255,7 @@ impl Alter {
 
 impl Operation for Alter {
     fn op_type(&self) -> RecordType {
-        RecordType::Delete
+        RecordType::Alter
     }
     fn object_id(&self) -> Option<ObjectId> {
         None // OID IS THE META TABLE
