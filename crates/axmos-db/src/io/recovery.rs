@@ -66,6 +66,7 @@ impl WalRecuperator {
                 }
 
                 if let Some(create_operation) = analysis.create_ops.get(&lsn) {
+               
                     self.undo_create(create_operation)?;
 
                 }
@@ -88,35 +89,45 @@ impl WalRecuperator {
     /// Run all the redo.
     pub(crate) fn run_redo(&mut self, analysis: &AnalysisResult) -> RuntimeResult<()> {
         for redo_transaction in analysis.needs_redo.iter() {
+            println!("Redo transaction {redo_transaction}");
             // Reapply all the operations of this transaction
             for lsn in analysis.try_iter_lsn(redo_transaction).ok_or(IoError::new(
                 ErrorKind::NotSeekable,
                 "transaction not found in th write ahead analysis",
             ))? {
-                 if let Some(delete_operation) = analysis.delete_ops.get(&lsn) {
-                    self.redo_delete(delete_operation)?;
-                }
-
-                if let Some(update_operation) = analysis.update_ops.get(&lsn) {
-                    self.redo_update(update_operation)?;
-                }
-
-                if let Some(insert_operation) = analysis.insert_ops.get(&lsn) {
-                    self.redo_insert(insert_operation)?;
-                }
-
+                println!("Lsn: {:?}", lsn);
 
                if let Some(create_operation) = analysis.create_ops.get(&lsn) {
+                    println!("Redoing create operation");
                     self.redo_create(create_operation)?;
 
                 }
                 if let Some(alter_operation) = analysis.alter_ops.get(&lsn) {
+                    println!("Redoing alter operation");
                     self.redo_alter(alter_operation)?;
 
                 }
                 if let Some(drop_operation) = analysis.drop_ops.get(&lsn) {
+                    println!("Redoing drop operation");
                     self.redo_drop(drop_operation)?;
                 }
+
+
+                if let Some(delete_operation) = analysis.delete_ops.get(&lsn) {
+                    println!("Redoing delete operation");
+                    self.redo_delete(delete_operation)?;
+                }
+
+                if let Some(update_operation) = analysis.update_ops.get(&lsn) {
+                     println!("Redoing update operation");
+                    self.redo_update(update_operation)?;
+                }
+
+                if let Some(insert_operation) = analysis.insert_ops.get(&lsn) {
+                       println!("Redoing insert operation");
+                    self.redo_insert(insert_operation)?;
+                }
+
             }
         }
 
@@ -130,6 +141,7 @@ impl WalRecuperator {
         let redo_bytes = create_op.redo();
 
         if redo_bytes.is_empty() {
+
             return Ok(());
         }
 
@@ -139,11 +151,16 @@ impl WalRecuperator {
 
         // Parse the redo payload as a Row from the meta_table schema
         if let Some(row) = Row::from_bytes_checked_with_snapshot(redo_bytes, &schema, &snapshot)? {
+
             let relation = Relation::from_meta_table_row(row);
+
             self.dml_executor
                 .ctx()
                 .catalog()
                 .store_relation(relation, &builder, snapshot.xid(), Some(&self.dml_executor.logger()))?;
+
+
+
         }
 
         Ok(())

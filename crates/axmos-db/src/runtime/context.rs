@@ -135,8 +135,8 @@ impl TransactionLogger {
     }
 
     pub(crate) fn log_end(&self) -> RuntimeResult<()> {
-        self.log_operation(End)?;
         self.pager.write().flush_wal()?;
+        self.log_operation(End)?;
         Ok(())
     }
 

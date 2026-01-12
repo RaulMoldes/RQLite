@@ -1,16 +1,14 @@
 use crate::{
     TransactionId,
-    io::disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
-    io::logger::{Delete, Insert, Update, Alter, DropOp, Create},
+    io::{disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize}, logger::{Alter, Create, Delete, DropOp, Insert, Update}},
     storage::{
-        Allocatable, AvailableSpace, WalMetadata, WalOps, Writable,
-        wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock},
+        Allocatable, AvailableSpace, WalMetadata, WalOps, Writable, tuple::Row, wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock}
     },
     types::{BlockId, Lsn},
 };
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     io::{self, Error as IoError, ErrorKind, Read, Seek, SeekFrom, Write},
     path::Path,
@@ -113,23 +111,23 @@ impl Seek for WriteAheadLog {
 #[derive(Debug, Default)]
 pub struct AnalysisResult {
     /// Transactions that need to be undo
-    pub needs_undo: HashSet<TransactionId>,
+    pub needs_undo: BTreeSet<TransactionId>,
     /// Transactions that need to be redo
-    pub needs_redo: HashSet<TransactionId>,
+    pub needs_redo: BTreeSet<TransactionId>,
     /// Map of the last lsn for each transaction.
-    pub lsn_chains: HashMap<TransactionId, Vec<Lsn>>,
+    pub lsn_chains: BTreeMap<TransactionId, Vec<Lsn>>,
     /// Map from transaction ID to its last LSN
-    pub insert_ops: HashMap<Lsn, Insert>,
+    pub insert_ops: BTreeMap<Lsn, Insert>,
     /// Map from transaction ID to its last LSN
-    pub delete_ops: HashMap<Lsn, Delete>,
+    pub delete_ops: BTreeMap<Lsn, Delete>,
     /// Update ops
-    pub update_ops: HashMap<Lsn, Update>,
+    pub update_ops: BTreeMap<Lsn, Update>,
     /// Map from transaction ID to its last LSN
-    pub create_ops: HashMap<Lsn, Create>,
+    pub create_ops: BTreeMap<Lsn, Create>,
     /// Map from transaction ID to its last LSN
-    pub alter_ops: HashMap<Lsn, Alter>,
+    pub alter_ops: BTreeMap<Lsn, Alter>,
     /// Update ops
-    pub drop_ops: HashMap<Lsn, DropOp>,
+    pub drop_ops: BTreeMap<Lsn, DropOp>,
     /// The starting point for redo
     pub start_redo_lsn: Option<Lsn>,
 }
@@ -184,20 +182,26 @@ impl WriteAheadLog {
             match record_type {
                 // By default all transactions will need to be undo unless the have committed.
                 RecordType::Begin => {
+                    println!("Se encontro record de tipo begin {tid}");
                     result.needs_undo.insert(tid);
                 }
                 RecordType::Commit => {
+                    println!("Se encontro record de tipo commit {tid}");
                     result.needs_undo.remove(&tid);
                     result.needs_redo.insert(tid);
                 }
                 RecordType::Abort => {
+                    println!("Se encontro record de tipo abort {tid}");
+                    result.needs_redo.remove(&tid);
                     result.needs_undo.insert(tid);
                 }
                 RecordType::End => {
-                    result.needs_undo.remove(&tid);
-                    result.needs_redo.remove(&tid);
+                    println!("Se encontro record de tipo end {tid}");
+                    //result.needs_undo.remove(&tid);
+                   // result.needs_redo.remove(&tid);
                 }
                 RecordType::Delete => {
+                     println!("Se encontro record de tipo delete");
                     let undo_content = Box::from(record.undo_payload());
                     let oid = record
                         .metadata()
@@ -211,6 +215,7 @@ impl WriteAheadLog {
                     result.delete_ops.insert(lsn, delete);
                 }
                 RecordType::Update => {
+                                         println!("Se encontro record de tipo update");
                     let undo_content = Box::from(record.undo_payload());
                     let redo_content = Box::from(record.redo_payload());
                     let oid = record
@@ -225,6 +230,7 @@ impl WriteAheadLog {
                     result.update_ops.insert(lsn, update);
                 }
                 RecordType::Insert => {
+                                         println!("Se encontro record de tipo insert");
                     let redo_content = Box::from(record.redo_payload());
                     let oid = record
                         .metadata()
@@ -238,6 +244,7 @@ impl WriteAheadLog {
                     result.insert_ops.insert(lsn, insert);
                 }
                 RecordType::Create => {
+                                         println!("Se encontro record de tipo create");
                     let redo_content = Box::from(record.redo_payload());
 
                     let row_id = record
@@ -249,6 +256,7 @@ impl WriteAheadLog {
                 }
 
                 RecordType::Alter => {
+                                         println!("Se encontro record de tipo alter");
                     let undo_content = Box::from(record.undo_payload());
                     let redo_content = Box::from(record.redo_payload());
                     let row_id = record
@@ -260,6 +268,7 @@ impl WriteAheadLog {
                 }
 
                 RecordType::Drop => {
+                                         println!("Se encontro record de tipo drop");
                     let undo_content = Box::from(record.undo_payload());
                     let row_id = record
                         .metadata()

@@ -428,7 +428,7 @@ fn test_rollback_reopen_vacuum() {
 /// This test suite intends to validate that via the wal we are able to recover the database to a usable consistent state after a disk failover.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn test_ddl_recovery_without_flush() {
+fn test_recovery_without_flush() {
     use tempfile::tempdir;
 
     let dir = tempdir().expect("Failed to create temp dir");
@@ -451,16 +451,16 @@ fn test_ddl_recovery_without_flush() {
         let db = Database::open(&db_path, config).expect("Failed to open database");
 
         let result = db.execute("SELECT COUNT(*) FROM crash_test");
+        println!("{:?}", result);
         assert!(result.is_ok(), "Transaction was committed so it must be recovered by the wal");
 
         // If table exists, verify data integrity
         if let Ok(result) = result {
             let rows = result.into_rows().expect("Expected rows");
             let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
-            // Count should be consistent (either 0 or 1, not corrupted)
-            assert!(count == 0 || count == 1, "Data should be consistent");
+            assert!(count == 1, "Data should be consistent");
         }
-        // If table doesn't exist, that's also acceptable (transaction wasn't committed)
+
     }
 
     drop(dir);

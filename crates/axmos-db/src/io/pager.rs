@@ -294,6 +294,11 @@ impl Pager {
         next
     }
 
+    pub fn total_allocated_pages(&self) -> u64 {
+        let header_mut = self.header_unchecked();
+        header_mut.total_pages
+    }
+
     fn set_first_free_page(&mut self, value: Option<PageId>) {
         self.header_unchecked_mut().first_free_page = value;
     }

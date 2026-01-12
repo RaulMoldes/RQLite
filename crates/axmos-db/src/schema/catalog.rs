@@ -143,7 +143,8 @@ impl Catalog {
     ) -> CatalogResult<Tuple> {
         let schema = meta_index_schema();
         let builder = TupleBuilder::from_schema(&schema);
-        let t = builder.build(&relation.to_meta_index_row(), transaction_id)?;
+        let row = relation.to_meta_index_row();
+        let t = builder.build(&row, transaction_id)?;
 
         Ok(t)
     }
@@ -657,7 +658,7 @@ impl Catalog {
 
         // Will replace existing relation if it exists.
         tree.upsert(self.meta_index, tuple, &schema)?;
-
+        
         let schema = meta_table_schema();
         let object_id = relation.object_id();
 
@@ -671,6 +672,7 @@ impl Catalog {
 
         // Will replace existing relation if it exists.
         tree.upsert(self.meta_table, tuple, &schema)?;
+        println!("META TABLE SUCCESSFULLY UPDATED");
 
         Ok(())
     }

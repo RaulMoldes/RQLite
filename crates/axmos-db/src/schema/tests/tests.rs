@@ -73,7 +73,7 @@ pub fn test_store_relation(count: usize) {
 pub fn test_get_relation(count: usize) {
     let config = TestConfig::default();
     let db = TestDb::new("catalog_get", &config).expect("Failed to create test db");
-    let mut catalog = create_test_catalog(db.pager.clone());
+    let catalog = create_test_catalog(db.pager.clone());
     let builder = BtreeBuilder::default().with_pager(db.pager.clone());
     let snapshot = Snapshot::default();
 
