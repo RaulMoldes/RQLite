@@ -1,14 +1,17 @@
 use std::cmp::Ordering;
 
 use crate::{
-    DataType, TypeSystemError, UInt64,
+    TypeSystemError, UInt64,
     core::SerializableType,
     runtime::{
         ExecutionStats, Executor, RuntimeError, RuntimeResult, context::ThreadContext,
         eval::ExpressionEvaluator,
     },
     schema::Schema,
-    sql::{binder::bounds::BoundExpression, planner::physical::PhysIndexScanOp},
+    sql::{
+        binder::bounds::BoundExpression,
+        planner::{logical::IndexRangeBound, physical::PhysIndexScanOp},
+    },
     storage::tuple::Row,
     tree::bplustree::{BtreePositionalIterator, SearchResult},
     types::PageId,
@@ -21,8 +24,9 @@ pub(crate) struct IndexScan {
     cursor: Option<BtreePositionalIterator>,
     index_schema: Schema,
     table_schema: Schema,
-    range_start: Option<BoundExpression>,
-    range_end: Option<BoundExpression>,
+    range_start: Option<Vec<IndexRangeBound>>,
+    range_end: Option<Vec<IndexRangeBound>>,
+    residual_predicate: Option<BoundExpression>,
     indexed_columns: Vec<usize>,
     stats: ExecutionStats,
 }
@@ -54,6 +58,7 @@ impl IndexScan {
             range_end: op.range_end.clone(),
             range_start: op.range_start.clone(),
             indexed_columns: op.index_columns.clone(),
+            residual_predicate: op.residual.clone(),
         })
     }
 
@@ -61,49 +66,49 @@ impl IndexScan {
         &self.stats
     }
 
-    fn range_start(&self) -> Option<&BoundExpression> {
-        self.range_start.as_ref()
+    fn range_start(&self) -> Option<&[IndexRangeBound]> {
+        self.range_start.as_ref().map(|v| v.as_slice())
     }
 
-    fn range_end(&self) -> Option<&BoundExpression> {
-        self.range_end.as_ref()
+    fn range_end(&self) -> Option<&[IndexRangeBound]> {
+        self.range_end.as_ref().map(|v| v.as_slice())
     }
 
-    fn compare_lists(lhs: &[DataType], rhs: &[DataType]) -> Option<Ordering> {
-        // Compare element by element util we find a diff.
-        for (left, right) in lhs.iter().zip(rhs.iter()) {
-            match left.partial_cmp(right) {
-                Some(Ordering::Equal) => continue,
-                Some(ordering) => return Some(ordering),
-                None => return None,
-            }
-        }
+    fn evaluate_bounds(row: &Row, bounds: &[IndexRangeBound], expected_ordering: Ordering) -> bool {
+        let mut results = Vec::with_capacity(bounds.len());
+        for bound in bounds {
 
-        // If all elements are equal compare the lengths
-        Some(lhs.len().cmp(&rhs.len()))
+            let ordering = bound.value.partial_cmp(&row[bound.col_idx]);
+
+            let result = ordering.map(|ord| ord == expected_ordering || (bound.inclusive && matches!(ord, Ordering::Equal))).unwrap_or(false);
+
+            results.push(result);
+
+
+        };
+        results.iter().all(|c| *c)
     }
 
     fn evaluate_index_predicate(&self, row: &Row) -> RuntimeResult<bool> {
-        let evaluator = ExpressionEvaluator::new(row, &self.index_schema);
-
-        let mut values = vec![DataType::Null; self.indexed_columns.len()];
-        for (i, index) in self.indexed_columns.iter().enumerate() {
-            values[i] = row[*index].clone();
-        }
 
         let lhs = self
-            .range_start()
-            .map(|expr| evaluator.evaluate(expr).expect("Evaluation failed"))
-            .map(|l| Self::compare_lists(&l, &values) == Some(Ordering::Less))
-            .unwrap_or(true);
+            .range_start().map(|bounds| Self::evaluate_bounds(row, bounds, Ordering::Less)).unwrap_or(true);
 
-        let rhs = self
-            .range_end()
-            .map(|expr| evaluator.evaluate(expr).expect("Evaluation failed"))
-            .map(|l| Self::compare_lists(&l, &values) == Some(Ordering::Greater))
-            .unwrap_or(true);
+        let rhs =  self
+            .range_end().map(|bounds| Self::evaluate_bounds(row, bounds, Ordering::Greater)).unwrap_or(true);
 
         Ok(lhs && rhs)
+    }
+
+    fn evaluate_residual_predicate(&self, row: &Row) -> RuntimeResult<bool> {
+        match &self.residual_predicate {
+            None => Ok(true),
+            Some(pred) => {
+                let evaluator = ExpressionEvaluator::new(row, &self.table_schema);
+                let bool = evaluator.evaluate_as_bool(pred)?;
+                Ok(bool)
+            }
+        }
     }
 
     fn get_row_id_checked<'a>(&self, row: &'a Row) -> RuntimeResult<&'a UInt64> {
@@ -174,7 +179,12 @@ impl Executor for IndexScan {
                 table_tree.search(row_key_bytes.as_ref(), &self.table_schema)?;
 
             if let SearchResult::Found(found_pos) = actual_row_result {
-                let actual_row = tree.get_row_at(found_pos, &self.table_schema, &snapshot)?;
+                let actual_row = tree
+                    .get_row_at(found_pos, &self.table_schema, &snapshot)?
+                    .filter(|r| {
+                        self.evaluate_residual_predicate(r)
+                            .expect("Predicate evaluation failed")
+                    });
 
                 if actual_row.is_none() {
                     continue;

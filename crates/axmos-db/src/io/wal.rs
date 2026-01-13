@@ -186,24 +186,18 @@ impl WriteAheadLog {
             match record_type {
                 // By default all transactions will need to be undo unless the have committed.
                 RecordType::Begin => {
-
                     result.needs_undo.insert(tid);
                 }
                 RecordType::Commit => {
-
                     result.needs_undo.remove(&tid);
                     result.needs_redo.insert(tid);
                 }
                 RecordType::Abort => {
-
                     result.needs_redo.remove(&tid);
                     result.needs_undo.insert(tid);
                 }
-                RecordType::End => {
-
-                }
+                RecordType::End => {}
                 RecordType::Delete => {
-
                     let undo_content = Box::from(record.undo_payload());
                     let oid = record
                         .metadata()
@@ -217,7 +211,6 @@ impl WriteAheadLog {
                     result.delete_ops.insert(lsn, delete);
                 }
                 RecordType::Update => {
-
                     let undo_content = Box::from(record.undo_payload());
                     let redo_content = Box::from(record.redo_payload());
                     let oid = record
@@ -232,7 +225,6 @@ impl WriteAheadLog {
                     result.update_ops.insert(lsn, update);
                 }
                 RecordType::Insert => {
-
                     let redo_content = Box::from(record.redo_payload());
                     let oid = record
                         .metadata()
@@ -246,7 +238,6 @@ impl WriteAheadLog {
                     result.insert_ops.insert(lsn, insert);
                 }
                 RecordType::Create => {
-
                     let redo_content = Box::from(record.redo_payload());
                     let undo_content = Box::from(record.undo_payload());
 
@@ -259,7 +250,6 @@ impl WriteAheadLog {
                 }
 
                 RecordType::Alter => {
-
                     let undo_content = Box::from(record.undo_payload());
                     let redo_content = Box::from(record.redo_payload());
                     let row_id = record
@@ -271,8 +261,6 @@ impl WriteAheadLog {
                 }
 
                 RecordType::Drop => {
-           
-
                     let redo_content = Box::from(record.redo_payload());
                     let undo_content = Box::from(record.undo_payload());
                     let row_id = record

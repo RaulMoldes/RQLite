@@ -505,7 +505,7 @@ impl Database {
     }
 }
 
- #[cfg(feature = "safe-drop")]
+#[cfg(feature = "safe-drop")]
 impl Drop for Database {
     fn drop(&mut self) {
         // Best-effort flush on drop

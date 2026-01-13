@@ -119,11 +119,8 @@ impl CreateTableInstr {
 impl From<&BoundCreateTable> for CreateTableInstr {
     fn from(stmt: &BoundCreateTable) -> Self {
         let columns: Vec<Column> = stmt.columns.iter().map(Column::from).collect();
-        let constraints: Vec<TableConstraint> = stmt
-            .constraints
-            .iter()
-            .map(TableConstraint::from)
-            .collect();
+        let constraints: Vec<TableConstraint> =
+            stmt.constraints.iter().map(TableConstraint::from).collect();
 
         Self::new(
             stmt.table_name.clone(),
@@ -421,7 +418,6 @@ impl AlterColumnActionInstr {
     }
 }
 
-
 impl From<&BoundTableConstraint> for TableConstraint {
     fn from(constraint: &BoundTableConstraint) -> Self {
         match constraint {
@@ -433,7 +429,7 @@ impl From<&BoundTableConstraint> for TableConstraint {
                 ref_columns,
             } => Self::ForeignKey {
                 columns: columns.clone(),
-                info: ForeignKeyInfo::for_table_and_columns(*ref_table_id, ref_columns.clone())
+                info: ForeignKeyInfo::for_table_and_columns(*ref_table_id, ref_columns.clone()),
             },
         }
     }
@@ -521,7 +517,10 @@ impl DdlExecutor {
         }
     }
 
-    pub(crate) fn execute_instruction(&mut self, instr: &DdlInstruction) -> RuntimeResult<DdlResult> {
+    pub(crate) fn execute_instruction(
+        &mut self,
+        instr: &DdlInstruction,
+    ) -> RuntimeResult<DdlResult> {
         match instr {
             DdlInstruction::CreateTable(create) => self.execute_create_table(create),
             DdlInstruction::DropTable(drop) => self.execute_drop_table(drop),
@@ -682,7 +681,7 @@ impl DdlExecutor {
             };
 
         let table_name = relation.name().to_string();
-        let undo_instr =  relation.to_create_table_instr()?;
+        let undo_instr = relation.to_create_table_instr()?;
 
         let id = relation.object_id();
 
@@ -716,6 +715,8 @@ impl DdlExecutor {
 
         let index_id =
             self.create_unique_index(instr.table_id, &instr.index_name, &instr.columns)?;
+
+        println!("INdice creado con id {index_id}");
 
         let redo_bytes = instr.to_bytes()?;
         let undo_instr = instr.inverse(index_id);
@@ -924,11 +925,7 @@ impl DdlExecutor {
                     col_names.join(", ")
                 ))
             }
-            TableConstraint::ForeignKey {
-                columns,
-                info,
-            } => {
-
+            TableConstraint::ForeignKey { columns, info } => {
                 if let Some(constraints) = relation.schema_mut().table_constraints.as_mut() {
                     constraints.push(TableConstraint::ForeignKey {
                         columns: columns.clone(),
@@ -951,9 +948,6 @@ impl DdlExecutor {
             }
         }
     }
-
-
-
 
     fn create_unique_index(
         &mut self,

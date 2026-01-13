@@ -243,7 +243,6 @@ impl DmlExecutor {
         old_row: &Row,
         new_row: &Row,
     ) -> RuntimeResult<UpdateResult> {
-
         let assignments = Self::build_assignments(old_row, new_row, 1);
         self.update(table_id, row_id, assignments)
     }
@@ -300,7 +299,6 @@ impl DmlExecutor {
             .get_row_at(position, &schema, &snapshot)?
             .expect("Tuple should exist");
 
-
         // Constraint validation goes here.
         self.validate_update_constraints(
             &relation,
@@ -318,7 +316,6 @@ impl DmlExecutor {
             .as_tuple_ref(&schema, &snapshot)
             .expect("Updated tuple should be visible")
             .to_row_with(&schema)?;
-
 
         // Log the update
         self.logger.log_update(

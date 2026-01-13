@@ -285,17 +285,15 @@ impl TransactionContext {
 
     /// Commits the transaction: log commit, commit handle, end.
     pub(crate) fn commit_transaction(&self) -> RuntimeResult<()> {
-        if let Some(mut h) = self.handle.try_write() {
-            h.commit()?;
-        }; // If we are not able to borrow the handle then we know there are other handles pointing to the same transaction so we should not commit yet
+        let mut h = self.handle.write();
+        h.commit()?;
         Ok(())
     }
 
     /// Aborts the transaction: log commit, commit handle, end.
     pub(crate) fn abort_transaction(&self) -> RuntimeResult<()> {
-        if let Some(mut h) = self.handle.try_write() {
-            h.abort()?;
-        };
+        let mut h = self.handle.write();
+        h.abort()?;
         Ok(())
     }
 }

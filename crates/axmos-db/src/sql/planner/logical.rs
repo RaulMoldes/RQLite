@@ -3,6 +3,7 @@
 //! These operators describe WHAT the query does, not HOW it will be executed.
 
 use crate::{
+    DataType,
     schema::Schema,
     sql::{
         binder::bounds::*,
@@ -173,9 +174,16 @@ pub struct IndexScanOp {
     pub index_id: ObjectId,
     pub schema: Schema,
     pub index_columns: Vec<usize>,
-    pub range_start: Option<BoundExpression>,
-    pub range_end: Option<BoundExpression>,
+    pub range_start: Option<Vec<IndexRangeBound>>,
+    pub range_end: Option<Vec<IndexRangeBound>>,
     pub residual_predicate: Option<BoundExpression>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexRangeBound {
+    pub inclusive: bool,
+    pub value: DataType,
+    pub col_idx: usize,
 }
 
 impl IndexScanOp {
@@ -198,8 +206,8 @@ impl IndexScanOp {
 
     pub fn with_range(
         mut self,
-        start: Option<BoundExpression>,
-        end: Option<BoundExpression>,
+        start: Option<Vec<IndexRangeBound>>,
+        end: Option<Vec<IndexRangeBound>>,
     ) -> Self {
         self.range_start = start;
         self.range_end = end;

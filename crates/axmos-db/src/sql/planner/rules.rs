@@ -4,7 +4,8 @@
 //! Implementation rules convert logical operators to physical operators.
 
 use crate::{
-    schema::Schema,
+    ObjectId,
+    schema::{Schema, base::IndexHandle},
     sql::{
         binder::bounds::*,
         parser::ast::{BinaryOperator, JoinType},
@@ -49,6 +50,7 @@ pub fn transformation_rules() -> Vec<Box<dyn TransformationRule>> {
         Box::new(FilterMergeRule),
         Box::new(FilterPushdownJoinRule),
         Box::new(FilterPushdownProjectRule),
+        Box::new(FilterToIndexScanRule),
     ]
 }
 
@@ -1319,5 +1321,333 @@ impl ImplementationRule for MaterializeRule {
             PhysicalOperator::Materialize(PhysMaterializeOp::new(m.schema.clone())),
             expr.children.clone(),
         )])
+    }
+}
+
+/// Transforms Filter(predicate) -> TableScan into IndexScan when an applicable index exists.
+///
+/// This rule identifies filter predicates that can leverage an index for more efficient
+/// execution. It analyzes the predicate to extract range bounds and matches them against
+/// available indexes on the table.
+#[derive(Clone, Copy)]
+pub struct FilterToIndexScanRule;
+
+impl Rule for FilterToIndexScanRule {
+    fn name(&self) -> &'static str {
+        "FilterToIndexScan"
+    }
+    fn promise(&self) -> u32 {
+        100 // High priority since index scans can dramatically improve performance
+    }
+}
+
+impl TransformationRule for FilterToIndexScanRule {
+    fn matches(&self, expr: &LogicalExpr, memo: &Memo) -> bool {
+        // Match pattern: Filter follwed by TableScan
+        if let LogicalOperator::Filter(_) = &expr.op {
+            if let Some(child_group) = expr.children.first() {
+                if let Some(child) = memo.get_group(*child_group) {
+                    if let Some(child_expr) = child.logical_exprs.first() {
+                        return matches!(&child_expr.op, LogicalOperator::TableScan(_));
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn apply(&self, expr: &LogicalExpr, memo: &mut Memo) -> PlannerResult<Vec<LogicalExpr>> {
+        let LogicalOperator::Filter(filter) = &expr.op else {
+            return Ok(vec![]);
+        };
+
+        let child_group = *expr.children.first().ok_or(PlannerError::InvalidState)?;
+        let child = memo
+            .get_group(child_group)
+            .ok_or(PlannerError::InvalidState)?;
+        let child_expr = child
+            .logical_exprs
+            .first()
+            .ok_or(PlannerError::InvalidState)?;
+
+        let LogicalOperator::TableScan(scan) = &child_expr.op else {
+            return Ok(vec![]);
+        };
+
+        // Get available indexes from the schema
+        let indexes = scan.schema.get_indexes();
+        if indexes.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut alternatives = Vec::new();
+
+        for index_handle in indexes {
+            // Try to match the predicate against this index
+            if let Some(index_scan) =
+                self.try_create_index_scan(scan, &filter.predicate, &index_handle)
+            {
+                alternatives.push(
+                    LogicalExpr::new(LogicalOperator::IndexScan(index_scan), vec![])
+                        .with_properties(expr.properties.clone()),
+                );
+            }
+        }
+
+        Ok(alternatives)
+    }
+}
+
+impl FilterToIndexScanRule {
+    /// Attempts to create an IndexScan from a filter predicate and index handle.
+    /// Returns None if the predicate cannot use this index.
+    fn try_create_index_scan(
+        &self,
+        scan: &TableScanOp,
+        predicate: &BoundExpression,
+        index_handle: &IndexHandle,
+    ) -> Option<IndexScanOp> {
+        let indexed_columns = index_handle.indexed_column_ids();
+        let index_id = index_handle.id();
+
+        // Extract predicates that can be used as index bounds
+        let (range_start, range_end, residual) =
+            self.extract_index_bounds(index_id, predicate, indexed_columns);
+
+        // Only create an index scan if we can use at least one bound
+        if range_start.is_none() && range_end.is_none() {
+            return None;
+        }
+
+        let mut index_scan = IndexScanOp::new(
+            scan.table_id,
+            index_handle.id(),
+            scan.schema.clone(),
+            indexed_columns.to_vec(),
+        );
+
+        index_scan.range_start = range_start;
+        index_scan.range_end = range_end;
+        index_scan.residual_predicate = residual;
+
+        Some(index_scan)
+    }
+
+    /// Extracts index bounds from a predicate.
+    /// Returns (range_start, range_end, residual_predicate)
+    fn extract_index_bounds(
+        &self,
+        index_id: ObjectId,
+        predicate: &BoundExpression,
+        indexed_columns: &[usize],
+    ) -> (
+        Option<Vec<IndexRangeBound>>,
+        Option<Vec<IndexRangeBound>>,
+        Option<BoundExpression>,
+    ) {
+        let mut range_start = Vec::new();
+        let mut range_end = Vec::new();
+        let mut residual_parts = Vec::new();
+
+        self.collect_bounds(
+            index_id,
+            predicate,
+            indexed_columns,
+            &mut range_start,
+            &mut range_end,
+            &mut residual_parts,
+        );
+
+        let range_end = Some(range_end).filter(|s| !s.is_empty());
+        let range_start = Some(range_start).filter(|s| !s.is_empty());
+
+        let residual = combine_predicates(residual_parts);
+
+        (range_start, range_end, residual)
+    }
+
+    /// Recursively collects bounds from a predicate expression.
+    fn collect_bounds(
+        &self,
+        index_id: ObjectId,
+        expr: &BoundExpression,
+        indexed_columns: &[usize],
+        range_start: &mut Vec<IndexRangeBound>,
+        range_end: &mut Vec<IndexRangeBound>,
+        residual: &mut Vec<BoundExpression>,
+    ) {
+        match expr {
+            BoundExpression::BinaryOp {
+                op: BinaryOperator::And,
+                left,
+                right,
+                ..
+            } => {
+                // Recursively process AND conditions
+                self.collect_bounds(
+                    index_id,
+                    left,
+                    indexed_columns,
+                    range_start,
+                    range_end,
+                    residual,
+                );
+                self.collect_bounds(
+                    index_id,
+                    right,
+                    indexed_columns,
+                    range_start,
+                    range_end,
+                    residual,
+                );
+            }
+            BoundExpression::BinaryOp {
+                op,
+                left,
+                right,
+                result_type,
+            } => {
+                // Check if this is a comparison on an indexed column
+                if let Some((col_idx, datatype)) = Self::extract_column_info(left)
+                    && let Some(position) = indexed_columns.iter().position(|&x| x == col_idx)
+                    && let Some(value) = Self::extract_literal(right)
+                {
+
+                    match op {
+                        BinaryOperator::Eq => {
+                        
+                            let bound = IndexRangeBound {
+                                value: value.clone(),
+                                inclusive: true,
+                                col_idx: position,
+                            };
+
+                            // Equality: both bounds are the same
+                            range_start.push(bound.clone());
+                            range_end.push(bound.clone());
+
+                            return;
+                        }
+                        BinaryOperator::Gt => {
+                            range_start.push(IndexRangeBound {
+                                value: value.clone(),
+                                inclusive: false,
+                                col_idx: position,
+                            });
+
+                            return;
+                        }
+                        BinaryOperator::Ge => {
+                            range_start.push(IndexRangeBound {
+                                value: value.clone(),
+                                inclusive: true,
+                                col_idx: position,
+                            });
+                            return;
+                        }
+                        BinaryOperator::Lt => {
+                            range_end.push(IndexRangeBound {
+                                value: value.clone(),
+                                inclusive: false,
+                                col_idx: position,
+                            });
+                            return;
+                        }
+
+                        BinaryOperator::Le => {
+                            range_end.push(IndexRangeBound {
+                                value: value.clone(),
+                                inclusive: true,
+                                col_idx: position,
+                            });
+                            return;
+                        }
+
+                        _ => {}
+                    }
+                }
+
+
+                // Check if this is a comparison on an indexed column
+                if let Some((col_idx, datatype)) = Self::extract_column_info(right)
+                    && let Some(position) = indexed_columns.iter().position(|&x| x == col_idx)
+                    && let Some(value) = Self::extract_literal(left)
+                {
+                    match op {
+                        BinaryOperator::Eq => {
+
+                            let bound = IndexRangeBound {
+                                value: value.clone(),
+                                inclusive: true,
+                                col_idx: position,
+                            };
+
+                            // Equality: both bounds are the same
+                            range_start.push(bound.clone());
+                            range_end.push(bound.clone());
+
+                            return;
+                        }
+                        BinaryOperator::Lt => {
+                            range_start.push(IndexRangeBound {
+                                value: value.clone(),
+                                inclusive: false,
+                                col_idx: position,
+                            });
+
+                            return;
+                        }
+                        BinaryOperator::Le => {
+                            range_start.push(IndexRangeBound {
+                                value: value.clone(),
+                                inclusive: true,
+                                col_idx: position,
+                            });
+                            return;
+                        }
+                        BinaryOperator::Gt => {
+                            range_end.push(IndexRangeBound {
+                                value: value.clone(),
+                                inclusive: false,
+                                col_idx: position,
+                            });
+                            return;
+                        }
+
+                        BinaryOperator::Ge => {
+                            range_end.push(IndexRangeBound {
+                                value: value.clone(),
+                                inclusive: true,
+                                col_idx: position,
+                            });
+                            return;
+                        }
+
+                        _ => {}
+                    }
+                }
+
+                // Cannot use this predicate for index bounds
+                residual.push(expr.clone());
+            }
+            _ => {
+                // Any other expression goes to residual
+                residual.push(expr.clone());
+            }
+        }
+    }
+
+    fn extract_column_info(expr: &BoundExpression) -> Option<(usize, DataTypeKind)> {
+        match expr {
+            BoundExpression::ColumnBinding(c) => Some((c.column_idx, c.data_type)),
+            _ => None,
+        }
+    }
+
+    fn extract_literal(expr: &BoundExpression) -> Option<crate::DataType> {
+        match expr {
+            BoundExpression::Literal { value } => Some(value.clone()),
+            _ => None,
+        }
     }
 }

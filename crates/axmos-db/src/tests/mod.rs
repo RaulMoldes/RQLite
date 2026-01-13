@@ -433,19 +433,18 @@ fn test_recovery_without_flush_insert() {
     });
 
     reopen_and_assert(&db_path, |db| {
-        let result = db.execute("SELECT COUNT(*) FROM crash_test")
+        let result = db
+            .execute("SELECT COUNT(*) FROM crash_test")
             .expect("Query failed");
 
         let rows = result.into_rows().unwrap();
-        let count = rows.first().unwrap()[0]
-            .as_big_int().unwrap().value();
+        let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
 
         assert_eq!(count, 1);
     });
 
     drop(dir);
 }
-
 
 #[test]
 #[cfg_attr(miri, ignore)]
@@ -460,29 +459,27 @@ fn test_recovery_without_flush_update() {
     });
 
     reopen_and_assert(&db_path, |db| {
-        let rows = db.execute("SELECT COUNT(*) FROM crash_test")
+        let rows = db
+            .execute("SELECT COUNT(*) FROM crash_test")
             .unwrap()
-            .into_rows().unwrap();
+            .into_rows()
+            .unwrap();
 
-        assert_eq!(
-            rows.first().unwrap()[0].as_big_int().unwrap().value(),
-            1
-        );
+        assert_eq!(rows.first().unwrap()[0].as_big_int().unwrap().value(), 1);
 
-        let rows = db.execute("SELECT data FROM crash_test WHERE id = 1")
+        let rows = db
+            .execute("SELECT data FROM crash_test WHERE id = 1")
             .unwrap()
-            .into_rows().unwrap();
+            .into_rows()
+            .unwrap();
 
-        let data = rows.first().unwrap()[0]
-            .as_blob().unwrap().to_string();
+        let data = rows.first().unwrap()[0].as_blob().unwrap().to_string();
 
         assert_eq!(data, "after_crash");
     });
 
     drop(dir);
 }
-
-
 
 #[test]
 #[cfg_attr(miri, ignore)]
@@ -492,19 +489,17 @@ fn test_recovery_without_flush_delete() {
         db.execute("INSERT INTO crash_test VALUES (1, 'before_crash')")
             .unwrap();
 
-        db.execute("DELETE FROM crash_test WHERE id = 1")
-            .unwrap();
+        db.execute("DELETE FROM crash_test WHERE id = 1").unwrap();
     });
 
     reopen_and_assert(&db_path, |db| {
-        let rows = db.execute("SELECT COUNT(*) FROM crash_test")
+        let rows = db
+            .execute("SELECT COUNT(*) FROM crash_test")
             .unwrap()
-            .into_rows().unwrap();
+            .into_rows()
+            .unwrap();
 
-        assert_eq!(
-            rows.first().unwrap()[0].as_big_int().unwrap().value(),
-            0
-        );
+        assert_eq!(rows.first().unwrap()[0].as_big_int().unwrap().value(), 0);
     });
 
     drop(dir);

@@ -131,6 +131,8 @@ impl TestHarness {
         handle: TransactionHandle,
         last_lsn: u64,
     ) -> Vec<Row> {
+        println!("{}", plan.explain());
+
         let tid = handle.id();
         let ctx = self
             .create_context(handle)
@@ -153,6 +155,7 @@ impl TestHarness {
         let (handle, last_lsn) = self.begin_transaction();
         let snapshot = handle.snapshot();
         let plan = self.optimize_sql(sql, snapshot);
+        dbg!(&plan);
         self.execute_plan(&plan, handle, last_lsn)
     }
 
@@ -166,11 +169,11 @@ impl TestHarness {
 
         let mut binder = Binder::new(self.catalog.clone(), builder.clone(), snapshot);
         let bound = binder.bind(&stmt).expect("Bind failed");
-
-        let ctx = self
-            .create_context(handle.clone())
-            .expect("Failed to create context");
         let tid = handle.id();
+        let ctx = self
+            .create_context(handle)
+            .expect("Failed to create context");
+
         let logger = self.create_logger(tid, last_lsn);
         let mut ddl_executor = DdlExecutor::new(ctx.create_child().unwrap(), logger);
         ddl_executor.execute(&bound)?;
@@ -293,7 +296,8 @@ impl TestHarness {
 
     pub fn setup_products_table(&self) {
         let (mut handle, last_lsn) = self.begin_transaction();
-        self.create_table("products", products_columns(), handle.id());
+        let id = self.create_table("products", products_columns(), handle.id());
+        println!("Created products table {id}");
         handle.commit().expect("Failed to commit");
     }
 

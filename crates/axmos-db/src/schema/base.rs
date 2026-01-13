@@ -702,16 +702,14 @@ impl Relation {
         self.schema
     }
 
-
     pub(crate) fn to_create_table_instr(&self) -> SchemaResult<CreateTableInstr> {
-
-       let schema = self.schema();
-       let constraints = schema
-            .table_constraints.clone().ok_or(SchemaError::NotATable)?;
+        let schema = self.schema();
+        let constraints = schema
+            .table_constraints
+            .clone()
+            .ok_or(SchemaError::NotATable)?;
 
         let columns: Vec<Column> = schema.columns().iter().skip(1).cloned().collect();
-
-
 
         Ok(CreateTableInstr::new(
             self.name().to_string(),
@@ -719,7 +717,6 @@ impl Relation {
             constraints,
             false,
         ))
-
     }
 
     /// Creates an index relation

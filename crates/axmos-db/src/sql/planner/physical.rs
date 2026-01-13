@@ -233,8 +233,8 @@ pub struct PhysIndexScanOp {
     pub index_id: ObjectId,
     pub schema: Schema,
     pub index_columns: Vec<usize>,
-    pub range_start: Option<BoundExpression>,
-    pub range_end: Option<BoundExpression>,
+    pub range_start: Option<Vec<IndexRangeBound>>,
+    pub range_end: Option<Vec<IndexRangeBound>>,
     pub residual: Option<BoundExpression>,
 }
 

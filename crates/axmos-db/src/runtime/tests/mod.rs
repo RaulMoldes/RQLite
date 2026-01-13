@@ -459,3 +459,212 @@ fn test_create_index_if_not_exists() {
         .execute_ddl("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_price ON products(price)");
     assert!(result.is_ok());
 }
+
+#[test]
+fn test_index_scan_equality_lookup() {
+    let harness = TestHarness::new();
+
+    harness.setup_products_table();
+    harness
+        .execute_ddl("CREATE UNIQUE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    harness.execute_sql("INSERT INTO products VALUES ('Widget', 100)");
+    harness.execute_sql("INSERT INTO products VALUES ('Gadget', 200)");
+    harness.execute_sql("INSERT INTO products VALUES ('Gizmo', 150)");
+
+    let results = harness.execute_sql("SELECT name FROM products WHERE price = 150");
+
+    assert_eq!(results.len(), 1);
+    match &results[0][0] {
+        DataType::Blob(b) => assert_eq!(b.to_string(), "Gizmo"),
+        other => panic!("Expected Blob, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_index_scan_range_both_bounds() {
+    let harness = TestHarness::new();
+
+    harness.setup_products_table();
+    harness
+        .execute_ddl("CREATE UNIQUE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    harness.execute_sql("INSERT INTO products VALUES ('A', 50)");
+    harness.execute_sql("INSERT INTO products VALUES ('B', 100)");
+    harness.execute_sql("INSERT INTO products VALUES ('C', 150)");
+    harness.execute_sql("INSERT INTO products VALUES ('D', 200)");
+    harness.execute_sql("INSERT INTO products VALUES ('E', 250)");
+
+    let results =
+        harness.execute_sql("SELECT name FROM products WHERE price >= 100 AND price <= 200");
+
+    assert_eq!(results.len(), 3);
+}
+
+#[test]
+fn test_index_scan_range_lower_bound() {
+    let harness = TestHarness::new();
+
+    harness.setup_products_table();
+    harness
+        .execute_ddl("CREATE UNIQUE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    harness.execute_sql("INSERT INTO products VALUES ('A', 50)");
+    harness.execute_sql("INSERT INTO products VALUES ('B', 100)");
+    harness.execute_sql("INSERT INTO products VALUES ('C', 150)");
+    harness.execute_sql("INSERT INTO products VALUES ('D', 200)");
+
+    let results = harness.execute_sql("SELECT name FROM products WHERE price > 100");
+
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_index_scan_range_upper_bound() {
+    let harness = TestHarness::new();
+
+    harness.setup_products_table();
+    harness
+        .execute_ddl("CREATE UNIQUE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    harness.execute_sql("INSERT INTO products VALUES ('A', 50)");
+    harness.execute_sql("INSERT INTO products VALUES ('B', 100)");
+    harness.execute_sql("INSERT INTO products VALUES ('C', 150)");
+    harness.execute_sql("INSERT INTO products VALUES ('D', 200)");
+
+    let results = harness.execute_sql("SELECT name FROM products WHERE price < 150");
+
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_index_scan_no_results() {
+    let harness = TestHarness::new();
+
+    harness.setup_products_table();
+    harness
+        .execute_ddl("CREATE UNIQUE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    harness.execute_sql("INSERT INTO products VALUES ('A', 50)");
+    harness.execute_sql("INSERT INTO products VALUES ('B', 100)");
+
+    let results =
+        harness.execute_sql("SELECT name FROM products WHERE price > 200 AND price < 300");
+
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn test_index_scan_empty_table() {
+    let harness = TestHarness::new();
+
+    harness.setup_products_table();
+    harness
+        .execute_ddl("CREATE UNIQUE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    let results = harness.execute_sql("SELECT name FROM products WHERE price = 100");
+
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn test_index_scan_with_residual_filter() {
+    let harness = TestHarness::new();
+
+    harness.setup_employees_table();
+    harness
+        .execute_ddl("CREATE UNIQUE INDEX idx_emp_salary ON employees(salary)")
+        .expect("Failed to create index");
+
+    harness.execute_sql("INSERT INTO employees VALUES ('Alice', 'Engineering', 100000)");
+    harness.execute_sql("INSERT INTO employees VALUES ('Bob', 'Sales', 150000)");
+    harness.execute_sql("INSERT INTO employees VALUES ('Charlie', 'Engineering', 80000)");
+    harness.execute_sql("INSERT INTO employees VALUES ('Diana', 'Sales', 120000)");
+
+    // Index scan on salary with residual filter on department
+    let results = harness.execute_sql(
+        "SELECT name FROM employees WHERE salary >= 100000 AND department = 'Engineering'",
+    );
+
+    assert_eq!(results.len(), 1);
+    match &results[0][0] {
+        DataType::Blob(b) => assert_eq!(b.to_string(), "Alice"),
+        other => panic!("Expected Blob, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_index_scan_with_order_by() {
+    let harness = TestHarness::new();
+
+    harness.setup_products_table();
+    harness
+        .execute_ddl("CREATE UNIQUE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    harness.execute_sql("INSERT INTO products VALUES ('D', 200)");
+    harness.execute_sql("INSERT INTO products VALUES ('A', 50)");
+    harness.execute_sql("INSERT INTO products VALUES ('C', 150)");
+    harness.execute_sql("INSERT INTO products VALUES ('B', 100)");
+
+    let results =
+        harness.execute_sql("SELECT name FROM products WHERE price >= 50 ORDER BY price ASC");
+
+    assert_eq!(results.len(), 4);
+
+    let names: Vec<String> = results
+        .iter()
+        .map(|r| match &r[0] {
+            DataType::Blob(b) => b.to_string(),
+            _ => panic!("Expected Blob"),
+        })
+        .collect();
+
+    assert_eq!(names, vec!["A", "B", "C", "D"]);
+}
+
+#[test]
+fn test_index_scan_with_limit() {
+    let harness = TestHarness::new();
+
+    harness.setup_products_table();
+    harness
+        .execute_ddl("CREATE UNIQUE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    harness.execute_sql("INSERT INTO products VALUES ('A', 50)");
+    harness.execute_sql("INSERT INTO products VALUES ('B', 100)");
+    harness.execute_sql("INSERT INTO products VALUES ('C', 150)");
+    harness.execute_sql("INSERT INTO products VALUES ('D', 200)");
+    harness.execute_sql("INSERT INTO products VALUES ('E', 250)");
+
+    let results =
+        harness.execute_sql("SELECT name FROM products WHERE price >= 50 ORDER BY price LIMIT 3");
+
+    assert_eq!(results.len(), 3);
+}
+
+#[test]
+fn test_index_scan_reversed_predicate() {
+    let harness = TestHarness::new();
+
+    harness.setup_products_table();
+    harness
+        .execute_ddl("CREATE UNIQUE INDEX idx_products_price ON products(price)")
+        .expect("Failed to create index");
+
+    harness.execute_sql("INSERT INTO products VALUES ('A', 50)");
+    harness.execute_sql("INSERT INTO products VALUES ('B', 100)");
+    harness.execute_sql("INSERT INTO products VALUES ('C', 150)");
+
+    // Reversed predicate: literal op column instead of column op literal
+    let results = harness.execute_sql("SELECT name FROM products WHERE 100 <= price");
+
+    assert_eq!(results.len(), 2);
+}

@@ -397,6 +397,7 @@ impl TransactionCoordinator {
 
         // Create snapshot
         let snapshot = self.snapshot(txid)?;
+
         let start_ts = self.commit_counter.load(Ordering::SeqCst);
 
         // Insert new transaction entry

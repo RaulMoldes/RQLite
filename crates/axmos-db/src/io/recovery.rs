@@ -1,5 +1,5 @@
 use crate::{
-     UInt64,
+    UInt64,
     io::{
         logger::{Alter, Create, Delete, DropOp, Insert, Operation, Update},
         wal::AnalysisResult,
@@ -13,7 +13,6 @@ use crate::{
         },
         dml::DmlExecutor,
     },
-
     storage::tuple::Row,
 };
 
@@ -77,39 +76,30 @@ impl WalRecuperator {
     /// Run all the redo.
     pub(crate) fn run_redo(&mut self, analysis: &AnalysisResult) -> RuntimeResult<()> {
         for redo_transaction in analysis.needs_redo.iter() {
-
             // Reapply all the operations of this transaction
             for lsn in analysis.try_iter_lsn(redo_transaction).ok_or(IoError::new(
                 ErrorKind::NotSeekable,
                 "transaction not found in th write ahead analysis",
             ))? {
-
-
                 if let Some(create_operation) = analysis.create_ops.get(&lsn) {
-
                     self.redo_create(create_operation)?;
                 }
                 if let Some(alter_operation) = analysis.alter_ops.get(&lsn) {
-
                     self.redo_alter(alter_operation)?;
                 }
                 if let Some(drop_operation) = analysis.drop_ops.get(&lsn) {
-
                     self.redo_drop(drop_operation)?;
                 }
 
                 if let Some(delete_operation) = analysis.delete_ops.get(&lsn) {
-
                     self.redo_delete(delete_operation)?;
                 }
 
                 if let Some(update_operation) = analysis.update_ops.get(&lsn) {
-
                     self.redo_update(update_operation)?;
                 }
 
                 if let Some(insert_operation) = analysis.insert_ops.get(&lsn) {
-
                     self.redo_insert(insert_operation)?;
                 }
             }
@@ -400,7 +390,7 @@ impl WalRecuperator {
         {
             if let Some(redo_row) =
                 Row::from_bytes_checked_with_snapshot(update_op.redo(), schema, &snapshot)?
-            {   
+            {
                 // Redo: apply new state
                 self.dml_executor
                     .update_row(table_id, &row_id, &undo_row, &redo_row)?;
