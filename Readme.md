@@ -253,7 +253,7 @@ I have also used quite a lot of SQLite's, PostgreSQL's, and InnoDB's documentati
 
 ## License
 
-Apache-2.0
+MIT
 
 ## Repository
 
