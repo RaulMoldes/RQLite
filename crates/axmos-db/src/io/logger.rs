@@ -162,20 +162,23 @@ impl Operation for Delete {
     }
 }
 
-
-
 /// LOGGING FOR DDL OPERATORS.
 /// [CREATE]
 #[repr(C)]
 #[derive(Debug)]
 pub struct Create {
     oid: ObjectId,
-    new: Box<[u8]>, // Data in the meta table
+    redo_data: Box<[u8]>, // Data in the meta table
+    undo_data: Box<[u8]>,
 }
 
 impl Create {
-    pub(crate) fn new(oid: ObjectId, new: Box<[u8]>) -> Self {
-        Self { oid, new }
+    pub(crate) fn new(oid: ObjectId, redo_data: Box<[u8]>, undo_data: Box<[u8]>) -> Self {
+        Self {
+            oid,
+            redo_data,
+            undo_data,
+        }
     }
 }
 
@@ -190,16 +193,13 @@ impl Operation for Create {
         Some(self.oid)
     }
     fn undo(&self) -> &[u8] {
-        &[]
+        &self.undo_data
     }
 
     fn redo(&self) -> &[u8] {
-        &self.new
+        &self.redo_data
     }
 }
-
-
-
 
 /// LOGGING FOR DDL OPERATORS.
 /// [DROP /REMOVE]
@@ -207,12 +207,17 @@ impl Operation for Create {
 #[derive(Debug)]
 pub struct DropOp {
     oid: ObjectId,
-    old: Box<[u8]>, // Data in the meta table
+    redo_data: Box<[u8]>, // Data in the meta table
+    undo_data: Box<[u8]>,
 }
 
 impl DropOp {
-    pub(crate) fn new(oid: ObjectId, old: Box<[u8]>) -> Self {
-        Self { oid, old }
+    pub(crate) fn new(oid: ObjectId, redo_data: Box<[u8]>, undo_data: Box<[u8]>) -> Self {
+        Self {
+            oid,
+            redo_data,
+            undo_data,
+        }
     }
 }
 
@@ -227,15 +232,13 @@ impl Operation for DropOp {
         Some(self.oid)
     }
     fn undo(&self) -> &[u8] {
-        &self.old
+        &self.undo_data
     }
 
     fn redo(&self) -> &[u8] {
-        &[]
+        &self.redo_data
     }
 }
-
-
 
 /// LOGGING FOR DDL OPERATORS.
 /// [DROP /REMOVE]
@@ -243,13 +246,17 @@ impl Operation for DropOp {
 #[derive(Debug)]
 pub struct Alter {
     oid: ObjectId,
-    new: Box<[u8]>,
-    old: Box<[u8]>, // Data in the meta table
+    redo_data: Box<[u8]>,
+    undo_data: Box<[u8]>, // Data in the meta table
 }
 
 impl Alter {
-    pub(crate) fn new(oid: ObjectId,new: Box<[u8]>,  old: Box<[u8]>) -> Self {
-        Self { oid, new, old }
+    pub(crate) fn new(oid: ObjectId, redo_data: Box<[u8]>, undo_data: Box<[u8]>) -> Self {
+        Self {
+            oid,
+            redo_data,
+            undo_data,
+        }
     }
 }
 
@@ -264,10 +271,10 @@ impl Operation for Alter {
         Some(self.oid)
     }
     fn undo(&self) -> &[u8] {
-        &self.old
+        &self.undo_data
     }
 
     fn redo(&self) -> &[u8] {
-        &self.new
+        &self.redo_data
     }
 }

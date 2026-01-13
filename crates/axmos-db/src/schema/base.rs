@@ -1,12 +1,13 @@
 use super::stats::Stats;
 use crate::{
-    runtime::eval::eval_literal_expr,
+    core::SerializableType,
+    runtime::{ddl::CreateTableInstr, eval::eval_literal_expr},
     schema::DatabaseItem,
     sql::binder::bounds::BoundColumnDef,
     storage::tuple::Row,
     types::{
-        Blob, DataType, DataTypeKind, ObjectId, PageId, RowId, SerializationError,
-        SerializationResult, UInt64,
+        Blob, BlobRef, DataType, DataTypeKind, DataTypeRef, ObjectId, PageId, RowId,
+        SerializationError, SerializationResult, UInt64,
     },
 };
 use rkyv::{
@@ -366,6 +367,22 @@ impl Schema {
         }
     }
 
+    pub fn write_to(&self, bytes: &mut [u8], cursor: usize) -> SerializationResult<usize> {
+        let blob = self.to_blob()?;
+        blob.write_to(bytes, cursor)
+    }
+
+    pub fn read_from(&self, bytes: &[u8], cursor: usize) -> SerializationResult<(Self, usize)> {
+        let (dtype, bytes_read) = DataTypeKind::Blob.deserialize(bytes, cursor)?;
+        let DataTypeRef::Blob(blob) = dtype else {
+            return Err(SerializationError::Other(
+                "Unexpected datatatype deserialized, expected blob".to_string(),
+            ));
+        };
+
+        Self::from_blob_ref(blob).map(|b| (b, bytes_read))
+    }
+
     /// Serializes an schema to a blob object
     pub fn to_blob(&self) -> SerializationResult<Blob> {
         let bytes = to_bytes::<RkyvError>(self)?;
@@ -382,7 +399,19 @@ impl Schema {
         let mut aligned = AlignedVec::<4>::new();
         aligned.extend_from_slice(data);
         let schema = from_bytes::<Schema, RkyvError>(&aligned)?;
+        Ok(schema)
+    }
 
+    /// Deserializes an schema from a blob object
+    pub fn from_blob_ref<'a>(blob: BlobRef<'a>) -> SerializationResult<Self> {
+        let data = blob
+            .data()
+            .map_err(|e| SerializationError::InvalidVarIntPrefix)?;
+
+        //  It is impossible to avoid this copy here unless we fuck up the whole blob data structure since blob does not guarantee alignment.
+        let mut aligned = AlignedVec::<4>::new();
+        aligned.extend_from_slice(data);
+        let schema = from_bytes::<Schema, RkyvError>(&aligned)?;
         Ok(schema)
     }
 
@@ -442,6 +471,39 @@ pub(crate) enum TableConstraint {
     },
     Unique(Vec<usize>), // Unique set of column ids in the schema.
 }
+impl TableConstraint {
+    /// Serializes an schema to a blob object
+    pub fn to_blob(&self) -> SerializationResult<Blob> {
+        let bytes = to_bytes::<RkyvError>(self)?;
+        Ok(Blob::from_unencoded_slice(&bytes))
+    }
+
+    /// Deserializes an schema from a blob object
+    pub fn from_blob(blob: &Blob) -> SerializationResult<Self> {
+        let data = blob
+            .data()
+            .map_err(|e| SerializationError::InvalidVarIntPrefix)?;
+
+        //  It is impossible to avoid this copy here unless we fuck up the whole blob data structure since blob does not guarantee alignment.
+        let mut aligned = AlignedVec::<4>::new();
+        aligned.extend_from_slice(data);
+        let schema = from_bytes::<Self, RkyvError>(&aligned)?;
+        Ok(schema)
+    }
+
+    /// Deserializes an schema from a blob object
+    pub fn from_blob_ref<'a>(blob: BlobRef<'a>) -> SerializationResult<Self> {
+        let data = blob
+            .data()
+            .map_err(|e| SerializationError::InvalidVarIntPrefix)?;
+
+        //  It is impossible to avoid this copy here unless we fuck up the whole blob data structure since blob does not guarantee alignment.
+        let mut aligned = AlignedVec::<4>::new();
+        aligned.extend_from_slice(data);
+        let schema = from_bytes::<Self, RkyvError>(&aligned)?;
+        Ok(schema)
+    }
+}
 
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ForeignKeyInfo {
@@ -463,6 +525,38 @@ impl ForeignKeyInfo {
 
     pub(crate) fn referenced_table(&self) -> ObjectId {
         self.ref_table
+    }
+
+    /// Serializes an schema to a blob object
+    pub fn to_blob(&self) -> SerializationResult<Blob> {
+        let bytes = to_bytes::<RkyvError>(self)?;
+        Ok(Blob::from_unencoded_slice(&bytes))
+    }
+
+    /// Deserializes an schema from a blob object
+    pub fn from_blob(blob: &Blob) -> SerializationResult<Self> {
+        let data = blob
+            .data()
+            .map_err(|e| SerializationError::InvalidVarIntPrefix)?;
+
+        //  It is impossible to avoid this copy here unless we fuck up the whole blob data structure since blob does not guarantee alignment.
+        let mut aligned = AlignedVec::<4>::new();
+        aligned.extend_from_slice(data);
+        let schema = from_bytes::<Self, RkyvError>(&aligned)?;
+        Ok(schema)
+    }
+
+    /// Deserializes an schema from a blob object
+    pub fn from_blob_ref<'a>(blob: BlobRef<'a>) -> SerializationResult<Self> {
+        let data = blob
+            .data()
+            .map_err(|e| SerializationError::InvalidVarIntPrefix)?;
+
+        //  It is impossible to avoid this copy here unless we fuck up the whole blob data structure since blob does not guarantee alignment.
+        let mut aligned = AlignedVec::<4>::new();
+        aligned.extend_from_slice(data);
+        let schema = from_bytes::<Self, RkyvError>(&aligned)?;
+        Ok(schema)
     }
 }
 
@@ -525,6 +619,54 @@ impl Column {
     pub(crate) fn datatype(&self) -> DataTypeKind {
         DataTypeKind::from_repr(self.dtype).unwrap_or(DataTypeKind::Null)
     }
+
+    pub fn write_to(&self, bytes: &mut [u8], cursor: usize) -> SerializationResult<usize> {
+        let blob = self.to_blob()?;
+        blob.write_to(bytes, cursor)
+    }
+
+    pub fn read_from(&self, bytes: &[u8], cursor: usize) -> SerializationResult<(Self, usize)> {
+        let (dtype, bytes_read) = DataTypeKind::Blob.deserialize(bytes, cursor)?;
+        let DataTypeRef::Blob(blob) = dtype else {
+            return Err(SerializationError::Other(
+                "Unexpected datatatype deserialized, expected blob".to_string(),
+            ));
+        };
+
+        Self::from_blob_ref(blob).map(|b| (b, bytes_read))
+    }
+
+    /// Serializes an schema to a blob object
+    pub fn to_blob(&self) -> SerializationResult<Blob> {
+        let bytes = to_bytes::<RkyvError>(self)?;
+        Ok(Blob::from_unencoded_slice(&bytes))
+    }
+
+    /// Deserializes an schema from a blob object
+    pub fn from_blob(blob: &Blob) -> SerializationResult<Self> {
+        let data = blob
+            .data()
+            .map_err(|e| SerializationError::InvalidVarIntPrefix)?;
+
+        //  It is impossible to avoid this copy here unless we fuck up the whole blob data structure since blob does not guarantee alignment.
+        let mut aligned = AlignedVec::<4>::new();
+        aligned.extend_from_slice(data);
+        let schema = from_bytes::<Self, RkyvError>(&aligned)?;
+        Ok(schema)
+    }
+
+    /// Deserializes an schema from a blob object
+    pub fn from_blob_ref<'a>(blob: BlobRef<'a>) -> SerializationResult<Self> {
+        let data = blob
+            .data()
+            .map_err(|e| SerializationError::InvalidVarIntPrefix)?;
+
+        //  It is impossible to avoid this copy here unless we fuck up the whole blob data structure since blob does not guarantee alignment.
+        let mut aligned = AlignedVec::<4>::new();
+        aligned.extend_from_slice(data);
+        let schema = from_bytes::<Self, RkyvError>(&aligned)?;
+        Ok(schema)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -560,6 +702,26 @@ impl Relation {
         self.schema
     }
 
+
+    pub(crate) fn to_create_table_instr(&self) -> SchemaResult<CreateTableInstr> {
+
+       let schema = self.schema();
+       let constraints = schema
+            .table_constraints.clone().ok_or(SchemaError::NotATable)?;
+
+        let columns: Vec<Column> = schema.columns().iter().skip(1).cloned().collect();
+
+
+
+        Ok(CreateTableInstr::new(
+            self.name().to_string(),
+            columns,
+            constraints,
+            false,
+        ))
+
+    }
+
     /// Creates an index relation
     pub(crate) fn index(
         object_id: ObjectId,
@@ -587,6 +749,10 @@ impl Relation {
     /// Returns the relation's object id
     pub(crate) fn object_id(&self) -> ObjectId {
         self.object_id
+    }
+
+    pub(crate) fn set_root_page(&mut self, root_page: PageId) {
+        self.root_page = root_page;
     }
 
     pub(crate) fn stats(&self) -> Option<&Stats> {

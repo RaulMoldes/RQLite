@@ -1,12 +1,18 @@
 use crate::{
-    ObjectId, SerializationError, TransactionId, UInt64, core::SerializableType, io::pager::{BtreeBuilder, SharedPager}, make_shared_readonly, multithreading::coordinator::Snapshot, runtime::{
-        RuntimeError, context::TransactionLogger}, schema::{Schema, base::SchemaError}, storage::tuple::{Tuple, TupleBuilder, TupleError, TupleReader, TupleRef}, tree::{
+    ObjectId, SerializationError, TransactionId, UInt64,
+    core::SerializableType,
+    io::pager::{BtreeBuilder, SharedPager},
+    make_shared_readonly,
+    multithreading::coordinator::Snapshot,
+    runtime::{RuntimeError, context::TransactionLogger},
+    schema::{Schema, base::SchemaError},
+    storage::tuple::{Tuple, TupleBuilder, TupleError, TupleReader, TupleRef},
+    tree::{
         accessor::BtreePagePosition,
         bplustree::{BtreeError, SearchResult},
-    }, types::{Blob, DataType, DataTypeRef, PageId}
+    },
+    types::{Blob, DataType, DataTypeRef, PageId},
 };
-
-
 
 use super::{
     Stats,
@@ -72,7 +78,6 @@ impl From<RuntimeError> for CatalogError {
     }
 }
 
-
 impl std::error::Error for CatalogError {}
 type CatalogResult<T> = Result<T, CatalogError>;
 
@@ -105,13 +110,12 @@ impl VacuumStats {
     }
 }
 
-
 make_shared_readonly!(SharedCatalog, Catalog);
 
 pub struct Catalog {
     meta_table: PageId,
     meta_index: PageId,
-    pager: SharedPager
+    pager: SharedPager,
 }
 
 impl Catalog {
@@ -119,10 +123,9 @@ impl Catalog {
         Self {
             meta_table,
             meta_index,
-            pager
+            pager,
         }
     }
-
 
     /// Converts a relation into a meta table tuple for storage.
     pub(crate) fn relation_as_meta_table_tuple(
@@ -310,7 +313,7 @@ impl Catalog {
                 continue;
             };
 
-            self.update_relation(id, None, None, Some(stats), &builder, &snapshot, logger)?;
+            self.update_relation(id, None, None, Some(stats), &builder, &snapshot)?;
         }
 
         Ok(())
@@ -469,7 +472,6 @@ impl Catalog {
         new_stats: Option<Stats>,
         builder: &BtreeBuilder,
         snapshot: &Snapshot,
-        logger: Option<&TransactionLogger>
     ) -> CatalogResult<()> {
         let schema = meta_table_schema();
         let mut meta_table = builder.build_tree_mut(self.meta_table);
@@ -507,21 +509,11 @@ impl Catalog {
             return Ok(());
         };
 
-        if let Some(logger) = logger {
-            let old_data = (&tuple).into();
-            tuple.add_version_with(&changes, snapshot.xid(), &schema)?;
-            logger.log_alter(relation_id, (&tuple).into(), old_data)?;
-
-        } else {
-            tuple.add_version_with(&changes, snapshot.xid(), &schema)?;
-        };
-
+        tuple.add_version_with(&changes, snapshot.xid(), &schema)?;
         let result = meta_table.update(self.meta_table, tuple, &schema)?;
 
         Ok(())
     }
-
-
 
     /// Removes a given relation using the provided
     /// Cascades the removal if required.
@@ -531,7 +523,6 @@ impl Catalog {
         builder: &BtreeBuilder,
         snapshot: &Snapshot,
         cascade: bool,
-        logger: Option<&TransactionLogger>
     ) -> CatalogResult<()> {
         if cascade {
             let schema = rel.schema();
@@ -540,7 +531,7 @@ impl Catalog {
             // Recursively remove object dependants
             for dep in dependants {
                 let relation = self.get_relation(dep, builder, snapshot)?;
-                self.remove_relation(relation, builder, snapshot, cascade, logger)?;
+                self.remove_relation(relation, builder, snapshot, cascade)?;
             }
         };
 
@@ -582,13 +573,6 @@ impl Catalog {
             .get_row_at(position, &schema, &snapshot)?
             .expect("Tuple should exist");
 
-
-        if let Some(logger) = logger {
-            let old_data = (&tuple).into();
-            // Apply the update
-            logger.log_drop(relation_id, old_data)?;
-        };
-
         tuple.delete(snapshot.xid())?;
         meta_table.update(self.meta_table, tuple, &schema)?;
 
@@ -625,7 +609,6 @@ impl Catalog {
         Ok(())
     }
 
-
     /// Removes a given relation using the provided id
     /// Cascades the removal if required.
     pub(crate) fn remove_relation_by_id(
@@ -634,10 +617,10 @@ impl Catalog {
         builder: &BtreeBuilder,
         snapshot: &Snapshot,
         cascade: bool,
-        logger: Option<&TransactionLogger>
+        logger: Option<&TransactionLogger>,
     ) -> CatalogResult<()> {
         let rel = self.get_relation(relation_id, builder, snapshot)?;
-        self.remove_relation(rel, builder, snapshot, cascade, logger)
+        self.remove_relation(rel, builder, snapshot, cascade)
     }
 
     /// Stores a new relation in the meta table.
@@ -646,7 +629,6 @@ impl Catalog {
         relation: Relation,
         builder: &BtreeBuilder,
         transaction_id: TransactionId,
-        logger: Option<&TransactionLogger>
     ) -> CatalogResult<()> {
         // Store the relation in the meta index.
         let schema = meta_index_schema();
@@ -658,7 +640,7 @@ impl Catalog {
 
         // Will replace existing relation if it exists.
         tree.upsert(self.meta_index, tuple, &schema)?;
-        
+
         let schema = meta_table_schema();
         let object_id = relation.object_id();
 
@@ -666,13 +648,8 @@ impl Catalog {
         let mut tree = builder.build_tree_mut(self.meta_table);
         let tuple = Self::relation_as_meta_table_tuple(&relation, transaction_id)?;
 
-        if let Some(logger) = logger {
-            logger.log_create(object_id, (&tuple).into())?;
-        };
-
         // Will replace existing relation if it exists.
         tree.upsert(self.meta_table, tuple, &schema)?;
-        println!("META TABLE SUCCESSFULLY UPDATED");
 
         Ok(())
     }

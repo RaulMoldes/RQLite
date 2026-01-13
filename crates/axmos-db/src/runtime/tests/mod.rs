@@ -359,10 +359,9 @@ fn test_create_index_via_sql() {
     let snapshot = handle.snapshot();
     let builder = harness.tree_builder();
 
-    let index =
-        harness
-            .catalog()
-            .get_relation_by_name("idx_products_price", &builder, &snapshot);
+    let index = harness
+        .catalog()
+        .get_relation_by_name("idx_products_price", &builder, &snapshot);
     assert!(index.is_ok(), "Index should exist in catalog");
     handle.commit().expect("Failed to commit");
 }

@@ -29,7 +29,7 @@ pub fn test_get_relation_by_name(count: usize) {
     for i in 0..count {
         let rel = make_relation(i as ObjectId, &format!("named_table_{}", i));
         catalog
-            .store_relation(rel, &builder, snapshot.xid(), None)
+            .store_relation(rel, &builder, snapshot.xid())
             .expect("Store failed");
     }
 
@@ -56,7 +56,7 @@ pub fn test_store_relation(count: usize) {
     for i in 0..count {
         let rel = make_relation(i as ObjectId, &format!("table_{}", i));
         catalog
-            .store_relation(rel, &builder, snapshot.xid(), None)
+            .store_relation(rel, &builder, snapshot.xid())
             .expect("Store failed");
     }
 
@@ -80,7 +80,7 @@ pub fn test_get_relation(count: usize) {
     for i in 0..count {
         let rel = make_relation(i as ObjectId, &format!("get_table_{}", i));
         catalog
-            .store_relation(rel, &builder, snapshot.xid(), None)
+            .store_relation(rel, &builder, snapshot.xid())
             .expect("Store failed");
     }
 
@@ -107,7 +107,7 @@ pub fn test_delete_relation(count: usize, delete_count: usize) {
     for i in 0..count {
         let rel = make_relation(i as ObjectId, &format!("deletable_{}", i));
         catalog
-            .store_relation(rel, &builder, snapshot.xid(), None)
+            .store_relation(rel, &builder, snapshot.xid())
             .expect("Store failed");
     }
 
@@ -116,7 +116,7 @@ pub fn test_delete_relation(count: usize, delete_count: usize) {
             .get_relation(i as ObjectId, &builder, &snapshot)
             .expect("Get failed");
         catalog
-            .remove_relation(rel, &builder, &snapshot, false, None)
+            .remove_relation(rel, &builder, &snapshot, false)
             .expect("Delete failed");
     }
 

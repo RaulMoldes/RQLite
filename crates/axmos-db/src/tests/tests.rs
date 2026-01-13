@@ -1,4 +1,6 @@
 use super::utils::*;
+use tempfile::TempDir;
+use std::path::PathBuf;
 use crate::{DBConfig, Database};
 
 pub fn test_create_and_open(flush_before_close: bool) {
@@ -248,4 +250,40 @@ pub fn test_unique_via_create_index() {
 
     db.execute_ok("INSERT INTO items VALUES (2, 'SKU002', 'Item 2')");
     assert_eq!(db.query_count("items"), 2);
+}
+
+
+pub fn setup_db_no_flush<F>(workload: F) -> (TempDir, PathBuf)
+where
+    F: FnOnce(&Database),
+{
+    let dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let db_path = dir.path().join("ddl_no_flush.axm");
+    let config = DBConfig::default();
+
+    {
+        let db = Database::create(&db_path, config)
+            .expect("Failed to create database");
+
+        db.execute("CREATE TABLE crash_test (id BIGINT, data TEXT)")
+            .expect("Failed to create table");
+
+        workload(&db);
+
+    }
+
+    (dir, db_path)
+}
+
+
+pub fn reopen_and_assert<F>(db_path: &PathBuf, assertions: F)
+where
+    F: FnOnce(&Database),
+{
+    let config = DBConfig::default();
+
+    let db = Database::open(db_path, config)
+        .expect("Failed to open database");
+
+    assertions(&db);
 }

@@ -6,8 +6,10 @@ AxmosDB is an experimental relational database server written in Rust, designed 
 
 First, start the server specifying the port to listen on:
 
+**Note**: The safe-drop feature flushes the database contents to disk when it is dropped. It is safer to compile with this feature on.
+
 ```bash
-cargo run --bin axmos-server -- -p 5432
+cargo run --features safe-drop --bin axmos-server -- -p 5432
 ```
 
 Then connect to it with the client:

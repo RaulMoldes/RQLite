@@ -1,5 +1,6 @@
 use crate::{
-    io::pager::{Pager, SharedPager, BtreeBuilder},
+    common::DBConfig,
+    io::pager::{BtreeBuilder, Pager, SharedPager},
     multithreading::coordinator::Snapshot,
     schema::{
         DatabaseItem,
@@ -19,7 +20,6 @@ use crate::{
     },
     storage::page::BtreePage,
     types::DataTypeKind,
-    common::DBConfig
 };
 
 use std::path::Path;
@@ -27,24 +27,28 @@ use std::path::Path;
 use tempfile::TempDir;
 
 /// Helper: Creates a test catalog with predefined tables
-fn create_test_catalog(path: impl AsRef<Path>, snapshot: &Snapshot, builder: &BtreeBuilder) -> SharedCatalog {
-
+fn create_test_catalog(
+    path: impl AsRef<Path>,
+    snapshot: &Snapshot,
+    builder: &BtreeBuilder,
+) -> SharedCatalog {
     let config = DBConfig::default();
-    let pager = SharedPager::from(Pager::from_config(config, path).expect("Failed to create pager"));
+    let pager =
+        SharedPager::from(Pager::from_config(config, path).expect("Failed to create pager"));
 
     let (meta_table_page, meta_index_page) = {
-            let mut p = pager.write();
-            let meta_table = p
-                .allocate_page::<BtreePage>()
-                .expect("Failed to allocate meta table page");
-            let meta_index = p
-                .allocate_page::<BtreePage>()
-                .expect("Failed to allocate meta index page");
-            (meta_table, meta_index)
-        };
+        let mut p = pager.write();
+        let meta_table = p
+            .allocate_page::<BtreePage>()
+            .expect("Failed to allocate meta table page");
+        let meta_index = p
+            .allocate_page::<BtreePage>()
+            .expect("Failed to allocate meta index page");
+        (meta_table, meta_index)
+    };
 
-        let catalog = Catalog::new(pager.clone(), meta_table_page, meta_index_page);
-        let catalog = SharedCatalog::from(catalog);
+    let catalog = Catalog::new(pager.clone(), meta_table_page, meta_index_page);
+    let catalog = SharedCatalog::from(catalog);
 
     // Table: users (id INT, name TEXT, email TEXT, age INT)
     let users = Relation::table(
@@ -59,7 +63,7 @@ fn create_test_catalog(path: impl AsRef<Path>, snapshot: &Snapshot, builder: &Bt
             Column::new_with_defaults(DataTypeKind::Int, "age"),
         ],
     );
-    catalog.store_relation(users, &builder, 0, None).unwrap();
+    catalog.store_relation(users, &builder, 0).unwrap();
 
     // Table: orders (id INT, user_id INT, amount DOUBLE, status TEXT)
     let orders = Relation::table(
@@ -74,7 +78,7 @@ fn create_test_catalog(path: impl AsRef<Path>, snapshot: &Snapshot, builder: &Bt
             Column::new_with_defaults(DataTypeKind::Blob, "status"),
         ],
     );
-    catalog.store_relation(orders, &builder, 0, None).unwrap();
+    catalog.store_relation(orders, &builder, 0).unwrap();
 
     // Table: products (id INT, name TEXT, price DOUBLE, category TEXT)
     let products = Relation::table(
@@ -88,7 +92,7 @@ fn create_test_catalog(path: impl AsRef<Path>, snapshot: &Snapshot, builder: &Bt
             Column::new_with_defaults(DataTypeKind::Blob, "category"),
         ],
     );
-    catalog.store_relation(products, &builder, 0, None).unwrap();
+    catalog.store_relation(products, &builder, 0).unwrap();
 
     catalog
 }
@@ -388,7 +392,7 @@ fn test_analyzer_cte_multiple() {
 #[test]
 fn test_analyzer_insert_all_columns() {
     let result = analyzer_test("INSERT INTO users VALUES (1, 'John', 'john@test.com', 25)");
-    dbg!(&result);
+
     assert!(result.is_ok());
 }
 

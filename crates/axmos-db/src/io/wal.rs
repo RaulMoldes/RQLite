@@ -1,8 +1,12 @@
 use crate::{
     TransactionId,
-    io::{disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize}, logger::{Alter, Create, Delete, DropOp, Insert, Update}},
+    io::{
+        disk::{DBFile, FileOperations, FileSystem, FileSystemBlockSize},
+        logger::{Alter, Create, Delete, DropOp, Insert, Update},
+    },
     storage::{
-        Allocatable, AvailableSpace, WalMetadata, WalOps, Writable, tuple::Row, wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock}
+        Allocatable, AvailableSpace, WalMetadata, WalOps, Writable,
+        wal::{BlockZero, OwnedRecord, RecordRef, RecordType, WAL_BLOCK_SIZE, WalBlock},
     },
     types::{BlockId, Lsn},
 };
@@ -182,26 +186,24 @@ impl WriteAheadLog {
             match record_type {
                 // By default all transactions will need to be undo unless the have committed.
                 RecordType::Begin => {
-                    println!("Se encontro record de tipo begin {tid}");
+
                     result.needs_undo.insert(tid);
                 }
                 RecordType::Commit => {
-                    println!("Se encontro record de tipo commit {tid}");
+
                     result.needs_undo.remove(&tid);
                     result.needs_redo.insert(tid);
                 }
                 RecordType::Abort => {
-                    println!("Se encontro record de tipo abort {tid}");
+
                     result.needs_redo.remove(&tid);
                     result.needs_undo.insert(tid);
                 }
                 RecordType::End => {
-                    println!("Se encontro record de tipo end {tid}");
-                    //result.needs_undo.remove(&tid);
-                   // result.needs_redo.remove(&tid);
+
                 }
                 RecordType::Delete => {
-                     println!("Se encontro record de tipo delete");
+
                     let undo_content = Box::from(record.undo_payload());
                     let oid = record
                         .metadata()
@@ -215,7 +217,7 @@ impl WriteAheadLog {
                     result.delete_ops.insert(lsn, delete);
                 }
                 RecordType::Update => {
-                                         println!("Se encontro record de tipo update");
+
                     let undo_content = Box::from(record.undo_payload());
                     let redo_content = Box::from(record.redo_payload());
                     let oid = record
@@ -230,7 +232,7 @@ impl WriteAheadLog {
                     result.update_ops.insert(lsn, update);
                 }
                 RecordType::Insert => {
-                                         println!("Se encontro record de tipo insert");
+
                     let redo_content = Box::from(record.redo_payload());
                     let oid = record
                         .metadata()
@@ -244,37 +246,40 @@ impl WriteAheadLog {
                     result.insert_ops.insert(lsn, insert);
                 }
                 RecordType::Create => {
-                                         println!("Se encontro record de tipo create");
+
                     let redo_content = Box::from(record.redo_payload());
+                    let undo_content = Box::from(record.undo_payload());
 
                     let row_id = record
                         .metadata()
                         .row_id
                         .expect("Row id must be set for insert operations");
-                    let insert = Create::new(row_id, redo_content);
+                    let insert = Create::new(row_id, redo_content, undo_content);
                     result.create_ops.insert(lsn, insert);
                 }
 
                 RecordType::Alter => {
-                                         println!("Se encontro record de tipo alter");
+
                     let undo_content = Box::from(record.undo_payload());
                     let redo_content = Box::from(record.redo_payload());
                     let row_id = record
                         .metadata()
                         .row_id
                         .expect("Row id must be set for alter operations");
-                    let update = Alter::new( row_id, undo_content, redo_content);
+                    let update = Alter::new(row_id, redo_content, undo_content);
                     result.alter_ops.insert(lsn, update);
                 }
 
                 RecordType::Drop => {
-                                         println!("Se encontro record de tipo drop");
+           
+
+                    let redo_content = Box::from(record.redo_payload());
                     let undo_content = Box::from(record.undo_payload());
                     let row_id = record
                         .metadata()
                         .row_id
                         .expect("Row id must be set for drop operations");
-                    let drop_op = DropOp::new( row_id, undo_content);
+                    let drop_op = DropOp::new(row_id, redo_content, undo_content);
                     result.drop_ops.insert(lsn, drop_op);
                 }
             }

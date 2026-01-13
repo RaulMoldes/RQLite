@@ -108,7 +108,7 @@ impl TestHarness {
 
         let relation = Relation::table(object_id, name, root_page, columns);
         self.catalog
-            .store_relation(relation, &self.tree_builder(), txid, None)
+            .store_relation(relation, &self.tree_builder(), txid)
             .expect("Failed to store relation");
 
         object_id
@@ -172,7 +172,7 @@ impl TestHarness {
             .expect("Failed to create context");
         let tid = handle.id();
         let logger = self.create_logger(tid, last_lsn);
-        let mut ddl_executor = DdlExecutor::new(ctx.create_child().unwrap(),logger);
+        let mut ddl_executor = DdlExecutor::new(ctx.create_child().unwrap(), logger);
         ddl_executor.execute(&bound)?;
 
         ctx.commit_transaction().unwrap();

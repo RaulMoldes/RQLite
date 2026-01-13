@@ -57,10 +57,10 @@ where
         // Get the schema to evaluate assignments
         let tree_builder = self.ctx.tree_builder();
         let snapshot = self.ctx.snapshot();
-        let relation =
-            self.ctx
-                .catalog()
-                .get_relation(self.table_id, &tree_builder, &snapshot)?;
+        let relation = self
+            .ctx
+            .catalog()
+            .get_relation(self.table_id, &tree_builder, &snapshot)?;
         let schema = relation.schema().clone();
 
         // Extract row ID and evaluate assignments

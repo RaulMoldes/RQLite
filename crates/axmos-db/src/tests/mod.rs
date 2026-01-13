@@ -418,50 +418,94 @@ fn test_rollback_reopen_vacuum() {
 
         assert_eq!(count, 10, "Data should still not be visible after vacuum");
     }
-
 }
-
-
 
 /// Recovery tests on failure scenarios.
 ///
 /// This test suite intends to validate that via the wal we are able to recover the database to a usable consistent state after a disk failover.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn test_recovery_without_flush() {
-    use tempfile::tempdir;
-
-    let dir = tempdir().expect("Failed to create temp dir");
-    let db_path = dir.path().join("ddl_no_flush.axm");
-    let config = DBConfig::default();
-
-    // Create table and insert data WITHOUT calling flush (simulating crash)
-    {
-        let db = Database::create(&db_path, config).expect("Failed to create database");
-
-        db.execute("CREATE TABLE crash_test (id BIGINT, data TEXT)")
-            .expect("Failed to create table");
-
+#[cfg(not(feature = "safe-drop"))]
+fn test_recovery_without_flush_insert() {
+    let (dir, db_path) = setup_db_no_flush(|db| {
         db.execute("INSERT INTO crash_test VALUES (1, 'before_crash')")
             .expect("Failed to insert");
-    }
+    });
 
-    // Reopen and verify recovery worked
-    {
-        let db = Database::open(&db_path, config).expect("Failed to open database");
+    reopen_and_assert(&db_path, |db| {
+        let result = db.execute("SELECT COUNT(*) FROM crash_test")
+            .expect("Query failed");
 
-        let result = db.execute("SELECT COUNT(*) FROM crash_test");
-        println!("{:?}", result);
-        assert!(result.is_ok(), "Transaction was committed so it must be recovered by the wal");
+        let rows = result.into_rows().unwrap();
+        let count = rows.first().unwrap()[0]
+            .as_big_int().unwrap().value();
 
-        // If table exists, verify data integrity
-        if let Ok(result) = result {
-            let rows = result.into_rows().expect("Expected rows");
-            let count = rows.first().unwrap()[0].as_big_int().unwrap().value();
-            assert!(count == 1, "Data should be consistent");
-        }
+        assert_eq!(count, 1);
+    });
 
-    }
+    drop(dir);
+}
+
+
+#[test]
+#[cfg_attr(miri, ignore)]
+#[cfg(not(feature = "safe-drop"))]
+fn test_recovery_without_flush_update() {
+    let (dir, db_path) = setup_db_no_flush(|db| {
+        db.execute("INSERT INTO crash_test VALUES (1, 'before_crash')")
+            .unwrap();
+
+        db.execute("UPDATE crash_test SET data = 'after_crash' WHERE id = 1")
+            .unwrap();
+    });
+
+    reopen_and_assert(&db_path, |db| {
+        let rows = db.execute("SELECT COUNT(*) FROM crash_test")
+            .unwrap()
+            .into_rows().unwrap();
+
+        assert_eq!(
+            rows.first().unwrap()[0].as_big_int().unwrap().value(),
+            1
+        );
+
+        let rows = db.execute("SELECT data FROM crash_test WHERE id = 1")
+            .unwrap()
+            .into_rows().unwrap();
+
+        let data = rows.first().unwrap()[0]
+            .as_blob().unwrap().to_string();
+
+        assert_eq!(data, "after_crash");
+    });
+
+    drop(dir);
+}
+
+
+
+#[test]
+#[cfg_attr(miri, ignore)]
+#[cfg(not(feature = "safe-drop"))]
+fn test_recovery_without_flush_delete() {
+    let (dir, db_path) = setup_db_no_flush(|db| {
+        db.execute("INSERT INTO crash_test VALUES (1, 'before_crash')")
+            .unwrap();
+
+        db.execute("DELETE FROM crash_test WHERE id = 1")
+            .unwrap();
+    });
+
+    reopen_and_assert(&db_path, |db| {
+        let rows = db.execute("SELECT COUNT(*) FROM crash_test")
+            .unwrap()
+            .into_rows().unwrap();
+
+        assert_eq!(
+            rows.first().unwrap()[0].as_big_int().unwrap().value(),
+            0
+        );
+    });
 
     drop(dir);
 }

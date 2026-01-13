@@ -12,7 +12,6 @@ use crate::{
     storage::{
         core::{buffer::MemBlock, traits::Buffer},
         page::{OverflowPage, PageZero, PageZeroHeader},
-
     },
     tree::{
         accessor::{BtreeReadAccessor, BtreeWriteAccessor, TreeReader, TreeWriter},
@@ -98,7 +97,6 @@ impl<'a> FileOperations for Pager {
         Ok(())
     }
 }
-
 
 impl Pager {
     /// Compute the offset at which a page is placed given the database header size and the page id.

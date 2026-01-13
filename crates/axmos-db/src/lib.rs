@@ -47,7 +47,7 @@ use crate::{
         disk::FileOperations,
         logger::Begin,
         pager::{Pager, SharedPager},
-        recovery::WalRecuperator
+        recovery::WalRecuperator,
     },
     multithreading::{
         coordinator::{TransactionCoordinator, TransactionError},
@@ -179,14 +179,13 @@ impl Database {
         let pager = Pager::from_config(config, &path)?;
         let pager = SharedPager::from(pager);
 
-         // Allocate meta table and meta index pages
+        // Allocate meta table and meta index pages
         let (meta_table_page, meta_index_page) = {
             let mut p = pager.write();
             let meta_table = p.allocate_page::<BtreePage>()?;
             let meta_index = p.allocate_page::<BtreePage>()?;
             (meta_table, meta_index)
         };
-
 
         // Create catalog
         let catalog = Catalog::new(pager.clone(), meta_table_page, meta_index_page);
@@ -225,22 +224,19 @@ impl Database {
 
         let total_pages = pager.total_allocated_pages();
 
-        let (meta_table, meta_index) = if total_pages == 1  {
+        let (meta_table, meta_index) = if total_pages == 1 {
             // Allocate meta table and meta index pages
             let meta_table = pager.allocate_page::<BtreePage>()?;
             let meta_index = pager.allocate_page::<BtreePage>()?;
             (meta_table, meta_index)
         } else {
-           (1u64, 2u64)
+            (1u64, 2u64)
         };
 
         let pager = SharedPager::from(pager);
 
-
-
         // Create catalog with last stored object
-        let catalog = Catalog::new(pager.clone(),
-        meta_table, meta_index);
+        let catalog = Catalog::new(pager.clone(), meta_table, meta_index);
         let catalog = SharedCatalog::from(catalog);
 
         // Create transaction coordinator with last transaction
@@ -441,7 +437,13 @@ impl Database {
             let snapshot = tx_ctx.snapshot();
 
             catalog
-                .analyze(&tree_builder, &snapshot, Some(&logger), sample_rate, max_sample_rows, )
+                .analyze(
+                    &tree_builder,
+                    &snapshot,
+                    Some(&logger),
+                    sample_rate,
+                    max_sample_rows,
+                )
                 .map_err(box_err)?;
 
             tx_ctx.commit_transaction().map_err(box_err)?;
@@ -467,12 +469,9 @@ impl Database {
             // Abort all active transactions
             let aborted_txs = coordinator.abort_all();
             let oldest_active_xid = coordinator.get_last_committed();
-            println!(
-                "INICIANDO VACUUM CON OLDEST ACTIVE ID: {:?}",
-                oldest_active_xid
-            );
+
             if !aborted_txs.is_empty() {
-                println!("VACUUM: Aborted {} active transactions", aborted_txs.len());
+                eprintln!("VACUUM: Aborted {} active transactions", aborted_txs.len());
             }
 
             // Create a vacuum transaction
@@ -506,10 +505,11 @@ impl Database {
     }
 }
 
+ #[cfg(feature = "safe-drop")]
 impl Drop for Database {
     fn drop(&mut self) {
         // Best-effort flush on drop
-      //  let _ = self.flush();
+        let _ = self.flush();
     }
 }
 

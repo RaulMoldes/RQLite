@@ -66,7 +66,7 @@ impl DmlExecutor {
 
         for idx in num_keys..old_row.len().min(new_row.len()) {
             if old_row[idx] != new_row[idx] {
-                assignments.insert(idx, new_row[idx].clone());
+                assignments.insert(idx - num_keys, new_row[idx].clone());
             }
         }
 
@@ -157,10 +157,10 @@ impl DmlExecutor {
         let tid = self.ctx.tid();
 
         // Get the relation and allocate a new row ID
-        let mut relation =
-            self.ctx
-                .catalog()
-                .get_relation(table_id, &tree_builder, &snapshot)?;
+        let mut relation = self
+            .ctx
+            .catalog()
+            .get_relation(table_id, &tree_builder, &snapshot)?;
 
         let row_id = relation.next_row_id();
         relation.increment_row_id();
@@ -220,7 +220,6 @@ impl DmlExecutor {
             None,
             &tree_builder,
             &snapshot,
-            Some(&self.logger)
         )?;
 
         Ok(InsertResult {
@@ -231,8 +230,8 @@ impl DmlExecutor {
     pub fn ctx(&self) -> &ThreadContext {
         &self.ctx
     }
-    
-     pub fn logger(&self) -> &TransactionLogger {
+
+    pub fn logger(&self) -> &TransactionLogger {
         &self.logger
     }
 
@@ -244,6 +243,7 @@ impl DmlExecutor {
         old_row: &Row,
         new_row: &Row,
     ) -> RuntimeResult<UpdateResult> {
+
         let assignments = Self::build_assignments(old_row, new_row, 1);
         self.update(table_id, row_id, assignments)
     }
@@ -269,10 +269,10 @@ impl DmlExecutor {
         let tree_builder = self.ctx.tree_builder();
 
         // Get relation and schema
-        let relation =
-            self.ctx
-                .catalog()
-                .get_relation(table_id, &tree_builder, &snapshot)?;
+        let relation = self
+            .ctx
+            .catalog()
+            .get_relation(table_id, &tree_builder, &snapshot)?;
 
         let schema = relation.schema().clone();
         let root = relation.root();
@@ -300,6 +300,7 @@ impl DmlExecutor {
             .get_row_at(position, &schema, &snapshot)?
             .expect("Tuple should exist");
 
+
         // Constraint validation goes here.
         self.validate_update_constraints(
             &relation,
@@ -317,6 +318,7 @@ impl DmlExecutor {
             .as_tuple_ref(&schema, &snapshot)
             .expect("Updated tuple should be visible")
             .to_row_with(&schema)?;
+
 
         // Log the update
         self.logger.log_update(
@@ -356,10 +358,10 @@ impl DmlExecutor {
         let tree_builder = self.ctx.tree_builder();
 
         // Get relation and schema
-        let relation =
-            self.ctx
-                .catalog()
-                .get_relation(table_id, &tree_builder, &snapshot)?;
+        let relation = self
+            .ctx
+            .catalog()
+            .get_relation(table_id, &tree_builder, &snapshot)?;
         let schema = relation.schema().clone();
         let root = relation.root();
 

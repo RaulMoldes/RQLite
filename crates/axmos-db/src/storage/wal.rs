@@ -37,7 +37,7 @@ pub enum RecordType {
     /// DDL INSTRUNCTIONS
     Create = 0x09,
     Drop = 0x0A,
-    Alter = 0x0B
+    Alter = 0x0B,
 }
 
 /// The write ahead log header stores metadata about the file.

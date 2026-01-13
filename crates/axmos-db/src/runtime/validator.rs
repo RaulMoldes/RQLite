@@ -160,10 +160,10 @@ impl<'a> ConstraintValidator<'a> {
     ) -> ValidationResult<bool> {
         let tree_builder = self.ctx.tree_builder();
         let snapshot = self.ctx.snapshot();
-        let table_relation =
-            self.ctx
-                .catalog()
-                .get_relation(table_id, &tree_builder, &snapshot)?;
+        let table_relation = self
+            .ctx
+            .catalog()
+            .get_relation(table_id, &tree_builder, &snapshot)?;
         let table_root = table_relation.root();
 
         // Search in the table
