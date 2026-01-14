@@ -668,3 +668,252 @@ fn test_index_scan_reversed_predicate() {
 
     assert_eq!(results.len(), 2);
 }
+
+
+
+// Add this test to crates/axmos-db/src/runtime/tests/mod.rs
+
+#[test]
+fn test_distinct_basic() {
+    let harness = TestHarness::new();
+
+    let (mut handle, _last_lsn) = harness.begin_transaction();
+    let users = harness.create_table("users", users_columns(), handle.id());
+
+    // Insert users with duplicate ages
+    harness.insert_row_direct(
+        users,
+        vec![
+            DataType::BigUInt(UInt64(1)),
+            DataType::Blob("Alice".into()),
+            DataType::Blob("alice@test.com".into()),
+            DataType::Int(25.into()),
+        ],
+        &handle,
+    );
+
+    harness.insert_row_direct(
+        users,
+        vec![
+            DataType::BigUInt(UInt64(2)),
+            DataType::Blob("Bob".into()),
+            DataType::Blob("bob@test.com".into()),
+            DataType::Int(30.into()),
+        ],
+        &handle,
+    );
+
+    harness.insert_row_direct(
+        users,
+        vec![
+            DataType::BigUInt(UInt64(3)),
+            DataType::Blob("Charlie".into()),
+            DataType::Blob("charlie@test.com".into()),
+            DataType::Int(25.into()), // Same age as Alice
+        ],
+        &handle,
+    );
+
+    harness.insert_row_direct(
+        users,
+        vec![
+            DataType::BigUInt(UInt64(4)),
+            DataType::Blob("Diana".into()),
+            DataType::Blob("diana@test.com".into()),
+            DataType::Int(30.into()), // Same age as Bob
+        ],
+        &handle,
+    );
+
+    harness.insert_row_direct(
+        users,
+        vec![
+            DataType::BigUInt(UInt64(5)),
+            DataType::Blob("Eve".into()),
+            DataType::Blob("eve@test.com".into()),
+            DataType::Int(35.into()),
+        ],
+        &handle,
+    );
+
+    handle.commit().expect("Failed to commit");
+
+    // Without DISTINCT: should return 5 rows
+    let results = harness.execute_sql("SELECT age FROM users");
+    assert_eq!(results.len(), 5);
+
+    // With DISTINCT: should return 3 unique ages (25, 30, 35)
+    let results = harness.execute_sql("SELECT DISTINCT age FROM users");
+    assert_eq!(results.len(), 3);
+
+    // Collect the ages and verify they are unique
+    let mut ages: Vec<i32> = results
+        .iter()
+        .map(|r| match &r[0] {
+            DataType::Int(v) => v.value(),
+            _ => panic!("Expected Int"),
+        })
+        .collect();
+    ages.sort();
+    assert_eq!(ages, vec![25, 30, 35]);
+}
+
+#[test]
+fn test_distinct_multiple_columns() {
+    let harness = TestHarness::new();
+
+    let (mut handle, _last_lsn) = harness.begin_transaction();
+    harness.create_table("orders", orders_columns(), handle.id());
+    handle.commit().expect("Failed to commit");
+
+    harness.setup_orders_table(&[
+        (1, 1, 100.0, "completed"),
+        (2, 1, 200.0, "completed"),   // Same user_id and status as row 1
+        (3, 2, 150.0, "completed"),
+        (4, 2, 50.0, "pending"),
+        (5, 1, 75.0, "pending"),
+    ]);
+
+    // DISTINCT on (user_id, status) should give 4 unique combinations:
+    // (1, completed), (2, completed), (2, pending), (1, pending)
+    let results = harness.execute_sql("SELECT DISTINCT user_id, status FROM orders");
+    assert_eq!(results.len(), 4);
+}
+
+#[test]
+fn test_distinct_all_duplicates() {
+    let harness = TestHarness::new();
+
+    let (mut handle, _last_lsn) = harness.begin_transaction();
+    let users = harness.create_table("users", users_columns(), handle.id());
+
+    // Insert 5 users all with the same age
+    for i in 1..=5 {
+        harness.insert_row_direct(
+            users,
+            vec![
+                DataType::BigUInt(UInt64(i)),
+                DataType::Blob(format!("User{}", i).into()),
+                DataType::Blob(format!("user{}@test.com", i).into()),
+                DataType::Int(25.into()), // All same age
+            ],
+            &handle,
+        );
+    }
+
+    handle.commit().expect("Failed to commit");
+
+    // DISTINCT should return only 1 row
+    let results = harness.execute_sql("SELECT DISTINCT age FROM users");
+    assert_eq!(results.len(), 1);
+
+    match &results[0][0] {
+        DataType::Int(v) => assert_eq!(v.value(), 25),
+        _ => panic!("Expected Int"),
+    }
+}
+
+#[test]
+fn test_distinct_empty_table() {
+    let harness = TestHarness::new();
+    harness.setup_users_table(0);
+
+    let results = harness.execute_sql("SELECT DISTINCT age FROM users");
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn test_distinct_with_nulls() {
+    let harness = TestHarness::new();
+
+    let (mut handle, _last_lsn) = harness.begin_transaction();
+    let users = harness.create_table("users", users_columns(), handle.id());
+
+    harness.insert_row_direct(
+        users,
+        vec![
+            DataType::BigUInt(UInt64(1)),
+            DataType::Blob("Alice".into()),
+            DataType::Blob("alice@test.com".into()),
+            DataType::Int(25.into()),
+        ],
+        &handle,
+    );
+
+    harness.insert_row_direct(
+        users,
+        vec![
+            DataType::BigUInt(UInt64(2)),
+            DataType::Blob("Bob".into()),
+            DataType::Blob("bob@test.com".into()),
+            DataType::Null,
+        ],
+        &handle,
+    );
+
+    harness.insert_row_direct(
+        users,
+        vec![
+            DataType::BigUInt(UInt64(3)),
+            DataType::Blob("Charlie".into()),
+            DataType::Blob("charlie@test.com".into()),
+            DataType::Null, // Another NULL
+        ],
+        &handle,
+    );
+
+    harness.insert_row_direct(
+        users,
+        vec![
+            DataType::BigUInt(UInt64(4)),
+            DataType::Blob("Diana".into()),
+            DataType::Blob("diana@test.com".into()),
+            DataType::Int(25.into()), // Same as Alice
+        ],
+        &handle,
+    );
+
+    handle.commit().expect("Failed to commit");
+
+    // DISTINCT should return 2 rows: one for age=25, one for NULL
+    // (multiple NULLs should be treated as duplicates)
+    let results = harness.execute_sql("SELECT DISTINCT age FROM users");
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_distinct_preserves_first_occurrence() {
+    let harness = TestHarness::new();
+
+    let (mut handle, _last_lsn) = harness.begin_transaction();
+    let users = harness.create_table("users", users_columns(), handle.id());
+
+    harness.insert_row_direct(
+        users,
+        vec![
+            DataType::BigUInt(UInt64(1)),
+            DataType::Blob("Alice".into()),
+            DataType::Blob("alice@test.com".into()),
+            DataType::Int(25.into()),
+        ],
+        &handle,
+    );
+
+    harness.insert_row_direct(
+        users,
+        vec![
+            DataType::BigUInt(UInt64(2)),
+            DataType::Blob("Bob".into()),
+            DataType::Blob("bob@test.com".into()),
+            DataType::Int(25.into()),
+        ],
+        &handle,
+    );
+
+    handle.commit().expect("Failed to commit");
+
+    // When selecting multiple columns with DISTINCT,
+    // verify that we get both rows since the full row is different
+    let results = harness.execute_sql("SELECT DISTINCT name, age FROM users");
+    assert_eq!(results.len(), 2);
+}

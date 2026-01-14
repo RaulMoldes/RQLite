@@ -4,7 +4,7 @@ use crate::{
         context::{ThreadContext, TransactionLogger},
         ops::{
             Delete, Filter, HashAggregate, IndexScan, Insert, Limit, Materialize, NestedLoopJoin,
-            Project, QuickSort, SeqScan, Update, Values,
+            Project, QuickSort, SeqScan, Update, Values, MergeJoin, HashJoin, HashDistinct
         },
     },
     sql::planner::physical::{PhysValuesOp, PhysicalOperator, PhysicalPlan},
@@ -88,14 +88,35 @@ impl ExecutorBuilder {
                 let right = build_child(&children[1])?;
                 Ok(Box::new(NestedLoopJoin::new(join_op, left, right)))
             }
+            PhysicalOperator::HashJoin(join_op) => {
+                require_children(children, 2, "HashJoin")?;
+                let left_schema = children[0].output_schema().clone();
+                let right_schema = children[1].output_schema().clone();
+                let left = build_child(&children[0])?;
+                let right = build_child(&children[1])?;
+                Ok(Box::new(HashJoin::new(
+                    join_op,
+                    left,
+                    right,
+                    left_schema,
+                    right_schema,
+                )))
+            }
 
-            PhysicalOperator::HashJoin(_) => Err(RuntimeError::Other(
-                "HashJoin executor not yet implemented".to_string(),
-            )),
-
-            PhysicalOperator::MergeJoin(_) => Err(RuntimeError::Other(
-                "MergeJoin executor not yet implemented".to_string(),
-            )),
+            PhysicalOperator::MergeJoin(join_op) => {
+                require_children(children, 2, "MergeJoin")?;
+                let left_schema = children[0].output_schema().clone();
+                let right_schema = children[1].output_schema().clone();
+                let left = build_child(&children[0])?;
+                let right = build_child(&children[1])?;
+                Ok(Box::new(MergeJoin::new(
+                    join_op,
+                    left,
+                    right,
+                    left_schema,
+                    right_schema,
+                )))
+            },
 
             PhysicalOperator::HashAggregate(agg_op) => {
                 require_children(children, 1, "HashAggregate")?;
@@ -115,9 +136,12 @@ impl ExecutorBuilder {
                 Ok(Box::new(Limit::new(limit_op, child)))
             }
 
-            PhysicalOperator::Distinct(_) => Err(RuntimeError::Other(
-                "Distinct executor not yet implemented".to_string(),
-            )),
+
+            PhysicalOperator::Distinct(distinct_op) => {
+                require_children(children, 1, "Distinct")?;
+                let child = build_child(&children[0])?;
+                Ok(Box::new(HashDistinct::new(distinct_op, child)))
+            },
 
             PhysicalOperator::Materialize(mat_op) => {
                 require_children(children, 1, "Materialize")?;

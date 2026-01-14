@@ -21,12 +21,16 @@ use crate::{
     io::pager::BtreeBuilder,
     multithreading::coordinator::Snapshot,
     schema::catalog::{SharedCatalog, StatisticsProvider},
-    sql::{binder::bounds::*, planner::prop::PropertyDeriver},
+    sql::{binder::bounds::*, planner::{
+        prop::{PhysicalProperties, PropertyDeriver},
+    logical::{SortExpr, SortOp}}},
+    types::DataTypeKind
 };
 
 pub(crate) use memo::{ExprId, GroupId, Memo};
 pub(crate) use model::{CostModel, DefaultCostModel, DerivedStats};
-pub(crate) use physical::{PhysicalExpr, PhysicalPlan};
+pub(crate) use physical::{PhysicalExpr, PhysicalPlan, PhysicalOperator};
+
 pub(crate) use prop::RequiredProperties;
 pub(crate) use rules::{ImplementationRule, TransformationRule};
 
@@ -412,7 +416,7 @@ impl<'a> CascadesOptimizer<'a> {
         )
     }
 
-    /// Extracts the final physical plan from the memo.
+      /// Extracts the final physical plan from the memo.
     fn extract_plan(
         &self,
         memo: &mut Memo,
@@ -433,11 +437,22 @@ impl<'a> CascadesOptimizer<'a> {
             .ok_or(PlannerError::InvalidState)?
             .clone();
         let winner_cost = winner.cost;
+
         // Recursively extract child plans
         let mut children = Vec::with_capacity(phys_expr.children.len());
         for (i, &child_group) in phys_expr.children.iter().enumerate() {
             let child_required = phys_expr.op.required_child_properties(i, required);
-            children.push(self.extract_plan(memo, child_group, &child_required)?);
+            let mut child_plan = self.extract_plan(memo, child_group, &child_required)?;
+
+            // Check if the child satisfies the required properties
+            // If not, insert a Sort enforcer
+            if !child_required.ordering.is_empty()
+                && !child_plan.properties.satisfies(&child_required)
+            {
+                child_plan = self.insert_sort_enforcer(child_plan, &child_required);
+            }
+
+            children.push(child_plan);
         }
 
         Ok(PhysicalPlan {
@@ -446,5 +461,54 @@ impl<'a> CascadesOptimizer<'a> {
             cost: winner_cost,
             properties: phys_expr.properties.clone(),
         })
+    }
+
+    /// Inserts a Sort operator to enforce the required ordering properties.
+    fn insert_sort_enforcer(
+        &self,
+        child: PhysicalPlan,
+        required: &RequiredProperties,
+    ) -> PhysicalPlan {
+        let schema = child.op.output_schema().clone();
+
+        // Convert OrderingSpec to SortExpr
+        let sort_exprs: Vec<logical::SortExpr> = required
+            .ordering
+            .iter()
+            .map(|spec| {
+                let dtype = schema
+                    .column(spec.column_idx)
+                    .map(|c| c.datatype())
+                    .unwrap_or(DataTypeKind::Null);
+
+                let expr = BoundExpression::ColumnBinding(Binding {
+                    table_id: None,
+                    scope_index: 0,
+                    column_idx: spec.column_idx,
+                    data_type: dtype,
+                });
+
+                SortExpr {
+                    expr,
+                    asc: spec.ascending,
+                    nulls_first: spec.nulls_first,
+                }
+            })
+            .collect();
+
+        let sort_op = SortOp::new(sort_exprs.clone(), schema);
+
+        // Build ordering for the Sort's physical properties
+        let ordering: Vec<(BoundExpression, bool)> = sort_exprs
+            .iter()
+            .map(|s| (s.expr.clone(), s.asc))
+            .collect();
+
+        PhysicalPlan {
+            op: PhysicalOperator::Sort(sort_op),
+            children: vec![child],
+            cost: 0.0, // Cost already factored during optimization
+            properties: PhysicalProperties { ordering },
+        }
     }
 }

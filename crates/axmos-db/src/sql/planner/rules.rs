@@ -931,6 +931,7 @@ impl ImplementationRule for ProjectRule {
     }
 }
 
+
 #[derive(Clone, Copy)]
 pub struct JoinRule;
 
@@ -939,10 +940,12 @@ impl Rule for JoinRule {
         "Join"
     }
 }
+
 impl ImplementationRule for JoinRule {
     fn matches(&self, expr: &LogicalExpr, _memo: &Memo) -> bool {
         matches!(&expr.op, LogicalOperator::Join(_))
     }
+
     fn implement(
         &self,
         expr: &LogicalExpr,
@@ -955,7 +958,7 @@ impl ImplementationRule for JoinRule {
 
         let mut impls = Vec::new();
 
-        // Nested loop (always available)
+        // Nested loop join is always available
         impls.push(PhysicalExpr::new(
             PhysicalOperator::NestedLoopJoin(NestedLoopJoinOp::new(
                 join.join_type,
@@ -964,23 +967,30 @@ impl ImplementationRule for JoinRule {
             )),
             expr.children.clone(),
         ));
-        /*
 
-        COMMENTED THIS UNTIL MERGE JOIN AND HASH JOIN ARE IMPLEMENTED
-        // Hash join (for equi-joins)
+        // Hash join and Merge join are available for equi-joins
         if join.is_equi_join() {
             let keys = join.extract_equi_keys();
             if !keys.is_empty() {
+                let left_cols = join.left_schema.num_columns();
+
+                // Create key expressions for left and right sides
+                // Note: extract_equi_keys returns indices in the combined output schema
+                // Left keys are already correct (0..left_cols)
+                // Right keys need to be adjusted by subtracting left_cols
                 let (left_keys, right_keys): (Vec<_>, Vec<_>) = keys
                     .iter()
                     .map(|(l, r)| {
+                        // r is the index in the combined schema, convert to right-side index
+                        let right_idx = r.saturating_sub(left_cols);
                         (
                             create_column_ref(*l, &join.left_schema),
-                            create_column_ref(*r, &join.right_schema),
+                            create_column_ref(right_idx, &join.right_schema),
                         )
                     })
                     .unzip();
 
+                // Hash join
                 impls.push(PhysicalExpr::new(
                     PhysicalOperator::HashJoin(HashJoinOp::new(
                         join.join_type,
@@ -993,10 +1003,18 @@ impl ImplementationRule for JoinRule {
                 ));
 
                 // Merge join
+                // left_ordering uses indices relative to left schema (child 0)
+                // right_ordering uses indices relative to right schema (child 1)
                 let left_ordering: Vec<_> =
                     keys.iter().map(|(l, _)| OrderingSpec::asc(*l)).collect();
-                let right_ordering: Vec<_> =
-                    keys.iter().map(|(_, r)| OrderingSpec::asc(*r)).collect();
+                let right_ordering: Vec<_> = keys
+                    .iter()
+                    .map(|(_, r)| {
+                        // r is in combined schema, convert to right-side index
+                        let right_idx = r.saturating_sub(left_cols);
+                        OrderingSpec::asc(right_idx)
+                    })
+                    .collect();
                 let output_ordering: Vec<_> = left_keys.iter().map(|e| (e.clone(), true)).collect();
 
                 let mut merge_expr = PhysicalExpr::new(
@@ -1014,7 +1032,7 @@ impl ImplementationRule for JoinRule {
                 merge_expr.properties.ordering = output_ordering;
                 impls.push(merge_expr);
             }
-        }*/
+        }
 
         Ok(impls)
     }
@@ -1515,7 +1533,7 @@ impl FilterToIndexScanRule {
 
                     match op {
                         BinaryOperator::Eq => {
-                        
+
                             let bound = IndexRangeBound {
                                 value: value.clone(),
                                 inclusive: true,

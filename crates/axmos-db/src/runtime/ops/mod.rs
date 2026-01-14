@@ -11,13 +11,15 @@ pub(crate) mod seq_scan;
 pub(crate) mod sort;
 pub(crate) mod update;
 pub(crate) mod values;
+pub(crate) mod distinct;
 
 pub(crate) use aggregate::HashAggregate;
+pub(crate) use distinct::HashDistinct;
 pub(crate) use delete::Delete;
 pub(crate) use filter::Filter;
 pub(crate) use index_scan::IndexScan;
 pub(crate) use insert::Insert;
-pub(crate) use join::NestedLoopJoin;
+pub(crate) use join::{MergeJoin, NestedLoopJoin, HashJoin};
 pub(crate) use limit::Limit;
 pub(crate) use materialize::Materialize;
 pub(crate) use project::Project;
