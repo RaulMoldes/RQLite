@@ -77,25 +77,29 @@ impl IndexScan {
     fn evaluate_bounds(row: &Row, bounds: &[IndexRangeBound], expected_ordering: Ordering) -> bool {
         let mut results = Vec::with_capacity(bounds.len());
         for bound in bounds {
-
             let ordering = bound.value.partial_cmp(&row[bound.col_idx]);
 
-            let result = ordering.map(|ord| ord == expected_ordering || (bound.inclusive && matches!(ord, Ordering::Equal))).unwrap_or(false);
+            let result = ordering
+                .map(|ord| {
+                    ord == expected_ordering || (bound.inclusive && matches!(ord, Ordering::Equal))
+                })
+                .unwrap_or(false);
 
             results.push(result);
-
-
-        };
+        }
         results.iter().all(|c| *c)
     }
 
     fn evaluate_index_predicate(&self, row: &Row) -> RuntimeResult<bool> {
-
         let lhs = self
-            .range_start().map(|bounds| Self::evaluate_bounds(row, bounds, Ordering::Less)).unwrap_or(true);
+            .range_start()
+            .map(|bounds| Self::evaluate_bounds(row, bounds, Ordering::Less))
+            .unwrap_or(true);
 
-        let rhs =  self
-            .range_end().map(|bounds| Self::evaluate_bounds(row, bounds, Ordering::Greater)).unwrap_or(true);
+        let rhs = self
+            .range_end()
+            .map(|bounds| Self::evaluate_bounds(row, bounds, Ordering::Greater))
+            .unwrap_or(true);
 
         Ok(lhs && rhs)
     }

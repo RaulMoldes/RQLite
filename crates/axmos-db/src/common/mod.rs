@@ -1,6 +1,3 @@
-//pub mod errors;
-//pub use errors::*;
-
 use std::thread;
 
 pub(crate) const DEFAULT_NUM_WORKERS: usize = 4;
@@ -35,13 +32,26 @@ pub(crate) const CELL_ALIGNMENT: usize = 8;
 /// Must read: https://stackoverflow.com/questions/53902811/why-direct-i-o-requires-alignments
 pub(crate) const PAGE_ALIGNMENT: usize = MIN_PAGE_SIZE;
 
+/// Configuration for the database engine.
+///
+/// Controls page size, caching behavior, thread pool size, and B+tree parameters.
 #[derive(Debug, Clone, Copy)]
 pub struct DBConfig {
-    pub(crate) page_size: usize,
-    pub(crate) cache_size: usize,
-    pub(crate) pool_size: usize,
-    pub(crate) num_siblings_per_side: usize,
-    pub(crate) min_keys_per_page: usize,
+    /// Size of each database page in bytes.
+    /// Must be a power of 2 between 4096 and 65536.
+    pub page_size: usize,
+
+    /// Number of pages to keep in the buffer cache.
+    pub cache_size: usize,
+
+    /// Number of worker threads in the thread pool.
+    pub pool_size: usize,
+
+    /// Number of sibling pages to consider on each side during B+tree balancing.
+    pub num_siblings_per_side: usize,
+
+    /// Minimum number of keys per B+tree page before underflow.
+    pub min_keys_per_page: usize,
 }
 
 impl Default for DBConfig {
@@ -57,7 +67,11 @@ impl Default for DBConfig {
 }
 
 impl DBConfig {
-    pub(crate) fn new(
+    /// Creates a new database configuration with the specified parameters.
+    ///
+    /// The page size will be adjusted to the nearest power of 2 and clamped
+    /// to the valid range (4096 to 65536 bytes).
+    pub fn new(
         page_size: usize,
         cache_size: usize,
         pool_size: usize,
@@ -74,5 +88,61 @@ impl DBConfig {
             cache_size,
             page_size,
         }
+    }
+
+    /// Creates a configuration builder for more ergonomic configuration.
+    pub fn builder() -> DBConfigBuilder {
+        DBConfigBuilder::default()
+    }
+}
+
+/// Builder for DBConfig that allows setting individual parameters.
+#[derive(Debug, Clone)]
+pub struct DBConfigBuilder {
+    config: DBConfig,
+}
+
+impl Default for DBConfigBuilder {
+    fn default() -> Self {
+        Self {
+            config: DBConfig::default(),
+        }
+    }
+}
+
+impl DBConfigBuilder {
+    /// Sets the page size in bytes.
+    pub fn page_size(mut self, size: usize) -> Self {
+        self.config.page_size = size.next_power_of_two().clamp(MIN_PAGE_SIZE, MAX_PAGE_SIZE);
+        self
+    }
+
+    /// Sets the cache size in pages.
+    pub fn cache_size(mut self, size: usize) -> Self {
+        self.config.cache_size = size;
+        self
+    }
+
+    /// Sets the thread pool size.
+    pub fn pool_size(mut self, size: usize) -> Self {
+        self.config.pool_size = size.max(1);
+        self
+    }
+
+    /// Sets the minimum keys per B+tree page.
+    pub fn min_keys_per_page(mut self, keys: usize) -> Self {
+        self.config.min_keys_per_page = keys.max(2);
+        self
+    }
+
+    /// Sets the number of siblings per side for balancing.
+    pub fn num_siblings_per_side(mut self, siblings: usize) -> Self {
+        self.config.num_siblings_per_side = siblings;
+        self
+    }
+
+    /// Builds the final configuration.
+    pub fn build(self) -> DBConfig {
+        self.config
     }
 }

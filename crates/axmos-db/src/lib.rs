@@ -42,7 +42,7 @@ pub use types::*;
 static GLOBAL: Jemalloc = Jemalloc;
 
 use crate::{
-    DBConfig,
+
     io::{
         disk::FileOperations,
         logger::Begin,
@@ -357,6 +357,31 @@ impl Database {
         Ok(result)
     }
 
+
+    /// Executes a SQL query and returns the result.
+    pub fn explain(&self, sql: &str) -> DatabaseResult<String> {
+        let sql = sql.to_string();
+        let (tx_ctx, logger) = Self::begin_transaction(
+            self.coordinator.clone(),
+            self.pager.clone(),
+            self.catalog.clone(),
+        )?;
+
+        let child = tx_ctx.create_child()?;
+        let result = self.task_runner.run_with_result(move |_ctx| {
+            let runner = QueryRunner::new(child, logger.clone());
+            let result = runner.prepare_and_explain(&sql).map_err(box_err)?;
+
+            logger.log_commit().map_err(box_err)?;
+            tx_ctx.commit_transaction().map_err(box_err)?;
+            logger.log_end().map_err(box_err)?;
+
+            Ok(result)
+        })?;
+
+        Ok(result)
+    }
+
     /// Executes multiple SQL statements in a single transaction.
     pub fn execute_batch(&self, statements: &[&str]) -> DatabaseResult<Vec<QueryResult>> {
         let statements: Vec<String> = statements.iter().map(|s| s.to_string()).collect();
@@ -421,6 +446,7 @@ impl Database {
     pub fn coordinator(&self) -> &TransactionCoordinator {
         &self.coordinator
     }
+
 
     /// Runs ANALYZE to update table statistics.
     pub fn analyze(&self, sample_rate: f64, max_sample_rows: usize) -> DatabaseResult<()> {
@@ -505,7 +531,7 @@ impl Database {
     }
 }
 
-#[cfg(feature = "safe-drop")]
+#[cfg(not(feature = "no-flush"))]
 impl Drop for Database {
     fn drop(&mut self) {
         // Best-effort flush on drop

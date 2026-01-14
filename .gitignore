@@ -2,3 +2,5 @@
 *.axm
 .vscode
 *.log
+releases
+releases/*

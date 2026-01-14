@@ -449,6 +449,26 @@ impl QueryRunner {
         self.execute_statement(bound)
     }
 
+    pub(crate) fn prepare_and_explain(&self, sql: &str) -> QueryRunnerResult<String> {
+        let bound = self.prepare(sql)?;
+        self.explain(bound)
+    }
+
+    pub(crate) fn explain(&self, stmt: BoundStatement) -> QueryRunnerResult<String> {
+        if is_ddl(&stmt) {
+            return Err(QueryError::InvalidStatementType);
+        }
+
+        let plan = optimize(
+            &stmt,
+            &self.ctx.catalog(),
+            &self.ctx.tree_builder(),
+            self.ctx.snapshot(),
+        )?;
+
+        Ok(plan.explain())
+    }
+
     fn execute_statement(&self, stmt: BoundStatement) -> QueryRunnerResult<QueryResult> {
         if is_ddl(&stmt) {
             let mut executor = DdlExecutor::new(self.ctx.clone(), self.logger.clone());

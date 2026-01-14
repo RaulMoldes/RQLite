@@ -24,9 +24,9 @@ indexmap = "2"
 rkyv = { version = "0.8", features = ["alloc"] }
 
 [features]
-# Flushes the database to disk `Database::flush()` automatically when dropped
-# If not set, the database will be recovered by the wal on `Database::open()`
-safe-drop = []
+# Avoid flushing the database to disk `Database::flush()` automatically when dropped
+# If set, the database will be recovered by the wal on `Database::open()`
+no-flush = []
 
 [dev-dependencies]
 uuid = { version = "1", features = ["v4"] }

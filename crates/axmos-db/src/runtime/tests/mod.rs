@@ -669,8 +669,6 @@ fn test_index_scan_reversed_predicate() {
     assert_eq!(results.len(), 2);
 }
 
-
-
 // Add this test to crates/axmos-db/src/runtime/tests/mod.rs
 
 #[test]
@@ -768,7 +766,7 @@ fn test_distinct_multiple_columns() {
 
     harness.setup_orders_table(&[
         (1, 1, 100.0, "completed"),
-        (2, 1, 200.0, "completed"),   // Same user_id and status as row 1
+        (2, 1, 200.0, "completed"), // Same user_id and status as row 1
         (3, 2, 150.0, "completed"),
         (4, 2, 50.0, "pending"),
         (5, 1, 75.0, "pending"),

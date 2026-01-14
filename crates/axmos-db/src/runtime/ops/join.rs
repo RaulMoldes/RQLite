@@ -2,10 +2,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::{
-    runtime::{
-        ExecutionStats, Executor, RuntimeResult,
-        eval::ExpressionEvaluator,
-    },
+    runtime::{ExecutionStats, Executor, RuntimeResult, eval::ExpressionEvaluator},
     schema::Schema,
     sql::{
         binder::bounds::BoundExpression,
@@ -15,8 +12,6 @@ use crate::{
     storage::tuple::Row,
     types::DataType,
 };
-
-
 
 /// A generic hash bucket that stores rows along with match tracking.
 /// Used by HashJoin for tracking which rows have been matched in outer joins.
@@ -112,7 +107,6 @@ pub(crate) fn keys_match(left: &[DataType], right: &[DataType]) -> bool {
     }
     true
 }
-
 
 fn combine_rows(left: &Row, right: &Row) -> Row {
     let mut values: Vec<DataType> = Vec::with_capacity(left.len() + right.len());
@@ -416,17 +410,15 @@ impl<Left: Executor, Right: Executor> Executor for HashJoin<Left, Right> {
 
     fn next(&mut self) -> RuntimeResult<Option<Row>> {
         self.build_hash_table()?;
-        let num_left_columns =  self.left_cols();
+        let num_left_columns = self.left_cols();
         if self.emitting_unmatched_right {
             loop {
-
                 if let Some(ref mut bucket) = self.current_unmatched_bucket {
                     while self.unmatched_row_idx < bucket.len() {
                         let idx = self.unmatched_row_idx;
                         self.unmatched_row_idx += 1;
 
                         if !bucket.is_matched(idx) {
-
                             let row = nulls_with_right(&bucket.rows[idx], num_left_columns);
                             self.stats.rows_produced += 1;
                             return Ok(Some(row));
@@ -463,7 +455,8 @@ impl<Left: Executor, Right: Executor> Executor for HashJoin<Left, Right> {
                         if matches!(self.join_type, JoinType::Right | JoinType::Full) {
                             self.emitting_unmatched_right = true;
                             let table = std::mem::take(&mut self.hash_table);
-                            self.unmatched_buckets = Some(table.into_values().collect::<Vec<_>>().into_iter());
+                            self.unmatched_buckets =
+                                Some(table.into_values().collect::<Vec<_>>().into_iter());
                             return self.next();
                         }
                         return Ok(None);
@@ -683,7 +676,9 @@ impl<Left: Executor, Right: Executor> Executor for MergeJoin<Left, Right> {
         loop {
             if self.left_exhausted {
                 if self.current_left.is_some() {
-                    if !self.left_matched && matches!(self.join_type, JoinType::Left | JoinType::Full) {
+                    if !self.left_matched
+                        && matches!(self.join_type, JoinType::Left | JoinType::Full)
+                    {
                         let left_row = self.current_left.take().unwrap();
                         let row = left_with_nulls(&left_row, self.right_cols());
                         self.stats.rows_produced += 1;
@@ -701,7 +696,9 @@ impl<Left: Executor, Right: Executor> Executor for MergeJoin<Left, Right> {
 
             if self.right_exhausted && self.right_buffer.is_empty() {
                 if let Some(ref left_row) = self.current_left {
-                    if !self.left_matched && matches!(self.join_type, JoinType::Left | JoinType::Full) {
+                    if !self.left_matched
+                        && matches!(self.join_type, JoinType::Left | JoinType::Full)
+                    {
                         let row = left_with_nulls(left_row, self.right_cols());
                         self.current_left = None;
                         self.advance_left()?;
@@ -781,7 +778,9 @@ impl<Left: Executor, Right: Executor> Executor for MergeJoin<Left, Right> {
 
             match self.compare_keys(&left_keys, &right_keys) {
                 Ordering::Less => {
-                    if !self.left_matched && matches!(self.join_type, JoinType::Left | JoinType::Full) {
+                    if !self.left_matched
+                        && matches!(self.join_type, JoinType::Left | JoinType::Full)
+                    {
                         let row = left_with_nulls(left_row, self.right_cols());
                         self.advance_left()?;
                         self.left_matched = false;

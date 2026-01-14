@@ -3,8 +3,8 @@ use crate::{
         Executor, RuntimeError, RuntimeResult,
         context::{ThreadContext, TransactionLogger},
         ops::{
-            Delete, Filter, HashAggregate, IndexScan, Insert, Limit, Materialize, NestedLoopJoin,
-            Project, QuickSort, SeqScan, Update, Values, MergeJoin, HashJoin, HashDistinct
+            Delete, Filter, HashAggregate, HashDistinct, HashJoin, IndexScan, Insert, Limit,
+            Materialize, MergeJoin, NestedLoopJoin, Project, QuickSort, SeqScan, Update, Values,
         },
     },
     sql::planner::physical::{PhysValuesOp, PhysicalOperator, PhysicalPlan},
@@ -116,7 +116,7 @@ impl ExecutorBuilder {
                     left_schema,
                     right_schema,
                 )))
-            },
+            }
 
             PhysicalOperator::HashAggregate(agg_op) => {
                 require_children(children, 1, "HashAggregate")?;
@@ -136,12 +136,11 @@ impl ExecutorBuilder {
                 Ok(Box::new(Limit::new(limit_op, child)))
             }
 
-
             PhysicalOperator::Distinct(distinct_op) => {
                 require_children(children, 1, "Distinct")?;
                 let child = build_child(&children[0])?;
                 Ok(Box::new(HashDistinct::new(distinct_op, child)))
-            },
+            }
 
             PhysicalOperator::Materialize(mat_op) => {
                 require_children(children, 1, "Materialize")?;

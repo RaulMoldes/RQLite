@@ -21,15 +21,19 @@ use crate::{
     io::pager::BtreeBuilder,
     multithreading::coordinator::Snapshot,
     schema::catalog::{SharedCatalog, StatisticsProvider},
-    sql::{binder::bounds::*, planner::{
-        prop::{PhysicalProperties, PropertyDeriver},
-    logical::{SortExpr, SortOp}}},
-    types::DataTypeKind
+    sql::{
+        binder::bounds::*,
+        planner::{
+            logical::{SortExpr, SortOp},
+            prop::{PhysicalProperties, PropertyDeriver},
+        },
+    },
+    types::DataTypeKind,
 };
 
 pub(crate) use memo::{ExprId, GroupId, Memo};
 pub(crate) use model::{CostModel, DefaultCostModel, DerivedStats};
-pub(crate) use physical::{PhysicalExpr, PhysicalPlan, PhysicalOperator};
+pub(crate) use physical::{PhysicalExpr, PhysicalOperator, PhysicalPlan};
 
 pub(crate) use prop::RequiredProperties;
 pub(crate) use rules::{ImplementationRule, TransformationRule};
@@ -416,7 +420,7 @@ impl<'a> CascadesOptimizer<'a> {
         )
     }
 
-      /// Extracts the final physical plan from the memo.
+    /// Extracts the final physical plan from the memo.
     fn extract_plan(
         &self,
         memo: &mut Memo,
@@ -499,10 +503,8 @@ impl<'a> CascadesOptimizer<'a> {
         let sort_op = SortOp::new(sort_exprs.clone(), schema);
 
         // Build ordering for the Sort's physical properties
-        let ordering: Vec<(BoundExpression, bool)> = sort_exprs
-            .iter()
-            .map(|s| (s.expr.clone(), s.asc))
-            .collect();
+        let ordering: Vec<(BoundExpression, bool)> =
+            sort_exprs.iter().map(|s| (s.expr.clone(), s.asc)).collect();
 
         PhysicalPlan {
             op: PhysicalOperator::Sort(sort_op),

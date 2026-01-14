@@ -425,7 +425,7 @@ fn test_rollback_reopen_vacuum() {
 /// This test suite intends to validate that via the wal we are able to recover the database to a usable consistent state after a disk failover.
 #[test]
 #[cfg_attr(miri, ignore)]
-#[cfg(not(feature = "safe-drop"))]
+#[cfg(feature = "no-flush")]
 fn test_recovery_without_flush_insert() {
     let (dir, db_path) = setup_db_no_flush(|db| {
         db.execute("INSERT INTO crash_test VALUES (1, 'before_crash')")
@@ -448,7 +448,7 @@ fn test_recovery_without_flush_insert() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-#[cfg(not(feature = "safe-drop"))]
+#[cfg(feature = "no-flush")]
 fn test_recovery_without_flush_update() {
     let (dir, db_path) = setup_db_no_flush(|db| {
         db.execute("INSERT INTO crash_test VALUES (1, 'before_crash')")
@@ -483,7 +483,7 @@ fn test_recovery_without_flush_update() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-#[cfg(not(feature = "safe-drop"))]
+#[cfg(feature = "no-flush")]
 fn test_recovery_without_flush_delete() {
     let (dir, db_path) = setup_db_no_flush(|db| {
         db.execute("INSERT INTO crash_test VALUES (1, 'before_crash')")

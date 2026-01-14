@@ -392,6 +392,7 @@ pub enum TcpError {
     InvalidMessage(String),
     Io(io::Error),
     MessageTooLarge(usize),
+    ConnectionClosed,
 }
 
 impl Display for TcpError {
@@ -415,6 +416,7 @@ impl Display for TcpError {
                     size, MAX_MESSAGE_SIZE
                 )
             }
+            Self::ConnectionClosed => f.write_str("connection closed"),
         }
     }
 }

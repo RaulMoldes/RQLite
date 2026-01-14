@@ -931,7 +931,6 @@ impl ImplementationRule for ProjectRule {
     }
 }
 
-
 #[derive(Clone, Copy)]
 pub struct JoinRule;
 
@@ -1530,10 +1529,8 @@ impl FilterToIndexScanRule {
                     && let Some(position) = indexed_columns.iter().position(|&x| x == col_idx)
                     && let Some(value) = Self::extract_literal(right)
                 {
-
                     match op {
                         BinaryOperator::Eq => {
-
                             let bound = IndexRangeBound {
                                 value: value.clone(),
                                 inclusive: true,
@@ -1585,7 +1582,6 @@ impl FilterToIndexScanRule {
                     }
                 }
 
-
                 // Check if this is a comparison on an indexed column
                 if let Some((col_idx, datatype)) = Self::extract_column_info(right)
                     && let Some(position) = indexed_columns.iter().position(|&x| x == col_idx)
@@ -1593,7 +1589,6 @@ impl FilterToIndexScanRule {
                 {
                     match op {
                         BinaryOperator::Eq => {
-
                             let bound = IndexRangeBound {
                                 value: value.clone(),
                                 inclusive: true,
