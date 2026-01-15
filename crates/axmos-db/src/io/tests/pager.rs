@@ -6,7 +6,7 @@ use crate::{
     storage::{
         BtreeMetadata, BtreeOps,
         cell::OwnedCell,
-        page::{BtreePage, PageZero},
+        page::BtreePage,
     },
     types::PageId,
 };
