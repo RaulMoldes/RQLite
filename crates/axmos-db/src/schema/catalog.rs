@@ -1,3 +1,5 @@
+use rkyv::Serialize;
+
 use crate::{
     ObjectId, SerializationError, TransactionId, UInt64,
     core::SerializableType,
@@ -537,16 +539,15 @@ impl Catalog {
 
         // First, deallocate the relation.
         // Deallocate the relation.
-        {
+        {   println!("About to deallocate tree");
             let mut tree = builder.build_tree_mut(rel.root());
             tree.dealloc()?;
         }
 
         // Obtain the relation metadata
         let relation_id = rel.object_id();
-        let relation_name = rel.name();
         let relation_id_bytes = UInt64(relation_id).serialize()?;
-        let relation_name_bytes = Blob::from(relation_name).serialize()?;
+        let relation_name_bytes = Blob::from(rel.name()).serialize()?;
 
         // First remove the relation from the meta table
         let schema = meta_table_schema();
@@ -580,7 +581,7 @@ impl Catalog {
         let index_schema = meta_index_schema();
         let mut meta_index = builder.build_tree_mut(self.meta_index);
 
-        let position = match meta_index.search(&relation_id_bytes, &index_schema)? {
+        let position = match meta_index.search(&relation_name_bytes, &index_schema)? {
             SearchResult::Found(pos) => pos,
             SearchResult::NotFound(_) => return Ok(()),
         };
@@ -603,7 +604,6 @@ impl Catalog {
 
         // Apply the update
         tuple.delete(snapshot.xid())?;
-        //    tuple.vaccum_for_snapshot(&index_schema, &snapshot)?;
         meta_index.update(self.meta_index, tuple, &index_schema)?;
 
         Ok(())

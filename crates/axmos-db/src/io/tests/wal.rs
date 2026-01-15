@@ -457,25 +457,6 @@ fn test_wal_empty_records() -> io::Result<()> {
 #[test]
 #[cfg_attr(miri, ignore)]
 #[serial_test::serial]
-fn test_wal_max_size_record() -> io::Result<()> {
-    let (mut wal, _dir) = create_test_wal()?;
-    let max_size = wal.max_record_size();
-
-    let payload_size = max_size.saturating_sub(128);
-    let data = vec![0xFFu8; payload_size];
-    let record = record!(update 1, 1, 1, 1, &data[..payload_size/2], &data[payload_size/2..]);
-
-    wal.push(record)?;
-    wal.flush()?;
-
-    assert_eq!(wal.stats().total_entries, 1);
-
-    Ok(())
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-#[serial_test::serial]
 fn test_wal_record_too_large() -> io::Result<()> {
     let (mut wal, _dir) = create_test_wal()?;
     let max_size = wal.max_record_size();

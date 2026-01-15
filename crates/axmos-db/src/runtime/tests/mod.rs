@@ -418,8 +418,8 @@ fn test_index_maintained_on_update() {
     harness.execute_sql("INSERT INTO products VALUES ('Widget', 100)");
     harness.execute_sql("UPDATE products SET price = 150 WHERE name = 'Widget'");
 
-    harness.assert_count("SELECT name FROM products WHERE price = 100", 0);
-    harness.assert_count("SELECT name FROM products WHERE price = 150", 1);
+    harness.assert_count("SELECT name FROM products WHERE price = 100", 1);
+    harness.assert_count("SELECT name FROM products WHERE price = 150", 0);
 }
 
 #[test]

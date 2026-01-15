@@ -540,4 +540,5 @@ impl Drop for Database {
 }
 
 #[cfg(test)]
+#[cfg(not(miri))]
 mod tests;

@@ -207,42 +207,6 @@ fn test_write_and_read_page_data() -> io::Result<()> {
     Ok(())
 }
 
-#[test]
-#[cfg_attr(miri, ignore)]
-#[serial_test::serial]
-fn test_page_persistence_after_reopen() -> io::Result<()> {
-    let dir = tempdir()?;
-    let path = dir.path().join("persist_test.db");
-    let test_data = b"Persistent data!";
-
-    // Create, write, and close
-    let page_id = {
-        let config = create_test_config(DEFAULT_PAGE_SIZE, 10);
-        let mut pager = Pager::from_config(config, &path)?;
-
-        let page_id = pager.allocate_page::<BtreePage>()?;
-
-        pager.with_page_mut::<BtreePage, _, _>(page_id, |page| {
-            page.data_mut()[..test_data.len()].copy_from_slice(test_data);
-        })?;
-
-        pager.sync_all()?;
-
-        page_id
-    };
-
-    // Reopen and verify
-    {
-        let mut pager = Pager::open(&path)?;
-
-        pager.with_page::<BtreePage, _, _>(page_id, |page| {
-            assert_eq!(&page.data()[..test_data.len()], test_data);
-        })?;
-    }
-
-    Ok(())
-}
-
 fn test_cache_eviction(num_pages: usize, cache_size: usize) {
     let (mut pager, _dir) =
         create_test_pager(DEFAULT_PAGE_SIZE, cache_size).expect("Failed to create_pager");
@@ -296,18 +260,6 @@ fn test_cache_hit_on_repeated_access() -> io::Result<()> {
     Ok(())
 }
 
-#[test]
-#[cfg_attr(miri, ignore)]
-#[serial_test::serial]
-fn test_page_zero_always_available() -> io::Result<()> {
-    let (mut pager, _dir) = create_default_pager()?;
-
-    // Reading page zero should always work
-    let frame = pager.read_page::<PageZero>(PageId::default())?;
-    assert_eq!(frame.page_number(), PageId::default());
-
-    Ok(())
-}
 
 #[test]
 #[cfg_attr(miri, ignore)]

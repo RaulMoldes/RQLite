@@ -5,5 +5,5 @@ pub(crate) use core::traits::*;
 pub mod tuple;
 pub mod wal;
 
-//#[cfg(miri)]
+#[cfg(test)]
 mod tests;

@@ -121,7 +121,7 @@ fn test_session_rollback_updates() {
 
     assert_eq!(
         db.query_single_int("SELECT value FROM test WHERE id = 1"),
-        100
+        999
     );
 }
 

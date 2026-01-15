@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "A fully functional database implementation."
 authors = ["Raul Moldes <raul.moldes.work@gmail.com>"]
-license = "Apache-2.0"
-readme = "README.md"
+license = "MIT"
+readme = "Readme.md"
 repository = "https://github.com/RaulMoldes/AxmosDB"
 
 [dependencies]

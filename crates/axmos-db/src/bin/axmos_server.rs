@@ -1,7 +1,6 @@
 //! AxmosDB Server Binary
-
 use axmosdb::{
-    Database, DatabaseError,
+    Database,
     common::DBConfig,
     runtime::QueryResult,
     tcp::{Request, Response, TcpError, recv_request, send_response, session::Session},
@@ -10,14 +9,17 @@ use axmosdb::{
 use std::{
     env,
     io::{BufReader, BufWriter},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, SocketAddr},
     path::PathBuf,
     process,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    thread::{self, JoinHandle},
 };
+
+use parking_lot::RwLock;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -154,150 +156,28 @@ struct ClientContext {
     session: Option<Session>,
 }
 
+struct SharedState {
+    db: RwLock<Option<Database>>,
+    db_config: DBConfig,
+    shutdown: AtomicBool,
+}
+
+impl SharedState {
+    fn new(db: Option<Database>, db_config: DBConfig) -> Self {
+        Self {
+            db: RwLock::new(db),
+            db_config,
+            shutdown: AtomicBool::new(false),
+        }
+    }
+}
+
 struct Server {
     listener: TcpListener,
-    db: Option<Database>,
-    db_config: DBConfig,
-    shutdown: Arc<AtomicBool>,
+    state: Arc<SharedState>,
 }
 
 impl Server {
-    fn handle_begin(&mut self, ctx: &mut ClientContext) -> Response {
-        if ctx.session.is_some() {
-            return Response::Error("Transaction already in progress".into());
-        }
-
-        let db = match &self.db {
-            Some(db) => db,
-            None => return Response::Error("No database open".into()),
-        };
-
-        if let Ok(session) = db.session() {
-            ctx.session = Some(session);
-        } else {
-            return Response::Error("Failed to create session".into());
-        };
-
-        Response::SessionStarted
-    }
-
-    fn handle_commit(&mut self, ctx: &mut ClientContext) -> Response {
-        let Some(mut session) = ctx.session.take() else {
-            return Response::Error("No active transaction".into());
-        };
-
-        match session.commit_transaction() {
-            Ok(_) => Response::SessionEnd,
-            Err(e) => Response::Error(format!("COMMIT failed: {}", e)),
-        }
-    }
-
-    fn handle_rollback(&mut self, ctx: &mut ClientContext) -> Response {
-        let Some(mut session) = ctx.session.take() else {
-            return Response::Error("No active transaction".into());
-        };
-
-        match session.abort_transaction() {
-            Ok(_) => Response::SessionEnd,
-            Err(e) => Response::Error(format!("ROLLBACK failed: {}", e)),
-        }
-    }
-
-    fn handle_sql(&mut self, sql: String, ctx: &mut ClientContext) -> Response {
-        let db = match &self.db {
-            Some(db) => db,
-            None => return Response::Error("No database open".into()),
-        };
-
-        let result = match ctx.session.as_mut() {
-            Some(session) => session.execute(&sql).map_err(|e| DatabaseError::from(e)),
-            None => db.execute(&sql),
-        };
-
-        match result {
-            Ok(res) => query_result_to_response(res),
-            Err(e) => Response::Error(format!("Query failed: {}", e)),
-        }
-    }
-
-    fn handle_create(&mut self, path: String) -> Response {
-        if self.db.is_some() {
-            return Response::Error("Database already open. Use CLOSE first.".into());
-        }
-
-        let db_path = PathBuf::from(&path);
-        match Database::create(&db_path, self.db_config) {
-            Ok(db) => {
-                self.db = Some(db);
-                Response::Ok(format!("Database created: {}", path))
-            }
-            Err(e) => Response::Error(format!("Failed to create database: {}", e)),
-        }
-    }
-
-    fn handle_open(&mut self, path: String) -> Response {
-        if self.db.is_some() {
-            return Response::Error("Database already open. Use CLOSE first.".into());
-        }
-
-        let db_path = PathBuf::from(&path);
-        match Database::open_or_create(&db_path, self.db_config) {
-            Ok(db) => {
-                self.db = Some(db);
-                Response::Ok(format!("Database opened: {}", path))
-            }
-            Err(e) => Response::Error(format!("Failed to open database: {}", e)),
-        }
-    }
-
-    fn handle_explain(&mut self, sql: String, _ctx: &ClientContext) -> Response {
-        let db = match &self.db {
-            Some(db) => db,
-            None => return Response::Error("No database open".into()),
-        };
-
-        match db.explain(&sql) {
-            Ok(plan) => Response::Explain(plan),
-            Err(e) => Response::Error(format!("EXPLAIN failed: {}", e)),
-        }
-    }
-
-    fn handle_vacuum(&mut self) -> Response {
-        let db = match &mut self.db {
-            Some(db) => db,
-            None => return Response::Error("No database open".into()),
-        };
-
-        match db.vacuum() {
-            Ok(stats) => Response::VacuumComplete {
-                tables_vacuumed: stats.tables_vacuumed,
-                bytes_freed: stats.total_bytes_freed,
-                transactions_cleaned: stats.transactions_cleaned,
-            },
-            Err(e) => Response::Error(format!("VACUUM failed: {}", e)),
-        }
-    }
-
-    fn handle_analyze(&mut self, sample_rate: f64, max_sample_rows: usize) -> Response {
-        let db = match &mut self.db {
-            Some(db) => db,
-            None => return Response::Error("No database open".into()),
-        };
-
-        match db.analyze(sample_rate, max_sample_rows) {
-            Ok(_) => Response::Ok("ANALYZE complete".into()),
-            Err(e) => Response::Error(format!("ANALYZE failed: {}", e)),
-        }
-    }
-
-    fn handle_close(&mut self) -> Response {
-        if self.db.take().is_some() {
-            Response::Goodbye
-        } else {
-            Response::Error("No database open".into())
-        }
-    }
-
     fn new(config: ServerConfig) -> Result<Self, String> {
         let addr = format!("0.0.0.0:{}", config.port);
         let listener =
@@ -316,40 +196,43 @@ impl Server {
         println!("  Min keys:     {}", config.db_config.min_keys_per_page);
         println!("  Siblings:     {}", config.db_config.num_siblings_per_side);
 
-        let mut server = Self {
-            listener,
-            db: None,
-            db_config: config.db_config,
-            shutdown: Arc::new(AtomicBool::new(false)),
-        };
-
-        if let Some(path) = config.db_path {
+        let db = if let Some(path) = config.db_path {
             println!();
             println!("Opening database: {}", path.display());
-            match Database::open_or_create(&path, server.db_config) {
+            match Database::open_or_create(&path, config.db_config) {
                 Ok(db) => {
-                    server.db = Some(db);
                     println!("Database ready");
+                    Some(db)
                 }
                 Err(e) => {
                     eprintln!("Warning: Failed to open database: {}", e);
+                    None
                 }
             }
         } else {
             println!();
             println!("No database specified. Use CREATEDB or OPENDB commands.");
-        }
+            None
+        };
+
+        let state = Arc::new(SharedState::new(db, config.db_config));
 
         println!();
-        Ok(server)
+        Ok(Self { listener, state })
     }
 
     fn run(&mut self) {
         println!("Ready to accept connections. Use SHUTDOWN command or Ctrl+C to stop.");
         println!();
 
+        self.listener
+            .set_nonblocking(true)
+            .expect("Failed to set non-blocking mode");
+
+        let mut client_handles: Vec<JoinHandle<()>> = Vec::new();
+
         loop {
-            if self.shutdown.load(Ordering::Relaxed) {
+            if self.state.shutdown.load(Ordering::Relaxed) {
                 println!("Shutdown requested...");
                 break;
             }
@@ -358,11 +241,16 @@ impl Server {
                 Ok((stream, addr)) => {
                     println!("[{}] Connected", addr);
 
-                    if let Err(e) = self.handle_client(stream) {
-                        eprintln!("Client error: {}", e);
-                    }
+                    let state = Arc::clone(&self.state);
+                    let handle = thread::spawn(move || {
+                        handle_client(stream, addr, state);
+                    });
 
-                    println!("[{}] Disconnected", addr);
+                    client_handles.push(handle);
+                    client_handles.retain(|h| !h.is_finished());
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(std::time::Duration::from_millis(10));
                 }
                 Err(e) => {
                     eprintln!("Accept error: {}", e);
@@ -370,67 +258,248 @@ impl Server {
             }
         }
 
-        if let Some(db) = self.db.take() {
+        println!("Waiting for {} client(s) to disconnect...", client_handles.len());
+        for handle in client_handles {
+            let _ = handle.join();
+        }
+
+        if let Some(db) = self.state.db.write().take() {
             println!("Closing database...");
             drop(db);
         }
 
         println!("Server stopped.");
     }
+}
 
-    fn handle_client(&mut self, stream: TcpStream) -> Result<(), TcpError> {
-        let mut ctx = ClientContext { session: None };
+fn handle_client(stream: TcpStream, addr: SocketAddr, state: Arc<SharedState>) {
+    if let Err(e) = run_client_loop(stream, &state) {
+        eprintln!("[{}] Client error: {}", addr, e);
+    }
+    println!("[{}] Disconnected", addr);
+}
 
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(300)))
-            .ok();
-        stream
-            .set_write_timeout(Some(std::time::Duration::from_secs(60)))
-            .ok();
+fn run_client_loop(stream: TcpStream, state: &Arc<SharedState>) -> Result<(), TcpError> {
+    let mut ctx = ClientContext { session: None };
 
-        let mut reader = BufReader::new(stream.try_clone()?);
-        let mut writer = BufWriter::new(stream);
+    stream.set_nonblocking(false).map_err(TcpError::Io)?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(300)))
+        .ok();
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(60)))
+        .ok();
 
-        loop {
-            let request = match recv_request(&mut reader) {
-                Ok(req) => req,
-                Err(TcpError::ConnectionClosed) => break,
-                Err(e) => {
-                    eprintln!("Request error: {}", e);
-                    break;
-                }
-            };
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut writer = BufWriter::new(stream);
 
-            let response = match request {
-                Request::Ping => Response::Pong,
-                Request::Create(path) => self.handle_create(path),
-                Request::Open(path) => self.handle_open(path),
-                Request::Close => self.handle_close(),
-                Request::Sql(sql) => self.handle_sql(sql, &mut ctx),
-                Request::Explain(sql) => self.handle_explain(sql, &ctx),
-                Request::Vacuum => self.handle_vacuum(),
-                Request::Analyze {
-                    sample_rate,
-                    max_sample_rows,
-                } => self.handle_analyze(sample_rate, max_sample_rows),
-                Request::Begin => self.handle_begin(&mut ctx),
-                Request::Commit => self.handle_commit(&mut ctx),
-                Request::Rollback => self.handle_rollback(&mut ctx),
-                Request::Shutdown => {
-                    self.shutdown.store(true, Ordering::Relaxed);
-                    send_response(&mut writer, &Response::ShuttingDown)?;
-                    break;
-                }
-            };
+    loop {
+        if state.shutdown.load(Ordering::Relaxed) {
+            send_response(&mut writer, &Response::ShuttingDown)?;
+            break;
+        }
 
+        let request = match recv_request(&mut reader) {
+            Ok(req) => req,
+            Err(TcpError::ConnectionClosed) => break,
+            Err(TcpError::Io(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => {
+                eprintln!("Request error: {}", e);
+                break;
+            }
+        };
+
+        let response = process_request(request, state, &mut ctx);
+
+        if matches!(response, Response::ShuttingDown) {
             send_response(&mut writer, &response)?;
+            break;
         }
 
-        if let Some(mut session) = ctx.session.take() {
-            let _ = session.abort_transaction();
-        }
+        send_response(&mut writer, &response)?;
+    }
 
-        Ok(())
+    if let Some(mut session) = ctx.session.take() {
+        let _ = session.abort_transaction();
+    }
+
+    Ok(())
+}
+
+fn process_request(
+    request: Request,
+    state: &Arc<SharedState>,
+    ctx: &mut ClientContext,
+) -> Response {
+    match request {
+        Request::Ping => Response::Pong,
+        Request::Create(path) => handle_create(state, path),
+        Request::Open(path) => handle_open(state, path),
+        Request::Close => handle_close(state),
+        Request::Sql(sql) => handle_sql(state, sql, ctx),
+        Request::Explain(sql) => handle_explain(state, sql),
+        Request::Vacuum => handle_vacuum(state),
+        Request::Analyze { sample_rate, max_sample_rows } => {
+            handle_analyze(state, sample_rate, max_sample_rows)
+        }
+        Request::Begin => handle_begin(state, ctx),
+        Request::Commit => handle_commit(ctx),
+        Request::Rollback => handle_rollback(ctx),
+        Request::Shutdown => {
+            state.shutdown.store(true, Ordering::Relaxed);
+            Response::ShuttingDown
+        }
+    }
+}
+
+fn handle_begin(state: &SharedState, ctx: &mut ClientContext) -> Response {
+    if ctx.session.is_some() {
+        return Response::Error("Transaction already in progress".into());
+    }
+
+    let db_guard = state.db.read();
+    let db = match db_guard.as_ref() {
+        Some(db) => db,
+        None => return Response::Error("No database open".into()),
+    };
+
+    match db.session() {
+        Ok(session) => {
+            ctx.session = Some(session);
+            Response::SessionStarted
+        }
+        Err(e) => Response::Error(format!("Failed to create session: {}", e)),
+    }
+}
+
+fn handle_commit(ctx: &mut ClientContext) -> Response {
+    let Some(mut session) = ctx.session.take() else {
+        return Response::Error("No active transaction".into());
+    };
+
+    match session.commit_transaction() {
+        Ok(_) => Response::SessionEnd,
+        Err(e) => Response::Error(format!("COMMIT failed: {}", e)),
+    }
+}
+
+fn handle_rollback(ctx: &mut ClientContext) -> Response {
+    let Some(mut session) = ctx.session.take() else {
+        return Response::Error("No active transaction".into());
+    };
+
+    match session.abort_transaction() {
+        Ok(_) => Response::SessionEnd,
+        Err(e) => Response::Error(format!("ROLLBACK failed: {}", e)),
+    }
+}
+
+fn handle_sql(state: &SharedState, sql: String, ctx: &mut ClientContext) -> Response {
+    // If client has an active session, use it (session holds its own references)
+    if let Some(session) = ctx.session.as_mut() {
+        return match session.execute(&sql) {
+            Ok(res) => query_result_to_response(res),
+            Err(e) => Response::Error(format!("Query failed: {}", e)),
+        };
+    }
+
+    // Otherwise, execute in auto-commit mode using the shared database
+    let db_guard = state.db.read();
+    let db = match db_guard.as_ref() {
+        Some(db) => db,
+        None => return Response::Error("No database open".into()),
+    };
+
+    match db.execute(&sql) {
+        Ok(res) => query_result_to_response(res),
+        Err(e) => Response::Error(format!("Query failed: {}", e)),
+    }
+}
+
+fn handle_create(state: &SharedState, path: String) -> Response {
+    let mut db_guard = state.db.write();
+
+    if db_guard.is_some() {
+        return Response::Error("Database already open. Use CLOSE first.".into());
+    }
+
+    let db_path = PathBuf::from(&path);
+    match Database::create(&db_path, state.db_config) {
+        Ok(db) => {
+            *db_guard = Some(db);
+            Response::Ok(format!("Database created: {}", path))
+        }
+        Err(e) => Response::Error(format!("Failed to create database: {}", e)),
+    }
+}
+
+fn handle_open(state: &SharedState, path: String) -> Response {
+    let mut db_guard = state.db.write();
+
+    if db_guard.is_some() {
+        return Response::Error("Database already open. Use CLOSE first.".into());
+    }
+
+    let db_path = PathBuf::from(&path);
+    match Database::open_or_create(&db_path, state.db_config) {
+        Ok(db) => {
+            *db_guard = Some(db);
+            Response::Ok(format!("Database opened: {}", path))
+        }
+        Err(e) => Response::Error(format!("Failed to open database: {}", e)),
+    }
+}
+
+fn handle_explain(state: &SharedState, sql: String) -> Response {
+    let db_guard = state.db.read();
+    let db = match db_guard.as_ref() {
+        Some(db) => db,
+        None => return Response::Error("No database open".into()),
+    };
+
+    match db.explain(&sql) {
+        Ok(plan) => Response::Explain(plan),
+        Err(e) => Response::Error(format!("EXPLAIN failed: {}", e)),
+    }
+}
+
+fn handle_vacuum(state: &SharedState) -> Response {
+    let db_guard = state.db.read();
+    let db = match db_guard.as_ref() {
+        Some(db) => db,
+        None => return Response::Error("No database open".into()),
+    };
+
+    match db.vacuum() {
+        Ok(stats) => Response::VacuumComplete {
+            tables_vacuumed: stats.tables_vacuumed,
+            bytes_freed: stats.total_bytes_freed,
+            transactions_cleaned: stats.transactions_cleaned,
+        },
+        Err(e) => Response::Error(format!("VACUUM failed: {}", e)),
+    }
+}
+
+fn handle_analyze(state: &SharedState, sample_rate: f64, max_sample_rows: usize) -> Response {
+    let db_guard = state.db.read();
+    let db = match db_guard.as_ref() {
+        Some(db) => db,
+        None => return Response::Error("No database open".into()),
+    };
+
+    match db.analyze(sample_rate, max_sample_rows) {
+        Ok(_) => Response::Ok("ANALYZE complete".into()),
+        Err(e) => Response::Error(format!("ANALYZE failed: {}", e)),
+    }
+}
+
+fn handle_close(state: &SharedState) -> Response {
+    let mut db_guard = state.db.write();
+
+    if db_guard.take().is_some() {
+        Response::Goodbye
+    } else {
+        Response::Error("No database open".into())
     }
 }
 

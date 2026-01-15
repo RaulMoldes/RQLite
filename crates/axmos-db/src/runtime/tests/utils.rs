@@ -155,7 +155,6 @@ impl TestHarness {
         let (handle, last_lsn) = self.begin_transaction();
         let snapshot = handle.snapshot();
         let plan = self.optimize_sql(sql, snapshot);
-        dbg!(&plan);
         self.execute_plan(&plan, handle, last_lsn)
     }
 

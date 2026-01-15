@@ -277,7 +277,7 @@ test_suite!(cell_misc {
     overflow => {
         use super::test_helpers::*;
 
-        let c = OwnedCell::new(&[0xCC; 100]);
+        let c = OwnedCell::new_overflow(&[0xCC; 100], 2);
         assert!(c.is_overflow());
         assert_eq!(c.overflow_page(), Some(2));
     },

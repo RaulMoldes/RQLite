@@ -27,7 +27,8 @@ pub fn test_get_relation_by_name(count: usize) {
     let snapshot = Snapshot::default();
 
     for i in 0..count {
-        let rel = make_relation(i as ObjectId, &format!("named_table_{}", i));
+        let root_page = db.pager.write().allocate_page::<BtreePage>().expect("Failed to allocate page");
+        let rel = make_relation(i as ObjectId, &format!("named_table_{}", i), root_page);
         catalog
             .store_relation(rel, &builder, snapshot.xid())
             .expect("Store failed");
@@ -54,7 +55,8 @@ pub fn test_store_relation(count: usize) {
     let snapshot = Snapshot::default();
 
     for i in 0..count {
-        let rel = make_relation(i as ObjectId, &format!("table_{}", i));
+        let root_page = db.pager.write().allocate_page::<BtreePage>().expect("Failed to allocate page");
+        let rel = make_relation(i as ObjectId, &format!("table_{}", i), root_page);
         catalog
             .store_relation(rel, &builder, snapshot.xid())
             .expect("Store failed");
@@ -78,7 +80,8 @@ pub fn test_get_relation(count: usize) {
     let snapshot = Snapshot::default();
 
     for i in 0..count {
-        let rel = make_relation(i as ObjectId, &format!("get_table_{}", i));
+        let root_page = db.pager.write().allocate_page::<BtreePage>().expect("Failed to allocate page");
+        let rel = make_relation(i as ObjectId, &format!("get_table_{}", i), root_page);
         catalog
             .store_relation(rel, &builder, snapshot.xid())
             .expect("Store failed");
@@ -105,7 +108,8 @@ pub fn test_delete_relation(count: usize, delete_count: usize) {
     let snapshot = Snapshot::default();
 
     for i in 0..count {
-        let rel = make_relation(i as ObjectId, &format!("deletable_{}", i));
+        let root_page = db.pager.write().allocate_page::<BtreePage>().expect("Failed to allocate page");
+        let rel = make_relation(i as ObjectId, &format!("deletable_{}", i), root_page);
         catalog
             .store_relation(rel, &builder, snapshot.xid())
             .expect("Store failed");
@@ -119,7 +123,7 @@ pub fn test_delete_relation(count: usize, delete_count: usize) {
             .remove_relation(rel, &builder, &snapshot, false)
             .expect("Delete failed");
     }
-
+    println!("All tables deleted successfully");
     for i in 0..delete_count {
         let result = catalog.get_relation(i as ObjectId, &builder, &snapshot);
         assert!(matches!(result, Err(CatalogError::TableNotFound(_))));

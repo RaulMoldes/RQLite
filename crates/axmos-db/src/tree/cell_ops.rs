@@ -335,6 +335,7 @@ impl CellBuilder {
 }
 
 #[cfg(test)]
+#[cfg(not(miri))]
 mod cell_comparator_tests {
     use crate::{
         DBConfig,
@@ -558,6 +559,7 @@ mod cell_comparator_tests {
 }
 
 #[cfg(test)]
+#[cfg(not(miri))]
 mod reassembler_tests {
     use crate::{
         DBConfig,

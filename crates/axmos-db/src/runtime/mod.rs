@@ -41,6 +41,7 @@ mod ops;
 pub mod validator;
 
 #[cfg(test)]
+#[cfg(not(miri))] // runtime tests cannot be executed with miri
 mod tests;
 
 #[derive(Debug)]

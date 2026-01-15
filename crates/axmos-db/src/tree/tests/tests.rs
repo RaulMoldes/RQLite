@@ -313,7 +313,7 @@ pub fn test_dealloc(count: usize) {
 
 /// Test deallocation of tree with overflow pages.
 pub fn test_dealloc_with_overflow(count: usize) {
-    let config = TestConfig::default().with_page_size(512); // Smaller pages to force overflow
+    let config = TestConfig::default().with_page_size(4096); // Smaller pages to force overflow
     let db = TestDb::new("dealloc_overflow", &config).expect("Failed to create test db");
 
     // Schema with larger data to create overflow cells

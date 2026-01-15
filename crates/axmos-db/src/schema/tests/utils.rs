@@ -2,7 +2,7 @@ use crate::{
     DBConfig, ObjectId,
     io::pager::{Pager, SharedPager},
     schema::base::{Column, Relation},
-    types::DataTypeKind,
+    types::{PageId, DataTypeKind},
 };
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -40,10 +40,10 @@ impl TestDb {
     }
 }
 
-pub fn make_relation(id: ObjectId, name: &str) -> Relation {
+pub fn make_relation(id: ObjectId, name: &str, root_page: PageId) -> Relation {
     let columns = vec![
         Column::new_with_defaults(DataTypeKind::BigUInt, "id"),
         Column::new_with_defaults(DataTypeKind::Blob, "name"),
     ];
-    Relation::table(id, name, 0, columns)
+    Relation::table(id, name, root_page, columns)
 }
