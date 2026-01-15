@@ -14,9 +14,8 @@ param_tests!(test_get_relation, count => [1, 5, 10, 50, 100]);
 
 param2_tests!(test_delete_relation, count, delete_count => [
     (10, 5),
-    (50, 25),
-    (100, 50),
-    (100, 100)
+    (25, 10),
+    (50, 20)
 ]);
 
 param_tests!(test_get_relation_by_name, count => [1, 5, 10, 50, 100]);

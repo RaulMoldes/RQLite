@@ -108,7 +108,9 @@ pub fn test_delete_relation(count: usize, delete_count: usize) {
     let snapshot = Snapshot::default();
 
     for i in 0..count {
+
         let root_page = db.pager.write().allocate_page::<BtreePage>().expect("Failed to allocate page");
+
         let rel = make_relation(i as ObjectId, &format!("deletable_{}", i), root_page);
         catalog
             .store_relation(rel, &builder, snapshot.xid())
@@ -123,7 +125,7 @@ pub fn test_delete_relation(count: usize, delete_count: usize) {
             .remove_relation(rel, &builder, &snapshot, false)
             .expect("Delete failed");
     }
-    println!("All tables deleted successfully");
+
     for i in 0..delete_count {
         let result = catalog.get_relation(i as ObjectId, &builder, &snapshot);
         assert!(matches!(result, Err(CatalogError::TableNotFound(_))));

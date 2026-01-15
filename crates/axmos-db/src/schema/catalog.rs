@@ -1,5 +1,3 @@
-use rkyv::Serialize;
-
 use crate::{
     ObjectId, SerializationError, TransactionId, UInt64,
     core::SerializableType,
@@ -8,7 +6,7 @@ use crate::{
     multithreading::coordinator::Snapshot,
     runtime::{RuntimeError, context::TransactionLogger},
     schema::{Schema, base::SchemaError},
-    storage::tuple::{Tuple, TupleBuilder, TupleError, TupleReader, TupleRef},
+    storage::tuple::{Tuple, TupleBuilder, TupleError, TupleReader,Row,  TupleRef},
     tree::{
         accessor::BtreePagePosition,
         bplustree::{BtreeError, SearchResult},
@@ -539,7 +537,7 @@ impl Catalog {
 
         // First, deallocate the relation.
         // Deallocate the relation.
-        {   println!("About to deallocate tree");
+      {
             let mut tree = builder.build_tree_mut(rel.root());
             tree.dealloc()?;
         }
@@ -551,60 +549,75 @@ impl Catalog {
 
         // First remove the relation from the meta table
         let schema = meta_table_schema();
-        let mut meta_table = builder.build_tree_mut(self.meta_table);
+        let Some((mut existing_tuple, old_row)) = ({
+            // First remove the relation from the meta table
 
-        let position = match meta_table.search(&relation_id_bytes, &schema)? {
-            SearchResult::Found(pos) => pos,
-            SearchResult::NotFound(_) => return Ok(()),
+            let mut meta_table = builder.build_tree(self.meta_table);
+
+            let position = match meta_table.search(&relation_id_bytes, &schema)? {
+                SearchResult::Found(pos) => pos,
+                SearchResult::NotFound(_) => return Ok(()),
+            };
+
+            // Read the existing tuple
+            let tuple_reader = TupleReader::from_schema(&schema);
+            meta_table.with_cell_at(position, |bytes| {
+                if let Some(layout) = tuple_reader.parse_for_snapshot(bytes, &snapshot)? {
+                    let tuple_ref = TupleRef::new(bytes, layout);
+                    let row = tuple_ref.to_row_with(&schema)?;
+                    Ok::<Option<(Tuple, Row)>, TupleError>(Some((Tuple::from_slice_unchecked(bytes)?, row)))
+                } else {
+                    Ok(None)
+                }
+            })??
+        })
+        else {
+            return Ok(())
         };
 
-        // Read the existing tuple
-        let tuple_reader = TupleReader::from_schema(&schema);
-        let existing_tuple = meta_table.with_cell_at(position, |bytes| {
-            tuple_reader.parse_for_snapshot(bytes, &snapshot).ok()??;
-            Tuple::from_slice_unchecked(bytes).ok()
-        })?;
 
-        let Some(mut tuple) = existing_tuple else {
-            return Ok(());
-        };
+        existing_tuple.delete(snapshot.xid())?;
 
-        // Get the old row for index maintenance
-        let old_row = meta_table
-            .get_row_at(position, &schema, &snapshot)?
-            .expect("Tuple should exist");
-
-        tuple.delete(snapshot.xid())?;
-        meta_table.update(self.meta_table, tuple, &schema)?;
+        {
+            let mut meta_table = builder.build_tree_mut(self.meta_table);
+            meta_table.update(self.meta_table, existing_tuple, &schema)?;
+        }
 
         // Now do the same with the meta index.
-        let index_schema = meta_index_schema();
-        let mut meta_index = builder.build_tree_mut(self.meta_index);
+        let schema = meta_index_schema();
+        let Some((mut existing_tuple, old_row)) = ({
+            // First remove the relation from the meta table
 
-        let position = match meta_index.search(&relation_name_bytes, &index_schema)? {
-            SearchResult::Found(pos) => pos,
-            SearchResult::NotFound(_) => return Ok(()),
+            let mut meta_index = builder.build_tree(self.meta_index);
+
+            let position = match meta_index.search(&relation_name_bytes, &schema)? {
+                SearchResult::Found(pos) => pos,
+                SearchResult::NotFound(_) => return Ok(()),
+            };
+
+            // Read the existing tuple
+            let tuple_reader = TupleReader::from_schema(&schema);
+            meta_index.with_cell_at(position, |bytes| {
+                if let Some(layout) = tuple_reader.parse_for_snapshot(bytes, &snapshot)? {
+                    let tuple_ref = TupleRef::new(bytes, layout);
+                    let row = tuple_ref.to_row_with(&schema)?;
+                    Ok::<Option<(Tuple, Row)>, TupleError>(Some((Tuple::from_slice_unchecked(bytes)?, row)))
+                } else {
+                    Ok(None)
+                }
+            })??
+        })
+        else {
+            return Ok(())
         };
 
-        // Read the existing tuple
-        let tuple_reader = TupleReader::from_schema(&index_schema);
-        let existing_tuple = meta_table.with_cell_at(position, |bytes| {
-            tuple_reader.parse_for_snapshot(bytes, &snapshot).ok()??;
-            Tuple::from_slice_unchecked(bytes).ok()
-        })?;
 
-        let Some(mut tuple) = existing_tuple else {
-            return Ok(());
-        };
+        existing_tuple.delete(snapshot.xid())?;
 
-        // Get the old row for index maintenance
-        let old_row = meta_index
-            .get_row_at(position, &index_schema, &snapshot)?
-            .expect("Tuple should exist");
-
-        // Apply the update
-        tuple.delete(snapshot.xid())?;
-        meta_index.update(self.meta_index, tuple, &index_schema)?;
+        {
+            let mut meta_index = builder.build_tree_mut(self.meta_index);
+            meta_index.update(self.meta_index, existing_tuple, &schema)?;
+        }
 
         Ok(())
     }

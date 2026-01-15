@@ -4,6 +4,12 @@ AxmosDB is an experimental relational database server written in Rust, designed 
 
 ## Quick Start
 
+### Release run
+
+Follow the instructions in [Install.md]
+
+### Development run
+
 First, start the server specifying the port to listen on:
 
 ```bash
@@ -29,6 +35,26 @@ OPENDB mydb.axm
 ```
 
 After that you can start running SQL queries. To work with transactions, open a new session with atomic guarantees using `BEGIN`, and close it with either `ROLLBACK` or `COMMIT`.
+
+### Testing.
+
+There is a very rich test suite provided in the binary. For tests to be included, you must compile with test flag:
+
+```sh
+    cargo test
+```
+
+Some tests are intended to be run along with miri. Miri is a Rust dynamic analyzer that allows to detect undefined behaviour. Execute:
+
+```sh
+    cargo +nightly miri test
+```
+
+Finally, in order to test recoverability from the write ahead log, you need to force the database not to flush its contents to disk when dropped, this can be done with the feature ```no-flush```
+
+```sh
+    cargo test --features no-flush
+```
 
 ### Available Commands
 
