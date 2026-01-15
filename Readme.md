@@ -6,7 +6,7 @@ AxmosDB is an experimental relational database server written in Rust, designed 
 
 ### Release run
 
-Follow the instructions in [Install.md]
+Follow the instructions in [installation instructions](Install.md)
 
 ### Development run
 
